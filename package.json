@@ -1,0 +1,44 @@
+{
+  "name": "rustradar",
+  "version": "0.1.0",
+  "description": "",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "prepare": "svelte-kit sync || echo ''",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "tauri": "tauri"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@deck.gl/core": "^9.4",
+    "@deck.gl/extensions": "^9.4",
+    "@deck.gl/geo-layers": "^9.4",
+    "@deck.gl/layers": "^9.4",
+    "@deck.gl/mesh-layers": "^9.4",
+    "@fontsource-variable/overpass": "^5.3.0",
+    "@fontsource-variable/overpass-mono": "^5.3.0",
+    "@loaders.gl/core": "4.5.2",
+    "@loaders.gl/mvt": "4.5.2",
+    "@lucide/svelte": "^1.52.0",
+    "@luma.gl/core": "^9.4.2",
+    "@luma.gl/engine": "^9.4.2",
+    "@luma.gl/shadertools": "^9.4.2",
+    "@luma.gl/webgl": "^9.4.2",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.65.1",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "svelte": "^5.56.3",
+    "svelte-check": "^4.6.0",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16",
+    "@tauri-apps/cli": "^2"
+  }
+}

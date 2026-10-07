@@ -1,0 +1,241 @@
+/*
+ * RustRadar: night flight. A navy-ink shell around the globe, white aircraft,
+ * sodium amber for selection and primary actions; green only for "live", red
+ * only for failures. Overpass (signage lineage) for UI, Overpass Mono for measured
+ * values: altitudes, speeds, codes, times.
+ */
+/* Overpass's middle dot has no advance width, so " · " separators collide
+   with the next word: take that one glyph from the system UI font */
+@font-face {
+  font-family: "Middle Dot";
+  src: local("Segoe UI"), local("Helvetica Neue"), local("Arial");
+  unicode-range: U+00B7;
+}
+
+:root {
+  --ink: oklch(0.15 0.02 255);
+  --surface: oklch(0.205 0.022 255);
+  --surface-raised: oklch(0.255 0.024 255);
+  --surface-hover: oklch(0.29 0.026 255);
+  --line: oklch(0.32 0.022 255);
+  --line-control: oklch(0.52 0.024 255);
+
+  --text-1: oklch(0.95 0.01 85);
+  --text-2: oklch(0.8 0.022 250);
+  --text-3: oklch(0.68 0.025 250);
+
+  --amber: oklch(0.82 0.15 75);
+  --amber-ink: oklch(0.24 0.05 70);
+  --amber-soft: oklch(0.82 0.15 75 / 0.14);
+  --live: oklch(0.8 0.15 152);
+  --danger: oklch(0.72 0.16 25);
+  --danger-soft: oklch(0.72 0.16 25 / 0.12);
+  /* chart series: the selection amber stepped into the dark data band
+     (validated against --surface: in band, 3:1+ contrast) */
+  --series-1: oklch(0.66 0.14 75);
+  /* status: delays (always with a text label, never colour alone) */
+  --warn: oklch(0.86 0.14 95);
+  --warn-soft: oklch(0.86 0.14 95 / 0.14);
+  --live-soft: oklch(0.8 0.15 152 / 0.14);
+
+  --font-ui: "Middle Dot", "Overpass Variable", "Segoe UI", system-ui, sans-serif;
+  --font-data: "Overpass Mono Variable", ui-monospace, "Cascadia Mono", monospace;
+
+  /* fixed role scale, ratio ≈ 1.17 */
+  --text-xs: 0.6875rem; /* 11px: attribution, captions */
+  --text-sm: 0.75rem; /* 12px: labels, secondary */
+  --text-md: 0.8125rem; /* 13px: list rows, data */
+  --text-base: 0.875rem; /* 14px: inputs, body */
+  --text-lg: 1.0625rem; /* 17px: wordmark */
+  --text-xl: 1.375rem; /* 22px: callsign, airport codes */
+
+  /* 4px spacing base */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --shadow: 0 1px 2px oklch(0 0 0 / 0.4), 0 8px 24px -6px oklch(0 0 0 / 0.55);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--text-1);
+  background: var(--ink);
+  color-scheme: dark;
+  accent-color: var(--amber);
+  caret-color: var(--amber);
+  -webkit-font-smoothing: antialiased;
+  font-synthesis: none;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--text-base);
+}
+
+::selection {
+  background: var(--amber);
+  color: var(--amber-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-control) transparent;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol,
+dl,
+dd {
+  margin: 0;
+}
+
+ul,
+ol {
+  padding: 0;
+  list-style: none;
+}
+
+.data {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* the panels that float over the globe */
+.surface {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* shared controls */
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition:
+    background-color 150ms var(--ease-out),
+    color 150ms var(--ease-out);
+}
+.icon-button:hover {
+  background: var(--surface-hover);
+  color: var(--text-1);
+}
+.icon-button[aria-pressed="true"] {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.icon-button:disabled {
+  color: var(--text-3);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line-control);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-size: var(--text-md);
+  font-weight: 550;
+  cursor: pointer;
+  transition: background-color 150ms var(--ease-out);
+}
+.button:hover {
+  background: var(--surface-hover);
+}
+
+/* status labels: the tone backs up words, never replaces them */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: var(--text-xs);
+  font-weight: 650;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.badge.good {
+  background: var(--live-soft);
+  color: var(--live);
+}
+.badge.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.badge.bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.badge.neutral {
+  background: var(--surface-raised);
+  color: var(--text-2);
+}
+
+.skeleton {
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--surface-raised) 0%, var(--surface-hover) 50%, var(--surface-raised) 100%);
+  background-size: 200% 100%;
+  animation: skeleton 1.4s linear infinite;
+}
+@keyframes skeleton {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,29 @@
+[package]
+name = "rustradar"
+version = "0.1.0"
+description = "Live flight radar on a 3D globe, powered by a Rust port of fr24"
+authors = ["you"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "rustradar_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+fr24 = { path = "../crates/fr24" }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["time", "macros", "sync"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+reqwest = { version = "0.13", default-features = false }

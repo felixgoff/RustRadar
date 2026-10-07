@@ -1,0 +1,33 @@
+// NOTE: the definition in the web client is:
+// ```
+// message LiveFlightsStatusResponse {
+//     repeated LiveFlightStatusData flights_map = 1;
+// }
+// ```
+// but in reality it returns a wrapped `LiveFlightStatusData`.
+// the names `LiveFlightStatus`, `flight_id` and `data`
+// are non-official. 
+
+syntax = "proto3";
+
+import "fr24/proto/_common.proto";
+
+message LiveFlightStatusData {
+    float lat = 1;
+    float lon = 2;
+    _common.Status status = 3;
+    uint32 squawk = 4;
+}
+
+message LiveFlightsStatusRequest {
+    repeated fixed32 flight_ids_list = 1;
+}
+
+message LiveFlightStatus {
+    uint32 flight_id = 1;
+    LiveFlightStatusData data = 2;
+}
+
+message LiveFlightsStatusResponse {
+    repeated LiveFlightStatus flights_map = 1;
+}

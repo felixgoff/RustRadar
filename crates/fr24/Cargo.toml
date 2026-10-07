@@ -1,0 +1,28 @@
+[package]
+name = "fr24"
+version = "0.1.0"
+edition = "2024"
+description = "Rust port of the fr24 Python library: gRPC-web and JSON clients for Flightradar24"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+base64 = "0.23"
+bytes = "1"
+dirs = "6"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+prost = "0.14"
+prost-types = "0.14"
+rand = "0.10"
+reqwest = { version = "0.13", features = ["json", "gzip", "deflate", "zstd", "stream", "form", "query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
+
+[build-dependencies]
+prost-build = "0.14"
+protox = "0.9"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

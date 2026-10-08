@@ -62,7 +62,7 @@ jobs:
           pacman -S --noconfirm \
             git \
             rust \
-            libwebkit2gtk-4.1 \
+            webkit2gtk-4.1 \
             gtk3 \
             libayatana-appindicator \
             librsvg \

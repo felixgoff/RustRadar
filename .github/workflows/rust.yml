@@ -17,13 +17,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-22.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
     - name: Install Linux dependencies
-      if: matrix.os == 'ubuntu-latest'
+      if: startsWith(matrix.os, 'ubuntu-')
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
@@ -36,7 +36,7 @@ jobs:
     - name: Build
       run: cargo build --release --verbose
     - name: Run tests
-      if: matrix.os == 'ubuntu-latest'
+      if: startsWith(matrix.os, 'ubuntu-')
       run: cargo test --verbose
     - name: Upload binary artifact
       uses: actions/upload-artifact@v4
@@ -45,3 +45,27 @@ jobs:
         path: |
           target/release/rustradar
           target/release/rustradar.exe
+
+  build-archlinux:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build and test on Arch Linux
+      uses: uraimo/run-on-arch-action@v3
+      with:
+        arch: x86_64
+        distro: archlinux_latest
+        install: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm \
+            git \
+            rust \
+            libwebkit2gtk-4.1 \
+            gtk3 \
+            libayatana-appindicator \
+            librsvg \
+            patchelf
+        run: |
+          cargo build --release --verbose
+          cargo test --verbose

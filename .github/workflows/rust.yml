@@ -55,7 +55,7 @@ jobs:
       uses: uraimo/run-on-arch-action@v3
       with:
         arch: x86_64
-        distro: archlinux_latest
+        distro: archlinux
         install: |
           pacman -Syu --noconfirm
           pacman -S --noconfirm \

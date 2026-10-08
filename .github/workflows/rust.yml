@@ -6,17 +6,24 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
     - name: Install Linux dependencies
+      if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
@@ -27,6 +34,14 @@ jobs:
           librsvg2-dev \
           patchelf
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --release --verbose
     - name: Run tests
+      if: matrix.os == 'ubuntu-latest'
       run: cargo test --verbose
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rustradar-${{ matrix.os }}
+        path: |
+          target/release/rustradar
+          target/release/rustradar.exe

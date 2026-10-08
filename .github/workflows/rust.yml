@@ -62,6 +62,7 @@ jobs:
           pacman -S --noconfirm \
             git \
             rust \
+            pkgconf \
             webkit2gtk-4.1 \
             gtk3 \
             libayatana-appindicator \

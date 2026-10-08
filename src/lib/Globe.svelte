@@ -87,8 +87,6 @@
     onselect: (flight: LiveFlight | null) => void;
     /** An airport label was clicked. */
     onairport?: (iata: string) => void;
-    /** The user panned the map away while following. */
-    onfollowend?: () => void;
     onviewchange?: (view: ViewState) => void;
   }
 
@@ -108,7 +106,6 @@
     follow,
     onselect,
     onairport,
-    onfollowend,
     onviewchange,
   }: Props = $props();
 
@@ -1185,13 +1182,6 @@
           hoveredId = id;
           render();
         }
-      },
-      // while locked a plain drag orbits the aircraft; only a pan (right
-      // button or a modifier, deck.gl's alternate drag) lets go of it
-      onDragStart: (_info, event) => {
-        const e = event as unknown as { rightButton?: boolean; srcEvent?: MouseEvent };
-        const s = e.srcEvent;
-        if (follow && (e.rightButton || s?.ctrlKey || s?.metaKey || s?.altKey || s?.shiftKey)) onfollowend?.();
       },
       onClick: (info) => {
         if (info.layer?.id.startsWith("aircraft-") && info.object) onselect(info.object as LiveFlight);

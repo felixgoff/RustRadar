@@ -25,6 +25,23 @@ interface StateLike {
 type StateClass = new (options: object) => StateLike;
 
 export class NorthUpGlobeController extends GlobeController {
+  /** `dragMode: "rotate"` means locked to an aircraft: every drag orbits it, whatever the button or modifier. */
+  private orbitOnly = false;
+
+  setProps(props: Parameters<GlobeController["setProps"]>[0]) {
+    this.orbitOnly = props.dragMode === "rotate";
+    super.setProps(props);
+  }
+
+  isFunctionKeyPressed(event: Parameters<GlobeController["isFunctionKeyPressed"]>[0]): boolean {
+    return !this.orbitOnly && super.isFunctionKeyPressed(event);
+  }
+
+  protected _onPanStart(event: Parameters<GlobeController["_onPanStart"]>[0]): boolean {
+    // the right button is deck.gl's other drag gesture, which would pan away
+    return super._onPanStart(this.orbitOnly ? { ...event, rightButton: false } : event);
+  }
+
   constructor(...args: ConstructorParameters<typeof GlobeController>) {
     super(...args);
     const self = this as unknown as { ControllerState: StateClass };

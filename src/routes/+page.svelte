@@ -438,7 +438,6 @@
     follow={following}
     onselect={(f) => select(f?.id ?? null, { fly: !!f, follow: !!f, keepZoom: true })}
     onairport={openAirport}
-    onfollowend={() => (following = false)}
     onviewchange={(v) => (view = v)}
   />
 

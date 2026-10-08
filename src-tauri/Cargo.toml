@@ -1,6 +1,6 @@
 [package]
 name = "rustradar"
-version = "0.1.2"
+version = "0.1.21"
 description = "Live flight radar on a 3D globe, powered by a Rust port of fr24"
 authors = ["you"]
 edition = "2024"

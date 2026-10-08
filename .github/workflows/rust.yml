@@ -54,14 +54,16 @@ jobs:
     - name: Build and test on Arch Linux
       uses: uraimo/run-on-arch-action@v3
       with:
-        arch: x86_64
-        distro: archlinux
+        arch: none
+        distro: none
+        base_image: archlinux:latest
         install: |
           pacman -Syu --noconfirm
           pacman -S --noconfirm \
             git \
             rust \
-            libwebkit2gtk-4.1 \
+            pkgconf \
+            webkit2gtk-4.1 \
             gtk3 \
             libayatana-appindicator \
             librsvg \

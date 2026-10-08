@@ -4,7 +4,6 @@
 // handed to deck.gl's SolidPolygonLayer as binary attributes, so nothing is
 // re-tessellated as the camera moves.
 
-import { contours } from "d3-contour";
 import { cutPolygonByGrid, earcut } from "@math.gl/polygon";
 
 /** NWS reflectivity palette: band `i` covers [5 + 5i, 10 + 5i) dBZ, the last one everything above. */
@@ -94,7 +93,10 @@ export function parseVolumePolygons(buffer: ArrayBuffer): BandPolygon[] {
   return polygons;
 }
 
-/** Triangles of all bands, sorted by band so a band and everything above it is one run of `indices`. */
+/**
+ * Triangles of all bands, sorted by band so a band and everything above it is
+ * one run of `indices`, and its vertices one run at the end of `positions`.
+ */
 export interface RadarMesh {
   /** Values per vertex in `positions`: 2 for the flat slices, 3 for walls. */
   size: 2 | 3;
@@ -105,6 +107,8 @@ export interface RadarMesh {
   indices: Uint32Array;
   /** Where each band's triangles start in `indices`; `BAND_COUNT + 1` entries. */
   bandStarts: Uint32Array;
+  /** Where each band's vertices start (in vertices, not values); `BAND_COUNT + 1` entries. */
+  bandVertexStarts: Uint32Array;
 }
 
 /**
@@ -117,36 +121,65 @@ const GRID_DEG = 4;
 
 export function buildMesh(polygons: BandPolygon[], gridDeg = GRID_DEG): RadarMesh {
   const sorted = [...polygons].sort((a, b) => a.band - b.band);
-  const positions: number[] = [];
-  const colors: number[] = [];
-  const indices: number[] = [];
-  const bandStarts = new Uint32Array(BAND_COUNT + 1);
-  let band = 0;
+  // triangulated first and copied out once, into arrays of the right size
+  const pieces: { band: number; positions: ArrayLike<number>; triangles: number[] }[] = [];
+  let values = 0;
+  let triangleCount = 0;
   for (const polygon of sorted) {
-    while (band < polygon.band) bandStarts[++band] = indices.length;
-    const color = bandColor(polygon.band);
-    const pieces = needsCut(polygon.positions, gridDeg)
-      ? cutPolygonByGrid(polygon.positions, polygon.holeIndices.map((i) => i * 2), { size: 2, gridResolution: gridDeg })
-      : [{ positions: polygon.positions, holeIndices: polygon.holeIndices.map((i) => i * 2) }];
-    for (const piece of pieces) {
+    const cut =
+      needsCut(polygon.positions, gridDeg)
+        ? cutPolygonByGrid(polygon.positions, polygon.holeIndices.map((i) => i * 2), { size: 2, gridResolution: gridDeg })
+        : null;
+    if (!cut) {
+      const triangles = earcut(polygon.positions as number[], polygon.holeIndices.length ? polygon.holeIndices : undefined, 2);
+      if (!triangles.length) continue;
+      pieces.push({ band: polygon.band, positions: polygon.positions, triangles });
+      values += polygon.positions.length;
+      triangleCount += triangles.length;
+      continue;
+    }
+    for (const piece of cut) {
       const flat = piece.positions as ArrayLike<number> as number[];
       const holes = piece.holeIndices ? Array.from(piece.holeIndices, (i) => i / 2) : undefined;
       const triangles = earcut(flat, holes, 2);
       if (!triangles.length) continue;
-      const base = positions.length / 2;
-      for (let i = 0; i < flat.length; i++) positions.push(flat[i]);
-      for (let i = 0; i < flat.length / 2; i++) colors.push(...color);
-      for (const t of triangles) indices.push(base + t);
+      pieces.push({ band: polygon.band, positions: flat, triangles });
+      values += flat.length;
+      triangleCount += triangles.length;
     }
   }
-  while (band < BAND_COUNT) bandStarts[++band] = indices.length;
-  return {
-    size: 2,
-    positions: new Float32Array(positions),
-    colors: new Uint8Array(colors),
-    indices: new Uint32Array(indices),
-    bandStarts,
-  };
+  const positions = new Float32Array(values);
+  const colors = new Uint8Array(values * 2);
+  const indices = new Uint32Array(triangleCount);
+  const bandStarts = new Uint32Array(BAND_COUNT + 1);
+  const bandVertexStarts = new Uint32Array(BAND_COUNT + 1);
+  let band = 0;
+  let vertex = 0;
+  let index = 0;
+  for (const piece of pieces) {
+    while (band < piece.band) {
+      bandStarts[++band] = index;
+      bandVertexStarts[band] = vertex;
+    }
+    const [r, g, b, a] = bandColor(piece.band);
+    const flat = piece.positions;
+    positions.set(flat, vertex * 2);
+    const count = flat.length / 2;
+    for (let i = 0; i < count; i++) {
+      const c = (vertex + i) * 4;
+      colors[c] = r;
+      colors[c + 1] = g;
+      colors[c + 2] = b;
+      colors[c + 3] = a;
+    }
+    for (const t of piece.triangles) indices[index++] = vertex + t;
+    vertex += count;
+  }
+  while (band < BAND_COUNT) {
+    bandStarts[++band] = index;
+    bandVertexStarts[band] = vertex;
+  }
+  return { size: 2, positions, colors, indices, bandStarts, bandVertexStarts };
 }
 
 function needsCut(positions: ArrayLike<number>, grid: number): boolean {
@@ -178,18 +211,66 @@ export interface PolygonData {
 
 /**
  * The mesh, or only its bands from `fromBand` up, ready for deck.gl; null when
- * that is nothing. Each call returns a new object (deck.gl writes into
- * `attributes`, so layers must not share one); keep it to keep the layer.
+ * that is nothing. Only the vertices those bands use are kept, so a layer of
+ * the strong echoes alone doesn't upload the whole mesh. Each call returns a
+ * new object (deck.gl writes into `attributes`, so layers must not share one);
+ * keep it to keep the layer.
  */
 export function polygonData(mesh: RadarMesh, fromBand = 0): PolygonData | null {
-  const indices = mesh.indices.subarray(mesh.bandStarts[Math.min(fromBand, BAND_COUNT)]);
-  if (!indices.length) return null;
+  return mergeMeshes([{ mesh, fromBand }]);
+}
+
+/**
+ * Several meshes (of the same `size`), each from its own `fromBand` up, as one
+ * deck.gl layer's data: one draw call however many tiles there are. Null when
+ * there is nothing.
+ */
+export function mergeMeshes(parts: { mesh: RadarMesh; fromBand: number }[]): PolygonData | null {
+  let size: 2 | 3 = 2;
+  let vertices = 0;
+  let indexCount = 0;
+  const used: { mesh: RadarMesh; vertex: number; index: number }[] = [];
+  for (const { mesh, fromBand } of parts) {
+    const band = Math.min(Math.max(0, fromBand), BAND_COUNT);
+    const index = mesh.bandStarts[band];
+    if (index >= mesh.indices.length) continue;
+    const vertex = mesh.bandVertexStarts[band];
+    size = mesh.size;
+    used.push({ mesh, vertex, index });
+    vertices += mesh.positions.length / mesh.size - vertex;
+    indexCount += mesh.indices.length - index;
+  }
+  if (!used.length) return null;
+  let positions: Float32Array;
+  let colors: Uint8Array;
+  let indices: Uint32Array;
+  if (used.length === 1 && used[0].vertex === 0) {
+    // the whole of one mesh: shared, not copied
+    const { mesh, index } = used[0];
+    positions = mesh.positions;
+    colors = mesh.colors;
+    indices = mesh.indices.subarray(index);
+  } else {
+    positions = new Float32Array(vertices * size);
+    colors = new Uint8Array(vertices * 4);
+    indices = new Uint32Array(indexCount);
+    let v = 0;
+    let i = 0;
+    for (const { mesh, vertex, index } of used) {
+      positions.set(mesh.positions.subarray(vertex * size), v * size);
+      colors.set(mesh.colors.subarray(vertex * 4), v * 4);
+      const shift = v - vertex;
+      const source = mesh.indices;
+      for (let k = index; k < source.length; k++) indices[i++] = source[k] + shift;
+      v += mesh.positions.length / size - vertex;
+    }
+  }
   return {
     length: 1,
-    startIndices: new Uint32Array([0, mesh.positions.length / mesh.size]),
+    startIndices: new Uint32Array([0, positions.length / size]),
     attributes: {
-      getPolygon: { value: mesh.positions, size: mesh.size },
-      getFillColor: { value: mesh.colors, size: 4, normalized: true },
+      getPolygon: { value: positions, size },
+      getFillColor: { value: colors, size: 4, normalized: true },
       indices,
     },
   };
@@ -221,34 +302,59 @@ export function buildWalls(lines: WallLine[]): RadarMesh {
   for (const line of sorted) points += line.positions.length / 2;
   const positions = new Float32Array(points * 6);
   const colors = new Uint8Array(points * 8);
-  const indices: number[] = [];
+  const indices = new Uint32Array(points * 6);
   const bandStarts = new Uint32Array(BAND_COUNT + 1);
+  const bandVertexStarts = new Uint32Array(BAND_COUNT + 1);
   let band = 0;
   let vertex = 0;
+  let index = 0;
   for (const line of sorted) {
-    while (band < line.band) bandStarts[++band] = indices.length;
+    while (band < line.band) {
+      bandStarts[++band] = index;
+      bandVertexStarts[band] = vertex;
+    }
     const [r, g, b, a] = bandColor(line.band);
     const alpha = Math.round(a * WALL_ALPHA);
     const p = line.positions;
     let previous = -1;
     for (let i = 0; i < p.length; i += 2) {
-      const [x, y] = [p[i], p[i + 1]];
+      const x = p[i];
+      const y = p[i + 1];
       // a repeated point would only add a wall of no width
       if (previous >= 0 && x === p[i - 2] && y === p[i - 1]) continue;
-      positions.set([x, y, 0, x, y, 1], vertex * 3);
-      colors.set([r, g, b, alpha, r, g, b, alpha], vertex * 4);
-      if (previous >= 0) indices.push(previous, previous + 1, vertex, previous + 1, vertex + 1, vertex);
+      const o = vertex * 3;
+      positions[o] = positions[o + 3] = x;
+      positions[o + 1] = positions[o + 4] = y;
+      positions[o + 2] = 0;
+      positions[o + 5] = 1;
+      const c = vertex * 4;
+      colors[c] = colors[c + 4] = r;
+      colors[c + 1] = colors[c + 5] = g;
+      colors[c + 2] = colors[c + 6] = b;
+      colors[c + 3] = colors[c + 7] = alpha;
+      if (previous >= 0) {
+        indices[index++] = previous;
+        indices[index++] = previous + 1;
+        indices[index++] = vertex;
+        indices[index++] = previous + 1;
+        indices[index++] = vertex + 1;
+        indices[index++] = vertex;
+      }
       previous = vertex;
       vertex += 2;
     }
   }
-  while (band < BAND_COUNT) bandStarts[++band] = indices.length;
+  while (band < BAND_COUNT) {
+    bandStarts[++band] = index;
+    bandVertexStarts[band] = vertex;
+  }
   return {
     size: 3,
-    positions: positions.subarray(0, vertex * 3),
-    colors: colors.subarray(0, vertex * 4),
-    indices: new Uint32Array(indices),
+    positions: positions.slice(0, vertex * 3),
+    colors: colors.slice(0, vertex * 4),
+    indices: indices.slice(0, index),
     bandStarts,
+    bandVertexStarts,
   };
 }
 
@@ -400,16 +506,22 @@ function alongEdge([px, py, qx, qy]: [number, number, number, number]): boolean 
  * contours themselves, before the polygons are cut into pieces, so they run
  * only where the reflectivity changes band: each threshold's rings once, in
  * the band that starts there, and nothing along the grid's edges or cuts.
+ * They are simplified to within a tenth of a cell of the contours.
  */
-export function contourBands(values: Float32Array, width: number, height: number, walls?: WallLine[]): BandPolygon[] {
+export function contourBands(
+  values: Float32Array,
+  width: number,
+  height: number,
+  walls?: WallLine[],
+): BandPolygon[] {
   let max = -Infinity;
-  for (const v of values) if (v > max) max = v;
+  for (let i = 0; i < values.length; i++) if (values[i] > max) max = values[i];
   if (!(max >= bandDbz(0))) return [];
 
   // Two cells of padding: the edge values repeated, then nothing. Contours
   // then run exactly as they would if the grid went on, out to the repeated
-  // cells, and close in the outer ring, clear of the grid. Without it, d3
-  // closes every ring along the grid edge itself, where the rings of
+  // cells, and close in the outer ring, clear of the grid. Without it, the
+  // rings would close along the grid edge itself, where the rings of
   // neighbouring thresholds would overlap.
   const PAD = 2;
   const w = width + 2 * PAD;
@@ -425,25 +537,29 @@ export function contourBands(values: Float32Array, width: number, height: number
 
   const thresholds: number[] = [];
   for (let b = 0; b < BAND_COUNT && bandDbz(b) <= max; b++) thresholds.push(bandDbz(b));
-  const generator = contours().size([w, h]);
+  const tracer = new IsoRings(w, h);
   // rings of everything at or above each threshold, in unit coordinates
   const above = thresholds.map((t) => {
     const rings: Float64Array[] = [];
-    for (const polygon of generator.contour(padded as unknown as number[], t).coordinates) {
-      for (const ring of polygon) {
-        const flat = new Float64Array(ring.length * 2);
-        ring.forEach(([x, y], i) => {
-          flat[i * 2] = (x - PAD) / width;
-          flat[i * 2 + 1] = (y - PAD) / height;
-        });
-        // specks a fraction of a cell across are noise; dropped from the
-        // threshold, they vanish from both bands that share the ring
-        if (Math.abs(ringArea(flat)) * width * height >= 0.3) rings.push(flat);
+    tracer.trace(padded, t, (ring) => {
+      const flat = new Float64Array(ring.length);
+      for (let i = 0; i < ring.length; i += 2) {
+        flat[i] = (ring[i] - PAD) / width;
+        flat[i + 1] = (ring[i + 1] - PAD) / height;
       }
-    }
+      // specks a fraction of a cell across are noise; dropped from the
+      // threshold, they vanish from both bands that share the ring
+      if (Math.abs(ringArea(flat)) * width * height >= 0.3) rings.push(flat);
+    });
     return rings;
   });
-  if (walls) above.forEach((rings, band) => rings.forEach((ring) => clipRingToUnit(ring, band, walls)));
+  if (walls) {
+    const from = walls.length;
+    above.forEach((rings, band) => rings.forEach((ring) => clipRingToUnit(ring, band, walls)));
+    // a tenth of a cell is far below what shows, and drops nearly half the points
+    const tolerance = WALL_TOLERANCE / Math.max(width, height);
+    for (let i = from; i < walls.length; i++) walls[i].positions = simplifyLine(walls[i].positions, tolerance);
+  }
 
   const out: BandPolygon[] = [];
   for (let band = 0; band < thresholds.length; band++) {
@@ -463,12 +579,210 @@ export function contourBands(values: Float32Array, width: number, height: number
         if (cx <= 0 || cx >= 1 || cy <= 0 || cy >= 1) continue;
         out.push({
           band,
-          positions: Array.from(piece.positions),
+          positions: piece.positions as number[],
           holeIndices: piece.holeIndices ? Array.from(piece.holeIndices, (i) => i / 2) : [],
         });
       }
     }
   }
+  return out;
+}
+
+/**
+ * Marching squares with the isolines stitched into closed rings and placed by
+ * linear interpolation: d3-contour's `isorings` and `smoothLinear` (ISC
+ * licence, Mike Bostock), ported to flat arrays. The rings come out exactly as
+ * d3's do; what is left out is d3's matching of holes to their polygons, which
+ * compares every hole with every polygon and dominated the time on speckled
+ * tiles, and which `evenOdd` does again anyway.
+ */
+class IsoRings {
+  private readonly byStart: Int32Array;
+  private readonly byEnd: Int32Array;
+  private readonly span: number;
+  private readonly first: Int32Array;
+  private readonly last: Int32Array;
+  private fragments: { start: number; end: number; ring: number[] }[] = [];
+
+  constructor(
+    private readonly dx: number,
+    private readonly dy: number,
+  ) {
+    // points sit on half cells from -0.5 to d + 0.5: one slot each
+    this.span = 2 * dx + 3;
+    this.byStart = new Int32Array(this.span * (2 * dy + 3));
+    this.byEnd = new Int32Array(this.span * (2 * dy + 3));
+    this.first = new Int32Array(dy);
+    this.last = new Int32Array(dy);
+  }
+
+  /** Calls `emit` with each closed ring (last point repeating the first) of `values >= value`. */
+  trace(values: Float32Array, value: number, emit: (ring: number[]) => void) {
+    const { dx, dy } = this;
+    this.byStart.fill(0);
+    this.byEnd.fill(0);
+    this.fragments = [];
+    const done = (ring: number[]) => {
+      smoothLinear(ring, values, dx, dy, value);
+      emit(ring);
+    };
+    // Only the cells around values at or above the threshold can hold a
+    // line: each row's span of those is found first, and the rest of the
+    // grid (most of a tile, usually) is skipped. The cells visited are the
+    // same, in the same order, as d3's full sweep that skips nothing.
+    const { first, last } = this;
+    for (let y = 0; y < dy; y++) {
+      const row = y * dx;
+      let lo = dx;
+      let hi = -1;
+      for (let x = 0; x < dx; x++) {
+        if (values[row + x] >= value) {
+          if (lo === dx) lo = x;
+          hi = x;
+        }
+      }
+      first[y] = lo;
+      last[y] = hi;
+    }
+    const at = (x: number, y: number) => (x >= 0 && x < dx && y >= 0 && y < dy && values[y * dx + x] >= value ? 1 : 0);
+    // cell (x, y) has the values (x, y) to (x + 1, y + 1) at its corners; the
+    // grid is ringed by cells half outside it, from -1 to d - 1
+    for (let y = -1; y < dy; y++) {
+      let lo = dx;
+      let hi = -1;
+      if (y >= 0) [lo, hi] = [first[y], last[y]];
+      if (y + 1 < dy) [lo, hi] = [Math.min(lo, first[y + 1]), Math.max(hi, last[y + 1])];
+      for (let x = lo - 1; x <= hi; x++) {
+        const c = at(x, y + 1) | (at(x + 1, y + 1) << 1) | (at(x + 1, y) << 2) | (at(x, y) << 3);
+        if (c && c !== 15) this.stitch(c, x, y, done);
+      }
+    }
+  }
+
+  private key(x: number, y: number) {
+    return x * 2 + 1 + (y * 2 + 1) * this.span;
+  }
+
+  private stitch(c: number, x: number, y: number, done: (ring: number[]) => void) {
+    const segments = CASES[c];
+    for (let k = 0; k < segments.length; k += 4) {
+      const sx = segments[k] + x;
+      const sy = segments[k + 1] + y;
+      const ex = segments[k + 2] + x;
+      const ey = segments[k + 3] + y;
+      const si = this.key(sx, sy);
+      const ei = this.key(ex, ey);
+      const { byStart, byEnd, fragments } = this;
+      let fi = byEnd[si];
+      if (fi) {
+        const f = fragments[fi - 1];
+        const gi = byStart[ei];
+        if (gi) {
+          const g = fragments[gi - 1];
+          byEnd[f.end] = 0;
+          byStart[g.start] = 0;
+          if (f === g) {
+            f.ring.push(ex, ey);
+            done(f.ring);
+          } else {
+            fragments.push({ start: f.start, end: g.end, ring: f.ring.concat(g.ring) });
+            byStart[f.start] = byEnd[g.end] = fragments.length;
+          }
+        } else {
+          byEnd[f.end] = 0;
+          f.ring.push(ex, ey);
+          byEnd[(f.end = ei)] = fi;
+        }
+      } else if ((fi = byStart[ei])) {
+        // nothing ends where this segment starts (that was the case above)
+        const f = fragments[fi - 1];
+        byStart[f.start] = 0;
+        f.ring.unshift(sx, sy);
+        byStart[(f.start = si)] = fi;
+      } else {
+        fragments.push({ start: si, end: ei, ring: [sx, sy, ex, ey] });
+        byStart[si] = byEnd[ei] = fragments.length;
+      }
+    }
+  }
+}
+
+/** Marching squares segments per case, `[x0, y0, x1, y1, …]` within the cell (d3-contour's table). */
+const CASES: number[][] = [
+  [],
+  [1.0, 1.5, 0.5, 1.0],
+  [1.5, 1.0, 1.0, 1.5],
+  [1.5, 1.0, 0.5, 1.0],
+  [1.0, 0.5, 1.5, 1.0],
+  [1.0, 1.5, 0.5, 1.0, 1.0, 0.5, 1.5, 1.0],
+  [1.0, 0.5, 1.0, 1.5],
+  [1.0, 0.5, 0.5, 1.0],
+  [0.5, 1.0, 1.0, 0.5],
+  [1.0, 1.5, 1.0, 0.5],
+  [0.5, 1.0, 1.0, 0.5, 1.5, 1.0, 1.0, 1.5],
+  [1.5, 1.0, 1.0, 0.5],
+  [0.5, 1.0, 1.5, 1.0],
+  [1.0, 1.5, 1.5, 1.0],
+  [0.5, 1.0, 1.0, 1.5],
+  [],
+];
+
+/** Moves each point along its cell edge to where the values cross `value`. */
+function smoothLinear(ring: number[], values: Float32Array, dx: number, dy: number, value: number) {
+  const at = (i: number) => (i >= 0 && i < values.length ? values[i] : -Infinity);
+  for (let i = 0; i < ring.length; i += 2) {
+    const x = ring[i];
+    const y = ring[i + 1];
+    const xt = x | 0;
+    const yt = y | 0;
+    const v1 = at(yt * dx + xt);
+    if (x > 0 && x < dx && xt === x) ring[i] = smooth1(x, at(yt * dx + xt - 1), v1, value);
+    if (y > 0 && y < dy && yt === y) ring[i + 1] = smooth1(y, at((yt - 1) * dx + xt), v1, value);
+  }
+}
+
+function smooth1(x: number, v0: number, v1: number, value: number) {
+  const a = value - v0;
+  const b = v1 - v0;
+  const d = isFinite(a) || isFinite(b) ? a / b : Math.sign(a) / Math.sign(b);
+  return isNaN(d) ? x : x + d - 0.5;
+}
+
+/** How far (in cells) a wall may stray from its contour: walls are simplified, the slices are not. */
+const WALL_TOLERANCE = 0.1;
+
+/**
+ * Douglas–Peucker: the points of a flat polyline that keep it within
+ * `tolerance` of the original. The ends are always kept, so lines still meet
+ * where they did, and a closed ring stays closed.
+ */
+export function simplifyLine(p: ArrayLike<number>, tolerance: number): number[] {
+  const n = p.length / 2;
+  if (n < 3) return Array.from(p);
+  const keep = new Uint8Array(n);
+  keep[0] = keep[n - 1] = 1;
+  const stack = [0, n - 1];
+  while (stack.length) {
+    const b = stack.pop()!;
+    const a = stack.pop()!;
+    const [ax, ay] = [p[a * 2], p[a * 2 + 1]];
+    const [dx, dy] = [p[b * 2] - ax, p[b * 2 + 1] - ay];
+    const length = Math.hypot(dx, dy);
+    let worst = tolerance;
+    let at = -1;
+    for (let i = a + 1; i < b; i++) {
+      const [x, y] = [p[i * 2] - ax, p[i * 2 + 1] - ay];
+      // distance from the chord, or from its start where the chord is a point (a closed ring)
+      const d = length ? Math.abs(x * dy - y * dx) / length : Math.hypot(x, y);
+      if (d > worst) [worst, at] = [d, i];
+    }
+    if (at >= 0) {
+      keep[at] = 1;
+      stack.push(a, at, at, b);
+    }
+  }
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) if (keep[i]) out.push(p[i * 2], p[i * 2 + 1]);
   return out;
 }
 

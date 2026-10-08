@@ -43,8 +43,9 @@
   import { NorthUpGlobeController } from "./controller";
   import { aircraftModels, type AircraftModel } from "./aircraft";
   import { nightPolygons } from "./daynight";
-  import { loadRadarTile, loadVolume, type MeasuredVolume, type RadarTile } from "./radar";
-  import type { PolygonData } from "./radar-mesh";
+  import { RADAR_LEVELS_KM, type RadarTile } from "./radar";
+  import { mergeMeshes, type PolygonData } from "./radar-mesh";
+  import { loadRadarTile, loadVolume, radarCoverageKey, setRadarCoverage, type MeasuredVolume } from "./radar-pool";
   import { liveries, type Livery, type Part } from "./liveries";
   import type { LonLat, Route } from "./routes";
   import {
@@ -525,8 +526,6 @@
   let measured: MeasuredVolume[] = [];
   let measuredCheckedAt = 0;
   let measuredLoading = false;
-  /** True where some service measures the weather in 3D, so RainViewer stands back. */
-  const measuredCover = (lon: number, lat: number) => measured.some((v) => v.covered(lon, lat));
   async function refreshMeasured(area: BoundingBox | null) {
     if (measuredLoading) return; // a slow load must not race the next poll
     measuredLoading = true;
@@ -539,6 +538,8 @@
       if (held.length === measured.length && held.every(Boolean)) return;
       // dropped volumes need no cleanup: their GPU buffers go with their layers
       measured = await Promise.all(frames.map((f, i) => held[i] ?? loadVolume(f, radarImage)));
+      // RainViewer stands back where some service measures the weather in 3D
+      setRadarCoverage(measured.map((v) => v.coverage));
       render();
     } catch (e) {
       console.warn("measured radar unavailable:", e);
@@ -548,7 +549,7 @@
     }
   }
   const getRadarTile = ({ url, index, signal }: { url?: string | null; index: { x: number; y: number; z: number }; signal?: AbortSignal }) =>
-    url ? loadRadarTile(url, index, signal, measured.length ? measuredCover : undefined) : null;
+    url ? loadRadarTile(url, index, signal) : null;
   const RADAR_LIFTED = { ...NO_CULL, depthWriteEnabled: false } as const;
   const FEET_PER_KM = 3280.84;
   /**
@@ -604,9 +605,38 @@
   let radarTiles: RadarTile[] = [];
   let radarVersion = 0;
   const onRadarTiles = (tiles: { content: RadarTile | null }[]) => {
-    radarTiles = tiles.map((t) => t.content).filter((c): c is RadarTile => c !== null);
+    const next = tiles.map((t) => t.content).filter((c): c is RadarTile => c !== null);
+    // fired again whenever the view settles; the same tiles need nothing rebuilt
+    const known = new Set(radarTiles);
+    if (next.length === radarTiles.length && next.every((t) => known.has(t))) return;
+    radarTiles = next;
     radarVersion++;
   };
+  /**
+   * The lifted layers of all tiles in view, merged: one slice layer and one
+   * wall layer per height rather than two per tile per height (hundreds of
+   * draw calls, each tile's whole mesh uploaded again for every height).
+   * Merged again only when the tiles change.
+   */
+  let liftedData: { version: number; levels: { km: number; slices: PolygonData | null; walls: PolygonData | null }[] } = {
+    version: -1,
+    levels: [],
+  };
+  function mergedLevels() {
+    if (liftedData.version !== radarVersion) {
+      const levels = RADAR_LEVELS_KM.map((km, i) => {
+        // each tile's levels run up from the lowest without gaps, so index i is this height
+        const parts = radarTiles.flatMap((tile) => (tile.levels[i] ? [{ tile, fromBand: tile.levels[i].fromBand }] : []));
+        return {
+          km,
+          slices: mergeMeshes(parts.map(({ tile, fromBand }) => ({ mesh: tile.slices, fromBand }))),
+          walls: mergeMeshes(parts.flatMap(({ tile, fromBand }) => (tile.walls ? [{ mesh: tile.walls, fromBand }] : []))),
+        };
+      });
+      liftedData = { version: radarVersion, levels };
+    }
+    return liftedData.levels;
+  }
   let lifted: { key: string; layers: Layer[] } = { key: "", layers: [] };
   /** Built again only when the tiles, the height scale or the tilt change. */
   function radarLifted(ex: number, lift: number): Layer[] {
@@ -615,19 +645,18 @@
     if (lifted.key !== key) {
       const layers: Layer[] = [];
       if (lift > 0) {
-        for (const tile of radarTiles) {
-          // higher layers keep only the stronger echoes, so cells rise like towers
-          tile.levels.forEach(({ km, data, walls }, i) => {
-            const opacity = Math.max(0.16, 0.34 - i * 0.03) * lift;
-            const z = elevation(km * FEET_PER_KM, scale);
-            layers.push(radarPolygons(null, { id: `radar-lift-${tile.id}-${km}`, data, opacity, parameters: RADAR_LIFTED, z }));
-            // walled down to the layer below, the lowest to the ground, so the stack has no gaps
-            const bottom = i ? elevation(tile.levels[i - 1].km * FEET_PER_KM, scale) : 0;
-            if (walls) {
-              layers.push(radarPolygons(null, { id: `radar-wall-${tile.id}-${km}`, data: walls, opacity, parameters: RADAR_LIFTED, z, bottom }));
-            }
-          });
-        }
+        // higher layers keep only the stronger echoes, so cells rise like towers
+        mergedLevels().forEach(({ km, slices, walls }, i) => {
+          if (!slices) return;
+          const opacity = Math.max(0.16, 0.34 - i * 0.03) * lift;
+          const z = elevation(km * FEET_PER_KM, scale);
+          layers.push(radarPolygons(null, { id: `radar-lift-${km}`, data: slices, opacity, parameters: RADAR_LIFTED, z }));
+          // walled down to the layer below, the lowest to the ground, so the stack has no gaps
+          const bottom = i ? elevation(RADAR_LEVELS_KM[i - 1] * FEET_PER_KM, scale) : 0;
+          if (walls) {
+            layers.push(radarPolygons(null, { id: `radar-wall-${km}`, data: walls, opacity, parameters: RADAR_LIFTED, z, bottom }));
+          }
+        });
       }
       lifted = { key, layers };
     }
@@ -635,9 +664,10 @@
   }
   const radarLayer = (url: string) =>
     new TileLayer<RadarTile | null>({
-      // the tiles have the measured area punched out of them, so they must
-      // reload whenever that area changes — every scan, not just every source
-      id: `radar-${url}-${measured.map((v) => `${v.source}:${v.time}`).sort().join("-") || "full"}`,
+      // the tiles have the measured area punched out of them, so they reload
+      // when its coverage changes (not with every scan); the tiles it doesn't
+      // reach come back from the pool's cache without being contoured again
+      id: `radar-${url}-${radarCoverageKey()}`,
       data: url,
       minZoom: 0,
       maxZoom: 7,

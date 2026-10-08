@@ -44,6 +44,7 @@
   import { aircraftModels, type AircraftModel } from "./aircraft";
   import { nightPolygons } from "./daynight";
   import { loadRadarTile, loadVolume, type MeasuredVolume, type RadarTile } from "./radar";
+  import type { PolygonData } from "./radar-mesh";
   import { liveries, type Livery, type Part } from "./liveries";
   import type { LonLat, Route } from "./routes";
   import {
@@ -86,7 +87,7 @@
     onselect: (flight: LiveFlight | null) => void;
     /** An airport label was clicked. */
     onairport?: (iata: string) => void;
-    /** The user dragged the map while following. */
+    /** The user panned the map away while following. */
     onfollowend?: () => void;
     onviewchange?: (view: ViewState) => void;
   }
@@ -536,16 +537,11 @@
     try {
       const frames = await radarFrame(area);
       // a scan already in hand is kept: the sources publish on their own
-      // schedules, and re-decoding an unchanged one costs a dozen images
+      // schedules, and re-triangulating an unchanged one costs a dozen meshes
       const held = frames.map((f) => measured.find((v) => v.source === f.source && v.time === f.time));
       if (held.length === measured.length && held.every(Boolean)) return;
-      const next = await Promise.all(frames.map((f, i) => held[i] ?? loadVolume(f, radarImage)));
-      for (const old of measured) {
-        if (next.includes(old)) continue;
-        old.ground?.close();
-        for (const level of old.levels) level.image.close();
-      }
-      measured = next;
+      // dropped volumes need no cleanup: their GPU buffers go with their layers
+      measured = await Promise.all(frames.map((f, i) => held[i] ?? loadVolume(f, radarImage)));
       render();
     } catch (e) {
       console.warn("measured radar unavailable:", e);
@@ -563,6 +559,39 @@
    * the 3D stack fades in as the camera tilts.
    */
   const liftFor = (pitch: number) => Math.round(clamp01((pitch - 10) / 30) * 10) / 10;
+  /**
+   * Radar polygons from prebuilt binary data (radar-mesh.ts): triangulated
+   * already, so deck.gl only uploads them. A lifted layer is raised by its
+   * model matrix rather than by its positions, so a change of height scale
+   * moves it without touching the data.
+   *
+   * Walls (`bottom` set) have z from 0 to 1 in their data; the model matrix
+   * scales that to the gap between `bottom` and `z` and lifts it to `bottom`.
+   * deck.gl applies the whole matrix to longitude, latitude and metres before
+   * projecting onto the globe, so the stretch is exact.
+   */
+  const radarPolygons = (
+    props: Record<string, unknown> | null,
+    own: { id: string; data: PolygonData; opacity: number; parameters: object; z?: number; bottom?: number },
+  ) =>
+    new SolidPolygonLayer(props ?? {}, {
+      id: own.id,
+      data: own.data as never,
+      _normalize: false,
+      positionFormat: own.bottom === undefined ? "XY" : "XYZ",
+      filled: true,
+      extruded: false,
+      // flat colour, like the images were: no shading from the scene light
+      material: false,
+      opacity: own.opacity,
+      parameters: own.parameters,
+      modelMatrix:
+        own.bottom !== undefined
+          ? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, (own.z ?? 0) - own.bottom, 0, 0, 0, own.bottom, 1]
+          : own.z
+            ? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, own.z, 1]
+            : null,
+    });
 
   // deck.gl's TileLayer renders each tile's sublayers once and keeps them, so
   // anything that changes with the camera (tilt, height exaggeration) can't
@@ -571,17 +600,9 @@
   // stacked layers are built here from the tiles in view.
   const renderRadarTile = (props: any) => {
     const tile = props.data as RadarTile | null;
-    if (!tile) return null;
-    const [[west, south], [east, north]] = props.tile.boundingBox;
-    return new BitmapLayer(props, {
-      id: `${props.id}-ground`,
-      data: undefined,
-      image: tile.image,
-      bounds: [west, south, east, north],
-      _imageCoordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-      opacity: 0.55,
-      parameters: SURFACE,
-    });
+    if (!tile?.ground) return null;
+    // both faces: the triangles' winding isn't kept consistent
+    return radarPolygons(props, { id: `${props.id}-ground`, data: tile.ground, opacity: 0.55, parameters: SURFACE_NO_CULL });
   };
   let radarTiles: RadarTile[] = [];
   let radarVersion = 0;
@@ -598,24 +619,16 @@
       const layers: Layer[] = [];
       if (lift > 0) {
         for (const tile of radarTiles) {
-          const [west, south, east, north] = tile.bounds;
           // higher layers keep only the stronger echoes, so cells rise like towers
-          tile.levels.forEach(({ km, image }, i) => {
+          tile.levels.forEach(({ km, data, walls }, i) => {
+            const opacity = Math.max(0.16, 0.34 - i * 0.03) * lift;
             const z = elevation(km * FEET_PER_KM, scale);
-            layers.push(
-              new BitmapLayer({
-                id: `radar-lift-${tile.id}-${km}`,
-                image,
-                bounds: [
-                  [west, south, z],
-                  [west, north, z],
-                  [east, north, z],
-                  [east, south, z],
-                ],
-                opacity: Math.max(0.16, 0.34 - i * 0.03) * lift,
-                parameters: RADAR_LIFTED,
-              }),
-            );
+            layers.push(radarPolygons(null, { id: `radar-lift-${tile.id}-${km}`, data, opacity, parameters: RADAR_LIFTED, z }));
+            // walled down to the layer below, the lowest to the ground, so the stack has no gaps
+            const bottom = i ? elevation(tile.levels[i - 1].km * FEET_PER_KM, scale) : 0;
+            if (walls) {
+              layers.push(radarPolygons(null, { id: `radar-wall-${tile.id}-${km}`, data: walls, opacity, parameters: RADAR_LIFTED, z, bottom }));
+            }
           });
         }
       }
@@ -639,36 +652,31 @@
     });
 
   function measuredLayers(volume: MeasuredVolume, ex: number, lift: number): Layer[] {
-    const [west, south, east, north] = volume.bounds;
     const layers: Layer[] = [];
     if (volume.ground) {
       layers.push(
-        new BitmapLayer({
+        radarPolygons(null, {
           id: `${volume.source}-ground-${volume.time}`,
-          image: volume.ground,
-          bounds: volume.bounds,
+          data: volume.ground,
           opacity: 0.7,
-          parameters: SURFACE,
+          parameters: SURFACE_NO_CULL,
         }),
       );
     }
     // the lowest height is already in the ground composite
-    for (const { km, image } of lift ? volume.levels.filter((l) => l.km > 1) : []) {
-      const z = elevation(km * FEET_PER_KM, Math.round(ex * 10) / 10);
-      layers.push(
-        new BitmapLayer({
-          id: `${volume.source}-${km}-${volume.time}`,
-          image,
-          bounds: [
-            [west, south, z],
-            [west, north, z],
-            [east, north, z],
-            [east, south, z],
-          ],
-          opacity: 0.18 * lift,
-          parameters: RADAR_LIFTED,
-        }),
-      );
+    const scale = Math.round(ex * 10) / 10;
+    let bottom = 0;
+    for (const { km, data, walls } of lift ? volume.levels.filter((l) => l.km > 1) : []) {
+      const z = elevation(km * FEET_PER_KM, scale);
+      const opacity = 0.18 * lift;
+      layers.push(radarPolygons(null, { id: `${volume.source}-${km}-${volume.time}`, data, opacity, parameters: RADAR_LIFTED, z }));
+      // walled down to the layer below, the lowest to the ground, so the stack has no gaps
+      if (walls) {
+        layers.push(
+          radarPolygons(null, { id: `${volume.source}-wall-${km}-${volume.time}`, data: walls, opacity, parameters: RADAR_LIFTED, z, bottom }),
+        );
+      }
+      bottom = z;
     }
     return layers;
   }
@@ -1039,15 +1047,19 @@
   const CAMERA_HEIGHTS = 1.5;
   /** Whether the wheel zooms about the cursor or the centre of the screen. */
   let zoomAround: "center" | "pointer" = "pointer";
+  /** Locked to an aircraft, a plain drag orbits it instead of panning away. */
+  const controllerFor = (locked: boolean) =>
+    ({ type: NorthUpGlobeController, zoomAround: locked ? "center" : "pointer", dragMode: locked ? "rotate" : "pan" }) as const;
 
   function render() {
     tick++;
     // locked to an aircraft, the wheel has to zoom about the centre, or every
-    // notch shoves the aircraft aside and the lock drags it straight back
+    // notch shoves the aircraft aside and the lock drags it straight back; a
+    // drag orbits for the same reason
     const wanted = follow && selected ? "center" : "pointer";
     if (wanted !== zoomAround) {
       zoomAround = wanted;
-      deck?.setProps({ controller: { type: NorthUpGlobeController, zoomAround } });
+      deck?.setProps({ controller: controllerFor(wanted === "center") });
     }
     if (follow && selected && Date.now() > transitionUntil) {
       const [lon, lat] = extrapolate(selected, Date.now());
@@ -1157,7 +1169,7 @@
       parent: container,
       views: new GlobeView({ resolution: 5 }),
       initialViewState: { ...view, ...LIMITS },
-      controller: { type: NorthUpGlobeController },
+      controller: controllerFor(false),
       effects: [lighting],
       pickingRadius: 6,
       onViewStateChange: ({ viewState }) => {
@@ -1174,8 +1186,12 @@
           render();
         }
       },
-      onDragStart: () => {
-        if (follow) onfollowend?.();
+      // while locked a plain drag orbits the aircraft; only a pan (right
+      // button or a modifier, deck.gl's alternate drag) lets go of it
+      onDragStart: (_info, event) => {
+        const e = event as unknown as { rightButton?: boolean; srcEvent?: MouseEvent };
+        const s = e.srcEvent;
+        if (follow && (e.rightButton || s?.ctrlKey || s?.metaKey || s?.altKey || s?.shiftKey)) onfollowend?.();
       },
       onClick: (info) => {
         if (info.layer?.id.startsWith("aircraft-") && info.object) onselect(info.object as LiveFlight);

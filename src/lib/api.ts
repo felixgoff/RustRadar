@@ -289,7 +289,7 @@ export interface RadarVolume {
   /** Unix seconds of the scan. */
   time: number;
   bounds: { west: number; south: number; east: number; north: number };
-  /** Heights (km) with an image. */
+  /** Heights (km) with polygons. */
   levels: number[];
   /** Size of the coverage mask, one byte per cell, north row first. */
   coverageWidth: number;
@@ -299,7 +299,10 @@ export interface RadarVolume {
 /** `area` limits the fetch to the sources on screen; `null` means everywhere. */
 export const radarFrame = (area: BoundingBox | null) => invoke<RadarVolume[]>("radar_frame", { area });
 
-/** `ground`, `coverage`, or a height such as `3`: PNG bytes (raw bytes for coverage). */
+/**
+ * `ground` or a height such as `3`: filled reflectivity polygons in the binary
+ * format `parseVolumePolygons` reads (radar-mesh.ts); `coverage`: the raw mask.
+ */
 export const radarImage = (source: string, name: string) =>
   invoke<ArrayBuffer>("radar_image", { source, name });
 

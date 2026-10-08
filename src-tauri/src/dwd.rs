@@ -1,14 +1,16 @@
-//! DWD's WN composite: reflectivity measured at 25 heights, 500 m apart from
-//! the surface to 12 km, on a 1 km grid over central Europe, every 5 minutes.
-//! Germany's radar network plus its neighbours' — the European counterpart to
-//! MRMS, and the reason the globe does not have to guess storm heights from
-//! the colour of a RainViewer tile anywhere near Germany.
+//! DWD's WN composite: reflectivity on a 1 km grid over central Europe, every
+//! 5 minutes, from Germany's radar network plus its neighbours'. Finer and
+//! fresher than RainViewer's tiles there, with a real no-data mask.
 //!
 //! Published free by Deutscher Wetterdienst at opendata.dwd.de. Each run is a
-//! bzip2'd tar of one file per height in DWD's composite format: an ASCII
-//! header terminated by ETX, then one little-endian 16-bit value per cell on
-//! the RADOLAN polar stereographic grid, holding reflectivity in tenths of an
-//! RVP6 count.
+//! bzip2'd tar of 25 files in DWD's composite format: an ASCII header
+//! terminated by ETX, then one little-endian 16-bit value per cell on the
+//! RADOLAN polar stereographic grid, holding reflectivity in tenths of an RVP6
+//! count. WN is a *nowcast*: the member suffix (and the header's `VV`) is the
+//! forecast lead time in minutes, `_000` the analysis and `_120` two hours
+//! ahead — not a height. Stacking the members as heights smears every cell
+//! along its track into a long streak. Only the analysis is drawn, and like
+//! RainViewer its storm heights are estimated from intensity.
 
 use std::io::Read;
 
@@ -16,11 +18,8 @@ use crate::radar::{self, Bounds, Error, GROUND_MIN_DBZ, LIFTED_MIN_DBZ, Volume};
 
 const DIRECTORY: &str = "https://opendata.dwd.de/weather/radar/composite/wn/";
 
-/// Heights to draw, km. The product carries every 500 m to 12 km; above 6 km
-/// the extra detail is not worth another image.
-const LEVELS_KM: [f32; 18] = [
-    0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
-];
+/// Heights of the stacked layers, km, as for RainViewer (`src/lib/radar.ts`).
+const LEVELS_KM: [f32; 7] = [1.5, 3.0, 4.5, 6.0, 8.0, 10.0, 12.0];
 /// Output resolution in degrees: the ground composite, then each height.
 const GROUND_STEP: f64 = 0.01;
 const LEVEL_STEP: f64 = 0.02;
@@ -199,10 +198,15 @@ pub fn decode(file: &[u8]) -> Result<Grid, Error> {
     Ok(Grid { cols, rows, dbz })
 }
 
-/// Height in km from a member name like `WN2610081840_030`.
-fn level_of(name: &str) -> Option<f32> {
-    let suffix = name.rsplit('_').next()?;
-    suffix.parse::<f32>().ok().map(|v| v / 10.0)
+/// Forecast lead time in minutes from a member name like `WN2610081840_030`.
+fn lead_minutes(name: &str) -> Option<u32> {
+    name.rsplit_once('_')?.1.parse().ok()
+}
+
+/// Echo top (km) for a reflectivity: the same rough climatological fit as
+/// `echoTopKm` in `src/lib/radar.ts`, so DWD's towers match RainViewer's.
+fn echo_top_km(dbz: f32) -> f32 {
+    (2.0 + (dbz - 10.0) * 0.22).clamp(1.0, 12.0)
 }
 
 /// Unix seconds from a run name's `WN<YYMMDDhhmm>`, as in
@@ -278,72 +282,43 @@ pub async fn fetch(http: &reqwest::Client) -> Result<Volume, Error> {
         bzip2_rs::DecoderReader::new(&archive[..]).read_to_end(&mut tar)?;
 
         let members = untar(&tar);
-        let wanted: Vec<_> = members
+        let (_, body) = members
             .iter()
-            .filter_map(|(name, body)| {
-                let km = level_of(name)?;
-                LEVELS_KM.contains(&km).then_some((km, *body))
+            .find(|(name, _)| lead_minutes(name) == Some(0))
+            .ok_or("the run carried no analysis")?;
+        let grid = decode(body)?;
+        let bounds = grid.bounds();
+
+        let (gw, gh, ground) = resample(&grid, bounds, GROUND_STEP);
+        let (cw, ch, c) = resample(&grid, bounds, COVERAGE_STEP);
+        let coverage: Vec<u8> = c.iter().map(|v| u8::from(v.is_finite())).collect();
+
+        // higher layers keep only the echoes whose estimated top reaches them
+        let (lw, lh, lifted) = resample(&grid, bounds, LEVEL_STEP);
+        let levels = LEVELS_KM
+            .iter()
+            .map(|&km| {
+                let l: Vec<f32> = lifted
+                    .iter()
+                    .map(|&v| {
+                        if v.is_finite() && echo_top_km(v) >= km {
+                            v
+                        } else {
+                            f32::NEG_INFINITY
+                        }
+                    })
+                    .collect();
+                (km, radar::contour(lw, lh, &l, bounds, LIFTED_MIN_DBZ))
             })
             .collect();
-        if wanted.is_empty() {
-            return Err("the run carried none of the heights we draw".into());
-        }
 
-        // One short or corrupt member must not cost the whole continent, so a
-        // height that fails is reported and dropped, as MRMS does.
-        let mut frame: Option<(Bounds, usize, usize)> = None;
-        let mut ground: Vec<f32> = Vec::new();
-        let mut seen: Option<(usize, usize, Vec<u8>)> = None;
-        let mut levels = Vec::with_capacity(LEVELS_KM.len());
-
-        for &km in &LEVELS_KM {
-            let Some((_, body)) = wanted.iter().find(|(k, _)| *k == km) else {
-                levels.push((km, None));
-                continue;
-            };
-            let grid = match decode(body) {
-                Ok(grid) => grid,
-                Err(e) => {
-                    eprintln!("DWD {km} km: {e}");
-                    levels.push((km, None));
-                    continue;
-                }
-            };
-            // every height shares one grid, so the first to decode fixes the frame
-            let (bounds, _, _) = *frame.get_or_insert_with(|| {
-                let bounds = grid.bounds();
-                let gw = ((bounds.east - bounds.west) / GROUND_STEP).round() as usize;
-                let gh = ((bounds.north - bounds.south) / GROUND_STEP).round() as usize;
-                ground = vec![f32::NEG_INFINITY; gw * gh];
-                (bounds, gw, gh)
-            });
-            let (_, _, g) = resample(&grid, bounds, GROUND_STEP);
-            for (cell, v) in ground.iter_mut().zip(g) {
-                *cell = cell.max(v);
-            }
-            let (cw, ch, c) = resample(&grid, bounds, COVERAGE_STEP);
-            let mask: Vec<u8> = c.iter().map(|v| u8::from(v.is_finite())).collect();
-            match &mut seen {
-                Some((_, _, all)) => all.iter_mut().zip(mask).for_each(|(a, s)| *a |= s),
-                None => seen = Some((cw, ch, mask)),
-            }
-            let (lw, lh, l) = resample(&grid, bounds, LEVEL_STEP);
-            // the height still counts towards the ground and the mask above
-            let png = radar::encode(lw, lh, &l, LIFTED_MIN_DBZ).unwrap_or_else(|e| {
-                eprintln!("DWD {km} km: {e}");
-                None
-            });
-            levels.push((km, png));
-        }
-
-        let (bounds, gw, gh) = frame.ok_or("no DWD height could be decoded")?;
-        let (cw, ch, coverage) = seen.unwrap_or_default();
         Ok(Volume {
             source: "dwd",
             time,
             fetched: std::time::Instant::now(),
             bounds,
-            ground: radar::encode(gw, gh, &ground, GROUND_MIN_DBZ)?.unwrap_or_default(),
+            ground: radar::contour(gw, gh, &ground, bounds, GROUND_MIN_DBZ)
+                .unwrap_or_else(radar::no_shapes),
             levels,
             coverage,
             coverage_size: (cw as u32, ch as u32),
@@ -386,10 +361,18 @@ mod tests {
     }
 
     #[test]
-    fn reads_level_heights() {
-        assert_eq!(level_of("WN2610081840_030"), Some(3.0));
-        assert_eq!(level_of("WN2610081840_005"), Some(0.5));
-        assert_eq!(level_of("WN2610081840_120"), Some(12.0));
+    fn reads_lead_times() {
+        assert_eq!(lead_minutes("WN2610081840_000"), Some(0));
+        assert_eq!(lead_minutes("WN2610081840_030"), Some(30));
+        assert_eq!(lead_minutes("WN2610081840_120"), Some(120));
+        assert_eq!(lead_minutes("WN2610081840"), None);
+    }
+
+    #[test]
+    fn stronger_echoes_reach_higher() {
+        assert_eq!(echo_top_km(-10.0), 1.0);
+        assert!((echo_top_km(25.0) - 5.3).abs() < 1e-4);
+        assert_eq!(echo_top_km(70.0), 12.0);
     }
 
     /// A header shaped like the real thing, followed by an all-zero grid.
@@ -424,25 +407,28 @@ mod tests {
         assert!(decode(&composite(tail, 0, 0)).is_err());
     }
 
+    /// A 1x1 composite holding one raw word. Built from its own header: the
+    /// grid size is read from the first `GP`, so tacking a second one onto
+    /// [`HEADER`] would leave the 3x4 grid in force.
+    fn one_cell(raw: u16) -> Vec<u8> {
+        let mut file = composite(
+            "WN081840100001026BY   2640195VS 5SW  P42001HPR E-01INT   5GP0001x0001VV 030MS103<deasb>",
+            0,
+            0,
+        );
+        file.extend_from_slice(&raw.to_le_bytes());
+        file
+    }
+
     /// The Fehlkennung flag, not one exact word, marks a cell as unmeasured.
     #[test]
     fn no_data_survives_the_other_flags() {
         for raw in [0x29C4u16, 0xA9C4, 0x39C4, 0x2000] {
-            let mut file = composite(HEADER, 0, 0);
-            file.pop();
-            file.extend_from_slice("GP0001x0001VV 030".as_bytes());
-            file.push(0x03);
-            file.extend_from_slice(&raw.to_le_bytes());
-            let grid = decode(&file).unwrap();
+            let grid = decode(&one_cell(raw)).unwrap();
             assert_eq!(grid.dbz[0], f32::NEG_INFINITY, "{raw:#06X}");
         }
         // a clutter-flagged real echo still decodes
-        let mut file = composite(HEADER, 0, 0);
-        file.pop();
-        file.extend_from_slice("GP0001x0001VV 030".as_bytes());
-        file.push(0x03);
-        file.extend_from_slice(&(0x8000u16 | 1249).to_le_bytes());
-        let grid = decode(&file).unwrap();
+        let grid = decode(&one_cell(0x8000 | 1249)).unwrap();
         assert!((grid.dbz[0] - 29.95).abs() < 0.01, "{}", grid.dbz[0]);
     }
 
@@ -540,5 +526,6 @@ mod tests {
             println!("{line}");
         }
         assert!(lit > total / 20, "almost nothing is covered");
+        volume.print_layers();
     }
 }

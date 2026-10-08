@@ -50,16 +50,16 @@ Python library.
   status, gate and aircraft. Airborne flights open on the map.
 - Day and night shading with civil, nautical and astronomical twilight, and an
   optional 3D weather radar (`W`). Heights are measured where a weather service
-  publishes 3D reflectivity, and estimated from the tile colour elsewhere.
+  publishes 3D reflectivity, and estimated from intensity elsewhere.
   - **The contiguous US and southern Canada** — NOAA MRMS: reflectivity
     actually measured, about 1 km resolution, quality-controlled (no bird or
     insect clutter), new every two minutes, drawn at 18 heights: 1, 1.5, 2,
     2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8, 9, 10, 11, 12 and 14 km.
   - **Central Europe** — the DWD WN composite (roughly 1.4-18.8°E,
-    45.7-55.9°N: Germany plus neighbouring countries): reflectivity measured on
-    a 1 km grid at 25 heights 500 m apart up to 12 km, of which 18 are drawn
-    (every 500 m to 6 km, then every 1 km to 12 km), refreshed every five
-    minutes. Free open data from Deutscher Wetterdienst, no key needed.
+    45.7-56.2°N: Germany plus neighbouring countries): reflectivity on a 1 km
+    grid, refreshed every five minutes, lifted to heights estimated from
+    intensity (WN is a nowcast; only its analysis frame is drawn). Free open
+    data from Deutscher Wetterdienst, no key needed.
   - **Elsewhere** — RainViewer, lifted to heights estimated from the tile
     colour.
 

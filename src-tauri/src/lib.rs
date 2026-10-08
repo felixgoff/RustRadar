@@ -499,8 +499,9 @@ async fn radar_frame(
     Ok(held.values().map(|v| v.info()).collect())
 }
 
-/// One image of a source's current volume: `ground`, `coverage` (one byte per
-/// mask cell) or a height in km such as `3`.
+/// One layer of a source's current volume: `ground` or a height in km such as
+/// `3` (isoband shapes, see `radar::contour`), or `coverage` (one byte per
+/// mask cell).
 #[tauri::command]
 async fn radar_image(
     source: String,

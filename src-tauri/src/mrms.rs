@@ -4,9 +4,9 @@
 //! every two minutes, from NOAA's public bucket.
 //!
 //! Each height is a GRIB2 file holding one 7000×3500 grid, packed as a 16-bit
-//! PNG (data representation template 5.41). Grids are reduced here to a
-//! coloured composite for the ground, a coloured image per height, and a
-//! coverage mask (where the radars see), ready for the globe.
+//! PNG (data representation template 5.41). Grids are reduced here to
+//! contoured isobands of the composite for the ground and of each height,
+//! and a coverage mask (where the radars see), ready for the globe.
 
 use std::io::Read;
 use std::time::Instant;
@@ -22,9 +22,9 @@ const BUCKET: &str = "https://noaa-mrms-pds.s3.amazonaws.com";
 pub const LEVELS_KM: [f32; 12] = [
     1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.0, 14.0,
 ];
-/// Source cells per output pixel: 0.02° for the ground, 0.04° per height.
+/// Source cells per contoured grid cell: 0.02° for the ground and per height.
 const GROUND_STEP: usize = 2;
-const LEVEL_STEP: usize = 4;
+const LEVEL_STEP: usize = 2;
 /// Coverage mask cells: 0.1°.
 const COVERAGE_STEP: usize = 10;
 /// The CONUS grid's outer edges, degrees.
@@ -44,8 +44,8 @@ struct Reduced {
     ground: (usize, usize, Vec<f32>),
     /// 1 where this height has data, for the coverage mask.
     seen: (usize, usize, Vec<u8>),
-    /// The layer image, or `None` where nothing reached [`LIFTED_MIN_DBZ`].
-    png: Option<Vec<u8>>,
+    /// The layer's isobands, or `None` where nothing reached [`LIFTED_MIN_DBZ`].
+    shapes: Option<Vec<u8>>,
 }
 
 /// A reduced height, or why it couldn't be loaded.
@@ -232,7 +232,7 @@ async fn fetch_level(http: &reqwest::Client, km: f32) -> Result<Reduced, Error> 
         .bytes()
         .await?;
     let time = key_time(&key).unwrap_or(0);
-    // decoding, downsampling and colouring are all CPU-bound, so they belong
+    // decoding, downsampling and contouring are all CPU-bound, so they belong
     // off the async executor; doing them together also means the grid is
     // freed here rather than being handed back to the caller
     tokio::task::spawn_blocking(move || -> Result<Reduced, Error> {
@@ -244,14 +244,14 @@ async fn fetch_level(http: &reqwest::Client, km: f32) -> Result<Reduced, Error> 
         let (cw, ch, c) = block_max(&grid, COVERAGE_STEP);
         let (lw, lh, l) = block_max(&grid, LEVEL_STEP);
         drop(grid);
-        let png = radar::encode(lw, lh, &l, LIFTED_MIN_DBZ)?;
+        let shapes = radar::contour(lw, lh, &l, BOUNDS, LIFTED_MIN_DBZ);
         // a radar sees a cell if it reported anything at all there
         let seen = c.iter().map(|&v| u8::from(v > -998.0)).collect();
         Ok(Reduced {
             time,
             ground: (gw, gh, g),
             seen: (cw, ch, seen),
-            png,
+            shapes,
         })
     })
     .await?
@@ -314,18 +314,19 @@ pub async fn fetch(http: &reqwest::Client) -> Result<Volume, Error> {
             Some((_, _, all)) => all.iter_mut().zip(s).for_each(|(a, s)| *a |= s),
             None => coverage = Some((cw, ch, s)),
         }
-        levels.push((km, level.png));
+        levels.push((km, level.shapes));
     }
     let (gw, gh, g) = ground.ok_or("no MRMS heights could be loaded")?;
     let ground =
-        tokio::task::spawn_blocking(move || radar::encode(gw, gh, &g, GROUND_MIN_DBZ)).await??;
+        tokio::task::spawn_blocking(move || radar::contour(gw, gh, &g, BOUNDS, GROUND_MIN_DBZ))
+            .await?;
     let (cw, ch, coverage) = coverage.unwrap_or_default();
     Ok(Volume {
         source: "mrms",
         bounds: BOUNDS,
         time,
         fetched: Instant::now(),
-        ground: ground.unwrap_or_default(),
+        ground: ground.unwrap_or_else(radar::no_shapes),
         levels,
         coverage,
         coverage_size: (cw as u32, ch as u32),
@@ -368,6 +369,7 @@ mod tests {
             info.coverage_height,
             started.elapsed()
         );
+        frame.print_layers();
         assert!(frame.coverage.contains(&1));
     }
 }

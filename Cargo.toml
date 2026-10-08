@@ -3,6 +3,21 @@ resolver = "3"
 members = ["src-tauri", "crates/fr24"]
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+# Image codecs are painfully slow unoptimised, and the weather radar decodes
+# a dozen 7000×3500 grids at a time: optimise them even in dev builds.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+
 [profile.release]
 codegen-units = 1
 lto = true

@@ -30,6 +30,8 @@
     status: FollowState;
     /** Squawk, vertical speed, airspace and flight plans are withheld from anonymous users. */
     authenticated: boolean;
+    /** How many track points came from the OpenSky Network. */
+    openskyAdded?: number;
     /** Whether the camera follows this aircraft. */
     following: boolean;
     /** Return to the airport board this flight was opened from. */
@@ -50,6 +52,7 @@
     status,
     authenticated,
     following,
+    openskyAdded = 0,
     back = null,
     onfollow,
     onselect,
@@ -338,13 +341,22 @@
         <ul class="legend" aria-label="Map key">
           <li>
             <span class="swatch gradient" style="background: linear-gradient(to right, {trailGradient})"></span>
-            <span>Track flown, coloured by altitude <span class="data scale">0 – 45,000 ft</span></span>
+            <span>
+              Track flown, coloured by altitude <span class="data scale">0 – 45,000 ft</span>
+              {#if openskyAdded > 0}
+                <small class="source">Start of the track from the OpenSky Network</small>
+              {/if}
+            </span>
           </li>
           {#if route?.kind === "filed"}
             <li><span class="swatch solid"></span><span>Filed route</span></li>
           {:else}
-            <li><span class="swatch ahead"></span><span>Great circle to the destination</span></li>
-            <li><span class="swatch before"></span><span>Departure to the first tracked position</span></li>
+            {#if route && route.ahead.length > 1}
+              <li><span class="swatch ahead"></span><span>Great circle to the destination</span></li>
+            {/if}
+            {#if route && route.before.length > 1}
+              <li><span class="swatch before"></span><span>Departure to the first tracked position</span></li>
+            {/if}
           {/if}
         </ul>
       </div>
@@ -815,6 +827,11 @@
   }
   .swatch.before {
     background: repeating-linear-gradient(to right, oklch(0.95 0.01 85 / 0.45) 0 4px, transparent 4px 8px);
+  }
+  .source {
+    display: block;
+    font-size: var(--text-xs);
+    color: var(--text-3);
   }
   .scale {
     margin-left: var(--space-1);

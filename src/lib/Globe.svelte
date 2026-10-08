@@ -24,15 +24,26 @@
     type PathStyleExtensionProps,
   } from "@deck.gl/extensions";
   import { MVTLayer, TileLayer } from "@deck.gl/geo-layers";
-  import { BitmapLayer, PathLayer, ScatterplotLayer, SolidPolygonLayer, TextLayer } from "@deck.gl/layers";
+  import { BitmapLayer, IconLayer, PathLayer, ScatterplotLayer, SolidPolygonLayer, TextLayer } from "@deck.gl/layers";
   import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
   import { SphereGeometry } from "@luma.gl/engine";
   import { load } from "@loaders.gl/core";
   import { MVTLoader } from "@loaders.gl/mvt";
   // decode vector tiles off the main thread with a bundled worker, not one from a CDN
   import mvtWorkerUrl from "@loaders.gl/mvt/mvt-worker.js?url";
-  import type { Airport, FlightDetails, LiveFlight } from "./api";
+  import {
+    isTauri,
+    radarFrame,
+    radarImage,
+    type Airport,
+    type BoundingBox,
+    type FlightDetails,
+    type LiveFlight,
+  } from "./api";
+  import { NorthUpGlobeController } from "./controller";
+  import { aircraftModels, type AircraftModel } from "./aircraft";
   import { nightPolygons } from "./daynight";
+  import { loadRadarTile, loadVolume, type MeasuredVolume, type RadarTile } from "./radar";
   import { liveries, type Livery, type Part } from "./liveries";
   import type { LonLat, Route } from "./routes";
   import {
@@ -46,6 +57,7 @@
     SELECTED_COLOR,
     unwrapLongitude,
     visibleRadius,
+    viewArea,
     type Basemap,
   } from "./geo";
   import { MODEL_KINDS, MODEL_SIZE, modelFor, models, sizeOf, type ModelKind } from "./models";
@@ -146,7 +158,13 @@
   // Zoomed out, aircraft are flat, unshaded silhouettes; they gain depth and
   // shading between zoom 6 and 9.
   const depthAt = (zoom: number) => Math.round(clamp01((zoom - 6) / 3) * 10) / 10;
-  const MESH_MATERIAL = { ambient: 0.38, diffuse: 0.65, shininess: 48, specular: [255, 236, 200] };
+  /** Up to this tilt the view reads as a flat map, where silhouettes belong. */
+  const FLAT_PITCH = 5;
+  /** From this zoom the detailed meshes are worth their triangles. */
+  const CLOSE_ZOOM = 11;
+  // White aircraft have to read as white against a dark map, so most of the
+  // light is ambient and the directional part only models the airframe.
+  const MESH_MATERIAL = { ambient: 0.72, diffuse: 0.42, shininess: 48, specular: [255, 236, 200] };
   const materials = new Map<number, object>();
   /** Lit 3D material at depth 1, pure flat colour at depth 0. */
   function meshMaterial(depth: number) {
@@ -403,6 +421,19 @@
     return visibleLabels.data;
   }
 
+  /** Airports with a marker of their own lose their map label, so the code isn't drawn twice. */
+  let unmarked: { base: LabelFeature[] | null; key: string; data: LabelFeature[] } = { base: null, key: "", data: [] };
+  function withoutMarked(data: LabelFeature[], codes: string[]): LabelFeature[] {
+    if (!codes.length) return data;
+    const key = codes.join(",");
+    if (unmarked.base !== data || unmarked.key !== key) {
+      const skip = new Set(codes);
+      const keep = (f: LabelFeature) => !(f.properties.layerName === "aerodrome_label" && skip.has(String(f.properties.iata)));
+      unmarked = { base: data, key, data: data.filter(keep) };
+    }
+    return unmarked.data;
+  }
+
   const collision = new CollisionFilterExtension();
   const LABEL_EXTENSIONS = [collision];
   const LABEL_PARAMETERS = { ...NO_CULL, depthCompare: "always", depthWriteEnabled: false } as const;
@@ -491,27 +522,156 @@
       radarUrl = null;
     }
   }
+  // NOAA MRMS over the US: measured in 3D, checked every two minutes (the
+  // backend refetches at most every four). RainViewer fills in elsewhere.
+  let measured: MeasuredVolume[] = [];
+  let measuredCheckedAt = 0;
+  let measuredLoading = false;
+  /** True where some service measures the weather in 3D, so RainViewer stands back. */
+  const measuredCover = (lon: number, lat: number) => measured.some((v) => v.covered(lon, lat));
+  async function refreshMeasured(area: BoundingBox | null) {
+    if (measuredLoading) return; // a slow load must not race the next poll
+    measuredLoading = true;
+    measuredCheckedAt = Date.now();
+    try {
+      const frames = await radarFrame(area);
+      // a scan already in hand is kept: the sources publish on their own
+      // schedules, and re-decoding an unchanged one costs a dozen images
+      const held = frames.map((f) => measured.find((v) => v.source === f.source && v.time === f.time));
+      if (held.length === measured.length && held.every(Boolean)) return;
+      const next = await Promise.all(frames.map((f, i) => held[i] ?? loadVolume(f, radarImage)));
+      for (const old of measured) {
+        if (next.includes(old)) continue;
+        old.ground?.close();
+        for (const level of old.levels) level.image.close();
+      }
+      measured = next;
+      render();
+    } catch (e) {
+      console.warn("measured radar unavailable:", e);
+    } finally {
+      measuredLoading = false;
+      measuredCheckedAt = Date.now();
+    }
+  }
+  const getRadarTile = ({ url, index, signal }: { url?: string | null; index: { x: number; y: number; z: number }; signal?: AbortSignal }) =>
+    url ? loadRadarTile(url, index, signal, measured.length ? measuredCover : undefined) : null;
+  const RADAR_LIFTED = { ...NO_CULL, depthWriteEnabled: false } as const;
+  const FEET_PER_KM = 3280.84;
+  /**
+   * Looking straight down, stacked layers only smear outward in perspective:
+   * the 3D stack fades in as the camera tilts.
+   */
+  const liftFor = (pitch: number) => Math.round(clamp01((pitch - 10) / 30) * 10) / 10;
+
+  // deck.gl's TileLayer renders each tile's sublayers once and keeps them, so
+  // anything that changes with the camera (tilt, height exaggeration) can't
+  // live in there: tiles loaded at different moments would disagree, with a
+  // hard edge where they meet. The tiles carry only the flat picture; the
+  // stacked layers are built here from the tiles in view.
   const renderRadarTile = (props: any) => {
+    const tile = props.data as RadarTile | null;
+    if (!tile) return null;
     const [[west, south], [east, north]] = props.tile.boundingBox;
     return new BitmapLayer(props, {
+      id: `${props.id}-ground`,
       data: undefined,
-      image: props.data,
+      image: tile.image,
       bounds: [west, south, east, north],
       _imageCoordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-      opacity: 0.6,
+      opacity: 0.55,
       parameters: SURFACE,
     });
   };
+  let radarTiles: RadarTile[] = [];
+  let radarVersion = 0;
+  const onRadarTiles = (tiles: { content: RadarTile | null }[]) => {
+    radarTiles = tiles.map((t) => t.content).filter((c): c is RadarTile => c !== null);
+    radarVersion++;
+  };
+  let lifted: { key: string; layers: Layer[] } = { key: "", layers: [] };
+  /** Built again only when the tiles, the height scale or the tilt change. */
+  function radarLifted(ex: number, lift: number): Layer[] {
+    const scale = Math.round(ex * 10) / 10;
+    const key = `${scale}/${lift}/${radarVersion}`;
+    if (lifted.key !== key) {
+      const layers: Layer[] = [];
+      if (lift > 0) {
+        for (const tile of radarTiles) {
+          const [west, south, east, north] = tile.bounds;
+          // higher layers keep only the stronger echoes, so cells rise like towers
+          tile.levels.forEach(({ km, image }, i) => {
+            const z = elevation(km * FEET_PER_KM, scale);
+            layers.push(
+              new BitmapLayer({
+                id: `radar-lift-${tile.id}-${km}`,
+                image,
+                bounds: [
+                  [west, south, z],
+                  [west, north, z],
+                  [east, north, z],
+                  [east, south, z],
+                ],
+                opacity: Math.max(0.16, 0.34 - i * 0.03) * lift,
+                parameters: RADAR_LIFTED,
+              }),
+            );
+          });
+        }
+      }
+      lifted = { key, layers };
+    }
+    return lifted.layers;
+  }
   const radarLayer = (url: string) =>
-    new TileLayer({
-      id: `radar-${url}`,
+    new TileLayer<RadarTile | null>({
+      // the tiles have the measured area punched out of them, so they must
+      // reload whenever that area changes — every scan, not just every source
+      id: `radar-${url}-${measured.map((v) => `${v.source}:${v.time}`).sort().join("-") || "full"}`,
       data: url,
       minZoom: 0,
       maxZoom: 7,
       tileSize: 256,
+      getTileData: getRadarTile,
+      onViewportLoad: onRadarTiles,
       renderSubLayers: renderRadarTile,
       parameters: SURFACE,
     });
+
+  function measuredLayers(volume: MeasuredVolume, ex: number, lift: number): Layer[] {
+    const [west, south, east, north] = volume.bounds;
+    const layers: Layer[] = [];
+    if (volume.ground) {
+      layers.push(
+        new BitmapLayer({
+          id: `${volume.source}-ground-${volume.time}`,
+          image: volume.ground,
+          bounds: volume.bounds,
+          opacity: 0.7,
+          parameters: SURFACE,
+        }),
+      );
+    }
+    // the lowest height is already in the ground composite
+    for (const { km, image } of lift ? volume.levels.filter((l) => l.km > 1) : []) {
+      const z = elevation(km * FEET_PER_KM, Math.round(ex * 10) / 10);
+      layers.push(
+        new BitmapLayer({
+          id: `${volume.source}-${km}-${volume.time}`,
+          image,
+          bounds: [
+            [west, south, z],
+            [west, north, z],
+            [east, north, z],
+            [east, south, z],
+          ],
+          opacity: 0.18 * lift,
+          parameters: RADAR_LIFTED,
+        }),
+      );
+    }
+    return layers;
+  }
 
   const dashed = new PathStyleExtension({ dash: true });
   const DASHED = [dashed];
@@ -641,7 +801,7 @@
 
   function buildLayers(): Layer[] {
     const now = Date.now();
-    const { longitude: cLon, latitude: cLat, zoom, pitch } = view;
+    const { longitude: cLon, latitude: cLat, zoom, bearing, pitch } = view;
     const flat = zoom > FLAT_ABOVE_ZOOM;
     const ex = effectiveExaggeration(exaggeration, zoom);
 
@@ -663,18 +823,46 @@
     const minCos = Math.cos((radius * Math.PI) / 180);
     // airline colours fade in over zoom 6-8, as the models gain depth
     const liveryAmount = showLiveries ? Math.round(clamp01((zoom - 6) / 2) * 10) / 10 : 0;
+    // Straight down and wide: top-down silhouettes, the right idiom for a map
+    // read from above. Tilted, or close in, the real shapes instead.
+    const useIcons = pitch <= FLAT_PITCH && zoom < CLOSE_ZOOM && aircraftModels.loaded;
+    const detail = zoom >= CLOSE_ZOOM ? 1 : 0;
+
     type Group = {
+      /** The published model for this type, or `null` for the built-in shapes. */
+      real: AircraftModel | null;
+      kind: ModelKind;
       flights: LiveFlight[];
       positions: [number, number, number][];
       liveries: Livery[];
       index: Map<number, number>;
     };
-    const byKind = new Map<ModelKind, Group>();
+    // the aircraft the camera is locked to is always drawn, even if the
+    // camera is aimed far enough ahead of it to put it past the cull radius
+    const lockedOn = follow ? selected?.id : undefined;
+    const groups = new Map<string, Group>();
+    const icons: LiveFlight[] = [];
+    const iconPositions: [number, number, number][] = [];
+    const iconNames: string[] = [];
+    const iconSizes: number[] = [];
+    const iconIndex = new Map<number, number>();
+
     for (const f of flights) {
-      if (cosAngle(f.lon, f.lat, cLon, cLat) <= minCos) continue;
+      if (f.id !== lockedOn && cosAngle(f.lon, f.lat, cLon, cLat) <= minCos) continue;
+      const real = aircraftModels.forFlight(f.typecode, f.icon);
+      if (useIcons && real) {
+        iconIndex.set(f.id, icons.length);
+        icons.push(f);
+        iconPositions.push(positionOf(f, now, ex));
+        iconNames.push(real.name);
+        iconSizes.push(real.size);
+        continue;
+      }
+      // balloons, ground vehicles and anything else with no published model
       const [kind] = modelFor(f.icon);
-      let group = byKind.get(kind);
-      if (!group) byKind.set(kind, (group = { flights: [], positions: [], liveries: [], index: new Map() }));
+      const id = real ? `t-${real.name}` : `k-${kind}`;
+      let group = groups.get(id);
+      if (!group) groups.set(id, (group = { real, kind, flights: [], positions: [], liveries: [], index: new Map() }));
       group.index.set(f.id, group.flights.length);
       group.flights.push(f);
       group.positions.push(positionOf(f, now, ex));
@@ -689,12 +877,21 @@
     }
     if (weather) {
       if (Date.now() - radarCheckedAt > 600_000) refreshRadar();
-      if (radarUrl) layers.push(radarLayer(radarUrl));
+      const lift = liftFor(pitch);
+      if (radarUrl) layers.push(radarLayer(radarUrl), ...radarLifted(ex, lift));
+      // only the sources on screen are worth fetching; each is tens of megabytes
+      if (isTauri() && Date.now() - measuredCheckedAt > 120_000) {
+        refreshMeasured(viewArea(view, container.clientWidth, container.clientHeight));
+      }
+      for (const volume of measured) layers.push(...measuredLayers(volume, ex, lift));
     }
     if (daylight) layers.push(nightLayer(now));
     if (tileUrl && buildings && flat && zoom >= 13) layers.push(buildingLayer(tileUrl));
     if (tileUrl && labels && fontsReady) {
-      layers.push(labelTileLayer(tileUrl), textLayer(labelsInView(cLon, cLat, zoom)));
+      const marked = [airport, ...(selected && route ? [route.origin, route.destination] : [])]
+        .map((a) => a?.iata)
+        .filter((code): code is string => Boolean(code));
+      layers.push(labelTileLayer(tileUrl), textLayer(withoutMarked(labelsInView(cLon, cLat, zoom), marked)));
     }
 
     if (selected) {
@@ -734,15 +931,19 @@
 
     const meshes = models();
     const selectedId = selected?.id;
-    for (const kind of MODEL_KINDS) {
-      const group = byKind.get(kind);
-      if (!group) continue;
+    for (const [id, group] of groups) {
+      const real = group.real?.lods[Math.min(detail, group.real.lods.length - 1)];
+      const shape = real ?? meshes[group.kind];
+      // the published meshes carry their own real-world size; the built-in
+      // ones are drawn at a nominal size and stretched per aircraft class
+      const metres = group.real?.size;
+      const divisor = metres ?? MODEL_SIZE[group.kind];
       const shared = {
         data: group.flights,
         getPosition: (_: LiveFlight, { index }: { index: number }) => group.positions[index],
         getOrientation: (f: LiveFlight): [number, number, number] => [0, yawOffset - f.track, 0],
         getScale: (f: LiveFlight): [number, number, number] => {
-          const s = (screenPx(sizeOf(f.icon)) * mpp) / MODEL_SIZE[kind];
+          const s = (screenPx(metres ?? sizeOf(f.icon)) * mpp) / divisor;
           // flattened into a silhouette when zoomed out
           return [s, s, s * Math.max(0.04, depth)];
         },
@@ -758,25 +959,56 @@
         layers.push(
           new SimpleMeshLayer<LiveFlight>({
             ...shared,
-            id: `aircraft-${kind}`,
-            mesh: meshes[kind].combined,
+            id: `aircraft-${id}-${detail}`,
+            mesh: shape.combined,
             getColor: (f) => (f.id === selectedId ? SELECTED_COLOR : AIRCRAFT_COLOR),
             updateTriggers: { ...triggers, getColor: selectedId },
           }),
         );
         continue;
       }
-      for (const [part, mesh] of meshes[kind].parts) {
+      for (const [part, mesh] of shape.parts) {
         layers.push(
           new SimpleMeshLayer<LiveFlight>({
             ...shared,
-            id: `aircraft-${kind}-${part}`,
+            id: `aircraft-${id}-${detail}-${part}`,
             mesh,
             getColor: (_, { index }) => mix(AIRCRAFT_COLOR, group.liveries[index][part as Part], liveryAmount),
             updateTriggers: { ...triggers, getColor: [liveryAmount, liveries.version] },
           }),
         );
       }
+    }
+
+    if (icons.length) {
+      layers.push(
+        new IconLayer<LiveFlight>({
+          id: "aircraft-icons",
+          data: icons,
+          getPosition: (_, { index }) => iconPositions[index],
+          getIcon: (_, { index }) => iconNames[index],
+          iconAtlas: aircraftModels.iconAtlas!,
+          iconMapping: aircraftModels.iconMapping,
+          // the silhouettes are drawn 94% of the way across their cell
+          getSize: (_, { index }) => screenPx(iconSizes[index]) * 1.06,
+          // the icons point north; `getAngle` turns anticlockwise on screen,
+          // and a rotated map has already turned the world underneath them
+          getAngle: (f) => bearing - f.track,
+          getColor: (f) => (f.id === selectedId ? SELECTED_COLOR : AIRCRAFT_COLOR),
+          sizeUnits: "pixels",
+          billboard: true,
+          pickable: true,
+          highlightedObjectIndex: hoveredId !== null ? (iconIndex.get(hoveredId) ?? -1) : -1,
+          highlightColor: [252, 180, 66, 150],
+          parameters: NO_CULL,
+          updateTriggers: {
+            getPosition: tick,
+            getAngle: [tick, bearing],
+            getSize: [mpp, minPx],
+            getColor: selectedId,
+          },
+        }),
+      );
     }
 
     // ring the selection, drawn over neighbouring aircraft but not through the globe
@@ -801,11 +1033,46 @@
     return layers;
   }
 
+  const DEGREES = Math.PI / 180;
+  const METRES_PER_DEGREE = 111_320;
+  /** deck.gl parks the camera this many viewport heights back from its target. */
+  const CAMERA_HEIGHTS = 1.5;
+  /** Whether the wheel zooms about the cursor or the centre of the screen. */
+  let zoomAround: "center" | "pointer" = "pointer";
+
   function render() {
     tick++;
+    // locked to an aircraft, the wheel has to zoom about the centre, or every
+    // notch shoves the aircraft aside and the lock drags it straight back
+    const wanted = follow && selected ? "center" : "pointer";
+    if (wanted !== zoomAround) {
+      zoomAround = wanted;
+      deck?.setProps({ controller: { type: NorthUpGlobeController, zoomAround } });
+    }
     if (follow && selected && Date.now() > transitionUntil) {
-      const [longitude, latitude] = extrapolate(selected, Date.now());
-      deck?.setProps({ initialViewState: { ...view, longitude, latitude, ...LIMITS } });
+      const [lon, lat] = extrapolate(selected, Date.now());
+      // The camera aims at a point on the ground, so once the view is tilted
+      // an aircraft drawn at altitude rides above the centre of the screen and
+      // zooming in closes on the ground beneath it instead. Aiming further
+      // along the bearing puts the aircraft itself on the camera's axis.
+      const pitch = view.pitch * DEGREES;
+      const camera = CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(view.zoom, lat);
+      // Only so far, though: aim past the camera itself and the aircraft ends
+      // up behind it, leaving the view staring at empty ground ahead.
+      const height = Math.min(
+        elevation(selected.alt, effectiveExaggeration(exaggeration, view.zoom)),
+        0.6 * camera * Math.cos(pitch),
+      );
+      const lift = height * Math.tan(pitch);
+      const latitude = Math.max(-85, Math.min(85, lat + (lift * Math.cos(view.bearing * DEGREES)) / METRES_PER_DEGREE));
+      const longitude =
+        lon + (lift * Math.sin(view.bearing * DEGREES)) / (METRES_PER_DEGREE * Math.max(0.05, Math.cos(lat * DEGREES)));
+      // deck.gl reports gestures back through `onViewStateChange` but not the
+      // moves we make ourselves, so say where the camera went: the feed area
+      // and the off-screen culling both read it
+      view = { ...view, longitude, latitude };
+      onviewchange?.(view);
+      deck?.setProps({ initialViewState: { ...view, ...LIMITS } });
     }
     deck?.setProps({ layers: buildLayers() });
   }
@@ -890,7 +1157,7 @@
       parent: container,
       views: new GlobeView({ resolution: 5 }),
       initialViewState: { ...view, ...LIMITS },
-      controller: true,
+      controller: { type: NorthUpGlobeController },
       effects: [lighting],
       pickingRadius: 6,
       onViewStateChange: ({ viewState }) => {
@@ -926,6 +1193,8 @@
       fontsReady = true;
       render();
     });
+    // the published aircraft shapes; the built-in ones draw until they land
+    aircraftModels.load().then(render);
     fetch(OPENFREEMAP)
       .then((r) => r.json())
       .then((tilejson: { tiles: string[] }) => {

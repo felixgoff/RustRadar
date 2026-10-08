@@ -1,9 +1,13 @@
 mod board;
+mod dwd;
 mod liveries;
+mod mrms;
+mod opensky;
+mod radar;
 mod reference;
 mod session;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -38,6 +42,12 @@ struct AppState {
     reference: tokio::sync::Mutex<Option<Arc<reference::ReferenceData>>>,
     /// Logo-derived livery colours per IATA code, loaded from disk on first use.
     colors: tokio::sync::Mutex<Option<liveries::ColorCache>>,
+    /// The newest volume from each 3D radar source, keyed by its name.
+    radar: tokio::sync::Mutex<HashMap<&'static str, Arc<radar::Volume>>>,
+    /// Sources with a fetch under way, so overlapping calls don't duplicate it.
+    radar_fetching: Mutex<HashSet<&'static str>>,
+    /// OpenSky tracks per aircraft, and whether it told us to back off.
+    opensky: tokio::sync::Mutex<opensky::Cache>,
 }
 
 impl AppState {
@@ -382,6 +392,144 @@ async fn airline_colors(
         .collect())
 }
 
+/// Sources of measured 3D reflectivity with the region each one covers. A
+/// volume costs tens of megabytes to fetch, so a source is only asked for
+/// when its region is actually in view. DWD's figures are the extent of its
+/// WN composite grid, written out here to keep the table self-contained.
+const RADAR_SOURCES: [(&'static str, radar::Bounds); 2] = [
+    ("mrms", mrms::BOUNDS),
+    (
+        "dwd",
+        radar::Bounds {
+            west: 1.4,
+            south: 45.6,
+            east: 18.9,
+            north: 56.3,
+        },
+    ),
+];
+
+/// Whether a source's region overlaps the view; `None` is the whole world.
+fn in_view(bounds: &radar::Bounds, area: Option<&BoundingBox>) -> bool {
+    let Some(area) = area else {
+        return true;
+    };
+    if f64::from(area.south) > bounds.north || f64::from(area.north) < bounds.south {
+        return false;
+    }
+    let (west, east) = (f64::from(area.west), f64::from(area.east));
+    if west > east {
+        // the view straddles the antimeridian, so it is really two spans:
+        // west..180 and -180..east. Neither radar region wraps itself.
+        bounds.east >= west || bounds.west <= east
+    } else {
+        bounds.west <= east && bounds.east >= west
+    }
+}
+
+/// The newest 3D radar volumes for the sources visible in `area` (or
+/// everywhere, when it is `None`): NOAA MRMS over North America and DWD over
+/// central Europe, fetched at most every few minutes. Anything already
+/// cached is returned either way. The images themselves are then read with
+/// [`radar_image`].
+#[tauri::command]
+async fn radar_frame(
+    area: Option<BoundingBox>,
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<radar::VolumeInfo>> {
+    let http = state.client().http().clone();
+    let stale: Vec<&'static str> = {
+        let held = state.radar.lock().await;
+        RADAR_SOURCES
+            .iter()
+            .filter(|(source, bounds)| {
+                in_view(bounds, area.as_ref())
+                    && held
+                        .get(source)
+                        .is_none_or(|v| v.fetched.elapsed() >= radar::MAX_AGE)
+            })
+            .map(|(source, _)| *source)
+            .collect()
+    };
+    // the frontend polls on a timer without waiting for the previous call, and
+    // a fetch can outlast one tick, so claim each source for the duration
+    let claimed: Vec<&'static str> = {
+        let mut fetching = state.radar_fetching.lock().unwrap();
+        stale
+            .into_iter()
+            .filter(|source| fetching.insert(source))
+            .collect()
+    };
+    if !claimed.is_empty() {
+        // the two sources are independent, so fetch them side by side
+        let fetched = futures_util::future::join_all(claimed.iter().map(|&source| {
+            let http = http.clone();
+            async move {
+                let volume = match source {
+                    "dwd" => dwd::fetch(&http).await,
+                    _ => mrms::fetch(&http).await,
+                };
+                (source, volume)
+            }
+        }))
+        .await;
+        {
+            let mut held = state.radar.lock().await;
+            for (source, volume) in fetched {
+                match volume {
+                    Ok(volume) => {
+                        held.insert(source, Arc::new(volume));
+                    }
+                    // keep showing the previous volume if a refresh fails
+                    Err(e) => eprintln!("{source} radar unavailable: {e}"),
+                }
+            }
+        }
+        let mut fetching = state.radar_fetching.lock().unwrap();
+        for source in &claimed {
+            fetching.remove(source);
+        }
+    }
+    let held = state.radar.lock().await;
+    // only a fetch we actually ran and that produced nothing is a failure;
+    // a view with no radar coverage legitimately has nothing to show
+    if held.is_empty() && !claimed.is_empty() {
+        return Err("no radar volume could be loaded".into());
+    }
+    Ok(held.values().map(|v| v.info()).collect())
+}
+
+/// One image of a source's current volume: `ground`, `coverage` (one byte per
+/// mask cell) or a height in km such as `3`.
+#[tauri::command]
+async fn radar_image(
+    source: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> CmdResult<tauri::ipc::Response> {
+    let volume = state
+        .radar
+        .lock()
+        .await
+        .get(source.as_str())
+        .cloned()
+        .ok_or("no such radar source")?;
+    let bytes = volume.image(&name).ok_or("no image by that name")?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// The flight an aircraft is on now, as tracked by the OpenSky Network.
+/// `icao24` is the six-digit hex Mode S address.
+#[tauri::command]
+async fn opensky_track(
+    icao24: String,
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<opensky::TrackPoint>> {
+    let http = state.client().http().clone();
+    let mut cache = state.opensky.lock().await;
+    opensky::track(&http, &mut cache, &icao24).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let fr24 = Fr24::new().expect("failed to build http client");
@@ -392,6 +540,9 @@ pub fn run() {
             follow: Mutex::new(None),
             reference: tokio::sync::Mutex::new(None),
             colors: tokio::sync::Mutex::new(None),
+            radar: tokio::sync::Mutex::new(HashMap::new()),
+            radar_fetching: Mutex::new(HashSet::new()),
+            opensky: tokio::sync::Mutex::new(opensky::Cache::default()),
         })
         .setup(|app| {
             // log in with credentials from the environment or the fr24 config
@@ -419,10 +570,55 @@ pub fn run() {
             airport_board,
             aircraft_history,
             airline_colors,
+            radar_frame,
+            radar_image,
+            opensky_track,
             session::session_info,
             session::sign_in,
             session::sign_out,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bbox(south: f32, north: f32, west: f32, east: f32) -> BoundingBox {
+        BoundingBox {
+            south,
+            north,
+            west,
+            east,
+        }
+    }
+
+    #[test]
+    fn only_sources_in_view_are_fetched() {
+        let mrms = RADAR_SOURCES[0].1;
+        let dwd = RADAR_SOURCES[1].1;
+        // no view at all means the whole globe
+        assert!(in_view(&mrms, None) && in_view(&dwd, None));
+        // central Europe sees DWD only, the US plains MRMS only
+        let europe = bbox(47.0, 54.0, 5.0, 15.0);
+        assert!(in_view(&dwd, Some(&europe)) && !in_view(&mrms, Some(&europe)));
+        let plains = bbox(35.0, 45.0, -105.0, -95.0);
+        assert!(in_view(&mrms, Some(&plains)) && !in_view(&dwd, Some(&plains)));
+        // the south Pacific sees neither
+        let pacific = bbox(-40.0, -10.0, -150.0, -120.0);
+        assert!(!in_view(&mrms, Some(&pacific)) && !in_view(&dwd, Some(&pacific)));
+    }
+
+    #[test]
+    fn views_across_the_antimeridian() {
+        let mrms = RADAR_SOURCES[0].1;
+        let dwd = RADAR_SOURCES[1].1;
+        // Alaska to Japan: west of the dateline, so no US east of -130
+        let far_north = bbox(40.0, 60.0, 140.0, -140.0);
+        assert!(!in_view(&mrms, Some(&far_north)) && !in_view(&dwd, Some(&far_north)));
+        // a wrap wide enough to reach back over the CONUS grid
+        let wide = bbox(20.0, 55.0, 140.0, -100.0);
+        assert!(in_view(&mrms, Some(&wide)) && !in_view(&dwd, Some(&wide)));
+    }
 }

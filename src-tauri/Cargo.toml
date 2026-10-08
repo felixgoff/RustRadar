@@ -24,6 +24,8 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 fr24 = { path = "../crates/fr24" }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["time", "macros", "sync"] }
+tokio = { version = "1", features = ["time", "macros", "sync", "rt"] }
+flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 reqwest = { version = "0.13", default-features = false }
+bzip2-rs = "0.1.2"

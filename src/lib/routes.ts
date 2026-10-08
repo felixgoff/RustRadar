@@ -1,5 +1,5 @@
 // Route geometry for the selected flight, and AIRAC cycle arithmetic.
-import type { Airport, FlightDetails, FlightPlan, LiveFlight } from "./api";
+import type { Airport, FlightDetails, FlightPlan, LiveFlight, OpenSkyPoint, TrailPoint } from "./api";
 import { reference } from "./reference.svelte";
 
 export type LonLat = [number, number];
@@ -63,6 +63,40 @@ export function decodeWaypoints(plan: FlightPlan, departure: Airport | undefined
   return candidates.reduce((best, points) =>
     distanceKm(points[0], home) < distanceKm(best[0], home) ? points : best,
   );
+}
+
+/**
+ * The flown track, with OpenSky's earlier part in front of Flightradar24's
+ * when OpenSky saw more of the flight (Flightradar24's own points win where
+ * both have them: they are newer and carry speeds).
+ */
+export function mergeTrail(
+  trail: TrailPoint[],
+  opensky: OpenSkyPoint[],
+): { trail: TrailPoint[]; added: number } {
+  const first = trail.find((p) => p.timestamp > 0)?.timestamp ?? Infinity;
+  const earlier = opensky.filter((p) => p.timestamp < first - 30);
+  if (earlier.length < 2) return { trail, added: 0 };
+  const points: TrailPoint[] = earlier.map((p, i) => {
+    // OpenSky has no speed: take it from the move to the next point
+    const next = earlier[i + 1] ?? trail[0];
+    let speed = 0;
+    if (next && next.timestamp > p.timestamp) {
+      const km = distanceKm([p.longitude, p.latitude], [next.longitude, next.latitude]);
+      speed = Math.min(700, Math.round((km / 1.852 / (next.timestamp - p.timestamp)) * 3600));
+    }
+    return {
+      timestamp: p.timestamp,
+      latitude: p.latitude,
+      longitude: p.longitude,
+      altitude: p.altitude,
+      ground_speed: speed,
+      track: p.track,
+      vertical_speed: 0,
+      source: -1,
+    };
+  });
+  return { trail: [...points, ...trail], added: points.length };
 }
 
 export interface Route {

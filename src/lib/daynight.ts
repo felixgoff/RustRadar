@@ -30,27 +30,53 @@ function sunAltitude(lat: number, lon: number, sun: { lat: number; lon: number }
   return Math.asin(Math.max(-1, Math.min(1, cosZenith))) / DEG;
 }
 
-/**
- * The region where the sun is below `altitude` degrees, as a polygon from
- * the night-side pole to the boundary on each meridian.
- */
-function nightBelow(altitude: number, sun: { lat: number; lon: number }): LonLat[] {
-  const nightPole = sun.lat >= 0 ? -POLE : POLE;
-  const step = nightPole < 0 ? 0.5 : -0.5;
-  const boundary: LonLat[] = [];
-  for (let lon = -180; lon <= 180; lon += 2) {
-    let lat = nightPole;
-    // walk away from the night pole until the sun rises above `altitude`
-    while (Math.abs(lat) <= POLE && sunAltitude(lat, lon, sun) < altitude) lat += step;
-    boundary.push([lon, Math.max(-POLE, Math.min(POLE, lat))]);
+/** Latitudes on a meridian where the sun is below `altitude`, or null. */
+function belowOn(lon: number, altitude: number, sun: { lat: number; lon: number }): [number, number] | null {
+  // along a meridian the sun's altitude falls steadily toward one end, so
+  // the night part is a single interval
+  let lo: number | null = null;
+  let hi = 0;
+  for (let lat = -POLE; lat <= POLE; lat += 1) {
+    if (sunAltitude(lat, lon, sun) < altitude) {
+      lo ??= lat;
+      hi = lat;
+    }
   }
-  return [...boundary, [180, nightPole], [-180, nightPole]];
+  return lo === null ? null : [lo, hi];
+}
+
+/**
+ * The region where the sun is below `altitude` degrees, as one quad per
+ * 2° meridian strip. (Walking from a pole fails when the pole itself is in
+ * shallower twilight, as it is near the equinoxes.)
+ */
+function nightBelow(altitude: number, sun: { lat: number; lon: number }): LonLat[][] {
+  const STEP = 2;
+  const quads: LonLat[][] = [];
+  let previous = belowOn(-180, altitude, sun);
+  for (let lon = -180; lon < 180; lon += STEP) {
+    const next = belowOn(lon + STEP, altitude, sun);
+    if (previous || next) {
+      // where the band ends between two meridians, taper it to a point
+      const a = previous ?? [(next![0] + next![1]) / 2, (next![0] + next![1]) / 2];
+      const b = next ?? [(a[0] + a[1]) / 2, (a[0] + a[1]) / 2];
+      quads.push([
+        [lon, a[0]],
+        [lon + STEP, b[0]],
+        [lon + STEP, b[1]],
+        [lon, a[1]],
+      ]);
+    }
+    previous = next;
+  }
+  return quads;
 }
 
 /** Sunset, then civil, nautical and astronomical twilight. */
 export const TWILIGHT_STEPS = [0, -6, -12, -18];
 
+/** Quads for every band, overlapping so the night deepens toward its middle. */
 export function nightPolygons(time: number): LonLat[][] {
   const sun = subsolarPoint(time);
-  return TWILIGHT_STEPS.map((altitude) => nightBelow(altitude, sun));
+  return TWILIGHT_STEPS.flatMap((altitude) => nightBelow(altitude, sun));
 }

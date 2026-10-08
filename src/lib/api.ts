@@ -282,6 +282,42 @@ export const aircraftHistory = (registration: string) =>
 export const airlineColors = (iatas: string[]) =>
   invoke<Record<string, LogoColors | null>>("airline_colors", { iatas });
 
+/** One source's current 3D radar scan: NOAA MRMS, or DWD over central Europe. */
+export interface RadarVolume {
+  /** The name images are requested by, e.g. `mrms`. */
+  source: string;
+  /** Unix seconds of the scan. */
+  time: number;
+  bounds: { west: number; south: number; east: number; north: number };
+  /** Heights (km) with an image. */
+  levels: number[];
+  /** Size of the coverage mask, one byte per cell, north row first. */
+  coverageWidth: number;
+  coverageHeight: number;
+}
+
+/** `area` limits the fetch to the sources on screen; `null` means everywhere. */
+export const radarFrame = (area: BoundingBox | null) => invoke<RadarVolume[]>("radar_frame", { area });
+
+/** `ground`, `coverage`, or a height such as `3`: PNG bytes (raw bytes for coverage). */
+export const radarImage = (source: string, name: string) =>
+  invoke<ArrayBuffer>("radar_image", { source, name });
+
+/** One position of a flight tracked by the OpenSky Network. */
+export interface OpenSkyPoint {
+  /** Unix seconds */
+  timestamp: number;
+  latitude: number;
+  longitude: number;
+  /** Feet */
+  altitude: number;
+  track: number;
+  on_ground: boolean;
+}
+
+/** The flight an aircraft is on now, by Mode S address (six hex digits). */
+export const openskyTrack = (icao24: string) => invoke<OpenSkyPoint[]>("opensky_track", { icao24 });
+
 export const sessionInfo = () => invoke<SessionInfo>("session_info");
 
 export const signIn = (email: string, password: string) =>

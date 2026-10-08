@@ -6,6 +6,7 @@
     isRateLimited,
     isTauri,
     liveFlights,
+    openskyTrack,
     sessionInfo,
     signIn,
     signOut,
@@ -17,6 +18,7 @@
     type FollowEvent,
     type LiveFlight,
     type LiveSnapshot,
+    type OpenSkyPoint,
     type SessionInfo,
     type TopFlight,
   } from "$lib/api";
@@ -31,7 +33,7 @@
   import { activeCount, loadPersisted, matcher, persist, serverCategories, type Filters } from "$lib/filters";
   import { cosAngle, viewArea } from "$lib/geo";
   import { reference } from "$lib/reference.svelte";
-  import { routeFor } from "$lib/routes";
+  import { mergeTrail, routeFor } from "$lib/routes";
 
   // A world refresh costs ~20 requests, a regional one a handful: poll the
   // world less often, and back off when Flightradar24 says to slow down.
@@ -52,6 +54,8 @@
   let top = $state.raw<TopFlight[] | null>(null);
   let topFailed = $state(false);
   let details = $state.raw<FlightDetails | null>(null);
+  /** The selected aircraft's track from the OpenSky Network, if it has one. */
+  let openskyPoints = $state.raw<{ icao24: string; points: OpenSkyPoint[] } | null>(null);
   let selectedId = $state<number | null>(null);
   /** What we know about a selection before it appears in the feed. */
   let hint = $state.raw<LiveFlight | null>(null);
@@ -86,6 +90,8 @@
   let fromBoard = $state(false);
   /** Fly to the selected flight once its position is known. */
   let flyPending = false;
+  /** Zoom for that pending fly-to; undefined lets `flyTo` choose one. */
+  let flyZoom: number | undefined;
 
   $effect(() => persist($state.snapshot(settings), $state.snapshot(filters)));
 
@@ -93,12 +99,6 @@
   const byId = $derived(new Map(flights.map((f) => [f.id, f])));
   const filtered = $derived(flights.filter(matcher($state.snapshot(filters) as Filters)));
   const active = $derived(activeCount(filters));
-  /** What the globe draws: the filtered flights, plus the selection even if filtered out. */
-  const shown = $derived.by(() => {
-    if (selectedId === null || filtered.some((f) => f.id === selectedId)) return filtered;
-    const s = byId.get(selectedId) ?? hint;
-    return s ? [...filtered, s] : filtered;
-  });
 
   // the follow stream updates every few seconds, the feed less often: use the fresher one
   const selected = $derived.by<LiveFlight | null>(() => {
@@ -125,9 +125,57 @@
     };
   });
 
+  /**
+   * What the globe draws: the filtered flights, with the selection substituted
+   * in (and added when filtered out). The substitution matters: the selected
+   * aircraft's model and its trail's tip must come from the same object, or
+   * the model lags behind the trail every time the follow stream beats the
+   * feed, then jumps forward when the feed catches up.
+   */
+  const shown = $derived.by(() => {
+    if (!selected) return filtered;
+    const i = filtered.findIndex((f) => f.id === selected.id);
+    if (i === -1) return [...filtered, selected];
+    const list = [...filtered];
+    list[i] = selected;
+    return list;
+  });
+
+  // OpenSky often saw the start of a flight that Flightradar24's trail lacks
+  const icao24 = $derived(
+    details?.aircraft?.icao_address ? details.aircraft.icao_address.toString(16).padStart(6, "0") : null,
+  );
+  const merged = $derived.by(() => {
+    if (!details) return { details, added: 0 };
+    const own = openskyPoints?.icao24 === icao24 ? openskyPoints.points : [];
+    const { trail, added } = mergeTrail(details.trail, own);
+    return { details: added ? { ...details, trail } : details, added };
+  });
+  const shownDetails = $derived(merged.details);
+
   const route = $derived.by(() => {
     void reference.ready; // airports resolve once the reference data is in
-    return selected ? routeFor(selected, details) : null;
+    return selected ? routeFor(selected, shownDetails) : null;
+  });
+
+  // fetch the track once the aircraft is known, then now and then while it is open
+  const OPENSKY_REFRESH_MS = 300_000;
+  $effect(() => {
+    const code = icao24;
+    if (!code || !isTauri()) return;
+    let stopped = false;
+    const load = () =>
+      openskyTrack(code)
+        .then((points) => {
+          if (!stopped) openskyPoints = { icao24: code, points };
+        })
+        .catch(() => {}); // no track, or OpenSky's allowance is used up: Flightradar24's trail stands
+    load();
+    const timer = setInterval(load, OPENSKY_REFRESH_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
   });
   const boardAirport = $derived.by(() => {
     void reference.ready;
@@ -221,7 +269,7 @@
         followState = "live";
         if (flyPending && e.data.flight) {
           flyPending = false;
-          globe.flyTo(e.data.flight.longitude, e.data.flight.latitude);
+          globe.flyTo(e.data.flight.longitude, e.data.flight.latitude, flyZoom);
         }
       } else if (e.event === "error") {
         followState = "reconnecting";
@@ -231,13 +279,16 @@
     }).catch(() => (followState = "ended"));
   }
 
-  function select(id: number | null, opts: { hint?: LiveFlight; fly?: boolean; fromBoard?: boolean } = {}) {
+  function select(
+    id: number | null,
+    opts: { hint?: LiveFlight; fly?: boolean; follow?: boolean; keepZoom?: boolean; fromBoard?: boolean } = {},
+  ) {
     if (id === selectedId && !opts.fly) return;
     selectedId = id;
     details = null;
     hint = opts.hint ?? null;
     flyPending = false;
-    following = false;
+    following = opts.follow ?? false;
     fromBoard = opts.fromBoard ?? false;
     if (id === null) {
       unfollowFlight();
@@ -245,7 +296,10 @@
     }
     const known = byId.get(id) ?? opts.hint;
     if (opts.fly) {
-      if (known) globe.flyTo(known.lon, known.lat);
+      // a click on the map keeps the zoom: the aircraft is already in view and
+      // the camera only has to centre on it. Picks from a list fly in instead.
+      flyZoom = opts.keepZoom ? view.zoom : undefined;
+      if (known) globe.flyTo(known.lon, known.lat, flyZoom);
       else flyPending = true;
     }
     startFollow(id);
@@ -266,6 +320,7 @@
       const { lat, lon, callsign } = entry.detail;
       select(id, {
         fly: true,
+        follow: true,
         hint: {
           id, lat, lon, track: 0, alt: 0, speed: 0, onGround: false, timestampMs: 0,
           callsign: callsign ?? "", flight: "", reg: "", typecode: "", origin: "", destination: "", icon: "",
@@ -328,8 +383,10 @@
   const attribution = $derived(
     [
       `Flight data: Flightradar24 (unofficial API${authenticated ? ", signed in" : ""})`,
-      settings.weather && "Radar: RainViewer",
+      // DWD's open data licence asks to be named wherever its radar is shown
+      settings.weather && "Radar: NOAA MRMS, Deutscher Wetterdienst, RainViewer",
       settings.basemap === "satellite" && "Imagery: Esri, Maxar, Earthstar Geographics",
+      merged.added > 0 && "Track: OpenSky Network",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]
       .filter(Boolean)
@@ -368,7 +425,7 @@
     bind:this={globe}
     flights={shown}
     {selected}
-    {details}
+    details={shownDetails}
     {route}
     airport={boardAirport ?? null}
     exaggeration={settings.exaggeration}
@@ -379,7 +436,7 @@
     daylight={settings.daylight}
     weather={settings.weather}
     follow={following}
-    onselect={(f) => select(f?.id ?? null)}
+    onselect={(f) => select(f?.id ?? null, { fly: !!f, follow: !!f, keepZoom: true })}
     onairport={openAirport}
     onfollowend={() => (following = false)}
     onviewchange={(v) => (view = v)}
@@ -459,7 +516,7 @@
         flights={top}
         failed={topFailed}
         {selectedId}
-        onpick={(f) => select(f.flight_id, { fly: true })}
+        onpick={(f) => select(f.flight_id, { fly: true, follow: true })}
         onretry={refreshTop}
       />
     </section>
@@ -472,7 +529,7 @@
         code={boardCode}
         airport={boardAirport}
         {selectedId}
-        onselect={(id) => select(id, { fly: true, fromBoard: true })}
+        onselect={(id) => select(id, { fly: true, follow: true, fromBoard: true })}
         onlocate={() => boardAirport && globe.flyTo(boardAirport.lon, boardAirport.lat, 11)}
         onclose={() => (boardCode = null)}
       />
@@ -482,14 +539,15 @@
   {#if selected}
     <FlightPanel
       flight={selected}
-      {details}
+      details={shownDetails}
+      openskyAdded={merged.added}
       {route}
       status={followState}
       {authenticated}
       {following}
       back={fromBoard && boardCode ? { label: `${boardCode} departures and arrivals`, onclick: () => select(null) } : null}
       onfollow={() => (following = !following)}
-      onselect={(id) => select(id, { fly: true })}
+      onselect={(id) => select(id, { fly: true, follow: true })}
       onairport={openAirport}
       onsignin={() => controls.openAccount()}
       onclose={() => select(null)}

@@ -12,8 +12,11 @@ export const PARTS: Part[] = ["top", "belly", "wings", "tail", "engines"];
 const hex = (h: string): RGB => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)) as RGB;
 
 const WHITE = hex("#F5F5F3");
-const WING_GREY = hex("#C3C8CF");
-const ENGINE_GREY = hex("#B9BEC6");
+// Wings cover most of an airliner seen from above, so this grey sets how the
+// whole fleet reads: dark enough to separate wing from fuselage, light enough
+// that the aircraft still look white rather than grey.
+const WING_GREY = hex("#E3E6EA");
+const ENGINE_GREY = hex("#D6DAE0");
 
 type Spec = { tail: string; top?: string; belly?: string; wings?: string; engines?: string };
 

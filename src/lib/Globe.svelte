@@ -1,5 +1,13 @@
 <script lang="ts" module>
-  export type ViewState = { longitude: number; latitude: number; zoom: number; bearing: number; pitch: number };
+  export type ViewState = {
+    longitude: number;
+    latitude: number;
+    zoom: number;
+    bearing: number;
+    pitch: number;
+    /** Metres the camera's target is raised by; only the flat projection (zoom above 12) takes it. */
+    position?: [number, number, number];
+  };
 </script>
 
 <script lang="ts">
@@ -135,6 +143,8 @@
   let tick = 0;
   /** Camera transitions in progress (fly-to): following must not cut them short. */
   let transitionUntil = 0;
+  /** The camera's target is raised to an aircraft's height and must be lowered once the lock ends. */
+  let raised = false;
   let hoveredId: number | null = null;
 
   // GlobeView culls back faces by default, which also drops camera-facing
@@ -1085,23 +1095,26 @@
    */
   function lockedView(v: ViewState, flight: LiveFlight): ViewState {
     const [lon, lat] = extrapolate(flight, Date.now());
-    // The camera aims at a point on the ground, so once the view is tilted
-    // an aircraft drawn at altitude rides above the centre of the screen and
-    // zooming in closes on the ground beneath it instead. Aiming further
-    // along the bearing puts the aircraft itself on the camera's axis.
+    const altitude = elevation(flight.alt, effectiveExaggeration(exaggeration, v.zoom));
+    // Close in, the projection is flat and can raise the camera's target to the
+    // aircraft's own height, which centres it at any tilt, bearing and zoom. A
+    // ground point aimed along the bearing can't: the camera sits only a few
+    // hundred metres out by street level, below a real cruise altitude.
+    if (v.zoom > FLAT_ABOVE_ZOOM) return { ...v, longitude: lon, latitude: lat, position: [0, 0, altitude] };
+    // The globe has no such offset, and the camera aims at a point on the
+    // ground, so once the view is tilted an aircraft drawn at altitude rides
+    // above the centre of the screen. Aiming further along the bearing puts
+    // the aircraft itself on the camera's axis.
     const pitch = v.pitch * DEGREES;
     const camera = CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(v.zoom, lat);
     // Only so far, though: aim past the camera itself and the aircraft ends
     // up behind it, leaving the view staring at empty ground ahead.
-    const height = Math.min(
-      elevation(flight.alt, effectiveExaggeration(exaggeration, v.zoom)),
-      0.6 * camera * Math.cos(pitch),
-    );
+    const height = Math.min(altitude, 0.6 * camera * Math.cos(pitch));
     const lift = height * Math.tan(pitch);
     const latitude = Math.max(-85, Math.min(85, lat + (lift * Math.cos(v.bearing * DEGREES)) / METRES_PER_DEGREE));
     const longitude =
       lon + (lift * Math.sin(v.bearing * DEGREES)) / (METRES_PER_DEGREE * Math.max(0.05, Math.cos(lat * DEGREES)));
-    return { ...v, longitude, latitude };
+    return { ...v, longitude, latitude, position: undefined };
   }
 
   function render() {
@@ -1120,7 +1133,15 @@
       // moves we make ourselves, so say where the camera went: the feed area
       // and the off-screen culling both read it
       onviewchange?.(view);
+      raised = Boolean(view.position);
       deck?.setProps({ initialViewState: { ...view, ...LIMITS } });
+    } else if (raised && !(follow && selected)) {
+      // the lock was released with the camera raised: bring it back to the ground
+      raised = false;
+      view = { ...view, position: undefined };
+      // `position` is the flat projection's; GlobeViewState doesn't declare it
+      const grounded: ViewState = { ...view, position: [0, 0, 0] };
+      deck?.setProps({ initialViewState: { ...grounded, ...LIMITS } });
     }
     deck?.setProps({ layers: buildLayers() });
   }

@@ -22,8 +22,10 @@ export interface LiveFlight {
   /** Flightradar24's icon class, e.g. `A320`, `B747`, `EC` (helicopter). */
   icon: string;
   /**
-   * Positions after `lat`/`lon`: `[Δlat, Δlon]` in 1e-5° and ms after
-   * `timestampMs`, oldest first. Up to ~10 s of look-ahead for smooth playback.
+   * The aircraft's recent history (Flightradar24's position buffer):
+   * `[Δlat, Δlon, Δms]` back from the report, each point at
+   * `lat - Δlat·1e-5`, `lon - Δlon·1e-5` and `timestampMs - Δms`, newest first
+   * (Δms increasing). Up to ~10 s, overlapping the previous reports' positions.
    */
   positions?: [number, number, number][];
   /** Feet per minute; only when signed in. */

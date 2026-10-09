@@ -94,20 +94,24 @@ struct LiveFlight {
     destination: String,
     /// Flightradar24's icon class, e.g. `A320`, `B744`, `EC` (helicopter)
     icon: String,
-    /// Positions after `lat`/`lon`, as `[Δlat, Δlon]` in 1e-5° and ms after
-    /// `timestamp_ms`, oldest first. Flightradar24 sends up to ~10 s of them so
-    /// motion can be played back rather than guessed.
+    /// The aircraft's recent history: positions before `lat`/`lon`, as
+    /// `[Δlat, Δlon, Δms]` back from the report, each point at
+    /// `lat - Δlat·1e-5`, `lon - Δlon·1e-5` and `timestamp_ms - Δms`, newest
+    /// first (Δms increasing). Flightradar24 sends up to ~10 s of them; they
+    /// overlap the previous reports' positions, so motion can be played back
+    /// through them rather than guessed.
     positions: Vec<[i32; 3]>,
     /// Feet per minute; only requested, so only present, when signed in.
     #[serde(skip_serializing_if = "Option::is_none")]
     vspeed: Option<i32>,
 }
 
-/// Longest look-ahead a buffered position may have; anything else is corrupt
+/// Furthest back a buffered position may be; anything else is corrupt
 /// (upstream occasionally sends an underflowed delta near 2^32).
 const MAX_BUFFER_MS: u32 = 60_000;
 
-/// The usable part of a position buffer: increasing times within range.
+/// The usable part of a position buffer (recent history, newest first):
+/// strictly increasing times back from the report, within range.
 fn buffered_positions(buffer: Option<&fr24::proto::common::PositionBuffer>) -> Vec<[i32; 3]> {
     let mut last = 0;
     let mut out = Vec::new();

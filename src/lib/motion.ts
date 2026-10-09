@@ -1,10 +1,12 @@
 // Aircraft motion between feed reports: where to draw each aircraft, and how.
 //
 // Flightradar24 sends a report every 8-15 s (minutes, for some sources) with a
-// short look-ahead buffer of positions. Between reports we interpolate inside
-// the known samples, extrapolate along an arc past them, predict touchdowns
-// and lift-offs, derive pitch, bank and gear, and blend every correction in
-// over a few seconds so that nothing on the globe ever jumps or freezes.
+// buffer of the aircraft's positions over the ~10 s before it: its recent
+// history, so each report brings the path since the previous one. Between
+// reports we interpolate inside the known samples, extrapolate along an arc
+// past them, predict touchdowns and lift-offs, derive pitch, bank and gear,
+// and blend every correction in over a few seconds so that nothing on the
+// globe ever jumps or freezes.
 //
 // BY DESIGN THE MAP SHOWS EACH AIRCRAFT A FEW SECONDS IN THE PAST (2-12 s; see
 // `drawnTime`). Drawn at "now", an aircraft is usually past its newest data
@@ -18,8 +20,9 @@
 //   samples. Track, heading, speed, turn rate (bank) and vertical rate come
 //   from the fitted curve, which is C2 and evaluated per frame as a Hermite
 //   piece, as cheaply as before.
-// - The delay is chosen per aircraft from its data cadence and how far ahead
-//   its newest sample reaches (`noteArrival`), and eases between values at no
+// - The delay is chosen per aircraft from its data cadence and how old its
+//   newest sample (the latest report) is on arrival (`noteArrival`), so that
+//   the drawn time stays inside the data, and eases between values at no
 //   more than ~10% of real time (`retarget`), so playback never jumps.
 // - Each report's state (phase, gear, field, measured attitude) takes over
 //   when the drawn time reaches the report's time, not on arrival, so what is
@@ -143,24 +146,23 @@ const GRAVITY_MS2 = 9.80665;
 
 /**
  * How much horizontal history a track keeps (and fits): the drawn time is
- * never more than ~22 s behind the newest sample (a 12 s delay, ~10 s of
- * look-ahead), so older samples are of no use.
+ * never more than 12 s behind the newest sample (which is never in the
+ * future), so older samples only steady the fit's start.
  */
 const SAMPLE_WINDOW_MS = 30_000;
 /**
- * A report this far (m) off the smoothed path of the samples before it is a
- * jump in the data: the old samples are dropped rather than smoothed into it.
+ * A report (or a point of its buffer) this far (m) off the smoothed path of
+ * the samples held is a jump in the data: the old samples are dropped rather
+ * than smoothed into it.
  */
 const JUMP_M = 150;
-/** ...checked for reports up to this long (ms) past those samples. */
+/** ...checked for points inside those samples or up to this long (ms) past them. */
 const JUMP_LOOKAHEAD_MS = 4_000;
-/** A newer report's samples replace old ones from this long before its own time on. */
-const MERGE_EPSILON_MS = 500;
 /** Samples closer together than this are duplicates (and would make the spline's tangents explode). */
 const MIN_SAMPLE_GAP_MS = 200;
 /** How far before the first sample we run the track backwards (clock skew), seconds. */
 const BACKWARD_LIMIT_S = 30;
-/** FR24 buffer offsets are in 1e-5 degrees. */
+/** FR24 buffer offsets are in 1e-5 degrees, back from the report: a point is at `lat/lon - d * this`. */
 const BUFFER_SCALE = 1e-5;
 
 // --- Estimators ----------------------------------------------------------------
@@ -288,7 +290,7 @@ const MAX_MARGIN_MS = 3_000;
 /**
  * Smoothing-spline stiffness for positions, s³ (per unit sample weight). The
  * fitted curve averages over about (λ × spacing)^¼ seconds either side: 2.5 s
- * for Flightradar24's 2 s look-ahead, 2.8 s for adsb.lol's 3 s polls. About
+ * for Flightradar24's buffer (2 s apart), 2.8 s for adsb.lol's 3 s polls. About
  * three samples, that is, which takes out the jitter with little lag.
  */
 const SMOOTH_LAMBDA = 20;
@@ -407,8 +409,16 @@ const FLARE_SPAN_FT = (2 * FLARE_HEIGHT_FT) / (1 + TOUCHDOWN_SINK);
 /** Raw height above the field (ft, negative) at which the flared height reaches the ground. */
 const FLARE_FLOOR_FT = FLARE_HEIGHT_FT - FLARE_SPAN_FT;
 const FLARE_A = (1 - TOUCHDOWN_SINK) / (2 * FLARE_SPAN_FT);
-/** A correction of a whole altitude reference (a QNH learned) is blended out at this rate, 1/s, not snapped. */
+/** A correction of a whole altitude reference (a QNH learned) is blended out at this rate, 1/s, not snapped... */
 const REFERENCE_BLEND_RATE = 0.8;
+/**
+ * ...or more slowly, so that it moves the drawn height by no more than this
+ * (ft/s, ~1800 fpm) at its peak: a QNH learned on the runway can move an
+ * aircraft still drawn on short final by a few hundred feet.
+ */
+const REFERENCE_MAX_FT_S = 30;
+/** Height left above the flare's floor at a predicted touchdown is eased out over this long before it, ms. */
+const TOUCHDOWN_FIT_MS = 2_000;
 
 /** Height to draw (ft above the field) for a raw height `x`: x above the flare, easing to 0 at FLARE_FLOOR_FT. */
 function flare(x: number): number {
@@ -1242,11 +1252,13 @@ export class Motion {
     const dVA = (before.vsFpm - after.vsFpm) / 60 - altFast.pvx - altGentle.pvx;
     const wa = smoothstep((Math.abs(dA) * FEET_TO_M - GENTLE_MAX_M) / GENTLE_MAX_M);
     // a new altitude reference (a QNH learned) moves the whole vertical profile: eased in, not snapped
-    // (and one still under way carries on at its own pace)
+    // (and one still under way carries on at its own pace, sped up no more than that allows;
+    // a critically damped blend of x from rest moves at most k |x| / e)
+    const capped = (REFERENCE_MAX_FT_S * Math.E) / Math.max(1, Math.abs(altFast.px + wa * dA));
     const altRate = Number.isFinite(tr.altBlendRate)
-      ? tr.altBlendRate
-      : Math.abs(altFast.px) * FEET_TO_M > GENTLE_MAX_M
-        ? Math.min(altFast.k, BLEND_RATE)
+      ? Math.min(tr.altBlendRate, capped)
+      : altFast.px !== 0 && altFast.k < BLEND_RATE
+        ? Math.min(BLEND_RATE, Math.max(altFast.k, capped))
         : BLEND_RATE;
     tr.altBlendRate = NaN;
     altFast.add(nowMs, wa * dA, 0, wa * dVA, 0, altRate);
@@ -1312,7 +1324,9 @@ export class Motion {
     if (!first && t < tr.reportMs) {
       // older than measured state already taken in: only its samples and route are news
       this.selectField(tr, f);
-      if (mergeMixed(tr, f, t, true) !== null) {
+      const lat0 = Number.isFinite(f.lat) ? clamp(f.lat, -90, 90) : 0;
+      const lon0 = Number.isFinite(f.lon) ? wrapLon(f.lon) : 0;
+      if (mergeReport(tr, f, t, lat0, lon0, true) !== null) {
         this.refresh(tr);
         noteArrival(tr, nowMs);
       }
@@ -1343,12 +1357,14 @@ export class Motion {
     tr.lon0 = Number.isFinite(f.lon) ? wrapLon(f.lon) : 0;
 
     this.selectField(tr, f);
-    const reportedOnly = tr.mixed ? mergeMixed(tr, f, t, false)! : mergeSamples(tr, f);
+    const reportedOnly = mergeReport(tr, f, t, tr.lat0, tr.lon0, false)!;
+    // this report's own samples: its buffer (the ~10 s before it) up to the report itself
+    const ownFrom = reportFromMs;
 
-    // --- acceleration (kt/s): across reports and across the buffer
+    // --- acceleration (kt/s): across reports and along the buffer
     const reportAccel =
       dtReport >= MIN_ACCEL_DT_S && dtReport <= MAX_ACCEL_DT_S ? (tr.speedKt - prevSpeed) / dtReport : NaN;
-    const bufferAccel = bufferAcceleration(tr, t);
+    const bufferAccel = bufferAcceleration(tr, ownFrom);
     let accel =
       Number.isFinite(reportAccel) && Number.isFinite(bufferAccel)
         ? (reportAccel + bufferAccel) / 2
@@ -1389,7 +1405,7 @@ export class Motion {
     // --- turn rate (deg/s): buffer chord headings when fast enough, else reported tracks
     const reportTurn =
       dtReport >= MIN_TURN_DT_S && dtReport <= MAX_TURN_DT_S ? wrap180(tr.trackDeg - prevTrack) / dtReport : NaN;
-    const bufferTurn = tr.onGround ? NaN : bufferTurnRate(tr, t);
+    const bufferTurn = tr.onGround ? NaN : bufferTurnRate(tr, ownFrom);
     let turn = Number.isFinite(bufferTurn) ? bufferTurn : Number.isFinite(reportTurn) ? reportTurn : 0;
     if (tr.onGround && tr.speedKt < PARKED_MAX_KT) turn = 0;
     tr.turnRate = clamp(first ? turn : tr.turnRate + SMOOTHING * (turn - tr.turnRate), -MAX_TURN_DEG_S, MAX_TURN_DEG_S);
@@ -1869,51 +1885,20 @@ export class Motion {
         phase = speed < TAXI_MAX_KT * KNOTS_TO_MS ? "taxi" : "landingRoll";
         out.pitch = S.touchdownPitch * (1 - smoothstep((T - td) / (TOUCHDOWN_EASE_S * 1000)));
       } else {
-        const na = tr.ats.length;
-        let alt: number;
-        let vs: number;
-        if (na > 1 && T >= tr.ats[0] && T <= tr.ats[na - 1]) {
-          // inside the altitude samples: the smoothed curve and its slope
-          altitudeAt(tr, T);
-          alt = hx;
-          vs = hvx * 60;
-        } else {
-          // past them: on from the smoothed newest altitude (or the report) at the
-          // estimated rate, the curve's own rate easing into it (C1)
-          let baseMs = S.reportMs;
-          let base = S.alt;
-          let baseRate = S.vrate * verticalWeight(0);
-          if (na > 0 && T >= tr.ats[0]) {
-            baseMs = tr.ats[na - 1];
-            base = tr.afv[na - 1];
-            baseRate = clamp(tr.afd[na - 1] * 60, -MAX_VRATE_FPM, MAX_VRATE_FPM);
+        airAltitude(tr, S, T);
+        let alt = amAlt;
+        let vs = amVs;
+        if (field && Number.isFinite(td) && T > td - TOUCHDOWN_FIT_MS) {
+          // the last moments before the predicted touchdown: height still left above the
+          // flare's floor then (the data moved on since it was predicted: a QNH re-read, say)
+          // eases out, so the wheels meet the runway when the landing roll begins
+          airAltitude(tr, S, td);
+          const excess = amAlt - (fieldElev + FLARE_FLOOR_FT);
+          if (excess > 0) {
+            const u = 1 - (td - T) / TOUCHDOWN_FIT_MS;
+            alt -= excess * smoothstep(u);
+            vs -= ((excess * 6 * u * (1 - u)) / TOUCHDOWN_FIT_MS) * 60_000;
           }
-          const dtR = (T - S.reportMs) / 1000;
-          const dtB = (baseMs - S.reportMs) / 1000;
-          const extra = baseRate - S.vrate * verticalWeight(dtB);
-          const ease = Math.exp(-Math.max(0, (T - baseMs) / 1000) / VRATE_HANDOVER_S);
-          let climb =
-            (S.vrate * (verticalIntegral(dtR) - verticalIntegral(dtB))) / 60 + (extra / 60) * VRATE_HANDOVER_S * (1 - ease);
-          let vsScale = 1;
-          let vsWeight = verticalWeight(dtR);
-          const cap = S.capAlt;
-          if (cap === cap) {
-            // altitude capture: ease onto the selected altitude (C1: the rate goes smoothly to 0)
-            const d = cap - base;
-            const band = clamp(Math.abs(S.vrate) * CAPTURE_FT_PER_FPM, MIN_CAPTURE_FT, MAX_CAPTURE_FT);
-            const kk = Math.min(1, band / Math.abs(d));
-            const xx = climb / d;
-            if (xx >= 1 + kk) {
-              climb = d;
-              vsScale = 0;
-            } else if (xx > 1 - kk) {
-              const u = xx - (1 - kk);
-              climb = d * (xx - (u * u) / (4 * kk));
-              vsScale = 1 - u / (2 * kk);
-            }
-          }
-          alt = base + climb;
-          vs = (S.vrate * vsWeight + extra * ease) * vsScale;
         }
         out.ground = false;
         out.altRaw = alt;
@@ -1980,6 +1965,75 @@ export class Motion {
   }
 }
 
+// Results of `airAltitude`.
+let amAlt = 0;
+let amVs = 0;
+
+/**
+ * The model's airborne altitude (ft, corrected) and vertical rate (fpm) at T
+ * for a state, before the flare shapes them near the ground, into amAlt/amVs:
+ * the smoothed altitude curve inside its samples, and past them on from it at
+ * the state's estimated rate (levelling off at a selected altitude).
+ */
+function airAltitude(tr: Track, S: State, T: number): void {
+  // the altitude samples count for a state that knew of them: one from before the first
+  // (its altitude estimated, say) carries on its own way, so that the state taking over
+  // when the drawn time reaches that first sample's report blends the difference out
+  const na = S.reportMs >= tr.ats[0] ? tr.ats.length : 0;
+  let alt: number;
+  let vs: number;
+  if (na > 1 && T >= tr.ats[0] && T <= tr.ats[na - 1]) {
+    // inside the altitude samples: the smoothed curve and its slope
+    altitudeAt(tr, T);
+    alt = hx;
+    vs = hvx * 60;
+  } else if (na > 0 && T < tr.ats[0]) {
+    // before them (a new track is drawn from its buffer's history): back along the
+    // smoothed curve's start, as the horizontal path is, so it meets the curve
+    vs = clamp(tr.afd[0] * 60, -MAX_VRATE_FPM, MAX_VRATE_FPM);
+    alt = tr.afv[0] + (vs / 60) * Math.max((T - tr.ats[0]) / 1000, -BACKWARD_LIMIT_S);
+  } else {
+    // past them: on from the smoothed newest altitude (or the report) at the
+    // estimated rate, the curve's own rate easing into it (C1)
+    let baseMs = S.reportMs;
+    let base = S.alt;
+    let baseRate = S.vrate * verticalWeight(0);
+    if (na > 0 && T >= tr.ats[0]) {
+      baseMs = tr.ats[na - 1];
+      base = tr.afv[na - 1];
+      baseRate = clamp(tr.afd[na - 1] * 60, -MAX_VRATE_FPM, MAX_VRATE_FPM);
+    }
+    const dtR = (T - S.reportMs) / 1000;
+    const dtB = (baseMs - S.reportMs) / 1000;
+    const extra = baseRate - S.vrate * verticalWeight(dtB);
+    const ease = Math.exp(-Math.max(0, (T - baseMs) / 1000) / VRATE_HANDOVER_S);
+    let climb =
+      (S.vrate * (verticalIntegral(dtR) - verticalIntegral(dtB))) / 60 + (extra / 60) * VRATE_HANDOVER_S * (1 - ease);
+    let vsScale = 1;
+    let vsWeight = verticalWeight(dtR);
+    const cap = S.capAlt;
+    if (cap === cap) {
+      // altitude capture: ease onto the selected altitude (C1: the rate goes smoothly to 0)
+      const d = cap - base;
+      const band = clamp(Math.abs(S.vrate) * CAPTURE_FT_PER_FPM, MIN_CAPTURE_FT, MAX_CAPTURE_FT);
+      const kk = Math.min(1, band / Math.abs(d));
+      const xx = climb / d;
+      if (xx >= 1 + kk) {
+        climb = d;
+        vsScale = 0;
+      } else if (xx > 1 - kk) {
+        const u = xx - (1 - kk);
+        climb = d * (xx - (u * u) / (4 * kk));
+        vsScale = 1 - u / (2 * kk);
+      }
+    }
+    alt = base + climb;
+    vs = (S.vrate * vsWeight + extra * ease) * vsScale;
+  }
+  amAlt = alt;
+  amVs = vs;
+}
+
 /** Gear fraction at a time, given the last target change. */
 function gearAt(tr: Track, nowMs: number): number {
   const t = (nowMs - tr.gearMs) / GEAR_TRANSIT_MS;
@@ -2025,84 +2079,169 @@ function fieldRemoval(tr: Track, lat: number, lon: number): number {
   return best;
 }
 
+// Scratch for `mergeReport`: a report's own samples, oldest first, and the merged result
+// (reports are merged for every aircraft in every snapshot).
+const newT: number[] = [];
+const newLat: number[] = [];
+const newLon: number[] = [];
+const outT: number[] = [];
+const outLat: number[] = [];
+const outLon: number[] = [];
+const outSrc: number[] = [];
+/** Time of the oldest sample the last report merged brought: its buffer's oldest point, or its own time. */
+let reportFromMs = 0;
+
 /**
- * Merges the report point and its look-ahead buffer into the track's samples:
- * the new samples replace old ones from shortly before the report on, and only
- * the last minute is kept. Returns whether the newest sample is the report
- * point itself (no look-ahead), whose velocity is then the reported one.
+ * A report's own samples into newT/newLat/newLon, oldest first: its position
+ * buffer, which is the aircraft's recent history (each point `dMs` before the
+ * report, at `lat/lon - d·1e-5`; Flightradar24 sends the newest first), then
+ * the report point itself, the newest. Of two points closer together than
+ * MIN_SAMPLE_GAP_MS the later one in the buffer is dropped.
  */
-function mergeSamples(tr: Track, f: LiveFlight): boolean {
-  const t = tr.reportMs;
-  // in place: this runs for every aircraft in every snapshot
-  const { ts, lats, lons } = tr;
-  let n = 0;
-  while (n < tr.n && ts[n] < t - MERGE_EPSILON_MS) n++;
-  // an old sample far off this report's path (a jump in the data) poisons the spline: start over
-  if (n) {
-    const gap = (t - ts[n - 1]) / 1000;
-    const km = distanceKm(lats[n - 1], lons[n - 1], tr.lat0, tr.lon0);
-    const plausible = (Math.max(tr.speedKt, 250) * 2 * KNOTS_TO_MS * gap) / 1000 + 0.5;
-    if (km > plausible || km * 1000 > SNAP_DISTANCE_M) n = 0;
-    // so does a report well off the path the old samples smoothed to: the old ones were wrong
-    else if (tr.fx.length === tr.n && tr.n > 1 && t >= ts[0] && t <= ts[tr.n - 1] + JUMP_LOOKAHEAD_MS) {
-      const last = tr.n - 1;
-      let x: number;
-      let y: number;
-      if (t <= ts[last]) {
-        hermite(tr, t);
-        x = hx;
-        y = hy;
-      } else {
-        // just past them: straight on is good to well inside JUMP_M over a few seconds
-        const dt = (t - ts[last]) / 1000;
-        x = tr.fx[last] + tr.mx[last] * dt;
-        y = tr.fy[last] + tr.my[last] * dt;
-      }
-      const lat = tr.refLat + y / M_PER_DEG;
-      const lon = tr.refLon + x / (M_PER_DEG * Math.max(Math.cos(((tr.refLat + lat) / 2) * DEG), 1e-3));
-      if (distanceKm(lat, lon, tr.lat0, tr.lon0) * 1000 > JUMP_M) n = 0;
-    }
-  }
-  ts.length = lats.length = lons.length = n;
-  // old samples all end before t - MERGE_EPSILON_MS, so the report point always goes in
-  ts.push(t);
-  lats.push(tr.lat0);
-  lons.push(tr.lon0);
-  let buffered = false;
+function reportPoints(f: LiveFlight, t: number, lat0: number, lon0: number): void {
+  newT.length = newLat.length = newLon.length = 0;
   const positions = f.positions;
   if (positions) {
-    for (let i = 0; i < positions.length; i++) {
-      const [dLat, dLon, dMs] = positions[i];
-      const time = t + dMs;
-      const lat = tr.lat0 + dLat * BUFFER_SCALE;
-      const lon = tr.lon0 + dLon * BUFFER_SCALE;
-      if (!(time - ts[ts.length - 1] >= MIN_SAMPLE_GAP_MS) || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      ts.push(time);
-      lats.push(lat);
-      lons.push(lon);
-      buffered = true;
+    for (let k = 0; k < positions.length; k++) {
+      const [dLat, dLon, dMs] = positions[k];
+      const lat = lat0 - dLat * BUFFER_SCALE;
+      const lon = lon0 - dLon * BUFFER_SCALE;
+      if (!(dMs >= MIN_SAMPLE_GAP_MS && dMs <= SAMPLE_WINDOW_MS) || !(Math.abs(lat) <= 90) || !Number.isFinite(lon)) continue;
+      const time = t - dMs;
+      let j = newT.length;
+      while (j > 0 && newT[j - 1] > time) j--;
+      if ((j > 0 && time - newT[j - 1] < MIN_SAMPLE_GAP_MS) || (j < newT.length && newT[j] - time < MIN_SAMPLE_GAP_MS)) continue;
+      newT.splice(j, 0, time);
+      newLat.splice(j, 0, lat);
+      newLon.splice(j, 0, wrapLon(lon));
     }
   }
-  const newest = ts[ts.length - 1];
-  let start = 0;
-  while (start < ts.length - 1 && ts[start] < newest - SAMPLE_WINDOW_MS) start++;
-  if (start) {
-    ts.splice(0, start);
-    lats.splice(0, start);
-    lons.splice(0, start);
-  }
-  n = tr.n = ts.length;
+  newT.push(t);
+  newLat.push(lat0);
+  newLon.push(lon0);
+  reportFromMs = newT[0];
+}
 
-  // local frame around the newest sample
-  tr.refLat = lats[n - 1];
-  tr.refLon = lons[n - 1];
-  const cosRef = Math.max(Math.cos(tr.refLat * DEG), 1e-3);
-  tr.xs.length = tr.ys.length = n;
-  for (let i = 0; i < n; i++) {
-    tr.xs[i] = wrap180(lons[i] - tr.refLon) * M_PER_DEG * cosRef;
-    tr.ys[i] = (lats[i] - tr.refLat) * M_PER_DEG;
+/**
+ * Whether one of the report's points (in newT/newLat/newLon) is well off the
+ * path the held samples smoothed to, inside them or just past them: the old
+ * samples were wrong (or this is a jump in the data), and would poison the
+ * spline.
+ */
+function offPath(tr: Track): boolean {
+  const n = tr.n;
+  if (n < 2 || tr.fx.length !== n || tr.ts.length !== n) return false;
+  const { ts } = tr;
+  const last = n - 1;
+  for (let j = 0; j < newT.length; j++) {
+    const t = newT[j];
+    if (t < ts[0] || t > ts[last] + JUMP_LOOKAHEAD_MS) continue;
+    let x: number;
+    let y: number;
+    if (t <= ts[last]) {
+      hermite(tr, t);
+      x = hx;
+      y = hy;
+    } else {
+      // just past them: straight on is good to well inside JUMP_M over a few seconds
+      const dt = (t - ts[last]) / 1000;
+      x = tr.fx[last] + tr.mx[last] * dt;
+      y = tr.fy[last] + tr.my[last] * dt;
+    }
+    const lat = tr.refLat + y / M_PER_DEG;
+    const lon = tr.refLon + x / (M_PER_DEG * Math.max(Math.cos(((tr.refLat + lat) / 2) * DEG), 1e-3));
+    if (distanceKm(lat, lon, newLat[j], newLon[j]) * 1000 > JUMP_M) return true;
   }
-  return !buffered;
+  return false;
+}
+
+/**
+ * Merges a Flightradar24 report at `t` (position `lat0`/`lon0`) into the
+ * track's samples: the report point, the newest, and its buffer, the ~10 s
+ * before it. The buffer overlaps what earlier reports brought (it holds their
+ * positions, to a metre or so), so samples within COINCIDENT_MS of each other
+ * are the same moment: a held sample of a better source (ADS-B) is kept,
+ * otherwise the newer arrival replaces it. Buffer points older than every
+ * held sample add nothing the track's record needs and are left out, and only
+ * the last SAMPLE_WINDOW_MS is kept.
+ *
+ * A report that jumps away from the held samples (implausibly far from the
+ * nearest, or a point of it well off their smoothed path) starts them over,
+ * unless it is `older` than the measured state (which then wins): it is
+ * dropped, and the result is null. Otherwise returns whether the newest sample
+ * is the report point itself, whose velocity is then the reported one.
+ */
+function mergeReport(tr: Track, f: LiveFlight, t: number, lat0: number, lon0: number, older: boolean): boolean | null {
+  reportPoints(f, t, lat0, lon0);
+  const { ts, lats, lons, src } = tr;
+  if (ts.length > 0) {
+    const near = nearestSample(tr, t);
+    const far =
+      distanceKm(lats[near], lons[near], lat0, lon0) > Math.min(plausibleKm(tr, (t - ts[near]) / 1000), SNAP_DISTANCE_M / 1000);
+    if (far || (!tr.mixed && offPath(tr))) {
+      if (older) return null;
+      clearSamples(tr);
+    }
+  }
+  const mixed = tr.mixed;
+  const held = ts.length;
+  // which of the report's points go in: none older than the record, none that a better source has
+  const from = held > 0 ? ts[0] : -Infinity;
+  const last = newT.length - 1;
+  let m = 0;
+  for (let j = 0; j <= last; j++) {
+    const time = newT[j];
+    if (time < from && j < last) continue;
+    let outranked = false;
+    if (mixed) {
+      for (let i = 0; i < held; i++) {
+        if (Math.abs(ts[i] - time) < COINCIDENT_MS && src[i] > SRC_FR24) {
+          outranked = true;
+          break;
+        }
+      }
+    }
+    if (outranked) continue;
+    newT[m] = time;
+    newLat[m] = newLat[j];
+    newLon[m] = newLon[j];
+    m++;
+  }
+  // both in time order, a held sample giving way to a new point of the same moment
+  outT.length = outLat.length = outLon.length = outSrc.length = 0;
+  let i = 0;
+  let j = 0;
+  while (i < held || j < m) {
+    if (j >= m || (i < held && ts[i] < newT[j])) {
+      const ti = ts[i];
+      if (!((j > 0 && ti - newT[j - 1] < COINCIDENT_MS) || (j < m && newT[j] - ti < COINCIDENT_MS))) {
+        outT.push(ti);
+        outLat.push(lats[i]);
+        outLon.push(lons[i]);
+        if (mixed) outSrc.push(src[i]);
+      }
+      i++;
+    } else {
+      outT.push(newT[j]);
+      outLat.push(newLat[j]);
+      outLon.push(newLon[j]);
+      if (mixed) outSrc.push(SRC_FR24);
+      j++;
+    }
+  }
+  const n = outT.length;
+  ts.length = lats.length = lons.length = n;
+  for (let k = 0; k < n; k++) {
+    ts[k] = outT[k];
+    lats[k] = outLat[k];
+    lons[k] = outLon[k];
+  }
+  if (mixed) {
+    src.length = n;
+    for (let k = 0; k < n; k++) src[k] = outSrc[k];
+  }
+  finishSamples(tr);
+  return tr.ts[tr.n - 1] === t;
 }
 
 /** Distance (km) a sample may plausibly be from another `gapS` seconds away, at the track's speed. */
@@ -2154,7 +2293,7 @@ function clearSamples(tr: Track): void {
   tr.ts.length = tr.lats.length = tr.lons.length = tr.src.length = 0;
 }
 
-/** Window trim, sample count, source bookkeeping and the local frame, after a mixed merge. */
+/** Window trim, sample count, source bookkeeping and the local frame (around the newest sample), after a merge. */
 function finishSamples(tr: Track): void {
   const { ts, lats, lons } = tr;
   const newest = ts[ts.length - 1];
@@ -2164,10 +2303,12 @@ function finishSamples(tr: Track): void {
     ts.splice(0, start);
     lats.splice(0, start);
     lons.splice(0, start);
-    tr.src.splice(0, start);
+    if (tr.mixed) tr.src.splice(0, start);
   }
   const n = (tr.n = ts.length);
-  tr.mixed = tr.src.some((s) => s !== SRC_FR24);
+  // still mixed while measured samples are left; per-sample sources are kept only then
+  tr.mixed = tr.mixed && tr.src.some((s) => s !== SRC_FR24);
+  if (!tr.mixed) tr.src.length = 0;
   tr.refLat = lats[n - 1];
   tr.refLon = lons[n - 1];
   const cosRef = Math.max(Math.cos(tr.refLat * DEG), 1e-3);
@@ -2176,55 +2317,6 @@ function finishSamples(tr: Track): void {
     tr.xs[i] = wrap180(lons[i] - tr.refLon) * M_PER_DEG * cosRef;
     tr.ys[i] = (lats[i] - tr.refLat) * M_PER_DEG;
   }
-}
-
-/**
- * `mergeSamples` for a track that also has measured samples: this report's
- * point and buffer replace Flightradar24's own samples from shortly before it
- * on, and interleave with the measured ones by time. Returns whether the
- * newest sample is the report point itself. A report that jumps away from
- * the samples starts them over, unless it is `older` than the measured state
- * (which then wins): it is dropped, and the result is null.
- */
-function mergeMixed(tr: Track, f: LiveFlight, t: number, older: boolean): boolean | null {
-  startMixing(tr);
-  const lat0 = Number.isFinite(f.lat) ? clamp(f.lat, -90, 90) : 0;
-  const lon0 = Number.isFinite(f.lon) ? wrapLon(f.lon) : 0;
-  const { ts, lats, lons, src } = tr;
-  if (older) {
-    const near = nearestSample(tr, t);
-    if (near >= 0 && distanceKm(lats[near], lons[near], lat0, lon0) > Math.min(plausibleKm(tr, (t - ts[near]) / 1000), SNAP_DISTANCE_M / 1000))
-      return null;
-  }
-  let kept = 0;
-  for (let i = 0; i < ts.length; i++) {
-    if (src[i] === SRC_FR24 && ts[i] >= t - MERGE_EPSILON_MS) continue;
-    ts[kept] = ts[i];
-    lats[kept] = lats[i];
-    lons[kept] = lons[i];
-    src[kept] = src[i];
-    kept++;
-  }
-  ts.length = lats.length = lons.length = src.length = kept;
-  const near = nearestSample(tr, t);
-  if (near >= 0 && distanceKm(lats[near], lons[near], lat0, lon0) > Math.min(plausibleKm(tr, (t - ts[near]) / 1000), SNAP_DISTANCE_M / 1000))
-    clearSamples(tr);
-  insertSample(tr, t, lat0, lon0, SRC_FR24);
-  let last = t;
-  const positions = f.positions;
-  if (positions) {
-    for (let i = 0; i < positions.length; i++) {
-      const [dLat, dLon, dMs] = positions[i];
-      const time = t + dMs;
-      const lat = lat0 + dLat * BUFFER_SCALE;
-      const lon = lon0 + dLon * BUFFER_SCALE;
-      if (!(time - last >= MIN_SAMPLE_GAP_MS) || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      last = time;
-      insertSample(tr, time, lat, lon, SRC_FR24);
-    }
-  }
-  finishSamples(tr);
-  return tr.ts[tr.n - 1] === t;
 }
 
 /**
@@ -2427,8 +2519,8 @@ function referenceSpan(back: number): number {
  * estimates; the next two read the turn and acceleration off the pass before
  * (each pass cuts the dependence on the estimates ~6-fold), so the result
  * comes from the data and changes as little as it does from report to report. A newest
- * sample that is the report itself (no look-ahead) takes the reported
- * velocity as its slope, softly.
+ * sample that is the report itself (as it is unless a measured one is newer)
+ * takes the reported velocity as its slope, softly.
  */
 function fitTrack(tr: Track, reportedOnly: boolean): void {
   const n = tr.n;
@@ -2820,16 +2912,22 @@ function retarget(tr: Track, nowMs: number, target: number, first: boolean): voi
 }
 
 /**
- * Data that reaches further arrived: adapt the delay. The drawn time should
- * still be a margin (one sample spacing) short of the newest sample when the
- * next data is due, one cadence from now, so the delay is
+ * Newer data arrived: adapt the delay. The newest sample is the latest report
+ * (a buffer only holds the past), already `age` old on arrival. The drawn time
+ * should still be a margin (one sample spacing) short of it when the next data
+ * is due, one cadence from now, so the delay is
  *
- *     cadence + margin - (newest sample - now)
+ *     cadence + margin + age        (age = now - newest sample)
  *
- * within 2-12 s. Flightradar24's look-ahead often reaches ~8 s past now, so
- * with its ~8 s cadence the delay is near its 2 s floor; adsb.lol (every 3 s,
- * ~1 s old) gives ~5-6 s; a report without look-ahead every minute, 12 s.
- * The target is smoothed over reports and the delay eases towards it.
+ * within 2-12 s: right after an arrival the drawn time is a cadence and a
+ * margin behind the newest data, and it closes up to the margin as the next
+ * comes due. Flightradar24 alone, every ~8 s (the area refresh) with its
+ * buffer 2 s apart and reports 0-5 s old, gives 10-15 s: 10-12 s, mostly the
+ * cap, where the drawn time can reach the newest report just before the next
+ * (and run up to ~1 s past it with 5 s old reports); every 15 s (the world
+ * view), the cap. With adsb.lol for the selected aircraft (every 3 s,
+ * ~0.5-1 s old, samples 1-3 s apart): ~5-6 s. The target is smoothed over
+ * reports and the delay eases towards it.
  */
 function noteArrival(tr: Track, nowMs: number): void {
   const n = tr.n;
@@ -2852,14 +2950,12 @@ function noteArrival(tr: Track, nowMs: number): void {
 }
 
 /**
- * Average turn rate (deg/s) over this report's own samples, from chord
- * headings; NaN if they are too short to tell. Older samples are left out:
- * where an old look-ahead meets a new report there is often a kink that is
- * not a turn.
+ * Average turn rate (deg/s) over this report's own samples (those from
+ * `from`, its buffer's oldest point, on: the last ~10 s up to the report),
+ * from chord headings in time order; NaN if they are too short to tell.
  */
-function bufferTurnRate(tr: Track, reportMs: number): number {
+function bufferTurnRate(tr: Track, from: number): number {
   const n = tr.n;
-  const from = reportMs - MERGE_EPSILON_MS;
   let firstHeading = NaN;
   let firstMid = 0;
   let lastHeading = NaN;
@@ -2889,14 +2985,18 @@ function bufferTurnRate(tr: Track, reportMs: number): number {
   return turned / ((lastMid - firstMid) / 1000);
 }
 
-/** Acceleration (kt/s) from the chord speeds of this report's own samples, NaN if they span too little. */
-function bufferAcceleration(tr: Track, reportMs: number): number {
+/**
+ * Acceleration (kt/s) from the chord speeds of this report's own samples
+ * (from `from` on, in time order: the later chord minus the earlier), NaN if
+ * they span too little.
+ */
+function bufferAcceleration(tr: Track, from: number): number {
   let firstSpeed = NaN;
   let firstMid = 0;
   let lastSpeed = NaN;
   let lastMid = 0;
   for (let i = 0; i + 1 < tr.n; i++) {
-    if (tr.ts[i] < reportMs) continue;
+    if (tr.ts[i] < from) continue;
     const dt = (tr.ts[i + 1] - tr.ts[i]) / 1000;
     const d = Math.hypot(tr.xs[i + 1] - tr.xs[i], tr.ys[i + 1] - tr.ys[i]);
     if (d < MIN_SPEED_CHORD_M) continue;
@@ -2919,8 +3019,8 @@ function decidePhase(tr: Track, prev: Phase | null): Phase {
   if (tr.onGround) {
     if (speed < PARKED_MAX_KT) return "parked";
     if (speed < TAXI_MAX_KT || tr.cls === "heli") return "taxi";
-    // the speed change between reports: the look-ahead's says little on a runway (Flightradar24
-    // carries it on at a steady speed while the aircraft brakes)
+    // the speed change between reports, else the estimate (on a first sighting, the buffer's:
+    // the speed change over the history it holds)
     const accel = Number.isFinite(tr.reportAccel) ? tr.reportAccel : tr.accel;
     // a roll goes on as it began: a landing becomes a take-off (touch and go) only on clear
     // acceleration, a take-off a landing (rejected) on clear braking

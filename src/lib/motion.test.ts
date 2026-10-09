@@ -55,7 +55,20 @@ function flight(over: Partial<LiveFlight>): LiveFlight {
   };
 }
 
-/** A report at time `t0` whose look-ahead buffer follows `path(seconds) → [east, north]` metres. */
+/**
+ * Flightradar24's position buffer for a report at `lat`/`lon`: the aircraft's
+ * recent history, each point `d` seconds before the report (newest first, as
+ * Flightradar24 sends it) at `lat/lon - [dLat, dLon]·1e-5`. `past(d)` is where
+ * it was then.
+ */
+function history(lat: number, lon: number, past: (d: number) => [number, number], ds = [2, 4, 6, 8]): [number, number, number][] {
+  return ds.map((d): [number, number, number] => {
+    const [la, lo] = past(d);
+    return [Math.round((lat - la) / 1e-5), Math.round((lon - lo) / 1e-5), d * 1000];
+  });
+}
+
+/** A report at time `t0` on `path(seconds from t0) → [east, north]` metres, with the buffer of where it was `bufferS` seconds before. */
 function pathFlight(
   path: (s: number) => [number, number],
   over: Partial<LiveFlight>,
@@ -63,10 +76,7 @@ function pathFlight(
   bufferS = [2, 4, 6, 8],
 ): LiveFlight {
   const [lat, lon] = offset(45, 10, ...path(0));
-  const positions = bufferS.map((s): [number, number, number] => {
-    const [la, lo] = offset(45, 10, ...path(s));
-    return [Math.round((la - lat) / 1e-5), Math.round((lo - lon) / 1e-5), s * 1000];
-  });
+  const positions = history(lat, lon, (d) => offset(45, 10, ...path(-d)), bufferS);
   return flight({ lat, lon, timestampMs: t0, positions, ...over });
 }
 
@@ -126,8 +136,9 @@ test("straight flight matches dead reckoning, a few seconds in the past", () => 
 test("a constant-rate turn continues along its circle", () => {
   const m = new Motion();
   const path = circle(160, 3);
-  const f = pathFlight(path, { speed: 160, alt: 10_000 });
-  m.pose(f, T0);
+  // the circle from T0 on: a report at T0 + 8 s, its buffer back to T0
+  const f = pathFlight((s) => path(s + 8), { speed: 160, alt: 10_000, track: 24 }, T0 + 8_000);
+  m.pose(f, T0 + 8_000);
   for (const s of [5, 10, 20, 30, 50]) {
     const p = poseAt(m, f, T0 + s * 1000);
     const [lat, lon] = offset(45, 10, ...path(s));
@@ -142,14 +153,15 @@ test("the smoothed path stays on exact samples", () => {
   const path = circle(220, 2);
   const f = pathFlight(path, { speed: 220, alt: 12_000 });
   m.pose(f, T0);
-  // smoothing takes out jitter, not a steady turn: exact (1 m quantised) samples are kept to within a metre or so
+  // smoothing takes out jitter, not a steady turn: exact (1 m quantised) samples, the report and
+  // the history before it, are kept to within a metre or so
   for (const [dLat, dLon, dMs] of [[0, 0, 0] as [number, number, number], ...f.positions!]) {
-    const p = poseAt(m, f, T0 + dMs);
-    expect(metres(p, { lat: f.lat + dLat * 1e-5, lon: f.lon + dLon * 1e-5 })).toBeLessThan(1.5);
+    const p = poseAt(m, f, T0 - dMs);
+    expect(metres(p, { lat: f.lat - dLat * 1e-5, lon: f.lon - dLon * 1e-5 })).toBeLessThan(1.5);
   }
   // and runs smoothly between them, close to the true path
-  const p = poseAt(m, f, T0 + 5_000);
-  const [lat, lon] = offset(45, 10, ...path(5));
+  const p = poseAt(m, f, T0 - 5_000);
+  const [lat, lon] = offset(45, 10, ...path(-5));
   expect(metres(p, { lat, lon })).toBeLessThan(3);
 });
 
@@ -471,10 +483,13 @@ test("measured roll drives the bank smoothly", () => {
   // (a 25° step eases in at up to ~20°/s, 0.33° a frame)
   expect(maxStep(m, f, t, t + 6_000, (p) => p.bank)).toBeLessThan(0.4);
   expect(maxStep(m, f, t, t + 6_000, (p) => p.heading)).toBeLessThan(0.3);
-  const p = poseAt(m, f, t + 1_000);
-  expect(p.bank).toBeGreaterThan(22);
-  expect(p.bank).toBeLessThan(28);
-  // and past the data the path turns right, as the measured track rate says
+  // banked as measured, though the Flightradar24 path (its history up to T0) runs straight
+  for (const T of [t - 2_000, t]) {
+    const p = poseAt(m, f, T);
+    expect(p.bank).toBeGreaterThan(22);
+    expect(p.bank).toBeLessThan(28);
+  }
+  // past the data the path turns right, as the measured track rate says
   expect(poseAt(m, f, T0 + 15_000).track).toBeGreaterThan(5);
 });
 
@@ -582,7 +597,7 @@ test("a stale measured source falls back to the estimates smoothly", () => {
 test("measured attitude is shown at the drawn time, not on arrival", () => {
   const m = new Motion();
   const path = north(250);
-  // no look-ahead: drawn ~10 s behind at first
+  // no buffer: drawn ~10 s behind at first
   const f = flight({ speed: 250, track: 0, alt: 10_000 });
   m.pose(f, T0);
   // adsb.lol every 3 s (T0, T0 + 3 s, ...), half a second old: wings level and nose on
@@ -624,7 +639,8 @@ test("interleaved Flightradar24 and measured samples stay continuous", () => {
   const m = new Motion();
   const v = 450 * KT;
   const path = east(450);
-  // Flightradar24: a report every 8 s with 8 s of look-ahead, arriving 12 s after its time
+  // Flightradar24: a report every 8 s with the 8 s before it in its buffer, arriving 12 s after its
+  // time (older than the measured positions by then: only its samples are news)
   const fr24At = (k: number) =>
     pathFlight((s) => path(s + k * 8), { speed: 450, alt: 36_000, track: 90 }, T0 + k * 8_000);
   // adsb.lol: every 3 s, 0.5 s old on arrival, a few metres of noise and a little clock offset
@@ -683,14 +699,19 @@ interface Flown {
 
 /**
  * Flies Flightradar24-like reports through 16 ms frames for two minutes and
- * measures the drawn path: a report every 8 s with 8 s of look-ahead (2 s
- * apart), each arriving 4 s after its time, at 250 kt turning right at
- * `turnDeg` deg/s and climbing 600 fpm; positions off by up to ±`noise` m
- * and altitudes by ±`altNoise` ft, in 25 ft steps.
+ * measures the drawn path: a report every 8 s with the 8 s before it in its
+ * buffer (2 s apart), each arriving 4 s after its time, at 250 kt turning
+ * right at `turnDeg` deg/s and climbing 600 fpm; positions off by up to
+ * ±`noise` m (each moment's the same in every report that holds it, as in
+ * Flightradar24's data) and altitudes by ±`altNoise` ft, in 25 ft steps.
  */
 function fly(turnDeg: number, noise: number, altNoise: number): Flown {
   const m = new Motion();
   const rnd = noiseSource(7);
+  const jitter = (s: number, axis: number) => {
+    const x = Math.sin((s * 2 + axis) * 12.9898) * 43758.5453;
+    return noise * ((x - Math.floor(x)) * 2 - 1);
+  };
   const v = 250 * KT;
   const w = turnDeg * DEG;
   const truth = (s: number): [number, number] =>
@@ -699,13 +720,12 @@ function fly(turnDeg: number, noise: number, altNoise: number): Flown {
   const altAt = (s: number) => 20_000 + 10 * s;
   const report = (k: number): LiveFlight => {
     const s0 = k * 8;
-    const [e0, n0] = truth(s0);
-    const [lat, lon] = offset(45, 10, e0 + noise * rnd(), n0 + noise * rnd());
-    const positions = [2, 4, 6, 8].map((d): [number, number, number] => {
-      const [e, n] = truth(s0 + d);
-      const [la, lo] = offset(45, 10, e + noise * rnd(), n + noise * rnd());
-      return [Math.round((la - lat) / 1e-5), Math.round((lo - lon) / 1e-5), d * 1000];
-    });
+    const measured = (s: number) => {
+      const [e, n] = truth(s);
+      return offset(45, 10, e + jitter(s, 0), n + jitter(s, 1));
+    };
+    const [lat, lon] = measured(s0);
+    const positions = history(lat, lon, (d) => measured(s0 - d));
     const alt = Math.round((altAt(s0) + altNoise * rnd()) / 25) * 25;
     return flight({ lat, lon, track: 90 + turnDeg * s0, alt, speed: 250, timestampMs: T0 + s0 * 1000, positions });
   };
@@ -781,7 +801,9 @@ test("noisy positions are smoothed: no sample-rate wiggle, close to the truth", 
     expect(r.rmsAccel).toBeLessThan(5);
     expect(r.maxAccel).toBeLessThan(30);
     expect(r.maxHeadingRate).toBeLessThan(turn + 4);
-    expect(r.rmsError).toBeLessThan(15);
+    // (4 s late every 8 s, the delay is at its 12 s cap: the drawn time reaches the newest
+    // report, the noisiest end of the smoothed path, just before the next one arrives)
+    expect(r.rmsError).toBeLessThan(16);
     expect(r.maxError).toBeLessThan(35);
     expect(r.maxAltError).toBeLessThan(40);
     expect(r.maxClimbStep).toBeLessThan(1);
@@ -854,26 +876,27 @@ test("a new sample causes no step in position or velocity", () => {
 test("the delay follows the data's cadence, within 2-12 s, and eases", () => {
   const m = new Motion();
   const path = east(250);
-  // first: reports every 8 s with 8 s of look-ahead, arriving 4 s late
-  // (the look-ahead reaches 4 s past now: 8 + 2 - 4 = 6 s behind)
-  const dense = (k: number) => pathFlight((s) => path(s + k * 8), { speed: 250, track: 90 }, T0 + k * 8_000);
+  // first: a report every 4 s holding the 8 s before it (2 s apart), arriving 1 s late: the drawn
+  // time is due one sample spacing behind the newest report when the next one arrives, so
+  // 4 + 2 + 1 = 7 s behind now
+  const dense = (k: number) => pathFlight((s) => path(s + k * 4), { speed: 250, track: 90 }, T0 + k * 4_000);
   // then: a bare report every 20 s, arriving 2 s late (20 + 3 + 2: the 12 s cap)
   const sparse = (t: number) => {
     const [lat, lon] = offset(45, 10, ...path((t - T0) / 1000));
     return flight({ lat, lon, speed: 250, track: 90, timestampMs: t });
   };
   let f = dense(0);
-  let next = T0 + 4_000;
+  let next = T0 + 1_000;
   let k = 0;
   let prevT = -Infinity;
   let prevDelay = NaN;
   let worstRate = 0;
   let denseDelay = NaN;
-  for (let t = T0 + 4_000; t <= T0 + 240_000; t += 16) {
+  for (let t = T0 + 1_000; t <= T0 + 240_000; t += 16) {
     if (t >= next) {
       if (t < T0 + 100_000) {
         f = dense(k++);
-        next = T0 + k * 8_000 + 4_000;
+        next = T0 + k * 4_000 + 1_000;
       } else {
         const at = Math.floor((t - T0) / 20_000) * 20_000 + T0;
         f = sparse(at);
@@ -891,11 +914,102 @@ test("the delay follows the data's cadence, within 2-12 s, and eases", () => {
     prevT = T;
     if (t <= T0 + 100_000) denseDelay = delay;
   }
-  expect(denseDelay).toBeGreaterThan(5_000);
-  expect(denseDelay).toBeLessThan(7_000);
+  expect(denseDelay).toBeGreaterThan(6_500);
+  expect(denseDelay).toBeLessThan(7_500);
   expect(prevDelay).toBeGreaterThan(11_000);
   // eased: never faster than ~0.15 s per second (the drawn time runs at 85-115% at most)
   expect(worstRate).toBeLessThan(0.16);
+});
+
+test("the drawn time stays about one sample spacing or more behind the newest data", () => {
+  // Flightradar24 alone, a report every 8 s holding the 10 s before it, arriving 3 s late:
+  // 8 + 2 + 3 = 13 s, so the 12 s cap; and with adsb.lol's positions every 3 s, half a second
+  // old, as for the selected aircraft: ~3 + 2 + 0.5 = 5-6 s
+  for (const measured of [false, true]) {
+    const m = new Motion();
+    const path = east(250);
+    const report = (k: number) =>
+      pathFlight((s) => path(s + k * 8), { speed: 250, track: 90, alt: 30_000 }, T0 + k * 8_000, [2, 4, 6, 8, 10]);
+    let f = report(0);
+    let k = 0;
+    let a = 0;
+    let newest = f.timestampMs;
+    let minBehind = Infinity;
+    let maxBehind = 0;
+    let delay = NaN;
+    for (let t = T0 + 3_000; t <= T0 + 180_000; t += 16) {
+      if (t >= T0 + (k + 1) * 8_000 + 3_000) {
+        f = report(++k);
+        newest = Math.max(newest, f.timestampMs);
+      }
+      if (measured && t >= T0 + 3_000 + a * 3_000) {
+        const at = T0 + 2_500 + a++ * 3_000;
+        const [lat, lon] = offset(45, 10, ...path((at - T0) / 1000));
+        m.measure(1, { positionMs: at, seenMs: at, lat, lon, onGround: false, gs: 250, track: 90, altBaro: 30_000 }, t);
+        newest = Math.max(newest, at);
+      }
+      m.pose(f, t);
+      const T = m.drawnTime(1, t);
+      if (t > T0 + 120_000) {
+        minBehind = Math.min(minBehind, newest - T);
+        maxBehind = Math.max(maxBehind, newest - T);
+        delay = t - T;
+      }
+    }
+    // within the data, never past it, and no further behind than one cadence and a spacing
+    expect(minBehind).toBeGreaterThan(measured ? 500 : 0);
+    if (measured) {
+      expect(delay).toBeGreaterThan(4_500);
+      expect(delay).toBeLessThan(6_500);
+      expect(maxBehind).toBeLessThan(3_000 + 3_000);
+    } else {
+      expect(delay).toBeCloseTo(12_000, -2);
+      expect(maxBehind).toBeLessThan(8_000 + 2_000);
+    }
+  }
+});
+
+test("the buffer is history: a braking roll is drawn slowing down, an accelerating one speeding up", () => {
+  // first sighted on the ground at 100 kt, the buffer holding the 10 s before: 2.5 kt/s either way
+  for (const accel of [-2.5, 2.5]) {
+    const m = new Motion();
+    const north = (s: number) => 100 * KT * s + (accel * KT * s * s) / 2;
+    const [lat, lon] = offset(45, 10, 0, north(0));
+    const positions = history(lat, lon, (d) => offset(45, 10, 0, north(-d)), [2, 4, 6, 8, 10]);
+    const f = flight({ lat, lon, onGround: true, alt: 0, speed: 100, track: 0, positions });
+    m.pose(f, T0 + 2_000);
+    const at = (T: number) => poseAt(m, f, T);
+    expect(at(T0).phase).toBe(accel < 0 ? "landingRoll" : "takeoffRoll");
+    // metres covered in a second, in the buffer's history and past the report
+    const d1 = metres(at(T0 - 7_000), at(T0 - 6_000));
+    const d2 = metres(at(T0 - 2_000), at(T0 - 1_000));
+    const d3 = metres(at(T0 + 2_000), at(T0 + 3_000));
+    const step = Math.abs(accel) * KT * 4; // 4 s of the speed change
+    if (accel < 0) {
+      expect(d1).toBeGreaterThan(d2 + 0.8 * step);
+      expect(d2).toBeGreaterThan(d3 + 0.5 * step);
+    } else {
+      expect(d2).toBeGreaterThan(d1 + 0.8 * step);
+      expect(d3).toBeGreaterThan(d2 + 0.5 * step);
+    }
+  }
+});
+
+test("the buffer is history: it tells which way a turn goes", () => {
+  // first sighted heading north, the buffer holding the 8 s of turn before it
+  for (const rate of [2, -2]) {
+    const m = new Motion();
+    const f = pathFlight(circle(250, rate), { speed: 250, alt: 20_000, track: 0 });
+    m.pose(f, T0 + 2_000);
+    const signed = (deg: number) => ((deg + 540) % 360) - 180;
+    // in the history, the heading led up to north...
+    expect(Math.abs(signed(poseAt(m, f, T0 - 4_000).track) + 4 * rate)).toBeLessThan(1);
+    // ...and past the report it carries on round, banked into the turn
+    const later = poseAt(m, f, T0 + 10_000);
+    expect(Math.abs(signed(later.track) - 10 * rate)).toBeLessThan(1.5);
+    expect(Math.sign(later.bank)).toBe(Math.sign(rate));
+    expect(Math.abs(later.bank)).toBeGreaterThan(15);
+  }
 });
 
 test("stale data never freezes, and fresh data is caught up smoothly", () => {
@@ -1065,7 +1179,7 @@ const fld = () => airport({ iata: "FLD", lat: 45, lon: 10, alt: FIELD_FT });
  * A synthetic arrival at a field `elev` ft up: 3° down at 140 kt, touching down at T0 + 120 s, then
  * braking at 2.5 kt/s. `alt` reads `biasFt` above the true height (pressure altitude, in 25 ft
  * steps), the ground flag comes `lateS` after touchdown and meanwhile the runway reads level,
- * as in the real data. Reports every `everyS` s, with a look-ahead buffer.
+ * as in the real data. Reports every `everyS` s, with the 8 s before each in its buffer.
  */
 function arrival(biasFt: number, everyS = 5, lateS = 12, id = 1, lastAirS = Infinity, elev = FIELD_FT): LiveFlight[] {
   const field = { lat: 45, lon: 10, elev };
@@ -1078,10 +1192,7 @@ function arrival(biasFt: number, everyS = 5, lateS = 12, id = 1, lastAirS = Infi
   for (let s = 0; s <= tdS + 40; s += everyS) {
     if (s < tdS && s > lastAirS) continue; // nothing heard on short final
     const [lat, lon] = offset(field.lat, field.lon, 0, north(s));
-    const positions = [2, 4, 6, 8].map((d): [number, number, number] => {
-      const [la, lo] = offset(field.lat, field.lon, 0, north(s + d));
-      return [Math.round((la - lat) / 1e-5), Math.round((lo - lon) / 1e-5), d * 1000];
-    });
+    const positions = history(lat, lon, (d) => offset(field.lat, field.lon, 0, north(s - d)));
     const onGround = s >= tdS + lateS;
     const alt = onGround ? 0 : Math.max(0, Math.round((field.elev + agl(s) + biasFt) / 25) * 25);
     reports.push(flight({ id, lat, lon, alt, speed: speed(s), track: 0, onGround, timestampMs: T0 + s * 1000, positions, destination: "FLD", origin: "XXX" }));
@@ -1093,14 +1204,13 @@ function arrival(biasFt: number, everyS = 5, lateS = 12, id = 1, lastAirS = Infi
 function departure(biasFt: number, id = 2): LiveFlight[] {
   const loS = 60;
   const reports: LiveFlight[] = [];
-  const north = (s: number) => (s <= loS ? (2.5 * KT * s * s) / 2 : (2.5 * KT * loS * loS) / 2 + 150 * KT * (s - loS));
+  // (standing at the start of the runway before T0)
+  const north = (s: number) =>
+    s <= 0 ? 0 : s <= loS ? (2.5 * KT * s * s) / 2 : (2.5 * KT * loS * loS) / 2 + 150 * KT * (s - loS);
   for (let s = 0; s <= 110; s += 5) {
     const speed = s <= loS ? 2.5 * s : 150;
     const [lat, lon] = offset(45, 10, 0, north(s));
-    const positions = [2, 4, 6, 8].map((d): [number, number, number] => {
-      const [la, lo] = offset(45, 10, 0, north(s + d));
-      return [Math.round((la - lat) / 1e-5), Math.round((lo - lon) / 1e-5), d * 1000];
-    });
+    const positions = history(lat, lon, (d) => offset(45, 10, 0, north(s - d)));
     const climb = Math.max(0, ((s - loS) * 2000) / 60);
     const onGround = speed < 90;
     const alt = onGround ? 0 : Math.max(0, Math.round((FIELD_FT + climb + biasFt) / 25) * 25);

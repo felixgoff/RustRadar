@@ -30,6 +30,12 @@
 //
 // Only the drawing is delayed: the panel's numbers come from the feed itself.
 //
+// Heights near airports are true heights above the field: the reported
+// pressure altitude corrected with the field's QNH, learned from the traffic
+// (see "Pressure altitude" below), and on the runway is on the ground even
+// while Flightradar24's air/ground flag lags, so touchdowns and lift-offs
+// happen where and when they did, through a flare.
+//
 // The selected aircraft can also get measured state from a second source
 // (adsb.lol, see `Motion.measure`): its position samples interleave with
 // Flightradar24's by time, and its transponder-reported heading, bank, turn
@@ -58,8 +64,10 @@ export interface Measured {
   /** When the other values were last reported. */
   seenMs: number;
   onGround: boolean;
-  /** Barometric altitude, feet. */
+  /** Barometric (pressure) altitude, feet: referenced to 1013.25 hPa, like Flightradar24's. */
   altBaro?: number;
+  /** The altimeter setting on board, hPa: below the transition altitude, the local QNH. */
+  navQnh?: number;
   /** Ground speed, kt; track over the ground and nose heading, degrees true. */
   gs?: number;
   track?: number;
@@ -98,7 +106,12 @@ export type Phase =
 export interface Pose {
   lon: number;
   lat: number;
-  /** Height to draw at, feet: MSL altitude with the relevant airport's field elevation removed near airports (faded back to plain MSL by ~30-60 km out), exactly 0 on the ground. */
+  /**
+   * Height to draw at, feet: altitude with the relevant airport's field elevation removed near
+   * airports (faded back to plain reported altitude by ~30-60 km out), exactly 0 on the ground.
+   * Near a field the reported pressure altitude is corrected with its QNH, and the last feet
+   * above the runway are shaped into a flare.
+   */
   altFt: number;
   /**
    * Degrees clockwise from north: where the nose points. Without measured
@@ -313,6 +326,103 @@ const MAX_STATES = 16;
 const MEAS_HISTORY_MS = 30_000;
 /** A pose further than this from the previous one (in time) is a fresh look: a state taking over isn't blended. */
 const CONTINUITY_GAP_MS = 1_000;
+
+// --- Pressure altitude ---------------------------------------------------------------
+//
+// Reported altitudes (Flightradar24's `alt`, ADS-B's `alt_baro`) are pressure
+// altitudes: what an altimeter set to the standard 1013.25 hPa reads. On a day
+// whose QNH (sea-level pressure) is off standard they are off true altitude by
+// ~27-30 ft per hPa, the same for every aircraft around: 1004 hPa at Amsterdam
+// reads ~240 ft high, 1020 hPa in Atlanta ~200 ft low. Measured at touchdown
+// (`testdata/landings.json`) a runway read 175-225 ft at Heathrow and Schiphol
+// and 200-280 ft below the field in Atlanta, Chicago and Dallas, while on the
+// ground Flightradar24 says 0: drawn as is, an aircraft hovered a few hundred
+// feet over the runway and then dropped, or sank into it 30 s early.
+//
+// So each field's QNH is learned from the traffic itself: a runway's pressure
+// altitude, read off an aircraft rolling on it (see `onRunway`), is the field
+// elevation at that field's QNH. It is shared by every aircraft around (and,
+// interpolated, nearby fields), and the selected aircraft's own altimeter
+// setting (adsb.lol's `nav_qnh`) is better still. Altitudes near a field are
+// corrected with it, faded out with the field elevation itself.
+
+const STD_HPA = 1013.25;
+/** ISA: pressure altitude h (ft) at pressure p is H0 (1 - (p / 1013.25)^EXP). */
+const ISA_H0_FT = 145_442.16;
+const ISA_EXP = 0.190263;
+const MIN_QNH_HPA = 940;
+const MAX_QNH_HPA = 1_060;
+/** A field's learned QNH counts for this long, ms (it moves ~1 hPa an hour)... */
+const QNH_TTL_MS = 3 * 3_600_000;
+/** ...and stands in for fields without one this far around, km. */
+const QNH_NEIGHBOUR_KM = 300;
+/** Weight of a new runway reading in a field's QNH; a reading this far (hPa) off it counts less. */
+const QNH_SMOOTHING = 0.3;
+const QNH_OUTLIER_HPA = 5;
+const QNH_OUTLIER_SMOOTHING = 0.05;
+/** The on-board altimeter setting is the local QNH below this height above the field, ft. */
+const MEAS_QNH_MAX_AGL_FT = 3_000;
+/** Runways are read only this close to the field's reference point, km. */
+const RUNWAY_FIELD_KM = 8;
+/** A runway's pressure altitude is this close to the field (ft), its QNH known or not. */
+const RUNWAY_TOL_KNOWN_FT = 150;
+const RUNWAY_TOL_UNKNOWN_FT = 600;
+/** One altitude step: reports this close are level. */
+const LEVEL_FT = 25;
+/** Braking on the runway (kt/s), not slowing down on the approach. */
+const RUNWAY_DECEL_KTS = 1;
+/** Below these ground speeds (kt) nothing flies, whatever the air/ground flag says. */
+const MIN_FLYING_KT = { jet: 60, turboprop: 50, light: 30 } as const;
+/** Older reports than this (s) don't tell a level run on the runway. */
+const LEVEL_MAX_DT_S = 20;
+
+/** True altitude (ft) of a pressure altitude at a QNH (hPa). */
+function trueAltitude(pressureAltFt: number, qnh: number): number {
+  return ISA_H0_FT - (ISA_H0_FT - pressureAltFt) * Math.pow(STD_HPA / qnh, ISA_EXP);
+}
+
+/** The QNH (hPa) at which a pressure altitude reads a true altitude (ft). */
+function qnhFrom(pressureAltFt: number, trueAltFt: number): number {
+  const ratio = (ISA_H0_FT - trueAltFt) / (ISA_H0_FT - pressureAltFt);
+  return STD_HPA / Math.pow(ratio, 1 / ISA_EXP);
+}
+
+const validQnh = (q: number | undefined): q is number =>
+  typeof q === "number" && Number.isFinite(q) && q >= MIN_QNH_HPA && q <= MAX_QNH_HPA;
+
+// --- Touchdown and lift-off ------------------------------------------------------------
+//
+// The last feet above the runway are drawn through a soft floor (`flare`):
+// the height above the field follows the data down to FLARE_HEIGHT_FT, then
+// eases into the ground, meeting it at TOUCHDOWN_SINK of the descent rate
+// (~100-200 fpm off a 3° approach) rather than diving in or levelling off.
+// Lift-offs leave the ground the same way.
+
+/** The flare begins this high above the field, ft. */
+const FLARE_HEIGHT_FT = 50;
+/** Touchdown (and lift-off) at this fraction of the approach's (climb's) vertical rate. */
+const TOUCHDOWN_SINK = 0.2;
+/** The flare's length in raw height (ft): touchdown is where the data reaches FLARE_HEIGHT_FT - this. */
+const FLARE_SPAN_FT = (2 * FLARE_HEIGHT_FT) / (1 + TOUCHDOWN_SINK);
+/** Raw height above the field (ft, negative) at which the flared height reaches the ground. */
+const FLARE_FLOOR_FT = FLARE_HEIGHT_FT - FLARE_SPAN_FT;
+const FLARE_A = (1 - TOUCHDOWN_SINK) / (2 * FLARE_SPAN_FT);
+/** A correction of a whole altitude reference (a QNH learned) is blended out at this rate, 1/s, not snapped. */
+const REFERENCE_BLEND_RATE = 0.8;
+
+/** Height to draw (ft above the field) for a raw height `x`: x above the flare, easing to 0 at FLARE_FLOOR_FT. */
+function flare(x: number): number {
+  if (x >= FLARE_HEIGHT_FT) return x;
+  const u = x - FLARE_FLOOR_FT;
+  return u <= 0 ? 0 : FLARE_A * u * u + TOUCHDOWN_SINK * u;
+}
+
+/** Slope of `flare` at `x`. */
+function flareSlope(x: number): number {
+  if (x >= FLARE_HEIGHT_FT) return 1;
+  const u = x - FLARE_FLOOR_FT;
+  return u <= 0 ? 0 : 2 * FLARE_A * u + TOUCHDOWN_SINK;
+}
 
 // --- Airports ----------------------------------------------------------------------
 
@@ -597,12 +707,31 @@ class Track {
 
   // estimates
   accel = 0; // kt/s
+  /** Ground-speed change since the previous report (kt/s), NaN if too close or too far apart to tell. */
+  reportAccel = NaN;
   turnRate = 0; // deg/s, clockwise positive
   vrate = 0; // fpm
   vrRefMs = NaN;
-  vrRefAlt = 0;
+  /** The vertical rate's reference: a pressure altitude and its correction weight (re-corrected as the QNH changes). */
+  vrRefRaw = 0;
+  vrRefW = 0;
   vrRefGround = false;
   phase: Phase = "cruise";
+
+  // pressure altitude
+  /** QNH (hPa) the altitudes are corrected with, NaN when unknown (no correction). */
+  qnh = NaN;
+  /** QNH read off this aircraft's own runway (at `qnhOwnField`), NaN if none. */
+  qnhOwn = NaN;
+  qnhOwnField: Airport | null = null;
+  /** The latest reported pressure altitude (ft; 0 is no altitude), its time and its correction weight. */
+  rawAlt = 0;
+  rawAltMs = -Infinity;
+  rawW = 0;
+  /** When the aircraft was last on the ground: older altitude samples belong to an earlier flight segment. */
+  groundMs = -Infinity;
+  /** Altitude corrections are blended out at this rate on the next change (a QNH learned), else NaN. */
+  altBlendRate = NaN;
 
   // horizontal samples, oldest first; x/y (raw) and fx/fy/mx/my (smoothed
   // values and slopes, m and m/s) are in the local frame around the newest
@@ -619,8 +748,11 @@ class Track {
   /** Turn rate of the smoothed path at each sample, rad/s, clockwise positive. */
   om: number[] = [];
 
-  // altitude samples (airborne only), oldest first, and the smoothed values (ft) and slopes (ft/s)
+  // altitude samples (airborne only), oldest first: reported pressure altitudes (ft) and their
+  // correction weights; the corrected values (ft), and the smoothed values (ft) and slopes (ft/s)
   ats: number[] = [];
+  aps: number[] = [];
+  aws: number[] = [];
   avs: number[] = [];
   afv: number[] = [];
   afd: number[] = [];
@@ -727,6 +859,9 @@ interface Raw {
   phase: Phase;
   speedMs: number;
   vsFpm: number;
+  /** The altitude (ft) and vertical rate (fpm) the data gives, before the flare shapes them near the ground. */
+  altRaw: number;
+  vsRaw: number;
   agl: number;
   ground: boolean;
   /** Velocity east/north, m/s of drawn time (of real time, once `drawn` scaled it). */
@@ -754,6 +889,8 @@ const newRaw = (): Raw => ({
   phase: "cruise",
   speedMs: 0,
   vsFpm: 0,
+  altRaw: 0,
+  vsRaw: 0,
   agl: NaN,
   ground: false,
 });
@@ -808,6 +945,11 @@ export class Motion {
   private budgetMs = NaN;
   private byIata = new Map<string, Airport>();
   private grid = new Map<number, Airport[]>();
+  /** Each field's QNH as learned from the traffic (hPa) and when. */
+  private qnhs = new Map<Airport, { hpa: number; ms: number }>();
+  /** Fields' QNHs interpolated from those around, until anything is learned (`qnhVersion`) or a minute passes. */
+  private qnhAround = new Map<Airport, { hpa: number; ms: number; version: number }>();
+  private qnhVersion = 0;
 
   /** Server-synced clock, ms. Use this everywhere instead of Date.now(). */
   now(): number {
@@ -924,11 +1066,65 @@ export class Motion {
     this.blendAround(tr, nowMs, () => this.applyMeasured(tr, m, newPosition, nowMs));
   }
 
-  /** Same airport-relative drawing height for points of the aircraft's trail (so the trail meets the model). */
+  /**
+   * Same airport-relative drawing height for points of the aircraft's trail
+   * (so the trail meets the model): `altFt` is a reported (pressure) altitude,
+   * corrected with the aircraft's QNH near its field like its own.
+   */
   drawAltitude(id: number, altFt: number, lat: number, lon: number): number {
     if (!(altFt > 0)) return 0;
     const tr = this.tracks.get(id);
-    return tr ? Math.max(0, altFt - fieldRemoval(tr, lat, lon)) : altFt;
+    if (!tr) return altFt;
+    const w = tr.field ? fieldFade(distanceKm(lat, lon, tr.field.lat, tr.field.lon)) : 0;
+    return Math.max(0, corrected(tr, altFt, w) - fieldRemoval(tr, lat, lon));
+  }
+
+  /**
+   * The QNH (hPa) learned for a field from the traffic at `nowMs`: its own,
+   * else interpolated from fields around; NaN if none is known.
+   */
+  fieldQnh(ap: Airport, nowMs: number = this.now()): number {
+    const own = this.qnhs.get(ap);
+    if (own && nowMs - own.ms <= QNH_TTL_MS) return own.hpa;
+    if (this.qnhs.size === 0) return NaN;
+    const cached = this.qnhAround.get(ap);
+    if (cached && cached.version === this.qnhVersion && Math.abs(nowMs - cached.ms) < 60_000) return cached.hpa;
+    let sum = 0;
+    let weights = 0;
+    for (const [other, q] of this.qnhs) {
+      if (nowMs - q.ms > QNH_TTL_MS) continue;
+      const km = distanceKm(ap.lat, ap.lon, other.lat, other.lon);
+      if (km > QNH_NEIGHBOUR_KM) continue;
+      const w = 1 / ((km + 20) * (km + 20));
+      sum += w * q.hpa;
+      weights += w;
+    }
+    const hpa = weights > 0 ? sum / weights : NaN;
+    this.qnhAround.set(ap, { hpa, ms: nowMs, version: this.qnhVersion });
+    return hpa;
+  }
+
+  /** A reading of a field's QNH (hPa) at `ms`. */
+  private learnQnh(ap: Airport, hpa: number, ms: number): void {
+    if (!validQnh(hpa)) return;
+    this.qnhVersion++;
+    const q = this.qnhs.get(ap);
+    if (!q || ms - q.ms > QNH_TTL_MS) {
+      this.qnhs.set(ap, { hpa, ms });
+      return;
+    }
+    const k = Math.abs(hpa - q.hpa) > QNH_OUTLIER_HPA ? QNH_OUTLIER_SMOOTHING : QNH_SMOOTHING;
+    q.hpa += k * (hpa - q.hpa);
+    q.ms = Math.max(q.ms, ms);
+  }
+
+  /** The QNH to correct a track's altitudes with at `t`: its own altimeter's, its own runway's, else its field's. */
+  private trackQnh(tr: Track, t: number): number {
+    if (!tr.field) return NaN;
+    const m = tr.meas;
+    if (m && validQnh(m.navQnh) && measFresh(tr, t) && tr.alt - tr.fieldElev < MEAS_QNH_MAX_AGL_FT) return m.navQnh;
+    if (tr.qnhOwnField === tr.field && validQnh(tr.qnhOwn)) return tr.qnhOwn;
+    return this.fieldQnh(tr.field, t);
   }
 
   /** Drop tracks not touched for 15 min; call opportunistically from pose/ingest yourself too. */
@@ -1026,6 +1222,7 @@ export class Motion {
       altFast.clear();
       altGentle.clear();
       tr.offMs = -Infinity;
+      tr.altBlendRate = NaN;
       return;
     }
     // what changed now, beyond the corrections already under way (which carry on as they were),
@@ -1044,7 +1241,15 @@ export class Motion {
     const dA = before.drawAlt - after.drawAlt - altFast.px - altGentle.px;
     const dVA = (before.vsFpm - after.vsFpm) / 60 - altFast.pvx - altGentle.pvx;
     const wa = smoothstep((Math.abs(dA) * FEET_TO_M - GENTLE_MAX_M) / GENTLE_MAX_M);
-    altFast.add(nowMs, wa * dA, 0, wa * dVA, 0, BLEND_RATE);
+    // a new altitude reference (a QNH learned) moves the whole vertical profile: eased in, not snapped
+    // (and one still under way carries on at its own pace)
+    const altRate = Number.isFinite(tr.altBlendRate)
+      ? tr.altBlendRate
+      : Math.abs(altFast.px) * FEET_TO_M > GENTLE_MAX_M
+        ? Math.min(altFast.k, BLEND_RATE)
+        : BLEND_RATE;
+    tr.altBlendRate = NaN;
+    altFast.add(nowMs, wa * dA, 0, wa * dVA, 0, altRate);
     altGentle.add(nowMs, (1 - wa) * dA, 0, (1 - wa) * dVA, 0, null);
     // the angles, from the offset with zero rate as before
     tr.offMs = nowMs;
@@ -1113,15 +1318,29 @@ export class Motion {
       }
       return;
     }
+    // Flightradar24 reports no altitude as 0, and a negative pressure altitude (a field near sea
+    // level on a high-pressure day) as 0 too: an airborne 0 is no altitude, carried on from the
+    // model instead (before this report changes it)
+    const rawAlt = Number.isFinite(f.alt) ? f.alt : 0;
+    const altKnown = rawAlt > 0;
+    let estAlt = NaN;
+    let estVrate = NaN;
+    let estGround = false;
+    if (!f.onGround && !altKnown && !first) {
+      const est = this.evaluate(tr, t, scratchC);
+      estGround = est.ground;
+      estAlt = est.altRaw;
+      estVrate = est.vsRaw;
+    }
+    const prevOnGround = tr.onGround;
+    const prevRaw = tr.rawAlt;
+    const levelDt = (t - tr.rawAltMs) / 1000;
+
     tr.reportMs = t;
-    tr.alt = Number.isFinite(f.alt) ? f.alt : 0;
     tr.speedKt = Number.isFinite(f.speed) ? Math.max(0, f.speed) : 0;
     tr.trackDeg = Number.isFinite(f.track) ? wrap360(f.track) : 0;
-    tr.onGround = !!f.onGround;
     tr.lat0 = Number.isFinite(f.lat) ? clamp(f.lat, -90, 90) : 0;
     tr.lon0 = Number.isFinite(f.lon) ? wrapLon(f.lon) : 0;
-    if (tr.onGround) tr.ats.length = tr.avs.length = 0;
-    else if (Number.isFinite(f.alt)) addAltitude(tr, t, f.alt);
 
     this.selectField(tr, f);
     const reportedOnly = tr.mixed ? mergeMixed(tr, f, t, false)! : mergeSamples(tr, f);
@@ -1138,6 +1357,34 @@ export class Motion {
           : bufferAccel;
     if (!Number.isFinite(accel)) accel = tr.accel * SMOOTHING; // no news: let it relax
     tr.accel = clamp(first ? accel : tr.accel + SMOOTHING * (accel - tr.accel), -MAX_ACCEL_KTS, MAX_ACCEL_KTS);
+    tr.reportAccel = dtReport >= 2 && dtReport <= MAX_ACCEL_DT_S ? (tr.speedKt - prevSpeed) / dtReport : NaN;
+
+    // --- on the ground or in the air: Flightradar24's flag lags, so an aircraft rolling on the
+    // runway, which reads the runway's pressure altitude, is on the ground (and tells its QNH)
+    const oldQnh = tr.qnh;
+    if (tr.field !== tr.qnhOwnField) tr.qnhOwn = NaN;
+    tr.qnh = this.trackQnh(tr, t);
+    tr.rawW = tr.field ? fieldFade(tr.fieldKm) : 0;
+    let onGround = !!f.onGround;
+    if (!onGround && !first)
+      onGround = this.onRunway(tr, rawAlt, prevOnGround, prevPhase, prevRaw, levelDt, estGround);
+    else if (onGround && !prevOnGround && !first) this.touchedDown(tr, prevRaw, levelDt, prevPhase);
+    tr.onGround = onGround;
+    this.setQnh(tr, t, oldQnh);
+    tr.rawAlt = onGround || altKnown ? rawAlt : 0;
+    tr.rawAltMs = t;
+    let altEstimated = false;
+    if (onGround) {
+      tr.alt = 0;
+      tr.groundMs = t;
+    } else if (altKnown) {
+      tr.alt = corrected(tr, rawAlt, tr.rawW);
+      addAltitude(tr, t, rawAlt, tr.rawW);
+    } else {
+      // no altitude: carried on from the model (or the field, for a first sighting)
+      altEstimated = true;
+      tr.alt = Number.isFinite(estAlt) ? estAlt : tr.field ? tr.fieldElev : 0;
+    }
 
     // --- turn rate (deg/s): buffer chord headings when fast enough, else reported tracks
     const reportTurn =
@@ -1148,35 +1395,29 @@ export class Motion {
     tr.turnRate = clamp(first ? turn : tr.turnRate + SMOOTHING * (turn - tr.turnRate), -MAX_TURN_DEG_S, MAX_TURN_DEG_S);
 
     // --- vertical rate (fpm): reported when signed in, else altitude differences between reports
-    if (typeof f.vspeed === "number" && Number.isFinite(f.vspeed)) {
-      tr.vrate = clamp(f.vspeed, -MAX_VRATE_FPM, MAX_VRATE_FPM);
-      tr.vrRefMs = t;
-      tr.vrRefAlt = tr.alt;
-      tr.vrRefGround = tr.onGround;
+    if (typeof f.vspeed === "number" && Number.isFinite(f.vspeed) && !(altEstimated && f.vspeed === 0)) {
+      tr.vrate = clamp(onGround ? 0 : f.vspeed, -MAX_VRATE_FPM, MAX_VRATE_FPM);
+      this.vrReference(tr, t);
     } else if (tr.onGround) {
       tr.vrate = 0;
-      tr.vrRefMs = t;
-      tr.vrRefAlt = tr.alt;
-      tr.vrRefGround = true;
+      this.vrReference(tr, t);
+    } else if (altEstimated) {
+      // no altitude, no news: the model's own rate carries on (the reference stays the last real altitude)
+      if (Number.isFinite(estVrate)) tr.vrate = clamp(estVrate, -MAX_VRATE_FPM, MAX_VRATE_FPM);
     } else {
       const dt = (t - tr.vrRefMs) / 1000;
       if (!(dt >= MIN_VRATE_DT_S)) {
-        if (!Number.isFinite(tr.vrRefMs)) {
-          tr.vrRefMs = t;
-          tr.vrRefAlt = tr.alt;
-          tr.vrRefGround = false;
-        }
+        if (!Number.isFinite(tr.vrRefMs)) this.vrReference(tr, t);
       } else {
-        // FR24 reports 0 ft on the ground: a lift-off climbs from the field
-        const refAlt = tr.vrRefGround ? (tr.field ? tr.fieldElev : NaN) : tr.vrRefAlt;
+        // FR24 reports 0 ft on the ground: a lift-off climbs from the field (both re-corrected
+        // with the QNH in use now, so a QNH learned in between is no vertical rate)
+        const refAlt = tr.vrRefGround ? (tr.field ? tr.fieldElev : NaN) : corrected(tr, tr.vrRefRaw, tr.vrRefW);
         if (dt <= MAX_VRATE_DT_S && Number.isFinite(refAlt)) {
           const vr = ((tr.alt - refAlt) / dt) * 60;
           const fresh = prevPhase === null || tr.vrRefGround;
           tr.vrate = clamp(fresh ? vr : tr.vrate + SMOOTHING * (vr - tr.vrate), -MAX_VRATE_FPM, MAX_VRATE_FPM);
         } else if (dt > MAX_VRATE_DT_S) tr.vrate = 0;
-        tr.vrRefMs = t;
-        tr.vrRefAlt = tr.alt;
-        tr.vrRefGround = false;
+        this.vrReference(tr, t);
       }
     }
 
@@ -1184,6 +1425,86 @@ export class Motion {
     tr.phase = decidePhase(tr, prevPhase);
     this.refit(tr, reportedOnly);
     noteArrival(tr, nowMs);
+  }
+
+  /**
+   * Whether an airborne report is really of an aircraft on the ground.
+   * Flightradar24's air/ground flag lags: it flags take-off rolls airborne
+   * from ~80-110 kt, and landings on the ground 10-15 s after touchdown, and
+   * meanwhile reports the runway's pressure altitude, level. So: below flying
+   * speed; rolling on after a ground report (below rotation speed, or level);
+   * level and braking after an approach; or, with no altitude, where the
+   * model has it on the ground already. Each runway read this way gives the
+   * field's QNH (a landing's only if it brings the aircraft down: a touchdown
+   * never lifts it back up).
+   */
+  private onRunway(
+    tr: Track,
+    raw: number,
+    prevOnGround: boolean,
+    prevPhase: Phase | null,
+    prevRaw: number,
+    levelDt: number,
+    estGround: boolean,
+  ): boolean {
+    const field = tr.field;
+    if (!field || tr.cls === "heli" || tr.fieldKm > RUNWAY_FIELD_KM) return false;
+    if (!(raw > 0)) return estGround;
+    const agl = corrected(tr, raw, tr.rawW) - tr.fieldElev;
+    if (!(Math.abs(agl) < (validQnh(tr.qnh) ? RUNWAY_TOL_KNOWN_FT : RUNWAY_TOL_UNKNOWN_FT))) return false;
+    const speed = tr.speedKt;
+    const level = prevRaw > 0 && Math.abs(raw - prevRaw) <= LEVEL_FT && levelDt <= LEVEL_MAX_DT_S;
+    let runway: boolean;
+    if (speed < MIN_FLYING_KT[tr.cls]) runway = true;
+    else if (prevOnGround) runway = speed < ROTATION_KT[tr.cls] || level;
+    else {
+      runway =
+        level &&
+        prevPhase !== null &&
+        FROM_LANDING.has(prevPhase) &&
+        (tr.reportAccel <= -RUNWAY_DECEL_KTS || tr.accel <= -RUNWAY_DECEL_KTS);
+    }
+    if (runway) {
+      const q = qnhFrom(raw, tr.fieldElev);
+      if (validQnh(q)) {
+        this.learnQnh(field, q, tr.reportMs);
+        if (prevOnGround || agl >= 0) {
+          tr.qnhOwn = q;
+          tr.qnhOwnField = field;
+        }
+      }
+    }
+    return runway;
+  }
+
+  /** A ground report after an approach: its last altitude, moments ago, was the runway's (if it was near the field). */
+  private touchedDown(tr: Track, prevRaw: number, levelDt: number, prevPhase: Phase | null): void {
+    const field = tr.field;
+    if (!field || tr.cls === "heli" || tr.fieldKm > RUNWAY_FIELD_KM || !(prevRaw > 0) || levelDt > LEVEL_MAX_DT_S) return;
+    if (prevPhase !== "approach" && prevPhase !== "flare") return;
+    const agl = corrected(tr, prevRaw, tr.rawW) - tr.fieldElev;
+    if (Math.abs(agl) < (validQnh(tr.qnh) ? RUNWAY_TOL_KNOWN_FT : RUNWAY_TOL_UNKNOWN_FT))
+      this.learnQnh(field, qnhFrom(prevRaw, tr.fieldElev), tr.reportMs);
+  }
+
+  /** The track's QNH at `t`; a change from `oldQnh` that moves its altitudes is eased in rather than snapped (see `setOffsets`). */
+  private setQnh(tr: Track, t: number, oldQnh: number): void {
+    tr.qnh = this.trackQnh(tr, t);
+    if (!tr.onGround && tr.rawAlt > 0) tr.alt = corrected(tr, tr.rawAlt, tr.rawW);
+    const na = tr.ats.length;
+    if (na === 0) return;
+    const raw = tr.aps[na - 1];
+    const w = tr.aws[na - 1];
+    if (Math.abs(correctAlt(raw, w, tr.qnh) - correctAlt(raw, w, oldQnh)) > 2 * LEVEL_FT) tr.altBlendRate = REFERENCE_BLEND_RATE;
+  }
+
+  /** The latest report (on the ground, or with an altitude) becomes the vertical rate's reference. */
+  private vrReference(tr: Track, t: number): void {
+    if (!tr.onGround && !(tr.rawAlt > 0)) return;
+    tr.vrRefMs = t;
+    tr.vrRefRaw = tr.rawAlt;
+    tr.vrRefW = tr.rawW;
+    tr.vrRefGround = tr.onGround;
   }
 
   /** Re-derives the extrapolation after samples or estimates changed without a newer report. */
@@ -1206,6 +1527,8 @@ export class Motion {
     tr.meas = m;
     tr.measMs = Math.max(tr.measMs, m.seenMs);
     const prevPhase = tr.phase;
+    const oldQnh = tr.qnh;
+    this.measuredQnh(tr, m);
     // the attitude's history, so that it is shown at the drawn time
     if (!m.onGround) {
       if (Number.isFinite(m.roll)) pushSeries(tr.rollTs, tr.rolls, m.seenMs, clamp(m.roll!, -MAX_BANK, MAX_BANK));
@@ -1223,28 +1546,43 @@ export class Motion {
         tr.reportMs = t;
         tr.lat0 = clamp(m.lat!, -90, 90);
         tr.lon0 = wrapLon(m.lon!);
+        this.selectField(tr, null);
+        if (tr.field !== tr.qnhOwnField) tr.qnhOwn = NaN;
+        tr.qnh = this.trackQnh(tr, t);
         tr.onGround = !!m.onGround;
+        tr.rawW = tr.field ? fieldFade(tr.fieldKm) : 0;
+        tr.rawAltMs = t;
         // Flightradar24 reports 0 ft on the ground too
         if (tr.onGround) {
           tr.alt = 0;
-          tr.ats.length = tr.avs.length = 0;
+          tr.rawAlt = 0;
+          tr.groundMs = t;
         } else if (Number.isFinite(m.altBaro)) {
-          tr.alt = m.altBaro!;
-          addAltitude(tr, t, tr.alt);
+          tr.rawAlt = m.altBaro!;
+          tr.alt = corrected(tr, tr.rawAlt, tr.rawW);
+          addAltitude(tr, t, tr.rawAlt, tr.rawW);
         }
         if (Number.isFinite(m.gs)) tr.speedKt = Math.max(0, m.gs!);
         if (Number.isFinite(m.track)) tr.trackDeg = wrap360(m.track!);
-        this.selectField(tr, null);
         if (dtReport >= MIN_ACCEL_DT_S && dtReport <= MAX_ACCEL_DT_S) {
           const accel = (tr.speedKt - prevSpeed) / dtReport;
+          tr.reportAccel = accel;
           tr.accel = clamp(tr.accel + SMOOTHING * (accel - tr.accel), -MAX_ACCEL_KTS, MAX_ACCEL_KTS);
         }
       }
     }
+    this.setQnh(tr, tr.reportMs, oldQnh);
     this.measuredRates(tr, tr.reportMs);
     tr.phase = decidePhase(tr, prevPhase);
     this.refresh(tr);
     noteArrival(tr, nowMs);
+  }
+
+  /** The on-board altimeter setting near the field is its QNH: learned for it. Returns whether it was. */
+  private measuredQnh(tr: Track, m: Measured): boolean {
+    if (!tr.field || !validQnh(m.navQnh) || m.onGround || !(tr.alt - tr.fieldElev < MEAS_QNH_MAX_AGL_FT)) return false;
+    this.learnQnh(tr.field, m.navQnh, m.seenMs);
+    return true;
   }
 
   /** Measured turn and vertical rates, airspeed, crab and selected heading replace the estimates while fresh at `t`. */
@@ -1267,9 +1605,7 @@ export class Motion {
     const vr = has(m.baroRate) ? m.baroRate : m.geomRate;
     if (has(vr)) {
       tr.vrate = clamp(vr, -MAX_VRATE_FPM, MAX_VRATE_FPM);
-      tr.vrRefMs = t;
-      tr.vrRefAlt = tr.alt;
-      tr.vrRefGround = false;
+      this.vrReference(tr, t);
     }
     // the selected heading steers only when the autopilot isn't following a route (LNAV);
     // it is magnetic, so it needs the variation the two reported headings give
@@ -1359,7 +1695,7 @@ export class Motion {
             na > 0 && tr.ats[na - 1] >= tr.reportMs - COINCIDENT_MS
               ? tr.afv[na - 1] + ((clamp(tr.afd[na - 1] * 60, -MAX_VRATE_FPM, MAX_VRATE_FPM) - tr.vrate) / 60) * VRATE_HANDOVER_S
               : tr.alt;
-          const needed = Math.max(0, (alt0 - tr.fieldElev) / (-tr.vrate / 60));
+          const needed = Math.max(0, (alt0 - tr.fieldElev - FLARE_FLOOR_FT) / (-tr.vrate / 60));
           const t = verticalIntegralInverse(needed);
           if (Number.isFinite(t)) tr.touchdownMs = tr.reportMs + t * 1000;
         }
@@ -1371,7 +1707,7 @@ export class Motion {
           if (tr.profEndV > ROLLOUT_KT * KNOTS_TO_MS) ramp(tr, -LANDING_DECEL_KTS * KNOTS_TO_MS, ROLLOUT_KT * KNOTS_TO_MS, Infinity);
           // the attitude at touchdown, which the rollout eases down from
           profile(tr, untilTouchdown);
-          const vs = tr.vrate * verticalWeight((tr.touchdownMs - tr.reportMs) / 1000);
+          const vs = TOUCHDOWN_SINK * tr.vrate * verticalWeight((tr.touchdownMs - tr.reportMs) / 1000);
           tr.touchdownPitch = Math.max(0, airPitch(vs, profV, "flare", 0));
         }
       }
@@ -1498,19 +1834,24 @@ export class Motion {
     if (GROUND.has(phase)) {
       out.ground = true;
       out.altMsl = field ? fieldElev : 0;
+      out.altRaw = out.altMsl;
+      out.vsRaw = 0;
       out.pitch = 0;
       if (phase === "landingRoll" && speed < TAXI_MAX_KT * KNOTS_TO_MS) phase = "taxi";
       const lo = S.liftoffMs;
       if (phase === "takeoffRoll" && Number.isFinite(lo)) {
         if (T < lo) out.pitch = ROTATION_PITCH * smoothstep(1 - (lo - T) / (ROTATION_S * 1000));
         else {
-          // predicted lift-off and initial climb
+          // predicted lift-off and initial climb, leaving the ground through the flare's curve
           const u = (T - lo) / 1000;
+          const raw = FLARE_FLOOR_FT + (TAKEOFF_CLIMB_FPM * verticalIntegral(u)) / 60;
           const vs = TAKEOFF_CLIMB_FPM * verticalWeight(u);
           out.ground = false;
-          out.agl = (TAKEOFF_CLIMB_FPM * verticalIntegral(u)) / 60;
+          out.agl = flare(raw);
+          out.altRaw = out.altMsl + raw;
+          out.vsRaw = vs;
           out.altMsl = Math.min(out.altMsl + out.agl, MAX_ALT_FT);
-          out.vsFpm = vs;
+          out.vsFpm = vs * flareSlope(raw);
           phase = out.agl < APPROACH_MAX_AGL_FT ? "initialClimb" : "climb";
           const settled = airPitch(vs, speed, phase, out.agl);
           out.pitch = ROTATION_PITCH + (settled - ROTATION_PITCH) * smoothstep(u / ROTATION_S);
@@ -1522,6 +1863,8 @@ export class Motion {
         // predicted landing roll
         out.ground = true;
         out.altMsl = fieldElev;
+        out.altRaw = fieldElev + FLARE_FLOOR_FT;
+        out.vsRaw = 0;
         out.agl = 0;
         phase = speed < TAXI_MAX_KT * KNOTS_TO_MS ? "taxi" : "landingRoll";
         out.pitch = S.touchdownPitch * (1 - smoothstep((T - td) / (TOUCHDOWN_EASE_S * 1000)));
@@ -1573,11 +1916,18 @@ export class Motion {
           vs = (S.vrate * vsWeight + extra * ease) * vsScale;
         }
         out.ground = false;
-        out.altMsl = clamp(alt, floor, MAX_ALT_FT);
-        out.vsFpm = alt === out.altMsl ? vs : 0;
+        out.altRaw = alt;
+        out.vsRaw = vs;
         if (field) {
-          out.agl = out.altMsl - fieldElev;
+          // near the ground, the flare: into the runway at a believable sink rate, never through it
+          const raw = Math.min(alt, MAX_ALT_FT) - fieldElev;
+          out.agl = flare(raw);
+          out.altMsl = fieldElev + out.agl;
+          out.vsFpm = vs * flareSlope(raw);
           if (phase === "approach" && out.agl < FLARE_MAX_AGL_FT) phase = "flare";
+        } else {
+          out.altMsl = clamp(alt, floor, MAX_ALT_FT);
+          out.vsFpm = alt === out.altMsl ? vs : 0;
         }
         // the flight-path angle is through the air: true airspeed when measured
         const airSpeed = mw > 0 && tr.tasMs > 0 ? speed + (tr.tasMs - speed) * mw : speed;
@@ -1603,7 +1953,9 @@ export class Motion {
     else if (raw.hasField) {
       down =
         ((phase === "approach" || phase === "flare") && raw.agl < GEAR_APPROACH_AGL_FT) ||
-        (phase === "initialClimb" && raw.agl < GEAR_CLIMB_AGL_FT);
+        (phase === "initialClimb" && raw.agl < GEAR_CLIMB_AGL_FT) ||
+        // whatever the phase (no altitude to tell one): just above the field and slow
+        (raw.agl < GEAR_CLIMB_AGL_FT && raw.speedMs < GEAR_FALLBACK_KT * KNOTS_TO_MS);
     } else {
       down =
         raw.altMsl < GEAR_FALLBACK_ALT_FT &&
@@ -2218,11 +2570,12 @@ function fitAround(
   }
 }
 
-/** The smoothed altitude through the airborne altitude samples. */
+/** The smoothed altitude through the airborne altitude samples, corrected with the track's QNH. */
 function fitAltitude(tr: Track): void {
   const n = tr.ats.length;
-  tr.afv.length = tr.afd.length = n;
+  tr.avs.length = tr.afv.length = tr.afd.length = n;
   if (n === 0) return;
+  for (let i = 0; i < n; i++) tr.avs[i] = corrected(tr, tr.aps[i], tr.aws[i]);
   if (n === 1) {
     tr.afv[0] = tr.avs[0];
     tr.afd[0] = tr.vrate / 60;
@@ -2231,28 +2584,47 @@ function fitAltitude(tr: Track): void {
   smoothSpline(n, tr.ats, null, ALT_SMOOTH_LAMBDA, tr.avs, tr.afv, tr.afd, null, null, null, 0, 0, 0);
 }
 
-/** An airborne altitude (ft) at `t`; a sample within a second of the newest replaces it, an older one is dropped. */
-function addAltitude(tr: Track, t: number, alt: number): void {
-  const { ats, avs } = tr;
+/**
+ * An airborne pressure altitude (ft) at `t`, corrected with weight `w` (the
+ * field fade); a sample within a second of the newest replaces it, an older
+ * one is dropped. The first one after the aircraft was on the ground starts
+ * a new flight segment: the samples of the approach before it are kept until
+ * then, so the drawn descent carries on into the touchdown rather than
+ * restarting from the latest report when the ground report comes in.
+ */
+function addAltitude(tr: Track, t: number, raw: number, w: number): void {
+  const { ats, aps, aws } = tr;
   let n = ats.length;
+  if (n && ats[n - 1] < tr.groundMs) ats.length = aps.length = aws.length = n = 0;
   if (n && t < ats[n - 1] - COINCIDENT_MS) return;
   // a change no aircraft can fly (beyond 25 ft steps) is a jump in the data: start over
-  if (n && Math.abs(alt - avs[n - 1]) > ALT_STEP_FT) {
+  if (n && Math.abs(raw - aps[n - 1]) > ALT_STEP_FT) {
     const dtMin = Math.max(t - ats[n - 1], COINCIDENT_MS) / 60_000;
-    if (Math.abs(alt - avs[n - 1]) / dtMin > 1.25 * MAX_VRATE_FPM) ats.length = avs.length = n = 0;
+    if (Math.abs(raw - aps[n - 1]) / dtMin > 1.25 * MAX_VRATE_FPM) ats.length = aps.length = aws.length = n = 0;
   }
   if (n && Math.abs(t - ats[n - 1]) < COINCIDENT_MS) {
     ats[n - 1] = Math.max(t, ats[n - 1]);
-    avs[n - 1] = alt;
+    aps[n - 1] = raw;
+    aws[n - 1] = w;
   } else {
     ats.push(t);
-    avs.push(alt);
+    aps.push(raw);
+    aws.push(w);
   }
   while (ats.length > 1 && ats[0] < t - ALT_WINDOW_MS) {
     ats.shift();
-    avs.shift();
+    aps.shift();
+    aws.shift();
   }
 }
+
+/** A pressure altitude (ft) corrected to true altitude at `qnh` with weight `w` (none without a QNH). */
+function correctAlt(raw: number, w: number, qnh: number): number {
+  return w > 0 && validQnh(qnh) ? raw + w * (trueAltitude(raw, qnh) - raw) : raw;
+}
+
+/** A pressure altitude (ft) corrected with the track's QNH and weight `w`. */
+const corrected = (tr: Track, raw: number, w: number) => correctAlt(raw, w, tr.qnh);
 
 // Scratch results of `hermite`/`altitudeAt`: value(s), slope(s), segment and fraction.
 let hx = 0;
@@ -2547,10 +2919,15 @@ function decidePhase(tr: Track, prev: Phase | null): Phase {
   if (tr.onGround) {
     if (speed < PARKED_MAX_KT) return "parked";
     if (speed < TAXI_MAX_KT || tr.cls === "heli") return "taxi";
-    if (tr.accel > ROLL_ACCEL_KTS) return "takeoffRoll";
-    if (tr.accel < -ROLL_ACCEL_KTS) return "landingRoll";
-    if (prev && FROM_TAXI.has(prev)) return "takeoffRoll";
-    if (prev && FROM_LANDING.has(prev)) return "landingRoll";
+    // the speed change between reports: the look-ahead's says little on a runway (Flightradar24
+    // carries it on at a steady speed while the aircraft brakes)
+    const accel = Number.isFinite(tr.reportAccel) ? tr.reportAccel : tr.accel;
+    // a roll goes on as it began: a landing becomes a take-off (touch and go) only on clear
+    // acceleration, a take-off a landing (rejected) on clear braking
+    if (prev && FROM_LANDING.has(prev)) return accel > 2 * ROLL_ACCEL_KTS ? "takeoffRoll" : "landingRoll";
+    if (prev && FROM_TAXI.has(prev)) return accel < -2 * ROLL_ACCEL_KTS ? "landingRoll" : "takeoffRoll";
+    if (accel > ROLL_ACCEL_KTS) return "takeoffRoll";
+    if (accel < -ROLL_ACCEL_KTS) return "landingRoll";
     // first sighting at speed on a runway: at the destination it is landing
     return tr.field && tr.field === tr.destAp ? "landingRoll" : "takeoffRoll";
   }

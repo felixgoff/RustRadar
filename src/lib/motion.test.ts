@@ -3,6 +3,7 @@
 import * as bunTest from "bun:test";
 import type { Airport, LiveFlight } from "./api";
 import { Motion, type Measured, type Pose } from "./motion";
+import landings from "./testdata/landings.json";
 
 interface Matchers {
   toBe(value: unknown): void;
@@ -317,7 +318,8 @@ test("a takeoff roll lifts off by itself", () => {
   expect(at(T0 + 9_900).altFt).toBe(0);
   const airborne = at(T0 + 20_000);
   expect(airborne.phase).toBe("initialClimb");
-  expect(airborne.altFt).toBeCloseTo(300, 0); // 10 s at 1800 fpm
+  // 10 s at 1800 fpm, less the ~33 ft the lift-off's curve (the flare's, mirrored) takes
+  expect(airborne.altFt).toBeCloseTo(300 - 100 / 3, 0);
   expect(airborne.pitch).toBeGreaterThan(rotating);
   expect(airborne.gear).toBe(1); // still below 400 ft
 });
@@ -933,4 +935,276 @@ test("stale data never freezes, and fresh data is caught up smoothly", () => {
   expect(worstStepChange).toBeLessThan(0.1);
   // and back on the data
   expect(metres(prev, truthAt(m, 1, T0 + 150_000, truth))).toBeLessThan(2);
+});
+
+// --- Touchdowns and lift-offs ----------------------------------------------------------------------
+
+/** What the drawn aircraft did, frame by frame (16 ms), while reports arrived `latency` ms after their time. */
+interface Frame {
+  drawn: number;
+  altFt: number;
+  gear: number;
+  phase: string;
+}
+
+function play(m: Motion, reports: LiveFlight[], latency = 3_000, after = 10_000): Frame[] {
+  const frames: Frame[] = [];
+  let k = 0;
+  const end = reports[reports.length - 1].timestampMs + latency + after;
+  for (let now = reports[0].timestampMs + latency; now <= end; now += 16) {
+    while (k + 1 < reports.length && reports[k + 1].timestampMs + latency <= now) k++;
+    const p = m.pose(reports[k], now);
+    frames.push({ drawn: m.drawnTime(reports[k].id, now), altFt: p.altFt, gear: p.gear, phase: p.phase });
+  }
+  return frames;
+}
+
+/** Largest change of the drawn height between frames, ft. */
+const worstStep = (frames: Frame[]) => frames.reduce((w, f, i) => (i ? Math.max(w, Math.abs(f.altFt - frames[i - 1].altFt)) : w), 0);
+
+/** Drawn time at which the aircraft first comes within a foot of the ground after `from` (landing), or last leaves it (take-off). */
+const firstDown = (frames: Frame[], from = -Infinity) => frames.find((f) => f.drawn > from && f.altFt < 1)?.drawn ?? NaN;
+const lastUp = (frames: Frame[]) => {
+  for (let i = frames.length - 1; i > 0; i--) if (frames[i - 1].altFt < 1 && frames[i].altFt >= 1) return frames[i].drawn;
+  return NaN;
+};
+
+/** 4000 fpm at 60 fps: the most the drawn height may move in a frame (a firm flare's worth, not a jump). */
+const MAX_FRAME_FT = (4_000 / 60) * 0.016;
+
+// Real reports (Flightradar24, 2026-10-09): see testdata/landings.json. `alt` is pressure altitude:
+// that day Schiphol's QNH was 1004 hPa (runways read ~225 ft for -11 ft), Heathrow's 1008 (175 ft
+// for 83), Atlanta's 1020 (750-775 ft for 1026), and Flightradar24's ground flag came 10-30 s
+// after touchdown, or (take-offs) went airborne 10-20 s before lift-off.
+type FixtureFlight = (typeof landings.flights)[number];
+const fixtureAirports = landings.airports.map((a, i) => airport({ id: i + 1, ...a }));
+function fixtureReports(f: FixtureFlight): LiveFlight[] {
+  return f.reports.map((r) => {
+    const [timestampMs, lat, lon, alt, speed, track, ground, positions] = r as [
+      number, number, number, number, number, number, number, [number, number, number][],
+    ];
+    return flight({
+      id: f.id, lat, lon, alt, speed, track, onGround: ground === 1, timestampMs, positions,
+      callsign: f.callsign, typecode: f.typecode, icon: f.typecode, origin: f.origin, destination: f.destination,
+    });
+  });
+}
+const fixture = (callsign: string) => landings.flights.find((f) => f.callsign === callsign)!;
+
+test("real touchdowns and lift-offs are smooth: no jump at the ground flag, gear down, never below ground", () => {
+  for (const f of landings.flights) {
+    const m = new Motion();
+    m.setAirports(fixtureAirports);
+    const frames = play(m, fixtureReports(f));
+    // before this change: up to 5.7 ft a frame (21,000 fpm) at Schiphol, 13 ft at Denver
+    expect(worstStep(frames)).toBeLessThan(MAX_FRAME_FT);
+    for (const fr of frames) {
+      expect(fr.altFt).toBeGreaterThanOrEqual(0);
+      if (fr.altFt < 30 && Math.abs(fr.drawn - f.eventMs) < 60_000) expect(fr.gear).toBe(1);
+    }
+    if (f.event === "land") {
+      // down by the ground flag at the latest (it lags), and not long before the runway
+      const down = firstDown(frames, f.eventMs - 120_000);
+      expect(down).toBeGreaterThan(f.eventMs - 45_000);
+      expect(down).toBeLessThan(f.eventMs + 8_000);
+      expect(frames.filter((fr) => fr.drawn > down + 3_000).every((fr) => fr.altFt < 1)).toBe(true);
+    } else {
+      // the airborne flag comes during the roll: off the ground once it climbs, not before
+      const up = lastUp(frames);
+      expect(up).toBeGreaterThan(f.eventMs);
+      expect(up).toBeLessThan(f.eventMs + 30_000);
+    }
+  }
+});
+
+test("each runway tells its field's QNH, which corrects the next arrival", () => {
+  const learn = (callsign: string) => {
+    const m = new Motion();
+    m.setAirports(fixtureAirports);
+    const f = fixture(callsign);
+    play(m, fixtureReports(f));
+    return { m, at: fixtureAirports.find((a) => a.iata === f.airport)!, t: f.eventMs };
+  };
+  // METAR: EHAM Q1004, EGLL Q1008, KORD A3014 (1020.7); to within what a runway (not the
+  // field's highest point, in 25 ft steps) and a METAR (whole hPa, rounded down) can tell
+  const ams = learn("KLM76F");
+  expect(Math.abs(ams.m.fieldQnh(ams.at, ams.t) - 1004)).toBeLessThan(2.5);
+  const lhr = learn("AEE604");
+  expect(Math.abs(lhr.m.fieldQnh(lhr.at, lhr.t) - 1008)).toBeLessThan(2.5);
+  const ord = learn("SKW446W");
+  expect(Math.abs(ord.m.fieldQnh(ord.at, ord.t) - 1020.7)).toBeLessThan(2.5);
+
+  // the next arrival at Schiphol is drawn at its true height: down when its runway roll begins
+  // (the level run at 225 ft from 30 s before the ground flag), not 236 ft up until the flag
+  const f = fixture("KLC20D");
+  const frames = play(ams.m, fixtureReports(f));
+  expect(worstStep(frames)).toBeLessThan(MAX_FRAME_FT);
+  const down = firstDown(frames, f.eventMs - 120_000);
+  expect(down).toBeGreaterThan(f.eventMs - 36_000);
+  expect(down).toBeLessThan(f.eventMs - 22_000);
+  // and the one in Atlanta (reading 250 ft low) no longer lands 15 s short: down with its braking
+  const atl = learn("DAL1424");
+  const g = fixture("SWA2713");
+  const atlFrames = play(atl.m, fixtureReports(g));
+  const atlDown = firstDown(atlFrames, g.eventMs - 120_000);
+  expect(atlDown).toBeGreaterThan(g.eventMs - 20_000);
+  expect(atlDown).toBeLessThan(g.eventMs - 8_000);
+  // the flare: the last 30 ft take seconds, touching down at a few hundred fpm at most
+  const i = atlFrames.findIndex((fr) => fr.drawn >= atlDown);
+  const j = atlFrames.findIndex((fr) => fr.altFt < 30 && fr.drawn > g.eventMs - 60_000);
+  expect(atlFrames[i].drawn - atlFrames[j].drawn).toBeGreaterThan(3_000);
+  const sink = ((atlFrames[i - 31].altFt - atlFrames[i].altFt) / ((atlFrames[i].drawn - atlFrames[i - 31].drawn) / 1000)) * 60;
+  expect(sink).toBeLessThan(300);
+});
+
+/** The synthetic field, 1000 ft up (so that its runway reads above 0 even 400 ft low). */
+const FIELD_FT = 1_000;
+const fld = () => airport({ iata: "FLD", lat: 45, lon: 10, alt: FIELD_FT });
+
+/**
+ * A synthetic arrival at a field `elev` ft up: 3° down at 140 kt, touching down at T0 + 120 s, then
+ * braking at 2.5 kt/s. `alt` reads `biasFt` above the true height (pressure altitude, in 25 ft
+ * steps), the ground flag comes `lateS` after touchdown and meanwhile the runway reads level,
+ * as in the real data. Reports every `everyS` s, with a look-ahead buffer.
+ */
+function arrival(biasFt: number, everyS = 5, lateS = 12, id = 1, lastAirS = Infinity, elev = FIELD_FT): LiveFlight[] {
+  const field = { lat: 45, lon: 10, elev };
+  const tdS = 120;
+  const v0 = 140 * KT;
+  const north = (s: number) => (s <= tdS ? v0 * (s - tdS) : v0 * (s - tdS) - (2.5 * KT * (s - tdS) ** 2) / 2);
+  const speed = (s: number) => (s <= tdS ? 140 : Math.max(20, 140 - 2.5 * (s - tdS)));
+  const agl = (s: number) => Math.max(0, ((tdS - s) * v0 * Math.tan(3 * DEG)) / 0.3048);
+  const reports: LiveFlight[] = [];
+  for (let s = 0; s <= tdS + 40; s += everyS) {
+    if (s < tdS && s > lastAirS) continue; // nothing heard on short final
+    const [lat, lon] = offset(field.lat, field.lon, 0, north(s));
+    const positions = [2, 4, 6, 8].map((d): [number, number, number] => {
+      const [la, lo] = offset(field.lat, field.lon, 0, north(s + d));
+      return [Math.round((la - lat) / 1e-5), Math.round((lo - lon) / 1e-5), d * 1000];
+    });
+    const onGround = s >= tdS + lateS;
+    const alt = onGround ? 0 : Math.max(0, Math.round((field.elev + agl(s) + biasFt) / 25) * 25);
+    reports.push(flight({ id, lat, lon, alt, speed: speed(s), track: 0, onGround, timestampMs: T0 + s * 1000, positions, destination: "FLD", origin: "XXX" }));
+  }
+  return reports;
+}
+
+/** A departure from the same field (`FIELD_FT` up): rolls from T0 at 2.5 kt/s, airborne-flagged from 90 kt, lifts off at 150 kt, climbs at 2000 fpm. */
+function departure(biasFt: number, id = 2): LiveFlight[] {
+  const loS = 60;
+  const reports: LiveFlight[] = [];
+  const north = (s: number) => (s <= loS ? (2.5 * KT * s * s) / 2 : (2.5 * KT * loS * loS) / 2 + 150 * KT * (s - loS));
+  for (let s = 0; s <= 110; s += 5) {
+    const speed = s <= loS ? 2.5 * s : 150;
+    const [lat, lon] = offset(45, 10, 0, north(s));
+    const positions = [2, 4, 6, 8].map((d): [number, number, number] => {
+      const [la, lo] = offset(45, 10, 0, north(s + d));
+      return [Math.round((la - lat) / 1e-5), Math.round((lo - lon) / 1e-5), d * 1000];
+    });
+    const climb = Math.max(0, ((s - loS) * 2000) / 60);
+    const onGround = speed < 90;
+    const alt = onGround ? 0 : Math.max(0, Math.round((FIELD_FT + climb + biasFt) / 25) * 25);
+    reports.push(flight({ id, lat, lon, alt, speed, track: 0, onGround, timestampMs: T0 + s * 1000, positions, origin: "FLD", destination: "XXX" }));
+  }
+  return reports;
+}
+
+
+test("a pressure altitude 400 ft off either way: down on time once the field's QNH is known", () => {
+  for (const bias of [400, -400]) {
+    const m = new Motion();
+    m.setAirports([fld(), airport({ id: 2, iata: "XXX", lat: 50, lon: 20 })]);
+    // an earlier departure's take-off roll tells the field's QNH
+    play(m, departure(bias, 2).map((f) => ({ ...f, timestampMs: f.timestampMs - 600_000 })));
+    const qnh = m.fieldQnh(fld(), T0);
+    expect(Math.abs(qnh - (1013.25 - bias / 27.7))).toBeLessThan(1);
+    const frames = play(m, arrival(bias));
+    expect(worstStep(frames)).toBeLessThan(MAX_FRAME_FT);
+    expect(Math.min(...frames.map((f) => f.altFt))).toBeGreaterThanOrEqual(0);
+    // at the true height on the approach (to within a 25 ft step and the smoothing's lag)
+    const mid = frames.find((f) => f.drawn >= T0 + 60_000)!;
+    expect(Math.abs(mid.altFt - (60 * 140 * KT * Math.tan(3 * DEG)) / 0.3048)).toBeLessThan(60);
+    // down within a few seconds of the true touchdown (the flare stretches it a little)
+    const down = firstDown(frames, T0 + 60_000);
+    expect(Math.abs(down - (T0 + 120_000))).toBeLessThan(5_000);
+    expect(frames.find((f) => f.drawn >= down)!.gear).toBe(1);
+  }
+});
+
+test("a pressure altitude 400 ft off at a field whose QNH isn't known yet: no jump, down by the ground flag", () => {
+  for (const bias of [400, -400]) {
+    const m = new Motion();
+    m.setAirports([fld(), airport({ id: 2, iata: "XXX", lat: 50, lon: 20 })]);
+    const frames = play(m, arrival(bias));
+    // the runway's level run tells it 5-10 s after touchdown: eased down, not dropped
+    expect(worstStep(frames)).toBeLessThan(2 * MAX_FRAME_FT);
+    expect(Math.min(...frames.map((f) => f.altFt))).toBeGreaterThanOrEqual(0);
+    // (it can't be told before then: the drawn time is only seconds behind the data)
+    const down = firstDown(frames, T0 + 60_000);
+    expect(down).toBeLessThan(T0 + 120_000 + 15_000);
+    // never lifted back up once down
+    expect(frames.filter((f) => f.drawn > down).every((f) => f.altFt < 1)).toBe(true);
+    // and it told the field's QNH for the next one
+    expect(Math.abs(m.fieldQnh(fld(), T0 + 200_000) - (1013.25 - bias / 27.7))).toBeLessThan(1);
+  }
+});
+
+test("sparse reports on short final: the descent carries on into a flare, not a drop at the ground report", () => {
+  const m = new Motion();
+  m.setAirports([fld(), airport({ id: 2, iata: "XXX", lat: 50, lon: 20 })]);
+  // a report every 15 s, the last airborne one 30 s (~370 ft) out
+  const frames = play(m, arrival(0, 15, 12, 1, 90));
+  expect(worstStep(frames)).toBeLessThan(MAX_FRAME_FT);
+  expect(Math.min(...frames.map((f) => f.altFt))).toBeGreaterThanOrEqual(0);
+  const down = firstDown(frames, T0 + 60_000);
+  expect(Math.abs(down - (T0 + 120_000))).toBeLessThan(6_000);
+});
+
+test("a take-off: on the ground through the airborne-flagged roll, then off it smoothly from 0", () => {
+  for (const bias of [300, -300]) {
+    const m = new Motion();
+    m.setAirports([fld(), airport({ id: 2, iata: "XXX", lat: 50, lon: 20 })]);
+    const frames = play(m, departure(bias));
+    expect(worstStep(frames)).toBeLessThan(MAX_FRAME_FT);
+    // flagged airborne at 90 kt (36 s) at the biased runway altitude: still rolling
+    for (const f of frames) if (f.drawn < T0 + 58_000) expect(f.altFt).toBe(0);
+    const up = lastUp(frames);
+    expect(Math.abs(up - (T0 + 60_000))).toBeLessThan(5_000);
+    // climbing at its true height above the field, not the biased one
+    const later = frames.find((f) => f.drawn >= T0 + 90_000)!;
+    expect(Math.abs(later.altFt - 1_000)).toBeLessThan(120);
+    expect(frames.find((f) => f.drawn >= up)!.gear).toBe(1);
+  }
+});
+
+test("no altitude on short final (a negative pressure altitude, sent as 0): the descent carries on", () => {
+  const m = new Motion();
+  m.setAirports([airport({ iata: "FLD", lat: 45, lon: 10, alt: 0 }), airport({ id: 2, iata: "XXX", lat: 50, lon: 20 })]);
+  // QNH ~1022 at a field at sea level: the last ~250 ft read below 0, which Flightradar24 reports as 0
+  const reports = arrival(-250, 5, 12, 1, Infinity, 0);
+  const frames = play(m, reports);
+  expect(worstStep(frames)).toBeLessThan(MAX_FRAME_FT);
+  const down = firstDown(frames, T0 + 60_000);
+  // it reads 250 ft low and the QNH isn't known: it gets down early, but gets down, gently
+  expect(down).toBeLessThan(T0 + 120_000);
+  expect(down).toBeGreaterThan(T0 + 85_000);
+  expect(frames.filter((f) => f.drawn > down).every((f) => f.altFt < 1)).toBe(true);
+});
+
+test("the selected aircraft's altimeter setting (adsb.lol nav_qnh) corrects it and its field", () => {
+  const m = new Motion();
+  m.setAirports([fld(), airport({ id: 2, iata: "XXX", lat: 50, lon: 20 })]);
+  // 1000 hPa: pressure altitude reads ~365 ft high
+  const reports = arrival(365);
+  const f = reports[10]; // 50 s in, ~1300 ft above the field
+  m.pose(reports[9], reports[9].timestampMs + 3_000);
+  m.pose(f, f.timestampMs + 3_000);
+  m.measure(1, { positionMs: f.timestampMs, seenMs: f.timestampMs, lat: f.lat, lon: f.lon, onGround: false, altBaro: f.alt, navQnh: 1000 }, f.timestampMs + 3_000);
+  expect(m.fieldQnh(fld(), f.timestampMs)).toBeCloseTo(1000, 3);
+  // eased over to the true height
+  const truth = ((120 - 50) * 140 * KT * Math.tan(3 * DEG)) / 0.3048;
+  const p = poseAt(m, f, f.timestampMs + 1_000);
+  expect(Math.abs(p.altFt - truth)).toBeLessThan(150);
+  const q = poseAt(m, f, f.timestampMs + 8_000);
+  expect(Math.abs(q.altFt - (truth - 8 * 140 * KT * Math.tan(3 * DEG) / 0.3048))).toBeLessThan(60);
 });

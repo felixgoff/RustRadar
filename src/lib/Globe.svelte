@@ -1078,6 +1078,32 @@
   const controllerFor = (locked: boolean) =>
     ({ type: NorthUpGlobeController, zoomAround: locked ? "center" : "pointer", dragMode: locked ? "rotate" : "pan" }) as const;
 
+  /**
+   * The view with its centre moved so the camera is locked on the aircraft.
+   * Gestures run it too (see `onViewStateChange`): re-aiming only on a timer
+   * leaves the aim stale for every frame of a zoom, and the aircraft jumps.
+   */
+  function lockedView(v: ViewState, flight: LiveFlight): ViewState {
+    const [lon, lat] = extrapolate(flight, Date.now());
+    // The camera aims at a point on the ground, so once the view is tilted
+    // an aircraft drawn at altitude rides above the centre of the screen and
+    // zooming in closes on the ground beneath it instead. Aiming further
+    // along the bearing puts the aircraft itself on the camera's axis.
+    const pitch = v.pitch * DEGREES;
+    const camera = CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(v.zoom, lat);
+    // Only so far, though: aim past the camera itself and the aircraft ends
+    // up behind it, leaving the view staring at empty ground ahead.
+    const height = Math.min(
+      elevation(flight.alt, effectiveExaggeration(exaggeration, v.zoom)),
+      0.6 * camera * Math.cos(pitch),
+    );
+    const lift = height * Math.tan(pitch);
+    const latitude = Math.max(-85, Math.min(85, lat + (lift * Math.cos(v.bearing * DEGREES)) / METRES_PER_DEGREE));
+    const longitude =
+      lon + (lift * Math.sin(v.bearing * DEGREES)) / (METRES_PER_DEGREE * Math.max(0.05, Math.cos(lat * DEGREES)));
+    return { ...v, longitude, latitude };
+  }
+
   function render() {
     tick++;
     // locked to an aircraft, the wheel has to zoom about the centre, or every
@@ -1089,27 +1115,10 @@
       deck?.setProps({ controller: controllerFor(wanted === "center") });
     }
     if (follow && selected && Date.now() > transitionUntil) {
-      const [lon, lat] = extrapolate(selected, Date.now());
-      // The camera aims at a point on the ground, so once the view is tilted
-      // an aircraft drawn at altitude rides above the centre of the screen and
-      // zooming in closes on the ground beneath it instead. Aiming further
-      // along the bearing puts the aircraft itself on the camera's axis.
-      const pitch = view.pitch * DEGREES;
-      const camera = CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(view.zoom, lat);
-      // Only so far, though: aim past the camera itself and the aircraft ends
-      // up behind it, leaving the view staring at empty ground ahead.
-      const height = Math.min(
-        elevation(selected.alt, effectiveExaggeration(exaggeration, view.zoom)),
-        0.6 * camera * Math.cos(pitch),
-      );
-      const lift = height * Math.tan(pitch);
-      const latitude = Math.max(-85, Math.min(85, lat + (lift * Math.cos(view.bearing * DEGREES)) / METRES_PER_DEGREE));
-      const longitude =
-        lon + (lift * Math.sin(view.bearing * DEGREES)) / (METRES_PER_DEGREE * Math.max(0.05, Math.cos(lat * DEGREES)));
+      view = lockedView(view, selected);
       // deck.gl reports gestures back through `onViewStateChange` but not the
       // moves we make ourselves, so say where the camera went: the feed area
       // and the off-screen culling both read it
-      view = { ...view, longitude, latitude };
       onviewchange?.(view);
       deck?.setProps({ initialViewState: { ...view, ...LIMITS } });
     }
@@ -1118,7 +1127,10 @@
 
   /** Re-render on an interval that depends on zoom: motion is invisible zoomed out. */
   function loop(t: number) {
-    const interval = view.zoom > 7 ? 50 : view.zoom > 4 ? 150 : 500;
+    // locked on an aircraft the camera and the aircraft must move together
+    // every frame, or at street zoom each 50 ms step is many pixels of jitter
+    const locked = follow && selected && Date.now() > transitionUntil;
+    const interval = locked && view.zoom > 7 ? 0 : view.zoom > 7 ? 50 : view.zoom > 4 ? 150 : 500;
     if (t - lastTick >= interval) {
       lastTick = t;
       render();
@@ -1202,7 +1214,11 @@
       onViewStateChange: ({ viewState }) => {
         const { longitude, latitude, zoom, bearing = 0, pitch = 0 } = viewState as Partial<ViewState>;
         view = { longitude: longitude!, latitude: latitude!, zoom: zoom!, bearing, pitch };
+        // a gesture while locked on is re-aimed in the same frame, not on the next tick
+        const locked = follow && selected && Date.now() > transitionUntil;
+        if (locked) view = lockedView(view, selected!);
         onviewchange?.(view);
+        return locked ? { ...viewState, ...view } : viewState;
       },
       getTooltip: tooltip,
       getCursor: ({ isDragging, isHovering }) => (isDragging ? "grabbing" : isHovering ? "pointer" : "grab"),

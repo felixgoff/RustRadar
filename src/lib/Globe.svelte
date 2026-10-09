@@ -71,6 +71,7 @@
   } from "./geo";
   import { MODEL_KINDS, MODEL_SIZE, modelFor, models, sizeOf, type ModelKind } from "./models";
   import { motion, type Pose } from "./motion";
+  import { screenAngle } from "./screen";
   import HoverCard from "./HoverCard.svelte";
   import { flightDetails, isRateLimited } from "./api";
   import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
@@ -179,6 +180,8 @@
   const GEAR_DEPTH = 0.8;
   /** Struts and tyres in one grey: light enough to read against the night map. */
   const GEAR_COLOR: [number, number, number] = [178, 182, 190];
+  /** How far ahead (screen pixels at the view centre) an icon's heading is sampled. */
+  const ICON_HEADING_STEP_PX = 20;
   /** The silhouettes' border: the app's navy ink (`--ink`), nearly opaque. */
   const OUTLINE_COLOR: [number, number, number, number] = [8, 12, 20, 215];
   // White aircraft have to read as white against a dark map, so most of the
@@ -1106,6 +1109,14 @@
     }
 
     if (icons.length) {
+      // each icon turned to its heading as seen on screen, which away from the
+      // middle of the globe is not simply `bearing - heading` (see screenAngle)
+      const viewport = deck?.getViewports()[0];
+      const step = ICON_HEADING_STEP_PX * mpp;
+      const iconAngles = iconPoses.map((pose, i) => {
+        const angle = viewport && screenAngle(viewport, iconPositions[i], pose.heading, step);
+        return angle ?? bearing - pose.heading;
+      });
       // a thin dark border under every silhouette, so they stand out on bright
       // weather and imagery and from each other where traffic is dense
       if (aircraftModels.outlineAtlas) {
@@ -1119,14 +1130,14 @@
             iconMapping: aircraftModels.outlineMapping,
             // the same silhouette size, in a cell padded for the border
             getSize: (_, { index }) => screenPx(iconSizes[index]) * 1.06 * aircraftModels.outlineScale,
-            getAngle: (_, { index }) => bearing - iconPoses[index].heading,
+            getAngle: (_, { index }) => iconAngles[index],
             getColor: OUTLINE_COLOR,
             sizeUnits: "pixels",
             billboard: true,
             parameters: NO_CULL,
             updateTriggers: {
               getPosition: tick,
-              getAngle: [tick, bearing],
+              getAngle: [tick, bearing, pitch, zoom, cLon, cLat],
               getSize: [mpp, minPx],
             },
           }),
@@ -1144,7 +1155,7 @@
           getSize: (_, { index }) => screenPx(iconSizes[index]) * 1.06,
           // the icons point north; `getAngle` turns anticlockwise on screen,
           // and a rotated map has already turned the world underneath them
-          getAngle: (_, { index }) => bearing - iconPoses[index].heading,
+          getAngle: (_, { index }) => iconAngles[index],
           getColor: (f) => (f.id === selectedId ? SELECTED_COLOR : AIRCRAFT_COLOR),
           sizeUnits: "pixels",
           billboard: true,
@@ -1154,7 +1165,7 @@
           parameters: NO_CULL,
           updateTriggers: {
             getPosition: tick,
-            getAngle: [tick, bearing],
+            getAngle: [tick, bearing, pitch, zoom, cLon, cLat],
             getSize: [mpp, minPx],
             getColor: selectedId,
           },

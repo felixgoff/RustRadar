@@ -1071,6 +1071,21 @@
       if (liveryAmount > 0) group.liveries.push(liveries.forFlight(f));
     }
 
+    // Models are centred on their bounding box, so an aircraft placed by its
+    // origin at height 0 would stand with its wheels below the map. Raise each
+    // by how far its wheels hang below the origin at the size it's drawn, so
+    // one on the ground stands on them (a few metres in the air is invisible).
+    for (const group of groups.values()) {
+      const real = group.real;
+      const mesh = real?.gear?.geometry ?? real?.lods[Math.min(detail, real.lods.length - 1)].combined ?? models()[group.kind].combined;
+      const wheels = -lowestZ(mesh);
+      const divisor = real?.size ?? MODEL_SIZE[group.kind];
+      group.positions.forEach((position, i) => {
+        const s = (screenPx(real?.size ?? sizeOf(group.flights[i].icon)) * mpp) / divisor;
+        position[2] += wheels * s * Math.max(0.04, depth);
+      });
+    }
+
     const layers: Layer[] = [earthLayer(basemap)];
     if (basemap === "satellite") layers.push(imageryLayer());
     else {
@@ -1154,11 +1169,6 @@
         const shape = real ?? meshes[group.kind];
         const metres = group.real?.size;
         const divisor = metres ?? MODEL_SIZE[group.kind];
-        // Aircraft are placed by their model origin, so one on the ground is
-        // drawn with its wheels below the map. The shadow goes on the plane
-        // the wheels stand on, which meets them at touchdown and never cuts
-        // through the airframe (writing depth on the map's plane, it would).
-        const wheels = lowestZ(group.real?.gear?.geometry ?? shape.combined);
         const n = group.poses.length;
         // per aircraft: toward the sun in the mesh's local frame, and opacity
         const toSun = new Float64Array(3 * n);
@@ -1198,8 +1208,8 @@
               shadowSunOut[2] = toSun[3 * i + 2];
               const scale = [s, s, s * Math.max(0.04, depth)];
               const orientation = orientationOf(group.poses[i], yawOffset);
-              const ground = wheels * scale[2];
-              return shadowMatrix(orientation, scale, shadowSunOut, group.positions[i][2], shadowMatrixOut, ground);
+              // aircraft are raised onto their wheels (above), so the ground is the map
+              return shadowMatrix(orientation, scale, shadowSunOut, group.positions[i][2], shadowMatrixOut);
             },
             getColor: (i) => {
               shadowColorOut[3] = Math.round(alpha[i] * 255);

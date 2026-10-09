@@ -16,7 +16,16 @@
     X,
   } from "@lucide/svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { aircraftHistory, airlineLogoUrl, type FlightDetails, type HistoryRow, type LiveFlight } from "./api";
+  import {
+    ADSB_LOL_URL,
+    aircraftHistory,
+    airlineLogoUrl,
+    type AdsbAircraft,
+    type FlightDetails,
+    type HistoryRow,
+    type LiveFlight,
+  } from "./api";
+  import { verticalRate } from "./adsb";
   import AltitudeChart from "./AltitudeChart.svelte";
   import { ALTITUDE_STOPS } from "./geo";
   import { airlineIcao, reference } from "./reference.svelte";
@@ -32,6 +41,8 @@
     authenticated: boolean;
     /** How many track points came from the OpenSky Network. */
     openskyAdded?: number;
+    /** What the aircraft's transponder reports, from adsb.lol, while recent. */
+    measured?: AdsbAircraft | null;
     /** Whether the camera follows this aircraft. */
     following: boolean;
     /** Return to the airport board this flight was opened from. */
@@ -53,6 +64,7 @@
     authenticated,
     following,
     openskyAdded = 0,
+    measured = null,
     back = null,
     onfollow,
     onselect,
@@ -104,6 +116,24 @@
   const km = (m: number) => `${Math.round(m / 1000).toLocaleString()} km`;
   // squawk codes are four octal digits, transmitted in base 10
   const squawk = (code: number) => (code ? code.toString(8).padStart(4, "0") : "—");
+  // measured values: "—" when the aircraft doesn't report them
+  const fmt = (v: number | undefined, unit = "", digits = 0) =>
+    v === undefined || !Number.isFinite(v) ? "—" : `${v.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })}${unit}`;
+  const signed = (v: number | undefined) => (v === undefined ? "—" : `${v > 0 ? "+" : ""}${v.toLocaleString()} fpm`);
+  const degrees = (v: number | undefined) => (v === undefined ? "—" : `${String(Math.round(v) % 360).padStart(3, "0")}°`);
+  const MODES: Record<string, string> = {
+    autopilot: "Autopilot",
+    vnav: "VNAV",
+    althold: "Altitude hold",
+    approach: "Approach",
+    lnav: "LNAV",
+    tcas: "TCAS",
+  };
+  /** FR24's vertical speed when signed in, else the transponder's from adsb.lol. */
+  const fr24Vs = $derived(info && authenticated ? info.vertical_speed : undefined);
+  const measuredVs = $derived(measured ? verticalRate(measured) : undefined);
+  const fr24Squawk = $derived(info && authenticated ? info.squawk : 0);
+  const selectedAlt = $derived(measured?.navAltitudeMcp ?? measured?.navAltitudeFms);
   const sentence = (s: string) => s.charAt(0) + s.slice(1).toLowerCase().replaceAll("_", " ");
 
   const departure = $derived.by(() => {
@@ -291,15 +321,74 @@
       <dl class="facts">
         <div><dt>Altitude</dt><dd class="data">{onGround ? "On ground" : `${altitude.toLocaleString()} ft`}</dd></div>
         <div><dt>Ground speed</dt><dd class="data">{info?.ground_speed ?? flight.speed} kt</dd></div>
-        <div title={authenticated ? undefined : LOGIN_HINT}>
-          <dt>Vertical speed</dt>
-          <dd class="data">{info && authenticated ? `${info.vertical_speed > 0 ? "+" : ""}${info.vertical_speed} fpm` : "—"}</dd>
-        </div>
+        {#if fr24Vs === undefined && measuredVs !== undefined}
+          <div title="Reported by the aircraft, via adsb.lol">
+            <dt>Vertical speed</dt>
+            <dd class="data">{signed(measuredVs)} <span class="via">adsb.lol</span></dd>
+          </div>
+        {:else}
+          <div title={authenticated ? undefined : LOGIN_HINT}>
+            <dt>Vertical speed</dt>
+            <dd class="data">{signed(fr24Vs)}</dd>
+          </div>
+        {/if}
         <div><dt>Track</dt><dd class="data">{info?.track ?? flight.track}°</dd></div>
-        <div title={authenticated ? undefined : LOGIN_HINT}><dt>Squawk</dt><dd class="data">{squawk(info?.squawk ?? 0)}</dd></div>
+        {#if !fr24Squawk && measured?.squawk}
+          <div title="Reported by the aircraft, via adsb.lol">
+            <dt>Squawk</dt>
+            <dd class="data">{measured.squawk} <span class="via">adsb.lol</span></dd>
+          </div>
+        {:else}
+          <div title={authenticated ? undefined : LOGIN_HINT}><dt>Squawk</dt><dd class="data">{squawk(info?.squawk ?? 0)}</dd></div>
+        {/if}
         <div><dt>Phase</dt><dd>{progress ? sentence(progress.flight_stage) : "—"}</dd></div>
         <div class="wide" title={authenticated ? undefined : LOGIN_HINT}><dt>Airspace</dt><dd>{info?.airspace || "—"}</dd></div>
       </dl>
+      {#if measured}
+        <section class="measured" aria-label="Reported by the aircraft">
+          <header>
+            <h3>Reported by the aircraft</h3>
+            <button
+              class="via link"
+              title="Community ADS-B data from adsb.lol, under the Open Database Licence"
+              onclick={() => openUrl(ADSB_LOL_URL)}
+            >
+              adsb.lol <ExternalLink size={11} strokeWidth={2} />
+            </button>
+          </header>
+          <dl class="facts">
+            <div><dt>Heading</dt><dd class="data">{degrees(measured.trueHeading)}</dd></div>
+            <div><dt>Bank</dt><dd class="data">{measured.roll === undefined ? "—" : `${Math.abs(measured.roll).toFixed(0)}° ${measured.roll > 0.5 ? "R" : measured.roll < -0.5 ? "L" : ""}`.trim()}</dd></div>
+            <div><dt>GNSS altitude</dt><dd class="data">{fmt(measured.altGeom, " ft")}</dd></div>
+            <div><dt>IAS</dt><dd class="data">{fmt(measured.ias, " kt")}</dd></div>
+            <div><dt>TAS</dt><dd class="data">{fmt(measured.tas, " kt")}</dd></div>
+            <div><dt>Mach</dt><dd class="data">{fmt(measured.mach, "", 3)}</dd></div>
+            <div title="Set on the autopilot (or by the flight management system)">
+              <dt>Selected alt.</dt>
+              <dd class="data">{fmt(selectedAlt, " ft")}</dd>
+            </div>
+            <div title="Set on the autopilot; magnetic"><dt>Selected hdg</dt><dd class="data">{degrees(measured.navHeading)}</dd></div>
+            <div><dt>OAT</dt><dd class="data">{fmt(measured.oat, " °C")}</dd></div>
+            <div class="wide" title="Derived from the aircraft's airspeed, heading and ground track">
+              <dt>Wind</dt>
+              <dd class="data">
+                {measured.windDir === undefined || measured.windSpeed === undefined
+                  ? "—"
+                  : `${degrees(measured.windDir)} at ${measured.windSpeed} kt`}
+              </dd>
+            </div>
+            {#if measured.navModes?.length}
+              <div class="wide">
+                <dt>Autopilot modes</dt>
+                <dd>{measured.navModes.map((m) => MODES[m] ?? m.toUpperCase()).join(" · ")}</dd>
+              </div>
+            {/if}
+          </dl>
+          {#if measured.mlat}
+            <p class="note">Position by multilateration: less precise than the aircraft's own.</p>
+          {/if}
+        </section>
+      {/if}
       <AltitudeChart trail={details?.trail ?? []} timeZone={origin?.timezone} place={origin?.iata || flight.origin || undefined} />
     {:else if tab === "route"}
       <div class="stack">
@@ -778,6 +867,43 @@
   }
   .facts .wide {
     grid-column: 1 / -1;
+  }
+  .measured {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--line);
+  }
+  .measured header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .measured h3 {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-2);
+  }
+  /* a value's source, when it isn't Flightradar24 */
+  .via {
+    font-family: var(--font-ui);
+    font-size: var(--text-xs);
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .via.link {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+  }
+  .via.link:hover {
+    color: var(--text-1);
   }
   .facts.compact {
     gap: var(--space-2) var(--space-3);

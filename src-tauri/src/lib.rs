@@ -1,3 +1,4 @@
+mod adsblol;
 mod board;
 mod dwd;
 mod liveries;
@@ -620,6 +621,8 @@ pub fn run() {
             radar_frame,
             radar_image,
             opensky_track,
+            adsblol::adsb_hex,
+            adsblol::adsb_callsign,
             session::session_info,
             session::sign_in,
             session::sign_out,

@@ -330,6 +330,79 @@ export interface OpenSkyPoint {
 /** The flight an aircraft is on now, by Mode S address (six hex digits). */
 export const openskyTrack = (icao24: string) => invoke<OpenSkyPoint[]>("opensky_track", { icao24 });
 
+/**
+ * One aircraft as adsb.lol reports it: what its transponder broadcasts,
+ * including what Flightradar24's anonymous feed leaves out. ODbL: credit
+ * "adsb.lol contributors" wherever it is shown. Absent values are left out.
+ */
+export interface AdsbAircraft {
+  /** ICAO 24-bit address, lowercase hex. */
+  hex: string;
+  callsign: string;
+  reg: string;
+  typecode: string;
+  /** How it was received: `adsb_icao`, `mlat`, `tisb_icao`, ... */
+  source: string;
+  /** The position is multilaterated. */
+  mlat: boolean;
+  lat?: number;
+  lon?: number;
+  /** Unix ms of the position. */
+  positionMs?: number;
+  /** Unix ms of the latest message of any kind. */
+  seenMs: number;
+  onGround: boolean;
+  /** Feet. */
+  altBaro?: number;
+  altGeom?: number;
+  /** Knots; degrees true. */
+  gs?: number;
+  track?: number;
+  trueHeading?: number;
+  magHeading?: number;
+  /** Bank, degrees, right wing down positive. */
+  roll?: number;
+  /** Degrees per second, clockwise positive. */
+  trackRate?: number;
+  /** Feet per minute. */
+  baroRate?: number;
+  geomRate?: number;
+  /** Knots, and Mach. */
+  ias?: number;
+  tas?: number;
+  mach?: number;
+  /** Where the wind blows from, degrees true, and its speed, knots. */
+  windDir?: number;
+  windSpeed?: number;
+  /** °C */
+  oat?: number;
+  tat?: number;
+  /** Selected altitudes (autopilot panel, FMS), feet; selected heading, degrees. */
+  navAltitudeMcp?: number;
+  navAltitudeFms?: number;
+  navHeading?: number;
+  /** hPa */
+  navQnh?: number;
+  navModes?: string[];
+  squawk?: string;
+  emergency?: string;
+  category?: string;
+}
+
+export interface AdsbSnapshot {
+  /** adsb.lol's clock when it answered, Unix ms. */
+  nowMs: number;
+  aircraft: AdsbAircraft[];
+}
+
+/** One aircraft from adsb.lol by Mode S address (six hex digits); polite spacing and backoff are applied by the backend. */
+export const adsbHex = (hex: string) => invoke<AdsbSnapshot>("adsb_hex", { hex });
+
+/** Aircraft from adsb.lol using a callsign, for when the Mode S address isn't known yet. */
+export const adsbCallsign = (callsign: string) => invoke<AdsbSnapshot>("adsb_callsign", { callsign });
+
+export const ADSB_LOL_URL = "https://adsb.lol";
+
 export const sessionInfo = () => invoke<SessionInfo>("session_info");
 
 export const signIn = (email: string, password: string) =>

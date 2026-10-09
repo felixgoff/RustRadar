@@ -2,7 +2,7 @@
 // @ts-ignore -- bun's types aren't a dependency; svelte-check still type-checks this file
 import * as bunTest from "bun:test";
 import type { Airport, LiveFlight } from "./api";
-import { Motion, type Pose } from "./motion";
+import { Motion, type Measured, type Pose } from "./motion";
 
 interface Matchers {
   toBe(value: unknown): void;
@@ -365,4 +365,185 @@ test("prune drops stale tracks", () => {
   // a re-created track starts from scratch: no blending from the old one
   const g = flight({ lat: 46, timestampMs: T0 + 16 * 60_000 });
   expect(m.pose(g, T0 + 16 * 60_000).lat).toBeCloseTo(46, 6);
+});
+
+// --- Measured data (adsb.lol) for the selected aircraft -------------------------------------
+
+/** A measured state at `t` for a flight following `path`, east/north metres from 45N 10E. */
+function measuredAt(path: (s: number) => [number, number], t: number, over: Partial<Measured> = {}): Measured {
+  const [lat, lon] = offset(45, 10, ...path((t - T0) / 1000));
+  return { positionMs: t, seenMs: t, lat, lon, onGround: false, ...over };
+}
+
+/** Largest per-frame change of `get` between `from` and `to`, at 16 ms frames, measuring each frame. */
+function maxStep(m: Motion, f: LiveFlight, from: number, to: number, get: (p: Pose) => number): number {
+  let prev = get(m.pose(f, from));
+  let worst = 0;
+  for (let t = from + 16; t <= to; t += 16) {
+    const v = get(m.pose(f, t));
+    worst = Math.max(worst, Math.abs(((v - prev + 540) % 360) - 180));
+    prev = v;
+  }
+  return worst;
+}
+
+const north = (speedKt: number) => (s: number): [number, number] => [0, speedKt * KT * s];
+const east = (speedKt: number) => (s: number): [number, number] => [speedKt * KT * s, 0];
+
+test("measured roll drives the bank smoothly", () => {
+  const m = new Motion();
+  const path = north(250);
+  const f = pathFlight(path, { speed: 250, alt: 10_000 });
+  const t = T0 + 3_000;
+  expect(Math.abs(m.pose(f, t).bank)).toBeLessThan(0.5);
+  m.measure(1, measuredAt(path, t, { gs: 250, track: 0, trueHeading: 0, roll: 25, trackRate: 2 }), t);
+  // no jump on arrival, and only a gentle change per frame while it blends in
+  // (a 25° step eases in at up to ~20°/s, 0.33° a frame)
+  expect(maxStep(m, f, t, t + 6_000, (p) => p.bank)).toBeLessThan(0.4);
+  expect(maxStep(m, f, t, t + 6_000, (p) => p.heading)).toBeLessThan(0.3);
+  const p = m.pose(f, t + 6_000);
+  expect(p.bank).toBeGreaterThan(22);
+  expect(p.bank).toBeLessThan(28);
+  // and the path now turns right, as the measured track rate says
+  expect(p.track).toBeGreaterThan(5);
+});
+
+test("a measured true heading off the track shows the crab", () => {
+  const m = new Motion();
+  const path = east(300);
+  const f = pathFlight(path, { speed: 300, alt: 20_000, track: 90 });
+  const t = T0 + 9_000;
+  m.pose(f, t);
+  m.measure(1, measuredAt(path, t, { gs: 300, track: 90, trueHeading: 100, roll: 0, trackRate: 0 }), t);
+  const p = m.pose(f, t + 8_000);
+  expect(p.heading).toBeCloseTo(100, 0); // the nose points into the wind
+  expect(p.track).toBeCloseTo(90, 0); // the path still follows the track
+  expect(p.bank).toBeCloseTo(0, 1);
+  const [lat, lon] = offset(45, 10, ...path(17));
+  expect(metres(p, { lat, lon })).toBeLessThan(10);
+});
+
+test("a climb levels off at the selected altitude", () => {
+  const path = north(280);
+  const run = (navAltitudeMcp?: number) => {
+    const m = new Motion();
+    const f = pathFlight(path, { speed: 280, alt: 30_000 });
+    const t = T0 + 8_000;
+    m.pose(f, t);
+    m.measure(1, measuredAt(path, t, { gs: 280, track: 0, altBaro: 30_000, baroRate: 2_000, navAltitudeMcp }), t);
+    return { m, f, t };
+  };
+  const free = run();
+  expect(free.m.pose(free.f, free.t + 90_000).altFt).toBeGreaterThan(32_300);
+
+  const { m, f, t } = run(32_000);
+  let prev = m.pose(f, t).altFt;
+  let prevRate = 0;
+  for (let s = t + 1_000; s <= t + 120_000; s += 1_000) {
+    const alt = m.pose(f, s).altFt;
+    expect(alt).toBeLessThanOrEqual(32_000.5);
+    expect(alt).toBeGreaterThanOrEqual(prev - 0.5); // never sinks back
+    const rate = alt - prev;
+    if (s > t + 8_000) expect(Math.abs(rate - prevRate)).toBeLessThan(6); // the rate eases off, no kink
+    prev = alt;
+    prevRate = rate;
+  }
+  expect(m.pose(f, t + 90_000).altFt).toBeCloseTo(32_000, 0);
+  // at the selected level the attitude is level flight's, not the climb's
+  expect(m.pose(f, t + 90_000).pitch).toBeLessThan(4);
+});
+
+test("a turn on the autopilot stops at the selected heading", () => {
+  const m = new Motion();
+  const path = circle(160, 3);
+  const f = pathFlight(path, { speed: 160, alt: 10_000 });
+  const t = T0 + 8_000;
+  m.pose(f, t);
+  const bankNow = Math.atan2(160 * KT * 3 * DEG, 9.80665) / DEG;
+  // selected 088 magnetic with 2° east variation: 090 true
+  m.measure(
+    1,
+    measuredAt(path, t, { gs: 160, track: 24, trueHeading: 24, magHeading: 22, roll: bankNow, trackRate: 3, navHeading: 88 }),
+    t,
+  );
+  expect(maxStep(m, f, t, t + 60_000, (p) => p.bank)).toBeLessThan(0.3);
+  const end = m.pose(f, t + 40_000);
+  expect(end.track).toBeCloseTo(90, 0);
+  expect(end.heading).toBeCloseTo(90, 0);
+  expect(Math.abs(end.bank)).toBeLessThan(0.5);
+  expect(m.pose(f, t + 60_000).track).toBeCloseTo(90, 0);
+
+  // with LNAV engaged the selected heading doesn't steer: the turn carries on
+  const lnav = new Motion();
+  lnav.pose(f, t);
+  lnav.measure(
+    1,
+    measuredAt(path, t, { gs: 160, track: 24, trueHeading: 24, magHeading: 22, trackRate: 3, navHeading: 88, navModes: ["lnav"] }),
+    t,
+  );
+  expect(lnav.pose(f, t + 40_000).track).toBeGreaterThan(130);
+});
+
+test("a stale measured source falls back to the estimates smoothly", () => {
+  const m = new Motion();
+  const path = east(300);
+  const f = pathFlight(path, { speed: 300, alt: 20_000, track: 90 });
+  const t = T0 + 9_000;
+  m.pose(f, t);
+  m.measure(1, measuredAt(path, t, { gs: 300, track: 90, trueHeading: 98, roll: 12, trackRate: 0 }), t);
+  expect(m.pose(f, t + 10_000).heading).toBeCloseTo(98, 0);
+  expect(m.pose(f, t + 10_000).bank).toBeCloseTo(12, 0);
+  // nothing more arrives: between 15 and 20 s the measured values ease out
+  expect(maxStep(m, f, t + 10_000, t + 30_000, (p) => p.heading)).toBeLessThan(0.06);
+  expect(maxStep(m, f, t + 10_000, t + 30_000, (p) => p.bank)).toBeLessThan(0.1);
+  const late = m.pose(f, t + 25_000);
+  expect(late.heading).toBeCloseTo(late.track, 3);
+  expect(late.bank).toBeCloseTo(0, 3);
+
+  // dropping the source (deselected) eases out too
+  const n = new Motion();
+  n.pose(f, t);
+  n.measure(1, measuredAt(path, t, { gs: 300, track: 90, trueHeading: 98, roll: 12, trackRate: 0 }), t);
+  n.pose(f, t + 5_000);
+  n.measure(1, null, t + 5_000);
+  expect(maxStep(n, f, t + 5_000, t + 12_000, (p) => p.heading)).toBeLessThan(0.3);
+  expect(n.pose(f, t + 12_000).heading).toBeCloseTo(90, 1);
+});
+
+test("interleaved Flightradar24 and measured samples stay continuous", () => {
+  const m = new Motion();
+  const v = 450 * KT;
+  const path = east(450);
+  // Flightradar24: a report every 8 s with 8 s of look-ahead, arriving 12 s after its time
+  const fr24At = (k: number) =>
+    pathFlight((s) => path(s + k * 8), { speed: 450, alt: 36_000, track: 90 }, T0 + k * 8_000);
+  // adsb.lol: every 3 s, 0.5 s old on arrival, a few metres of noise and a little clock offset
+  const noise = (k: number) => ((k * 7919) % 21) - 10;
+  let report = fr24At(0);
+  let k = 0;
+  let a = 0;
+  const start = T0 + 12_000;
+  let prev = m.pose(report, start);
+  let worstStep = 0;
+  let worstError = 0;
+  for (let t = start + 16; t <= start + 90_000; t += 16) {
+    if (t >= T0 + (k + 1) * 8_000 + 12_000) report = fr24At(++k);
+    if (t >= start + a * 3_000) {
+      const at = start + a * 3_000 - 500 + 150;
+      const [e, n] = path((at - 150 - T0) / 1000);
+      const [lat, lon] = offset(45, 10, e + noise(a), n + noise(a + 3));
+      m.measure(1, { positionMs: at, seenMs: at, lat, lon, onGround: false, gs: 450, track: 90, trueHeading: 90, roll: 0, trackRate: 0, altBaro: 36_000, baroRate: 0 }, t);
+      a++;
+    }
+    const p = m.pose(report, t);
+    const step = metres(prev, p);
+    // moving forward each frame, at about the right speed
+    if (!(p.lon > prev.lon) || Math.abs(step - v * 0.016) > 1.5) console.log("BAD", t - start, step, k, a);
+    worstStep = Math.max(worstStep, Math.abs(step - v * 0.016));
+    const [lat, lon] = offset(45, 10, ...path((t - T0) / 1000));
+    worstError = Math.max(worstError, metres(p, { lat, lon }));
+    prev = p;
+  }
+  expect(worstStep).toBeLessThan(1.5);
+  expect(worstError).toBeLessThan(80);
 });

@@ -6,11 +6,58 @@
 // and lift-offs, derive pitch, bank and gear, and blend every correction in
 // over a few seconds so that nothing on the globe ever jumps or freezes.
 //
+// The selected aircraft can also get measured state from a second source
+// (adsb.lol, see `Motion.measure`): its position samples interleave with
+// Flightradar24's by time, and its transponder-reported heading, bank, turn
+// and vertical rates and autopilot targets replace the estimates while they
+// are fresh, eased in and out through the same blending. Every other aircraft
+// is drawn from Flightradar24 alone.
+//
 // Times are server-synced milliseconds (`motion.now()`) throughout. Horizontal
 // work happens in a local east/north metre frame around each track's newest
 // sample: equirectangular, which is exact enough for the few hundred
 // kilometres an aircraft can cover before its data runs out.
 import type { Airport, LiveFlight } from "./api";
+
+/**
+ * Measured state of one aircraft from a second source (adsb.lol's readsb
+ * fields; its `AdsbAircraft` fits). Times are Unix ms; absent values are
+ * simply left out.
+ */
+export interface Measured {
+  /** When `lat`/`lon` were measured. */
+  positionMs?: number;
+  lat?: number;
+  lon?: number;
+  /** The position is multilaterated: less precise than Flightradar24's. */
+  mlat?: boolean;
+  /** When the other values were last reported. */
+  seenMs: number;
+  onGround: boolean;
+  /** Barometric altitude, feet. */
+  altBaro?: number;
+  /** Ground speed, kt; track over the ground and nose heading, degrees true. */
+  gs?: number;
+  track?: number;
+  trueHeading?: number;
+  /** Nose heading, degrees magnetic: with `trueHeading`, gives the variation for `navHeading`. */
+  magHeading?: number;
+  /** Bank, degrees, right wing down positive. */
+  roll?: number;
+  /** Degrees per second, clockwise positive. */
+  trackRate?: number;
+  /** Feet per minute. */
+  baroRate?: number;
+  geomRate?: number;
+  /** True airspeed, kt. */
+  tas?: number;
+  /** Altitudes selected on the autopilot (MCP/FCU) and by the FMS, feet. */
+  navAltitudeMcp?: number;
+  navAltitudeFms?: number;
+  /** Heading selected on the autopilot, degrees (magnetic, in practice). */
+  navHeading?: number;
+  navModes?: string[];
+}
 
 export type Phase =
   | "parked"
@@ -29,8 +76,14 @@ export interface Pose {
   lat: number;
   /** Height to draw at, feet: MSL altitude with the relevant airport's field elevation removed near airports (faded back to plain MSL by ~30-60 km out), exactly 0 on the ground. */
   altFt: number;
-  /** Degrees clockwise from north: direction of motion along the drawn path (reported track when parked). */
+  /**
+   * Degrees clockwise from north: where the nose points. Without measured
+   * data this is the direction of motion (`track`); with a measured true
+   * heading it differs from it by the crab angle into a crosswind.
+   */
   heading: number;
+  /** Degrees clockwise from north: direction of motion along the drawn path (reported track when parked). */
+  track: number;
   /** Degrees, nose up positive. */
   pitch: number;
   /** Degrees, right wing down positive (a right turn banks right). */
@@ -125,6 +178,28 @@ const BLEND_END_S = 6;
 const SNAP_DISTANCE_M = 5_000;
 /** If the previous data was older than this, its extrapolation means little: snap. */
 const SNAP_AGE_MS = 120_000;
+
+// --- Measured data (selected aircraft) ----------------------------------------------
+
+/** Measured values are used fully for this long after they were reported... */
+const MEAS_FRESH_MS = 15_000;
+/** ...then eased back to the estimates over this long. */
+const MEAS_FADE_MS = 5_000;
+/** Samples from the two sources closer in time than this are the same moment: the better one is kept. */
+const COINCIDENT_MS = 1_000;
+/** Largest crab angle believed, degrees. */
+const MAX_CRAB = 30;
+/** A turn onto a selected heading rolls out over this long. */
+const ROLL_OUT_S = 4;
+/** Altitude capture: the level-off is spread over this fraction of the vertical rate (ft per fpm)... */
+const CAPTURE_FT_PER_FPM = 0.15;
+/** ...within these bounds, feet either side of the selected altitude. */
+const MIN_CAPTURE_FT = 100;
+const MAX_CAPTURE_FT = 800;
+/** Sample sources, also their rank when two coincide (higher wins). */
+const SRC_FR24 = 1;
+const SRC_ADSB = 2;
+const SRC_MLAT = 0;
 
 // --- Airports ----------------------------------------------------------------------
 
@@ -273,6 +348,15 @@ function blend(t: number): number {
   return (1 + kt) * Math.exp(-kt);
 }
 
+/** Weight of a track's measured values at time T: 1 while fresh, easing to 0 (the estimates) once stale. */
+function measWeight(tr: Track, T: number): number {
+  if (tr.measMs === -Infinity) return 0;
+  return 1 - smoothstep((T - tr.measMs - MEAS_FRESH_MS) / MEAS_FADE_MS);
+}
+
+/** Whether measured values reported at `measMs` still count at time `t`. */
+const measFresh = (tr: Track, t: number) => tr.meas !== null && t - tr.measMs <= MEAS_FRESH_MS;
+
 /** Field elevation removal factor at `km` from the field. */
 function fieldFade(km: number): number {
   return clamp((FADE_ZERO_KM - km) / (FADE_ZERO_KM - FADE_FULL_KM), 0, 1);
@@ -295,8 +379,10 @@ class Track {
   icon = "";
   typecode = "";
 
-  // latest report (all describe `reportMs`)
+  // latest report (all describe `reportMs`), from either source
   reportMs = -Infinity;
+  /** Time of the newest Flightradar24 report taken in. */
+  fr24Ms = -Infinity;
   lat0 = 0;
   lon0 = 0;
   alt = 0;
@@ -330,6 +416,28 @@ class Track {
   my: number[] = [];
   refLat = 0;
   refLon = 0;
+  /** Per sample source (SRC_*), kept only once measured samples are mixed in. */
+  src: number[] = [];
+  mixed = false;
+
+  // measured data (selected aircraft only)
+  meas: Measured | null = null;
+  /** When the measured values were reported; -Infinity without any. */
+  measMs = -Infinity;
+  /** Newest measured position taken in. */
+  measPosMs = -Infinity;
+  /** Nose heading minus track, degrees. */
+  crab = 0;
+  /** Measured bank minus the model's bank at `measMs`, degrees. */
+  rollBias = 0;
+  /** True airspeed, m/s (0: unknown). */
+  tasMs = 0;
+  /** Track (deg) the autopilot is turning onto, NaN if none. */
+  navTrack = NaN;
+  /** Altitude (ft) the climb or descent levels off at, NaN if none. */
+  capAlt = NaN;
+  /** Seconds past the newest sample when the predicted turn ends. */
+  turnEndS = TURN_HORIZON_S;
 
   // extrapolation past the newest sample
   v0 = 0; // m/s
@@ -352,6 +460,7 @@ class Track {
   offN = 0;
   offAlt = 0;
   offHdg = 0;
+  offTrk = 0;
   offPitch = 0;
   offBank = 0;
 
@@ -370,6 +479,7 @@ interface Raw {
   altMsl: number;
   drawAlt: number;
   heading: number;
+  track: number;
   pitch: number;
   bank: number;
   phase: Phase;
@@ -385,6 +495,7 @@ const newRaw = (): Raw => ({
   altMsl: 0,
   drawAlt: 0,
   heading: 0,
+  track: 0,
   pitch: 0,
   bank: 0,
   phase: "cruise",
@@ -397,6 +508,7 @@ const newRaw = (): Raw => ({
 // Reused scratch space: pose() is called thousands of times per frame.
 const scratchA = newRaw();
 const scratchB = newRaw();
+const scratchC = newRaw();
 let profS = 0;
 let profV = 0;
 
@@ -477,21 +589,54 @@ export class Motion {
       this.tracks.set(f.id, tr);
     }
     tr.touched = nowMs;
-    if (tr.n === 0 || f.timestampMs > tr.reportMs) this.ingest(tr, f, nowMs);
+    if (tr.n === 0 || f.timestampMs > tr.fr24Ms) this.ingest(tr, f, nowMs);
     if (nowMs - this.lastPrune > PRUNE_INTERVAL_MS) this.prune(nowMs);
 
     const raw = this.evaluate(tr, nowMs, scratchA);
-    let { lat, lon, drawAlt: altFt, heading, pitch, bank } = raw;
+    let { lat, lon, drawAlt: altFt, heading, track, pitch, bank } = raw;
     const w = blend((nowMs - tr.offMs) / 1000);
     if (w > 0) {
       lat += (tr.offN * w) / M_PER_DEG;
       lon = wrapLon(lon + (tr.offE * w) / (M_PER_DEG * Math.max(Math.cos(lat * DEG), 1e-3)));
       altFt = Math.max(0, altFt + tr.offAlt * w);
       heading = wrap360(heading + tr.offHdg * w);
+      track = wrap360(track + tr.offTrk * w);
       pitch = clamp(pitch + tr.offPitch * w, MIN_PITCH, MAX_PITCH);
       bank = clamp(bank + tr.offBank * w, -MAX_BANK, MAX_BANK);
     }
-    return { lon, lat, altFt, heading, pitch, bank, gear: this.gear(tr, raw, nowMs), phase: raw.phase };
+    return { lon, lat, altFt, heading, track, pitch, bank, gear: this.gear(tr, raw, nowMs), phase: raw.phase };
+  }
+
+  /**
+   * Measured state for an aircraft (the selected one), from a second source;
+   * `null` drops it. Call on each fetch, not per frame. Its position joins
+   * the track's samples in time order; its heading, bank, turn and vertical
+   * rates, airspeed and autopilot targets replace the estimates while fresh,
+   * and every change is blended in like a new report, so nothing jumps.
+   */
+  measure(id: number, m: Measured | null, nowMs: number = this.now()): void {
+    const tr = this.tracks.get(id);
+    if (!tr || tr.n === 0) return; // no Flightradar24 report yet: the next fetch will do
+    if (!m) {
+      if (tr.meas === null && tr.measMs === -Infinity) return;
+      this.blendAround(tr, nowMs, () => {
+        tr.meas = null;
+        tr.measMs = -Infinity;
+        tr.crab = 0;
+        tr.rollBias = 0;
+        tr.tasMs = 0;
+        tr.navTrack = NaN;
+        this.refresh(tr);
+      });
+      return;
+    }
+    const posMs = m.positionMs;
+    const positioned =
+      typeof posMs === "number" && Number.isFinite(posMs) && Number.isFinite(m.lat) && Number.isFinite(m.lon);
+    const newPosition = positioned && posMs! > tr.measPosMs;
+    if (!newPosition && !(m.seenMs > tr.measMs)) return; // nothing new
+    tr.touched = nowMs;
+    this.blendAround(tr, nowMs, () => this.applyMeasured(tr, m, newPosition));
   }
 
   /** Same airport-relative drawing height for points of the aircraft's trail (so the trail meets the model). */
@@ -537,9 +682,16 @@ export class Motion {
   /** Takes a newer report into the track and blends from the old drawn pose to the new one. */
   private ingest(tr: Track, f: LiveFlight, nowMs: number): void {
     const first = tr.n === 0;
+    const t = Number.isFinite(f.timestampMs) ? f.timestampMs : nowMs;
+    if (first) this.update(tr, f, t, true);
+    else this.blendAround(tr, nowMs, () => this.update(tr, f, t, false));
+  }
+
+  /** Applies `change` to an existing track, blending from the pose drawn before it to the one after. */
+  private blendAround(tr: Track, nowMs: number, change: () => void): void {
     const before = scratchA;
     const previousMs = tr.reportMs;
-    if (!first) {
+    {
       // what is on screen right now, correction included
       this.evaluate(tr, nowMs, before);
       const w = blend((nowMs - tr.offMs) / 1000);
@@ -547,12 +699,12 @@ export class Motion {
       before.lon = wrapLon(before.lon + (tr.offE * w) / (M_PER_DEG * Math.max(Math.cos(before.lat * DEG), 1e-3)));
       before.drawAlt = Math.max(0, before.drawAlt + tr.offAlt * w);
       before.heading = wrap360(before.heading + tr.offHdg * w);
+      before.track = wrap360(before.track + tr.offTrk * w);
       before.pitch += tr.offPitch * w;
       before.bank += tr.offBank * w;
     }
 
-    this.update(tr, f, Number.isFinite(f.timestampMs) ? f.timestampMs : nowMs, first);
-    if (first) return;
+    change();
 
     const after = this.evaluate(tr, nowMs, scratchB);
     const cosLat = Math.max(Math.cos(after.lat * DEG), 1e-3);
@@ -567,6 +719,7 @@ export class Motion {
     tr.offN = offN;
     tr.offAlt = before.drawAlt - after.drawAlt;
     tr.offHdg = wrap180(before.heading - after.heading);
+    tr.offTrk = wrap180(before.track - after.track);
     tr.offPitch = before.pitch - after.pitch;
     tr.offBank = before.bank - after.bank;
   }
@@ -583,6 +736,13 @@ export class Motion {
       tr.typecode = f.typecode;
       tr.cls = aircraftClass(f.icon, f.typecode);
     }
+    tr.fr24Ms = t;
+    if (!first && t < tr.reportMs) {
+      // older than measured state already taken in: only its samples and route are news
+      this.selectField(tr, f);
+      if (mergeMixed(tr, f, t, true) !== null) this.refresh(tr);
+      return;
+    }
     tr.reportMs = t;
     tr.alt = Number.isFinite(f.alt) ? f.alt : 0;
     tr.speedKt = Number.isFinite(f.speed) ? Math.max(0, f.speed) : 0;
@@ -592,7 +752,7 @@ export class Motion {
     tr.lon0 = Number.isFinite(f.lon) ? wrapLon(f.lon) : 0;
 
     this.selectField(tr, f);
-    const reportedOnly = mergeSamples(tr, f);
+    const reportedOnly = tr.mixed ? mergeMixed(tr, f, t, false)! : mergeSamples(tr, f);
 
     // --- acceleration (kt/s): across reports and across the buffer
     const reportAccel =
@@ -648,15 +808,101 @@ export class Motion {
       }
     }
 
+    this.measuredRates(tr, t);
     tr.phase = decidePhase(tr, prevPhase);
     computeTangents(tr, reportedOnly);
     this.predict(tr);
+    this.measuredAttitude(tr);
+  }
+
+  /** Re-derives the extrapolation after samples or estimates changed without a newer report. */
+  private refresh(tr: Track): void {
+    computeTangents(tr, tr.ts[tr.n - 1] === tr.reportMs);
+    this.predict(tr);
+    this.measuredAttitude(tr);
+  }
+
+  /** Takes in a measured state; a newer position also becomes the track's latest report. */
+  private applyMeasured(tr: Track, m: Measured, newPosition: boolean): void {
+    tr.meas = m;
+    tr.measMs = Math.max(tr.measMs, m.seenMs);
+    const prevPhase = tr.phase;
+    if (newPosition) {
+      const t = m.positionMs!;
+      tr.measPosMs = t;
+      const inserted = mergeMeasured(tr, t, m.lat!, m.lon!, m.mlat ? SRC_MLAT : SRC_ADSB);
+      if (inserted && t > tr.reportMs) {
+        const dtReport = (t - tr.reportMs) / 1000;
+        const prevSpeed = tr.speedKt;
+        tr.reportMs = t;
+        tr.lat0 = clamp(m.lat!, -90, 90);
+        tr.lon0 = wrapLon(m.lon!);
+        tr.onGround = !!m.onGround;
+        // Flightradar24 reports 0 ft on the ground too
+        if (tr.onGround) tr.alt = 0;
+        else if (Number.isFinite(m.altBaro)) tr.alt = m.altBaro!;
+        if (Number.isFinite(m.gs)) tr.speedKt = Math.max(0, m.gs!);
+        if (Number.isFinite(m.track)) tr.trackDeg = wrap360(m.track!);
+        this.selectField(tr, null);
+        if (dtReport >= MIN_ACCEL_DT_S && dtReport <= MAX_ACCEL_DT_S) {
+          const accel = (tr.speedKt - prevSpeed) / dtReport;
+          tr.accel = clamp(tr.accel + SMOOTHING * (accel - tr.accel), -MAX_ACCEL_KTS, MAX_ACCEL_KTS);
+        }
+      }
+    }
+    this.measuredRates(tr, tr.reportMs);
+    tr.phase = decidePhase(tr, prevPhase);
+    this.refresh(tr);
+  }
+
+  /** Measured turn and vertical rates, airspeed, crab and selected heading replace the estimates while fresh at `t`. */
+  private measuredRates(tr: Track, t: number): void {
+    const m = tr.meas;
+    if (!m) return;
+    const has = (x: number | undefined): x is number => typeof x === "number" && Number.isFinite(x);
+    const track = has(m.track) ? m.track : tr.trackDeg;
+    tr.crab = has(m.trueHeading) && !tr.onGround ? clamp(wrap180(m.trueHeading - track), -MAX_CRAB, MAX_CRAB) : 0;
+    tr.tasMs = has(m.tas) && m.tas > 0 ? m.tas * KNOTS_TO_MS : 0;
+    tr.navTrack = NaN;
+    if (!measFresh(tr, t) || tr.onGround) return;
+    let turn = NaN;
+    if (has(m.trackRate)) turn = m.trackRate;
+    else if (has(m.roll) && tr.speedKt > 60) {
+      // a coordinated turn: rate = g tan(bank) / speed
+      turn = (GRAVITY_MS2 * Math.tan(clamp(m.roll, -60, 60) * DEG)) / (tr.speedKt * KNOTS_TO_MS) / DEG;
+    }
+    if (Number.isFinite(turn)) tr.turnRate = clamp(turn, -MAX_TURN_DEG_S, MAX_TURN_DEG_S);
+    const vr = has(m.baroRate) ? m.baroRate : m.geomRate;
+    if (has(vr)) {
+      tr.vrate = clamp(vr, -MAX_VRATE_FPM, MAX_VRATE_FPM);
+      tr.vrRefMs = t;
+      tr.vrRefAlt = tr.alt;
+      tr.vrRefGround = false;
+    }
+    // the selected heading steers only when the autopilot isn't following a route (LNAV);
+    // it is magnetic, so it needs the variation the two reported headings give
+    const lnav = m.navModes?.some((mode) => mode.toLowerCase() === "lnav") ?? false;
+    if (has(m.navHeading) && has(m.trueHeading) && has(m.magHeading) && !lnav) {
+      const variation = wrap180(m.trueHeading - m.magHeading);
+      tr.navTrack = wrap360(m.navHeading + variation - tr.crab);
+    }
+  }
+
+  /** The measured bank as an offset to the model's own at the time it was reported. */
+  private measuredAttitude(tr: Track): void {
+    tr.rollBias = 0;
+    const roll = tr.meas?.roll;
+    if (typeof roll !== "number" || !Number.isFinite(roll) || tr.onGround) return;
+    const raw = this.evaluate(tr, tr.measMs, scratchC);
+    if (!raw.ground) tr.rollBias = clamp(roll, -MAX_BANK, MAX_BANK) - raw.bank;
   }
 
   /** Destination within 40 km, else origin within 40 km, else the nearest within 15 km, else the previous one while within 60 km. */
-  private selectField(tr: Track, f: LiveFlight): void {
-    tr.originAp = (f.origin && this.byIata.get(f.origin)) || null;
-    tr.destAp = (f.destination && this.byIata.get(f.destination)) || null;
+  private selectField(tr: Track, f: LiveFlight | null): void {
+    if (f) {
+      tr.originAp = (f.origin && this.byIata.get(f.origin)) || null;
+      tr.destAp = (f.destination && this.byIata.get(f.destination)) || null;
+    }
     const lat = tr.lat0;
     const lon = tr.lon0;
     const within = (ap: Airport | null, range: number) =>
@@ -732,6 +978,21 @@ export class Motion {
     }
     profile(tr, TURN_HORIZON_S);
     tr.sTurnMax = profS;
+
+    // measured autopilot targets: a turn onto the selected heading stops there,
+    // and a climb or descent levels off at the selected altitude
+    tr.turnEndS = TURN_HORIZON_S;
+    if (Number.isFinite(tr.navTrack) && tr.kappa !== 0 && tr.v0 > HEADING_MIN_SPEED_MS && !GROUND.has(tr.phase)) {
+      const togo = wrap180(tr.navTrack - tr.h0 / DEG);
+      if (Math.sign(togo) === Math.sign(tr.kappa) || Math.abs(togo) < 1) {
+        const s = Math.abs((togo * DEG) / tr.kappa);
+        if (s < tr.sTurnMax) {
+          tr.sTurnMax = s;
+          tr.turnEndS = s / tr.v0;
+        }
+      }
+    }
+    tr.capAlt = captureAltitude(tr);
   }
 
   /** The model at time T (server ms), without blending, into `out`. */
@@ -770,8 +1031,14 @@ export class Motion {
       vx = v * Math.sin(h);
       vy = v * Math.cos(h);
       pathHeading = h;
-      turnRad = dt < TURN_HORIZON_S ? k * v : 0;
-      bankFade = dt <= BANK_FADE_START_S ? 1 : Math.max(0, (TURN_HORIZON_S - dt) / (TURN_HORIZON_S - BANK_FADE_START_S));
+      if (tr.turnEndS < TURN_HORIZON_S) {
+        // rolling out onto the selected heading
+        turnRad = dt < tr.turnEndS ? k * v : 0;
+        bankFade = smoothstep((tr.turnEndS - dt) / ROLL_OUT_S);
+      } else {
+        turnRad = dt < TURN_HORIZON_S ? k * v : 0;
+        bankFade = dt <= BANK_FADE_START_S ? 1 : Math.max(0, (TURN_HORIZON_S - dt) / (TURN_HORIZON_S - BANK_FADE_START_S));
+      }
     } else if (T <= tr.ts[0]) {
       const dt = Math.max((T - tr.ts[0]) / 1000, -BACKWARD_LIMIT_S);
       x = tr.xs[0] + tr.mx[0] * dt;
@@ -804,10 +1071,13 @@ export class Motion {
     out.lon = wrapLon(tr.refLon + x / (M_PER_DEG * cosMid));
     const speed = Math.hypot(vx, vy);
     out.speedMs = speed;
-    out.heading =
+    out.track =
       tr.phase === "parked"
         ? tr.trackDeg
         : wrap360((speed > HEADING_MIN_SPEED_MS ? Math.atan2(vx, vy) : pathHeading) / DEG);
+    // measured values count while fresh (the nose's crab, the bank, the airspeed), then ease out
+    const mw = measWeight(tr, T);
+    out.heading = mw > 0 ? wrap360(out.track + tr.crab * mw) : out.track;
 
     // --- vertical, phase and attitude
     let phase = tr.phase;
@@ -848,17 +1118,37 @@ export class Motion {
         out.pitch = tr.touchdownPitch * (1 - smoothstep((T - td) / (TOUCHDOWN_EASE_S * 1000)));
       } else {
         const dtR = (T - tr.reportMs) / 1000;
-        const alt = tr.alt + (tr.vrate * verticalIntegral(dtR)) / 60;
+        let climb = (tr.vrate * verticalIntegral(dtR)) / 60;
+        let vsWeight = verticalWeight(dtR);
+        const cap = tr.capAlt;
+        if (cap === cap) {
+          // altitude capture: ease onto the selected altitude (C1: the rate goes smoothly to 0)
+          const d = cap - tr.alt;
+          const band = clamp(Math.abs(tr.vrate) * CAPTURE_FT_PER_FPM, MIN_CAPTURE_FT, MAX_CAPTURE_FT);
+          const kk = Math.min(1, band / Math.abs(d));
+          const x = climb / d;
+          if (x >= 1 + kk) {
+            climb = d;
+            vsWeight = 0;
+          } else if (x > 1 - kk) {
+            const u = x - (1 - kk);
+            climb = d * (x - (u * u) / (4 * kk));
+            vsWeight *= 1 - u / (2 * kk);
+          }
+        }
+        const alt = tr.alt + climb;
         out.ground = false;
         out.altMsl = clamp(alt, floor, MAX_ALT_FT);
-        out.vsFpm = alt === out.altMsl ? tr.vrate * verticalWeight(dtR) : 0;
+        out.vsFpm = alt === out.altMsl ? tr.vrate * vsWeight : 0;
         if (field) {
           out.agl = out.altMsl - tr.fieldElev;
           if (phase === "approach" && out.agl < FLARE_MAX_AGL_FT) phase = "flare";
         }
-        out.pitch = airPitch(out.vsFpm, speed, phase, out.agl);
+        // the flight-path angle is through the air: true airspeed when measured
+        const airSpeed = mw > 0 && tr.tasMs > 0 ? speed + (tr.tasMs - speed) * mw : speed;
+        out.pitch = airPitch(out.vsFpm, airSpeed, phase, out.agl);
         const bank = Math.atan2(speed * turnRad, GRAVITY_MS2) / DEG;
-        out.bank = clamp(bank * bankFade, -MAX_BANK, MAX_BANK);
+        out.bank = clamp(bank * bankFade + tr.rollBias * mw, -MAX_BANK, MAX_BANK);
       }
     }
     out.phase = phase;
@@ -907,6 +1197,23 @@ function gearAt(tr: Track, nowMs: number): number {
   if (t >= 1) return tr.gearTarget;
   if (t <= 0) return tr.gearFrom;
   return tr.gearFrom + (tr.gearTarget - tr.gearFrom) * smoothstep(t);
+}
+
+/** The selected altitude a climb or descent is heading for, from fresh measured data; NaN if none. */
+function captureAltitude(tr: Track): number {
+  const m = tr.meas;
+  if (!m || !measFresh(tr, tr.reportMs) || GROUND.has(tr.phase) || tr.phase === "approach" || tr.phase === "flare")
+    return NaN;
+  if (Math.abs(tr.vrate) < 100) return NaN;
+  let best = NaN;
+  for (const c of [m.navAltitudeMcp, m.navAltitudeFms]) {
+    if (typeof c !== "number" || !Number.isFinite(c) || c <= 0) continue;
+    const d = c - tr.alt;
+    // only a target ahead of the climb or descent; one behind it is no level-off
+    if (d * tr.vrate < 0 || Math.abs(d) < 1) continue;
+    if (!(Math.abs(d) >= Math.abs(best - tr.alt))) best = c;
+  }
+  return best;
 }
 
 /** Feet of field elevation to remove at a point: the track's field, else the nearer of origin and destination. */
@@ -988,6 +1295,150 @@ function mergeSamples(tr: Track, f: LiveFlight): boolean {
     tr.ys[i] = (lats[i] - tr.refLat) * M_PER_DEG;
   }
   return !buffered;
+}
+
+/** Distance (km) a sample may plausibly be from another `gapS` seconds away, at the track's speed. */
+const plausibleKm = (tr: Track, gapS: number) => (Math.max(tr.speedKt, 250) * 2 * KNOTS_TO_MS * Math.abs(gapS)) / 1000 + 0.5;
+
+/** Starts the per-sample sources when measured samples first join a track: all so far are Flightradar24's. */
+function startMixing(tr: Track): void {
+  if (tr.mixed) return;
+  tr.src.length = 0;
+  for (let i = 0; i < tr.n; i++) tr.src.push(SRC_FR24);
+  tr.mixed = true;
+}
+
+/**
+ * Puts a sample into a mixed track in time order. Samples within a second of
+ * it describe the same moment: the better source wins (ADS-B over
+ * Flightradar24 over MLAT), and of equals the newer arrival. Returns whether
+ * it went in.
+ */
+function insertSample(tr: Track, t: number, lat: number, lon: number, src: number): boolean {
+  const { ts, lats, lons } = tr;
+  for (let j = 0; j < ts.length; j++) if (Math.abs(ts[j] - t) < COINCIDENT_MS && tr.src[j] > src) return false;
+  for (let j = ts.length - 1; j >= 0; j--) {
+    if (Math.abs(ts[j] - t) < COINCIDENT_MS) {
+      ts.splice(j, 1);
+      lats.splice(j, 1);
+      lons.splice(j, 1);
+      tr.src.splice(j, 1);
+    }
+  }
+  let i = ts.length;
+  while (i > 0 && ts[i - 1] > t) i--;
+  ts.splice(i, 0, t);
+  lats.splice(i, 0, lat);
+  lons.splice(i, 0, lon);
+  tr.src.splice(i, 0, src);
+  return true;
+}
+
+/** Index of the sample nearest in time to `t`, or -1. */
+function nearestSample(tr: Track, t: number): number {
+  let best = -1;
+  for (let j = 0; j < tr.ts.length; j++) if (best < 0 || Math.abs(tr.ts[j] - t) < Math.abs(tr.ts[best] - t)) best = j;
+  return best;
+}
+
+/** Drops all samples (a jump in the data: they would poison the spline). */
+function clearSamples(tr: Track): void {
+  tr.ts.length = tr.lats.length = tr.lons.length = tr.src.length = 0;
+}
+
+/** Window trim, sample count, source bookkeeping and the local frame, after a mixed merge. */
+function finishSamples(tr: Track): void {
+  const { ts, lats, lons } = tr;
+  const newest = ts[ts.length - 1];
+  let start = 0;
+  while (start < ts.length - 1 && ts[start] < newest - SAMPLE_WINDOW_MS) start++;
+  if (start) {
+    ts.splice(0, start);
+    lats.splice(0, start);
+    lons.splice(0, start);
+    tr.src.splice(0, start);
+  }
+  const n = (tr.n = ts.length);
+  tr.mixed = tr.src.some((s) => s !== SRC_FR24);
+  tr.refLat = lats[n - 1];
+  tr.refLon = lons[n - 1];
+  const cosRef = Math.max(Math.cos(tr.refLat * DEG), 1e-3);
+  tr.xs.length = tr.ys.length = n;
+  for (let i = 0; i < n; i++) {
+    tr.xs[i] = wrap180(lons[i] - tr.refLon) * M_PER_DEG * cosRef;
+    tr.ys[i] = (lats[i] - tr.refLat) * M_PER_DEG;
+  }
+}
+
+/**
+ * `mergeSamples` for a track that also has measured samples: this report's
+ * point and buffer replace Flightradar24's own samples from shortly before it
+ * on, and interleave with the measured ones by time. Returns whether the
+ * newest sample is the report point itself. A report that jumps away from
+ * the samples starts them over, unless it is `older` than the measured state
+ * (which then wins): it is dropped, and the result is null.
+ */
+function mergeMixed(tr: Track, f: LiveFlight, t: number, older: boolean): boolean | null {
+  startMixing(tr);
+  const lat0 = Number.isFinite(f.lat) ? clamp(f.lat, -90, 90) : 0;
+  const lon0 = Number.isFinite(f.lon) ? wrapLon(f.lon) : 0;
+  const { ts, lats, lons, src } = tr;
+  if (older) {
+    const near = nearestSample(tr, t);
+    if (near >= 0 && distanceKm(lats[near], lons[near], lat0, lon0) > Math.min(plausibleKm(tr, (t - ts[near]) / 1000), SNAP_DISTANCE_M / 1000))
+      return null;
+  }
+  let kept = 0;
+  for (let i = 0; i < ts.length; i++) {
+    if (src[i] === SRC_FR24 && ts[i] >= t - MERGE_EPSILON_MS) continue;
+    ts[kept] = ts[i];
+    lats[kept] = lats[i];
+    lons[kept] = lons[i];
+    src[kept] = src[i];
+    kept++;
+  }
+  ts.length = lats.length = lons.length = src.length = kept;
+  const near = nearestSample(tr, t);
+  if (near >= 0 && distanceKm(lats[near], lons[near], lat0, lon0) > Math.min(plausibleKm(tr, (t - ts[near]) / 1000), SNAP_DISTANCE_M / 1000))
+    clearSamples(tr);
+  insertSample(tr, t, lat0, lon0, SRC_FR24);
+  let last = t;
+  const positions = f.positions;
+  if (positions) {
+    for (let i = 0; i < positions.length; i++) {
+      const [dLat, dLon, dMs] = positions[i];
+      const time = t + dMs;
+      const lat = lat0 + dLat * BUFFER_SCALE;
+      const lon = lon0 + dLon * BUFFER_SCALE;
+      if (!(time - last >= MIN_SAMPLE_GAP_MS) || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      last = time;
+      insertSample(tr, time, lat, lon, SRC_FR24);
+    }
+  }
+  finishSamples(tr);
+  return tr.ts[tr.n - 1] === t;
+}
+
+/**
+ * A measured position joins the samples in time order. One that jumps away
+ * from them starts them over if it is the newest data, and is dropped if not.
+ * Returns whether it went in.
+ */
+function mergeMeasured(tr: Track, t: number, lat: number, lon: number, src: number): boolean {
+  const near = nearestSample(tr, t);
+  if (
+    near >= 0 &&
+    distanceKm(tr.lats[near], tr.lons[near], lat, lon) >
+      Math.min(plausibleKm(tr, (t - tr.ts[near]) / 1000), SNAP_DISTANCE_M / 1000)
+  ) {
+    if (t <= tr.reportMs) return false;
+    startMixing(tr);
+    clearSamples(tr);
+  }
+  startMixing(tr);
+  const inserted = insertSample(tr, t, clamp(lat, -90, 90), wrapLon(lon), src);
+  finishSamples(tr);
+  return inserted;
 }
 
 /**

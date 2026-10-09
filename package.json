@@ -1,6 +1,6 @@
 {
   "name": "rustradar",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "",
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
+    "bump": "node scripts/version.mjs",
     "build:aircraft": "node scripts/aircraft/build.mjs"
   },
   "license": "MIT",

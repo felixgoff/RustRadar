@@ -6,6 +6,7 @@ mod opensky;
 mod radar;
 mod reference;
 mod session;
+mod updater;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -536,6 +537,7 @@ pub fn run() {
     let fr24 = Fr24::new().expect("failed to build http client");
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             fr24: RwLock::new(Arc::new(fr24)),
             follow: Mutex::new(None),
@@ -546,6 +548,8 @@ pub fn run() {
             opensky: tokio::sync::Mutex::new(opensky::Cache::default()),
         })
         .setup(|app| {
+            // the main window starts hidden: update first, then open it
+            tauri::async_runtime::spawn(updater::run(app.handle().clone()));
             // log in with credentials from the environment or the fr24 config
             // file, if any; until then (or without them) requests are anonymous
             let handle = app.handle().clone();

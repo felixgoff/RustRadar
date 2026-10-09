@@ -62,7 +62,6 @@
     cosAngle,
     effectiveExaggeration,
     elevation,
-    extrapolate,
     metersPerPixel,
     SELECTED_COLOR,
     unwrapLongitude,
@@ -71,6 +70,7 @@
     type Basemap,
   } from "./geo";
   import { MODEL_KINDS, MODEL_SIZE, modelFor, models, sizeOf, type ModelKind } from "./models";
+  import { motion, type Pose } from "./motion";
 
   interface Props {
     flights: LiveFlight[];
@@ -171,6 +171,10 @@
   const FLAT_PITCH = 5;
   /** From this zoom the detailed meshes are worth their triangles. */
   const CLOSE_ZOOM = 11;
+  /** Model depth from which landing gear is drawn (about zoom 8.5). */
+  const GEAR_DEPTH = 0.8;
+  /** Struts and tyres in one grey: light enough to read against the night map. */
+  const GEAR_COLOR: [number, number, number] = [178, 182, 190];
   // White aircraft have to read as white against a dark map, so most of the
   // light is ambient and the directional part only models the airframe.
   const MESH_MATERIAL = { ambient: 0.72, diffuse: 0.42, shininess: 48, specular: [255, 236, 200] };
@@ -839,13 +843,33 @@
     a[2] + (b[2] - a[2]) * t,
   ];
 
-  function positionOf(f: LiveFlight, now: number, ex: number): [number, number, number] {
-    const [lon, lat] = extrapolate(f, now);
-    return [lon, lat, elevation(f.alt, ex)];
+  const at = (pose: Pose, ex: number): [number, number, number] => [pose.lon, pose.lat, elevation(pose.altFt, ex)];
+
+  /**
+   * deck.gl's `[pitch, yaw, roll]` turns the mesh about its own y, z and x axes.
+   * The models put the nose on +y and the right wing on +x, so deck's "pitch"
+   * is the aircraft's bank and its "roll" the aircraft's pitch. Both act in the
+   * model's own frame, before the yaw, so their signs hold on the globe too.
+   */
+  const orientationOf = (pose: Pose, yawOffset: number): [number, number, number] => [
+    pose.bank,
+    yawOffset - pose.heading,
+    pose.pitch,
+  ];
+
+  /**
+   * Where the mesh's up axis points after `orientationOf`: the third column of
+   * deck.gl's rotation (`@deck.gl/mesh-layers` utils/matrix.ts). Retracting the
+   * gear scales it about its attach plane, whose offset has to follow the tilt.
+   */
+  function upAxis([p, y, r]: [number, number, number]): [number, number, number] {
+    const [sp, cp, sy, cy, sr, cr] = [p, p, y, y, r, r].map((a, i) => (i % 2 ? Math.cos : Math.sin)(a * DEGREES));
+    return [sy * sr + cy * sp * cr, -cy * sr + sy * sp * cr, cp * cr];
   }
 
   function buildLayers(): Layer[] {
-    const now = Date.now();
+    // the motion model's clock follows the feed's, not this machine's
+    const now = motion.now();
     const { longitude: cLon, latitude: cLat, zoom, bearing, pitch } = view;
     const flat = zoom > FLAT_ABOVE_ZOOM;
     const ex = effectiveExaggeration(exaggeration, zoom);
@@ -879,6 +903,7 @@
       real: AircraftModel | null;
       kind: ModelKind;
       flights: LiveFlight[];
+      poses: Pose[];
       positions: [number, number, number][];
       liveries: Livery[];
       index: Map<number, number>;
@@ -888,6 +913,7 @@
     const lockedOn = follow ? selected?.id : undefined;
     const groups = new Map<string, Group>();
     const icons: LiveFlight[] = [];
+    const iconPoses: Pose[] = [];
     const iconPositions: [number, number, number][] = [];
     const iconNames: string[] = [];
     const iconSizes: number[] = [];
@@ -896,10 +922,12 @@
     for (const f of flights) {
       if (f.id !== lockedOn && cosAngle(f.lon, f.lat, cLon, cLat) <= minCos) continue;
       const real = aircraftModels.forFlight(f.typecode, f.icon);
+      const pose = motion.pose(f, now);
       if (useIcons && real) {
         iconIndex.set(f.id, icons.length);
         icons.push(f);
-        iconPositions.push(positionOf(f, now, ex));
+        iconPoses.push(pose);
+        iconPositions.push(at(pose, ex));
         iconNames.push(real.name);
         iconSizes.push(real.size);
         continue;
@@ -908,10 +936,11 @@
       const [kind] = modelFor(f.icon);
       const id = real ? `t-${real.name}` : `k-${kind}`;
       let group = groups.get(id);
-      if (!group) groups.set(id, (group = { real, kind, flights: [], positions: [], liveries: [], index: new Map() }));
+      if (!group) groups.set(id, (group = { real, kind, flights: [], poses: [], positions: [], liveries: [], index: new Map() }));
       group.index.set(f.id, group.flights.length);
       group.flights.push(f);
-      group.positions.push(positionOf(f, now, ex));
+      group.poses.push(pose);
+      group.positions.push(at(pose, ex));
       if (liveryAmount > 0) group.liveries.push(liveries.forFlight(f));
     }
 
@@ -940,10 +969,16 @@
       layers.push(labelTileLayer(tileUrl), textLayer(withoutMarked(labelsInView(cLon, cLat, zoom), marked)));
     }
 
-    if (selected) {
-      const pos = positionOf(selected, now, ex);
+    const selectedPose = selected ? motion.pose(selected, now) : null;
+    if (selected && selectedPose) {
+      const pos = at(selectedPose, ex);
       const trail = (details?.trail ?? []).filter((p) => p.latitude || p.longitude);
-      const path = trail.map((p) => [p.longitude, p.latitude, elevation(p.altitude, ex)]);
+      // the same airport-relative heights as the aircraft, so the trail meets it
+      const path = trail.map((p) => [
+        p.longitude,
+        p.latitude,
+        elevation(motion.drawAltitude(selected.id, p.altitude, p.latitude, p.longitude), ex),
+      ]);
       path.push(pos);
       const colors = trail.map((p) => [...altitudeColor(p.altitude), 255]);
       colors.push([...altitudeColor(selected.alt), 255]);
@@ -987,7 +1022,7 @@
       const shared = {
         data: group.flights,
         getPosition: (_: LiveFlight, { index }: { index: number }) => group.positions[index],
-        getOrientation: (f: LiveFlight): [number, number, number] => [0, yawOffset - f.track, 0],
+        getOrientation: (_: LiveFlight, { index }: { index: number }) => orientationOf(group.poses[index], yawOffset),
         getScale: (f: LiveFlight): [number, number, number] => {
           const s = (screenPx(metres ?? sizeOf(f.icon)) * mpp) / divisor;
           // flattened into a silhouette when zoomed out
@@ -1000,7 +1035,45 @@
         highlightColor: [252, 180, 66, 150] as [number, number, number, number],
         parameters: NO_CULL,
       };
-      const triggers = { getPosition: tick, getOrientation: yawOffset, getScale: [mpp, minPx, depth] };
+      const triggers = { getPosition: tick, getOrientation: [tick, yawOffset], getScale: [mpp, minPx, depth] };
+      const gear = group.real?.gear;
+      // gear only once the models have depth; a silhouette has nowhere to hang it
+      if (gear && depth >= GEAR_DEPTH) {
+        const down: number[] = [];
+        group.poses.forEach((pose, i) => pose.gear > 0 && down.push(i));
+        if (down.length) {
+          const flatten = Math.max(0.04, depth);
+          layers.push(
+            new SimpleMeshLayer<number>({
+              id: `gear-${id}`,
+              data: down,
+              mesh: gear.geometry,
+              getPosition: (i) => group.positions[i],
+              getOrientation: (i) => orientationOf(group.poses[i], yawOffset),
+              // retracted by squashing it up into the airframe about its attach plane
+              getScale: (i) => {
+                const s = (screenPx(metres!) * mpp) / divisor;
+                return [s, s, s * flatten * group.poses[i].gear];
+              },
+              getTranslation: (i) => {
+                const s = (screenPx(metres!) * mpp) / divisor;
+                const lift = gear.attachZ * (1 - group.poses[i].gear) * s * flatten;
+                const [x, y, z] = upAxis(orientationOf(group.poses[i], yawOffset));
+                return [x * lift, y * lift, z * lift];
+              },
+              getColor: GEAR_COLOR,
+              material,
+              parameters: NO_CULL,
+              updateTriggers: {
+                getPosition: tick,
+                getOrientation: [tick, yawOffset],
+                getScale: [tick, mpp, minPx, depth],
+                getTranslation: [tick, mpp, minPx, depth, yawOffset],
+              },
+            }),
+          );
+        }
+      }
       if (liveryAmount === 0) {
         layers.push(
           new SimpleMeshLayer<LiveFlight>({
@@ -1039,7 +1112,7 @@
           getSize: (_, { index }) => screenPx(iconSizes[index]) * 1.06,
           // the icons point north; `getAngle` turns anticlockwise on screen,
           // and a rotated map has already turned the world underneath them
-          getAngle: (f) => bearing - f.track,
+          getAngle: (_, { index }) => bearing - iconPoses[index].heading,
           getColor: (f) => (f.id === selectedId ? SELECTED_COLOR : AIRCRAFT_COLOR),
           sizeUnits: "pixels",
           billboard: true,
@@ -1058,11 +1131,11 @@
     }
 
     // ring the selection, drawn over neighbouring aircraft but not through the globe
-    if (selected && cosAngle(selected.lon, selected.lat, cLon, cLat) > 0) {
+    if (selected && selectedPose && cosAngle(selectedPose.lon, selectedPose.lat, cLon, cLat) > 0) {
       layers.push(
         new ScatterplotLayer({
           id: "selection-ring",
-          data: [positionOf(selected, now, ex)],
+          data: [at(selectedPose, ex)],
           getPosition: (d) => d,
           getRadius: screenPx(sizeOf(selected.icon)) * 0.6 + 4,
           radiusUnits: "pixels",
@@ -1095,8 +1168,10 @@
    * leaves the aim stale for every frame of a zoom, and the aircraft jumps.
    */
   function lockedView(v: ViewState, flight: LiveFlight): ViewState {
-    const [lon, lat] = extrapolate(flight, Date.now());
-    const altitude = elevation(flight.alt, effectiveExaggeration(exaggeration, v.zoom));
+    // the same pose the model is drawn at, or the camera shakes against it
+    const pose = motion.pose(flight, motion.now());
+    const [lon, lat] = [pose.lon, pose.lat];
+    const altitude = elevation(pose.altFt, effectiveExaggeration(exaggeration, v.zoom));
     // Close in, the projection is flat and can raise the camera's target to the
     // aircraft's own height, which centres it at any tilt, bearing and zoom. A
     // ground point aimed along the bearing can't: the camera sits only a few

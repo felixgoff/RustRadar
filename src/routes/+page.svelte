@@ -32,6 +32,7 @@
   import TopFlights from "$lib/TopFlights.svelte";
   import { activeCount, loadPersisted, matcher, persist, serverCategories, type Filters } from "$lib/filters";
   import { cosAngle, viewArea } from "$lib/geo";
+  import { motion } from "$lib/motion";
   import { reference } from "$lib/reference.svelte";
   import { mergeTrail, routeFor } from "$lib/routes";
 
@@ -96,6 +97,11 @@
   $effect(() => persist($state.snapshot(settings), $state.snapshot(filters)));
 
   const flights = $derived(snapshot?.flights ?? []);
+
+  // field elevations, for landings, takeoffs and heights near airports
+  $effect(() => {
+    if (reference.ready) motion.setAirports(reference.airports);
+  });
   const byId = $derived(new Map(flights.map((f) => [f.id, f])));
   const filtered = $derived(flights.filter(matcher($state.snapshot(filters) as Filters)));
   const active = $derived(activeCount(filters));
@@ -209,6 +215,8 @@
     let limited = false;
     try {
       snapshot = await liveFlights(area, serverCategories($state.snapshot(filters) as Filters));
+      // aircraft are drawn on the feed's clock, so a wrong system clock can't misplace them
+      motion.syncClock(snapshot.serverTimeMs);
       regional = area !== null;
       lastUpdate = Date.now();
       feedError = null;

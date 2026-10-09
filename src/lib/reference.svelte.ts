@@ -1,5 +1,7 @@
-// Airlines and airports, loaded once from the backend's weekly cache.
-import { referenceData, type Airline, type Airport } from "./api";
+// Airlines and airports, loaded once from the backend's weekly cache, and
+// runways per airport as routes need them.
+import { SvelteMap } from "svelte/reactivity";
+import { airportRunways, isTauri, referenceData, type Airline, type Airport, type Runway } from "./api";
 
 class Reference {
   ready = $state(false);
@@ -31,6 +33,31 @@ class Reference {
         this.loading = null;
       });
     return this.loading;
+  }
+
+  /** Runways by ICAO code, filled in as they are asked for; `null` while unknown or unavailable. */
+  private runwaysByIcao = new SvelteMap<string, Runway[]>();
+  private runwaysAsked = new Set<string>();
+
+  /**
+   * The airport's runways, or `undefined` until they have loaded (they then
+   * arrive reactively, so this can be read inside `$derived`). An empty list
+   * means none are known.
+   */
+  runways(airport: Airport | undefined): Runway[] | undefined {
+    if (!airport) return undefined;
+    const code = airport.icao?.toUpperCase();
+    if (!code || !isTauri()) return [];
+    const known = this.runwaysByIcao.get(code);
+    if (known) return known;
+    if (!this.runwaysAsked.has(code)) {
+      this.runwaysAsked.add(code);
+      airportRunways([code])
+        .then((found) => this.runwaysByIcao.set(code, found[code] ?? []))
+        // offline, or the download failed: ask again later
+        .catch(() => setTimeout(() => this.runwaysAsked.delete(code), 60_000));
+    }
+    return undefined;
   }
 
   airline(icao: string | null | undefined): Airline | undefined {

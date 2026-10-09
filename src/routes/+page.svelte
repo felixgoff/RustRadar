@@ -165,7 +165,8 @@
 
   const route = $derived.by(() => {
     void reference.ready; // airports resolve once the reference data is in
-    return selected ? routeFor(selected, shownDetails) : null;
+    // other traffic shows which runways are in use
+    return selected ? routeFor(selected, shownDetails, flights) : null;
   });
 
   // fetch the track once the aircraft is known, then now and then while it is open

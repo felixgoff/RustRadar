@@ -1,49 +1,11 @@
-// Route geometry for the selected flight, and AIRAC cycle arithmetic.
+// Routes for the selected flight: the filed flight plan when Flightradar24
+// shares it, otherwise an estimate shaped by `flightpath.ts`; and AIRAC cycle
+// arithmetic.
 import type { Airport, FlightDetails, FlightPlan, LiveFlight, OpenSkyPoint, TrailPoint } from "./api";
+import { distanceKm, estimateRoute, type LonLat, type PathPoint, type RunwayGuess } from "./flightpath";
 import { reference } from "./reference.svelte";
 
-export type LonLat = [number, number];
-
-const DEG = Math.PI / 180;
-
-/** Points along the great circle from `a` to `b`, about every `stepKm`. */
-export function greatCircle(a: LonLat, b: LonLat, stepKm = 80): LonLat[] {
-  const [lon1, lat1] = [a[0] * DEG, a[1] * DEG];
-  const [lon2, lat2] = [b[0] * DEG, b[1] * DEG];
-  const d =
-    2 *
-    Math.asin(
-      Math.sqrt(
-        Math.sin((lat2 - lat1) / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin((lon2 - lon1) / 2) ** 2,
-      ),
-    );
-  if (d < 1e-9) return [a, b];
-  const n = Math.min(256, Math.max(2, Math.ceil((d * 6371) / stepKm)));
-  const points: LonLat[] = [];
-  let previousLon = a[0];
-  for (let i = 0; i <= n; i++) {
-    const f = i / n;
-    const A = Math.sin((1 - f) * d) / Math.sin(d);
-    const B = Math.sin(f * d) / Math.sin(d);
-    const x = A * Math.cos(lat1) * Math.cos(lon1) + B * Math.cos(lat2) * Math.cos(lon2);
-    const y = A * Math.cos(lat1) * Math.sin(lon1) + B * Math.cos(lat2) * Math.sin(lon2);
-    const z = A * Math.sin(lat1) + B * Math.sin(lat2);
-    let lon = Math.atan2(y, x) / DEG;
-    // keep the path continuous across the antimeridian
-    while (lon - previousLon > 180) lon -= 360;
-    while (lon - previousLon < -180) lon += 360;
-    previousLon = lon;
-    points.push([lon, Math.atan2(z, Math.hypot(x, y)) / DEG]);
-  }
-  return points;
-}
-
-/** Great-circle distance in km. */
-export function distanceKm(a: LonLat, b: LonLat): number {
-  const [lon1, lat1, lon2, lat2] = [a[0] * DEG, a[1] * DEG, b[0] * DEG, b[1] * DEG];
-  const h = Math.sin((lat2 - lat1) / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin((lon2 - lon1) / 2) ** 2;
-  return 2 * 6371 * Math.asin(Math.sqrt(h));
-}
+export { distanceKm, greatCircle, trimToPosition, type LonLat, type PathPoint, type RunwayGuess } from "./flightpath";
 
 /**
  * Flight plan waypoints arrive as integers of undocumented scale (the proto
@@ -102,17 +64,25 @@ export function mergeTrail(
 export interface Route {
   origin?: Airport;
   destination?: Airport;
-  /** `filed`: the subscriber flight plan; `estimated`: great circles only. */
+  /** `filed`: the subscriber flight plan; `estimated`: the app's own guess. */
   kind: "filed" | "estimated" | "none";
   /** The filed route, origin to destination. */
   filed: LonLat[];
-  /** Great circle from the origin to where the recorded track begins. */
-  before: LonLat[];
-  /** Great circle from the aircraft to its destination. */
-  ahead: LonLat[];
+  /** Estimated: from the take-off roll to where the recorded track begins, with heights (ft MSL). */
+  before: PathPoint[];
+  /** Estimated: from the aircraft to touchdown, with heights (ft MSL). */
+  ahead: PathPoint[];
+  /** The runway `before` departs from, when runways are known. */
+  departure: RunwayGuess | null;
+  /** The runway `ahead` lands on, when runways are known. */
+  arrival: RunwayGuess | null;
 }
 
-export function routeFor(flight: LiveFlight, details: FlightDetails | null): Route {
+/**
+ * The selected flight's route. `traffic` (the other flights on the globe) is
+ * read for which runways are in use at the two airports.
+ */
+export function routeFor(flight: LiveFlight, details: FlightDetails | null, traffic: readonly LiveFlight[] = []): Route {
   const schedule = details?.schedule;
   const plan = details?.flight_plan;
   const origin =
@@ -121,18 +91,26 @@ export function routeFor(flight: LiveFlight, details: FlightDetails | null): Rou
     reference.airportById(schedule?.diverted_id || schedule?.destination_id) ??
     reference.airport(flight.destination) ??
     reference.airport(plan?.destination);
-  const here: LonLat = [flight.lon, flight.lat];
 
   const filed = plan ? decodeWaypoints(plan, origin) : [];
-  if (filed.length > 1) return { origin, destination, kind: "filed", filed, before: [], ahead: [] };
-
+  if (filed.length > 1) {
+    return { origin, destination, kind: "filed", filed, before: [], ahead: [], departure: null, arrival: null };
+  }
   const trailStart = details?.trail.find((p) => p.latitude || p.longitude);
-  const start: LonLat = trailStart ? [trailStart.longitude, trailStart.latitude] : here;
-  const before =
-    origin && distanceKm([origin.lon, origin.lat], start) > 15 ? greatCircle([origin.lon, origin.lat], start) : [];
-  const ahead = destination && !flight.onGround ? greatCircle(here, [destination.lon, destination.lat]) : [];
-  const kind = origin || destination ? "estimated" : "none";
-  return { origin, destination, kind, filed: [], before, ahead };
+  return {
+    origin,
+    destination,
+    filed: [],
+    ...estimateRoute({
+      flight,
+      trailStart,
+      origin,
+      destination,
+      originRunways: origin ? (reference.runways(origin) ?? []) : [],
+      destinationRunways: destination ? (reference.runways(destination) ?? []) : [],
+      traffic,
+    }),
+  };
 }
 
 /** AIRAC cycles change every 28 days; cycle 2401 became effective on 2024-01-25. */

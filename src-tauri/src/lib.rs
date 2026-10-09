@@ -6,6 +6,7 @@ mod mrms;
 mod opensky;
 mod radar;
 mod reference;
+mod runways;
 mod session;
 mod updater;
 
@@ -42,6 +43,8 @@ struct AppState {
     follow: Mutex<Option<JoinHandle<()>>>,
     /// Airlines and airports, loaded once.
     reference: tokio::sync::Mutex<Option<Arc<reference::ReferenceData>>>,
+    /// Runways by airport, loaded once.
+    runways: tokio::sync::Mutex<Option<Arc<runways::RunwayData>>>,
     /// Logo-derived livery colours per IATA code, loaded from disk on first use.
     colors: tokio::sync::Mutex<Option<liveries::ColorCache>>,
     /// The newest volume from each 3D radar source, keyed by its name.
@@ -350,6 +353,38 @@ async fn reference_data(
     Ok(data)
 }
 
+/// The runways of the given airports (ICAO codes), from a disk cache of
+/// OurAirports' list refreshed weekly. Airports it doesn't know are left out.
+#[tauri::command]
+async fn airport_runways(
+    airports: Vec<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<HashMap<String, Vec<runways::Runway>>> {
+    let data = {
+        let mut slot = state.runways.lock().await;
+        match slot.as_ref() {
+            Some(data) => data.clone(),
+            None => {
+                let path = cache_file(&app, "runways.json")?;
+                let http = state.client().http().clone();
+                let data = Arc::new(runways::load(&http, &path).await?);
+                *slot = Some(data.clone());
+                data
+            }
+        }
+    };
+    Ok(airports
+        .into_iter()
+        .take(16)
+        .filter_map(|code| {
+            let code = code.trim().to_ascii_uppercase();
+            let list = data.airports.get(&code)?.clone();
+            Some((code, list))
+        })
+        .collect())
+}
+
 /// Arrivals or departures at an airport (IATA code), one page at a time.
 #[tauri::command]
 async fn airport_board(
@@ -585,6 +620,7 @@ pub fn run() {
             fr24: RwLock::new(Arc::new(fr24)),
             follow: Mutex::new(None),
             reference: tokio::sync::Mutex::new(None),
+            runways: tokio::sync::Mutex::new(None),
             colors: tokio::sync::Mutex::new(None),
             radar: tokio::sync::Mutex::new(HashMap::new()),
             radar_fetching: Mutex::new(HashSet::new()),
@@ -615,6 +651,7 @@ pub fn run() {
             top_flights,
             search,
             reference_data,
+            airport_runways,
             airport_board,
             aircraft_history,
             airline_colors,

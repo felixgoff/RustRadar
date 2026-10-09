@@ -55,7 +55,7 @@
   import { mergeMeshes, type PolygonData } from "./radar-mesh";
   import { loadRadarTile, loadVolume, radarCoverageKey, setRadarCoverage, type MeasuredVolume } from "./radar-pool";
   import { liveries, type Livery, type Part } from "./liveries";
-  import type { LonLat, Route } from "./routes";
+  import { distanceKm, trimToPosition, type LonLat, type PathPoint, type Route } from "./routes";
   import {
     AIRCRAFT_COLOR,
     altitudeColor,
@@ -731,19 +731,40 @@
     return layers;
   }
 
-  const dashed = new PathStyleExtension({ dash: true });
+  // dashes measured along the whole path, not per segment: the estimated
+  // routes are sampled every few kilometres, and per-segment dashes would
+  // squeeze into a solid line wherever the segments are short on screen
+  const dashed = new PathStyleExtension({ dash: true, highPrecisionDash: true });
   const DASHED = [dashed];
   const ROUTE_AHEAD: [number, number, number, number] = [252, 180, 66, 210];
   const ROUTE_BEFORE: [number, number, number, number] = [241, 238, 231, 110];
   const ROUTE_FILED: [number, number, number, number] = [241, 238, 231, 150];
 
-  /** A ground path that climbs or descends linearly between two heights. */
-  function ramp(points: LonLat[], fromZ: number, toZ: number): [number, number, number][] {
-    const n = Math.max(1, points.length - 1);
-    return points.map(([lon, lat], i) => [lon, lat, fromZ + ((toZ - fromZ) * i) / n]);
+  /** Route heights (ft MSL) as drawn: airport-relative like the aircraft and its trail, then exaggerated. */
+  function drawnRoute(points: readonly PathPoint[], id: number, ex: number): [number, number, number][] {
+    return points.map(([lon, lat, alt]) => [lon, lat, elevation(motion.drawAltitude(id, alt, lat, lon), ex)]);
   }
 
-  function routeLayers(r: Route, pos: [number, number, number], trailStartZ: number): Layer[] {
+  /** Over this distance the estimate ahead eases from the aircraft's drawn height into its own profile. */
+  const AHEAD_BLEND_M = 15_000;
+
+  /**
+   * The estimated path ahead, from the aircraft as drawn now: the route is
+   * worked out at each report, and the aircraft moves on along it between them.
+   */
+  function drawnAhead(ahead: readonly PathPoint[], pos: [number, number, number], id: number, ex: number) {
+    const path = drawnRoute(trimToPosition(ahead, [pos[0], pos[1]]), id, ex);
+    const dz = pos[2] - path[0][2];
+    let walked = 0;
+    for (let i = 1; i < path.length && walked < AHEAD_BLEND_M; i++) {
+      walked += distanceKm([path[i - 1][0], path[i - 1][1]], [path[i][0], path[i][1]]) * 1000;
+      path[i][2] = Math.max(0, path[i][2] + dz * Math.max(0, 1 - walked / AHEAD_BLEND_M));
+    }
+    path[0] = pos;
+    return path;
+  }
+
+  function routeLayers(r: Route, pos: [number, number, number], id: number, ex: number): Layer[] {
     const layers: Layer[] = [];
     if (r.filed.length > 1) {
       layers.push(
@@ -771,31 +792,28 @@
       layers.push(
         new PathLayer<{ path: [number, number, number][] }, PathStyleExtensionProps>({
           id: "route-before",
-          data: [{ path: ramp(r.before, 0, trailStartZ) }],
+          // ends at the trail's first point, at the same height
+          data: [{ path: drawnRoute(r.before, id, ex) }],
           getPath: (d) => d.path,
           getColor: ROUTE_BEFORE,
           getWidth: 1.5,
           widthUnits: "pixels",
           getDashArray: [3, 3],
-          dashJustified: true,
           extensions: DASHED,
           parameters: NO_CULL,
         }),
       );
     }
     if (r.ahead.length > 1) {
-      // from the aircraft as drawn now, descending to the destination
-      const ahead = [[pos[0], pos[1]] as LonLat, ...r.ahead.slice(1)];
       layers.push(
         new PathLayer<{ path: [number, number, number][] }, PathStyleExtensionProps>({
           id: "route-ahead",
-          data: [{ path: ramp(ahead, pos[2], 0) }],
+          data: [{ path: drawnAhead(r.ahead, pos, id, ex) }],
           getPath: (d) => d.path,
           getColor: ROUTE_AHEAD,
           getWidth: 2,
           widthUnits: "pixels",
           getDashArray: [4, 3],
-          dashJustified: true,
           extensions: DASHED,
           parameters: NO_CULL,
           updateTriggers: { getPath: tick },
@@ -1015,7 +1033,7 @@
           updateTriggers: { getPath: tick },
         }),
       );
-      if (route) layers.push(...routeLayers(route, pos, path.length > 1 ? path[0][2] : pos[2]));
+      if (route) layers.push(...routeLayers(route, pos, selected.id, ex));
     }
     if (airport) layers.push(...airportMarkers("focus-airport", [airport]));
 

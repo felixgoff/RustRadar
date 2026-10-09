@@ -417,10 +417,30 @@
             {day(airac.expires)}.
           </p>
         {:else}
+          {@const arrival = route?.arrival}
+          {@const dest = route?.destination ? route.destination.iata || route.destination.icao : "the destination"}
           <p class="explain">
-            The map shows the track flown so far and the great-circle path to the destination. That's an estimate:
-            the filed route follows airways and waypoints of AIRAC cycle {airac.ident}, and Flightradar24 shares flight
-            plans only with signed-in subscribers.
+            {#if route && route.ahead.length > 1}
+              {#if arrival}
+                The path ahead is an estimate: the great circle to {dest}, then a turn onto a straight final to runway
+                <span class="data">{arrival.runway}</span> down a 3° glide path.
+                {#if arrival.reason === "aligned"}
+                  The aircraft is lined up with that runway.
+                {:else if arrival.reason === "traffic"}
+                  Other aircraft are using that runway now.
+                {:else}
+                  The runway in use depends on the wind, which isn't known here, so it's a guess.
+                {/if}
+                Controllers vector arrivals, so the turns are a guess too.
+              {:else}
+                The path ahead is an estimate: the great circle to {dest}, descending at 3°. Its runways aren't known, so
+                the path ends at the airport.
+              {/if}
+            {:else}
+              The map shows the track flown so far.
+            {/if}
+            The filed route follows airways and waypoints of AIRAC cycle {airac.ident}; Flightradar24 shares flight plans
+            only with signed-in subscribers.
           </p>
           {#if !authenticated}
             <button class="button" onclick={onsignin}>Sign in to Flightradar24</button>
@@ -449,10 +469,32 @@
             <li><span class="swatch solid"></span><span>Filed route</span></li>
           {:else}
             {#if route && route.ahead.length > 1}
-              <li><span class="swatch ahead"></span><span>Great circle to the destination</span></li>
+              <li>
+                <span class="swatch ahead"></span>
+                <span>
+                  {#if route.arrival}
+                    Estimated path to runway <span class="data">{route.arrival.runway}</span>
+                  {:else}
+                    Estimated path to the airport
+                  {/if}
+                </span>
+              </li>
             {/if}
             {#if route && route.before.length > 1}
-              <li><span class="swatch before"></span><span>Departure to the first tracked position</span></li>
+              <li>
+                <span class="swatch before"></span>
+                <span>
+                  {#if route.departure}
+                    Estimated take-off from runway <span class="data">{route.departure.runway}</span> to the first
+                    tracked position
+                  {:else}
+                    Estimated departure to the first tracked position
+                  {/if}
+                </span>
+              </li>
+            {/if}
+            {#if route && (route.arrival || route.departure)}
+              <li class="credit"><small class="source">Runways from OurAirports</small></li>
             {/if}
           {/if}
         </ul>
@@ -957,6 +999,10 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
+  }
+  /* under the entries' text, past the swatches */
+  .legend .credit {
+    padding-left: calc(28px + var(--space-3));
   }
   .swatch {
     flex: none;

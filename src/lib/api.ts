@@ -282,6 +282,29 @@ export const search = (query: string) => invoke<FindEntry[]>("search", { query }
 
 export const referenceData = () => invoke<ReferenceData>("reference_data");
 
+/** One end of a runway, from OurAirports. */
+export interface RunwayEnd {
+  /** e.g. `22L` */
+  ident: string;
+  /** The physical end of the runway; the landing threshold may be displaced from it. */
+  lat: number;
+  lon: number;
+  elevationFt?: number | null;
+  /** Feet from the physical end to the landing threshold. */
+  displacedFt: number;
+}
+
+export interface Runway {
+  lengthFt?: number | null;
+  widthFt?: number | null;
+  surface: string;
+  ends: [RunwayEnd, RunwayEnd];
+}
+
+/** Runways of airports by ICAO code (OurAirports, cached weekly); unknown airports are left out. */
+export const airportRunways = (airports: string[]) =>
+  invoke<Record<string, Runway[]>>("airport_runways", { airports });
+
 export const airportBoard = (code: string, mode: BoardMode, page = 1) =>
   invoke<Board>("airport_board", { code, mode, page });
 

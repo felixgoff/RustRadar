@@ -90,10 +90,35 @@ struct LiveFlight {
     destination: String,
     /// Flightradar24's icon class, e.g. `A320`, `B744`, `EC` (helicopter)
     icon: String,
+    /// Positions after `lat`/`lon`, as `[Δlat, Δlon]` in 1e-5° and ms after
+    /// `timestamp_ms`, oldest first. Flightradar24 sends up to ~10 s of them so
+    /// motion can be played back rather than guessed.
+    positions: Vec<[i32; 3]>,
+    /// Feet per minute; only requested, so only present, when signed in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vspeed: Option<i32>,
+}
+
+/// Longest look-ahead a buffered position may have; anything else is corrupt
+/// (upstream occasionally sends an underflowed delta near 2^32).
+const MAX_BUFFER_MS: u32 = 60_000;
+
+/// The usable part of a position buffer: increasing times within range.
+fn buffered_positions(buffer: Option<&fr24::proto::common::PositionBuffer>) -> Vec<[i32; 3]> {
+    let mut last = 0;
+    let mut out = Vec::new();
+    for p in buffer.map(|b| b.recent_positions_list.as_slice()).unwrap_or_default() {
+        if p.delta_ms > last && p.delta_ms <= MAX_BUFFER_MS {
+            last = p.delta_ms;
+            out.push([p.delta_lat, p.delta_lon, p.delta_ms as i32]);
+        }
+    }
+    out
 }
 
 impl From<fr24::proto::common::Flight> for LiveFlight {
     fn from(f: fr24::proto::common::Flight) -> Self {
+        let positions = buffered_positions(f.position_buffer.as_ref());
         let extra = f.extra_info.unwrap_or_default();
         let route = extra.route.unwrap_or_default();
         Self {
@@ -114,6 +139,8 @@ impl From<fr24::proto::common::Flight> for LiveFlight {
             icon: Icon::try_from(f.icon)
                 .map(|i| i.as_str_name().to_owned())
                 .unwrap_or_default(),
+            positions,
+            vspeed: None,
         }
     }
 }
@@ -147,6 +174,11 @@ async fn live_flights(
     if let Some(services) = services.filter(|s| !s.is_empty()) {
         template.services = services;
     }
+    // vertical speed is a signed-in field; anonymous requests get four, all used
+    let signed_in = fr24.auth().is_some();
+    if signed_in {
+        template.fields.push(fr24::grpc::LiveFeedField::Vspeed);
+    }
     let world = fr24
         .live_feed_area(&template, area, WORLD_CONCURRENCY)
         .await;
@@ -163,7 +195,17 @@ async fn live_flights(
             .iter()
             .map(|(b, e)| format!("{:.0}..{:.0}: {e}", b.west, b.east))
             .collect(),
-        flights: world.flights.into_iter().map(LiveFlight::from).collect(),
+        flights: world
+            .flights
+            .into_iter()
+            .map(|f| {
+                let vspeed = f.extra_info.as_ref().map(|e| e.vspeed);
+                LiveFlight {
+                    vspeed: if signed_in { vspeed } else { None },
+                    ..LiveFlight::from(f)
+                }
+            })
+            .collect(),
         elapsed_ms: start.elapsed().as_millis() as u64,
         authenticated: fr24.auth().is_some(),
     })
@@ -597,6 +639,18 @@ mod tests {
             west,
             east,
         }
+    }
+
+    #[test]
+    fn buffered_positions_keep_only_sane_increasing_times() {
+        use fr24::proto::common::{PositionBuffer, RecentPosition};
+        let at = |delta_ms| RecentPosition { delta_lat: 1, delta_lon: 2, delta_ms };
+        let buffer = PositionBuffer {
+            recent_positions_list: vec![at(2000), at(1500), at(4000), at(4_294_961_250), at(6000)],
+        };
+        let kept: Vec<i32> = buffered_positions(Some(&buffer)).iter().map(|p| p[2]).collect();
+        assert_eq!(kept, [2000, 4000, 6000]);
+        assert!(buffered_positions(None).is_empty());
     }
 
     #[test]

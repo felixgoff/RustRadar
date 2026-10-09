@@ -21,6 +21,13 @@ export interface LiveFlight {
   destination: string;
   /** Flightradar24's icon class, e.g. `A320`, `B747`, `EC` (helicopter). */
   icon: string;
+  /**
+   * Positions after `lat`/`lon`: `[Δlat, Δlon]` in 1e-5° and ms after
+   * `timestampMs`, oldest first. Up to ~10 s of look-ahead for smooth playback.
+   */
+  positions?: [number, number, number][];
+  /** Feet per minute; only when signed in. */
+  vspeed?: number;
 }
 
 export interface LiveSnapshot {
@@ -170,6 +177,8 @@ export interface Airport {
   country: string;
   lat: number;
   lon: number;
+  /** Field elevation, feet, where known. */
+  alt?: number | null;
   size: number;
   /** IANA timezone name. */
   timezone: string;

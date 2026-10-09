@@ -30,6 +30,9 @@ pub struct Airport {
     pub country: String,
     pub lat: f64,
     pub lon: f64,
+    /// Field elevation, feet, where known. Older caches lack it.
+    #[serde(default)]
+    pub alt: Option<i64>,
     /// A relative size/importance score.
     pub size: i64,
     /// IANA timezone name, e.g. `Europe/London`.
@@ -58,8 +61,10 @@ pub async fn load(fr24: &Fr24, cache_file: &Path) -> Result<ReferenceData, Strin
     let cached = std::fs::read(cache_file)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<ReferenceData>(&bytes).ok());
+    // a cache written before elevations were kept is stale whatever its age
     if let Some(data) = &cached
         && now_s() - data.fetched_at < MAX_AGE_S
+        && data.airports.iter().any(|a| a.alt.is_some())
     {
         return Ok(data.clone());
     }
@@ -104,6 +109,8 @@ async fn fetch(fr24: &Fr24) -> Result<ReferenceData, String> {
                 country: a.country,
                 lat: a.lat,
                 lon: a.lon,
+                // upstream's "unknown" is -1
+                alt: a.alt.filter(|&alt| alt != -1),
                 size: a.size,
                 timezone: a.timezone.map(|t| t.name).unwrap_or_default(),
             })

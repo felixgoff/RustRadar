@@ -19,6 +19,7 @@
     Deck,
     DirectionalLight,
     _GlobeView as GlobeView,
+    _GlobeViewport as GlobeViewport,
     LightingEffect,
     LinearInterpolator,
     WebMercatorViewport,
@@ -1129,10 +1130,13 @@
     if (icons.length) {
       // each icon turned to its heading as seen on screen, which away from the
       // middle of the globe is not simply `bearing - heading` (see screenAngle)
-      const viewport = deck?.getViewports()[0];
+      // built from the view state rather than asked of deck.gl, whose
+      // `getViewports` can assert while a camera move is under way; icons only
+      // show below zoom 11, where the view is always the globe projection
+      const viewport = new GlobeViewport({ ...view, width: container.clientWidth, height: container.clientHeight });
       const step = ICON_HEADING_STEP_PX * mpp;
       const iconAngles = iconPoses.map((pose, i) => {
-        const angle = viewport && screenAngle(viewport, iconPositions[i], pose.heading, step);
+        const angle = screenAngle(viewport, iconPositions[i], pose.heading, step);
         return angle ?? bearing - pose.heading;
       });
       // a thin dark border under every silhouette, so they stand out on bright

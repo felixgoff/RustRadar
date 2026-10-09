@@ -281,7 +281,7 @@
 
   function select(
     id: number | null,
-    opts: { hint?: LiveFlight; fly?: boolean; follow?: boolean; keepZoom?: boolean; fromBoard?: boolean } = {},
+    opts: { hint?: LiveFlight; fly?: boolean; follow?: boolean; fromBoard?: boolean } = {},
   ) {
     if (id === selectedId && !opts.fly) return;
     selectedId = id;
@@ -296,9 +296,9 @@
     }
     const known = byId.get(id) ?? opts.hint;
     if (opts.fly) {
-      // a click on the map keeps the zoom: the aircraft is already in view and
-      // the camera only has to centre on it. Picks from a list fly in instead.
-      flyZoom = opts.keepZoom ? view.zoom : undefined;
+      // picks from a list fly in; a click on the map leaves the camera alone,
+      // and only the panel's follow button (or C) locks it to the aircraft
+      flyZoom = undefined;
       if (known) globe.flyTo(known.lon, known.lat, flyZoom);
       else flyPending = true;
     }
@@ -320,7 +320,6 @@
       const { lat, lon, callsign } = entry.detail;
       select(id, {
         fly: true,
-        follow: true,
         hint: {
           id, lat, lon, track: 0, alt: 0, speed: 0, onGround: false, timestampMs: 0,
           callsign: callsign ?? "", flight: "", reg: "", typecode: "", origin: "", destination: "", icon: "",
@@ -436,7 +435,7 @@
     daylight={settings.daylight}
     weather={settings.weather}
     follow={following}
-    onselect={(f) => select(f?.id ?? null, { fly: !!f, follow: !!f, keepZoom: true })}
+    onselect={(f) => select(f?.id ?? null)}
     onairport={openAirport}
     onviewchange={(v) => (view = v)}
   />
@@ -515,7 +514,7 @@
         flights={top}
         failed={topFailed}
         {selectedId}
-        onpick={(f) => select(f.flight_id, { fly: true, follow: true })}
+        onpick={(f) => select(f.flight_id, { fly: true })}
         onretry={refreshTop}
       />
     </section>
@@ -528,7 +527,7 @@
         code={boardCode}
         airport={boardAirport}
         {selectedId}
-        onselect={(id) => select(id, { fly: true, follow: true, fromBoard: true })}
+        onselect={(id) => select(id, { fly: true, fromBoard: true })}
         onlocate={() => boardAirport && globe.flyTo(boardAirport.lon, boardAirport.lat, 11)}
         onclose={() => (boardCode = null)}
       />
@@ -546,7 +545,7 @@
       {following}
       back={fromBoard && boardCode ? { label: `${boardCode} departures and arrivals`, onclick: () => select(null) } : null}
       onfollow={() => (following = !following)}
-      onselect={(id) => select(id, { fly: true, follow: true })}
+      onselect={(id) => select(id, { fly: true })}
       onairport={openAirport}
       onsignin={() => controls.openAccount()}
       onclose={() => select(null)}

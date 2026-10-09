@@ -36,6 +36,7 @@
   import { BitmapLayer, IconLayer, PathLayer, ScatterplotLayer, SolidPolygonLayer, TextLayer } from "@deck.gl/layers";
   import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
   import { SphereGeometry } from "@luma.gl/engine";
+  import type { Device } from "@luma.gl/core";
   import { load } from "@loaders.gl/core";
   import { MVTLoader } from "@loaders.gl/mvt";
   // decode vector tiles off the main thread with a bundled worker, not one from a CDN
@@ -53,7 +54,8 @@
   import { aircraftModels, type AircraftModel } from "./aircraft";
   import { nightPolygons } from "./daynight";
   import { RADAR_LEVELS_KM, type RadarTile } from "./radar";
-  import { mergeMeshes, type PolygonData } from "./radar-mesh";
+  import type { PolygonData } from "./radar-mesh";
+  import { ArenaLayer, MeshArena, type ArenaData, type ArenaPiece } from "./radar-arena";
   import { loadRadarTile, loadVolume, radarCoverageKey, setRadarCoverage, type MeasuredVolume } from "./radar-pool";
   import { liveries, type Livery, type Part } from "./liveries";
   import { distanceKm, trimToPosition, type LonLat, type PathPoint, type Route } from "./routes";
@@ -594,9 +596,19 @@
    */
   const radarPolygons = (
     props: Record<string, unknown> | null,
-    own: { id: string; data: PolygonData; opacity: number; parameters: object; z?: number; bottom?: number },
+    own: {
+      id: string;
+      data: PolygonData | ArenaData;
+      /** For an arena's data (radar-arena.ts): how much of it to draw, and its version. */
+      arena?: { indexCount: number; version: number };
+      opacity: number;
+      parameters: object;
+      z?: number;
+      bottom?: number;
+    },
   ) =>
-    new SolidPolygonLayer(props ?? {}, {
+    new (own.arena ? ArenaLayer : SolidPolygonLayer)(props ?? {}, {
+      ...own.arena,
       id: own.id,
       data: own.data as never,
       _normalize: false,
@@ -637,51 +649,72 @@
     radarVersion++;
   };
   /**
-   * The lifted layers of all tiles in view, merged: one slice layer and one
-   * wall layer per height rather than two per tile per height (hundreds of
-   * draw calls, each tile's whole mesh uploaded again for every height).
-   * Merged again only when the tiles change.
+   * The lifted layers' buffers, a slices and a walls arena per height
+   * (radar-arena.ts): updated in place as tiles come and go, so a pan uploads
+   * only the tiles it brings into view. Freed while the view is flat.
    */
-  let liftedData: { version: number; levels: { km: number; slices: PolygonData | null; walls: PolygonData | null }[] } = {
-    version: -1,
-    levels: [],
-  };
-  function mergedLevels() {
-    if (liftedData.version !== radarVersion) {
-      const levels = RADAR_LEVELS_KM.map((km, i) => {
-        // each tile's levels run up from the lowest without gaps, so index i is this height
-        const parts = radarTiles.flatMap((tile) => (tile.levels[i] ? [{ tile, fromBand: tile.levels[i].fromBand }] : []));
-        return {
-          km,
-          slices: mergeMeshes(parts.map(({ tile, fromBand }) => ({ mesh: tile.slices, fromBand }))),
-          walls: mergeMeshes(parts.flatMap(({ tile, fromBand }) => (tile.walls ? [{ mesh: tile.walls, fromBand }] : []))),
-        };
+  let arenas: { slices: MeshArena; walls: MeshArena }[] | null = null;
+  let arenasVersion = -1;
+  /** deck.gl's GPU device, for the arenas' buffers; set once it has one. */
+  let device: Device | null = null;
+  function liftedArenas(gpu: Device) {
+    arenas ??= RADAR_LEVELS_KM.map(() => ({ slices: new MeshArena(gpu, 2), walls: new MeshArena(gpu, 3) }));
+    if (arenasVersion !== radarVersion) {
+      arenasVersion = radarVersion;
+      arenas.forEach(({ slices, walls }, i) => {
+        const slicePieces = new Map<RadarTile, ArenaPiece>();
+        const wallPieces = new Map<RadarTile, ArenaPiece>();
+        for (const tile of radarTiles) {
+          // each tile's levels run up from the lowest without gaps, so index i is this height
+          const level = tile.levels[i];
+          if (!level) continue;
+          slicePieces.set(tile, { mesh: tile.slices, fromBand: level.fromBand });
+          if (tile.walls) wallPieces.set(tile, { mesh: tile.walls, fromBand: level.fromBand });
+        }
+        slices.update(slicePieces);
+        walls.update(wallPieces);
       });
-      liftedData = { version: radarVersion, levels };
     }
-    return liftedData.levels;
+    return arenas;
   }
   let lifted: { key: string; layers: Layer[] } = { key: "", layers: [] };
+  function freeArenas() {
+    if (!arenas) return;
+    for (const { slices, walls } of arenas) {
+      slices.destroy();
+      walls.destroy();
+    }
+    arenas = null;
+    arenasVersion = -1;
+    lifted = { key: "", layers: [] };
+  }
   /** Built again only when the tiles, the height scale or the tilt change. */
   function radarLifted(ex: number, lift: number): Layer[] {
     const scale = Math.round(ex * 10) / 10;
+    if (!lift || !device) {
+      freeArenas();
+      return [];
+    }
     const key = `${scale}/${lift}/${radarVersion}`;
     if (lifted.key !== key) {
       const layers: Layer[] = [];
-      if (lift > 0) {
-        // higher layers keep only the stronger echoes, so cells rise like towers
-        mergedLevels().forEach(({ km, slices, walls }, i) => {
-          if (!slices) return;
-          const opacity = Math.max(0.16, 0.34 - i * 0.03) * lift;
-          const z = elevation(km * FEET_PER_KM, scale);
-          layers.push(radarPolygons(null, { id: `radar-lift-${km}`, data: slices, opacity, parameters: RADAR_LIFTED, z }));
-          // walled down to the layer below, the lowest to the ground, so the stack has no gaps
-          const bottom = i ? elevation(RADAR_LEVELS_KM[i - 1] * FEET_PER_KM, scale) : 0;
-          if (walls) {
-            layers.push(radarPolygons(null, { id: `radar-wall-${km}`, data: walls, opacity, parameters: RADAR_LIFTED, z, bottom }));
-          }
-        });
-      }
+      // higher layers keep only the stronger echoes, so cells rise like towers
+      liftedArenas(device).forEach(({ slices, walls }, i) => {
+        if (!slices.data) return;
+        const km = RADAR_LEVELS_KM[i];
+        const opacity = Math.max(0.16, 0.34 - i * 0.03) * lift;
+        const z = elevation(km * FEET_PER_KM, scale);
+        const { data, indexCount, version } = slices;
+        const arena = { indexCount, version };
+        layers.push(radarPolygons(null, { id: `radar-lift-${km}`, data, arena, opacity, parameters: RADAR_LIFTED, z }));
+        // walled down to the layer below, the lowest to the ground, so the stack has no gaps
+        const bottom = i ? elevation(RADAR_LEVELS_KM[i - 1] * FEET_PER_KM, scale) : 0;
+        if (walls.data) {
+          const { data, indexCount, version } = walls;
+          const arena = { indexCount, version };
+          layers.push(radarPolygons(null, { id: `radar-wall-${km}`, data, arena, opacity, parameters: RADAR_LIFTED, z, bottom }));
+        }
+      });
       lifted = { key, layers };
     }
     return lifted.layers;
@@ -982,12 +1015,13 @@
       if (Date.now() - radarCheckedAt > 600_000) refreshRadar();
       const lift = liftFor(pitch);
       if (radarUrl) layers.push(radarLayer(radarUrl), ...radarLifted(ex, lift));
+      else freeArenas();
       // only the sources on screen are worth fetching; each is tens of megabytes
       if (isTauri() && Date.now() - measuredCheckedAt > 120_000) {
         refreshMeasured(viewArea(view, container.clientWidth, container.clientHeight));
       }
       for (const volume of measured) layers.push(...measuredLayers(volume, ex, lift));
-    }
+    } else freeArenas();
     if (daylight) layers.push(nightLayer(now));
     if (tileUrl && buildings && flat && zoom >= 13) layers.push(buildingLayer(tileUrl));
     if (tileUrl && labels && fontsReady) {
@@ -1414,6 +1448,7 @@
       controller: controllerFor(false),
       effects: [lighting],
       pickingRadius: 6,
+      onDeviceInitialized: (d) => (device = d),
       onViewStateChange: ({ viewState }) => {
         const { longitude, latitude, zoom, bearing = 0, pitch = 0 } = viewState as Partial<ViewState>;
         view = { longitude: longitude!, latitude: latitude!, zoom: zoom!, bearing, pitch };
@@ -1465,6 +1500,7 @@
 
   onDestroy(() => {
     cancelAnimationFrame(frame);
+    freeArenas();
     deck?.finalize();
     deck = null;
   });

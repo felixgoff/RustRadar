@@ -71,6 +71,10 @@
   } from "./geo";
   import { MODEL_KINDS, MODEL_SIZE, modelFor, models, sizeOf, type ModelKind } from "./models";
   import { motion, type Pose } from "./motion";
+  import HoverCard from "./HoverCard.svelte";
+  import { flightDetails, isRateLimited } from "./api";
+  import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
+  import { reference } from "./reference.svelte";
 
   interface Props {
     flights: LiveFlight[];
@@ -1303,30 +1307,68 @@
 
   const escape = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
+  /** Airport labels get deck's tooltip; aircraft get the {@link HoverCard}. */
   function tooltip(info: PickingInfo) {
-    if (info.layer?.id === "labels") {
-      const p = (info.object as LabelFeature | undefined)?.properties;
-      if (p?.layerName !== "aerodrome_label") return null;
-      return {
-        html: `<div class="tt-head">${escape(nameOf(p))}</div><div class="tt-sub">Open departures and arrivals</div>`,
-        className: "aircraft-tooltip",
-      };
-    }
-    return flightTooltip(info as PickingInfo<LiveFlight>);
-  }
-
-  function flightTooltip({ object, layer }: PickingInfo<LiveFlight>) {
-    if (!object || !layer?.id.startsWith("aircraft-")) return null;
-    const route = object.origin || object.destination ? `${object.origin || "?"} – ${object.destination || "?"}` : "";
-    const altitude = object.onGround ? "On ground" : `${object.alt.toLocaleString()} ft`;
+    if (info.layer?.id !== "labels") return null;
+    const p = (info.object as LabelFeature | undefined)?.properties;
+    if (p?.layerName !== "aerodrome_label") return null;
     return {
-      html: `<div class="tt-head data">${escape(object.callsign || object.flight || "No callsign")}</div>
-        <div class="tt-sub">${escape([object.typecode, object.reg].filter(Boolean).join(" · "))}</div>
-        ${route ? `<div class="tt-row data">${escape(route)}</div>` : ""}
-        <div class="tt-row data">${altitude} · ${object.speed} kt</div>`,
+      html: `<div class="tt-head">${escape(nameOf(p))}</div><div class="tt-sub">Open departures and arrivals</div>`,
       className: "aircraft-tooltip",
     };
   }
+
+  // The hover card. The pointer's position is kept apart from the flight, so
+  // moving over one aircraft only moves the card and recomputes nothing else.
+  let hoverFlight = $state.raw<LiveFlight | null>(null);
+  let pointer = $state({ x: 0, y: 0 });
+  let areaWidth = $state(0);
+  let areaHeight = $state(0);
+  /** Bumped when a details request settles, so the card reads the loader again. */
+  let hoverVersion = $state(0);
+  const hoverLoader = new HoverLoader({ fetch: flightDetails, isRateLimited, onchange: () => hoverVersion++ });
+  onDestroy(() => hoverLoader.dispose());
+
+  /** The selected flight's details are already streaming in: no need to ask again. */
+  const ownDetails = (id: number) => (id === selected?.id && details ? details : null);
+
+  function setHover(flight: LiveFlight | null, x = 0, y = 0) {
+    if (flight) pointer = { x, y };
+    if (flight?.id === hoverFlight?.id) return;
+    hoverLoader.hover(flight && !ownDetails(flight.id) ? flight.id : null);
+    hoverFlight = flight;
+  }
+
+  /** The latest report of the hovered flight, as the feed refreshes under a resting pointer. */
+  const hovered = $derived.by(() => {
+    const id = hoverFlight?.id;
+    return id === undefined ? null : (flights.find((f) => f.id === id) ?? hoverFlight);
+  });
+
+  const hoverCard = $derived.by(() => {
+    if (!hovered) return null;
+    void hoverVersion;
+    void reference.ready; // airports resolve once the reference data is in
+    const own = ownDetails(hovered.id);
+    const info = own ? hoverInfo(own) : hoverLoader.info(hovered.id);
+    const status = own ? ("ready" as const) : hoverLoader.status(hovered.id);
+    const origin = reference.airport(hovered.origin);
+    const destination = reference.airport(hovered.destination);
+    let progress: { value: number; measured: boolean } | null = null;
+    if (info?.progressPct != null) progress = { value: info.progressPct / 100, measured: true };
+    else {
+      const estimate = routeProgress(hovered, origin, destination);
+      if (estimate !== null) progress = { value: estimate, measured: false };
+    }
+    return {
+      flight: hovered,
+      from: origin?.city || hovered.origin,
+      to: destination?.city || hovered.destination,
+      progress,
+      info,
+      status,
+    };
+  });
 
   onMount(() => {
     deck = new Deck<GlobeView>({
@@ -1348,12 +1390,16 @@
       getTooltip: tooltip,
       getCursor: ({ isDragging, isHovering }) => (isDragging ? "grabbing" : isHovering ? "pointer" : "grab"),
       onHover: (info) => {
-        const id = info.layer?.id.startsWith("aircraft-") ? ((info.object as LiveFlight | undefined)?.id ?? null) : null;
+        const flight = info.layer?.id.startsWith("aircraft-") ? ((info.object as LiveFlight | undefined) ?? null) : null;
+        setHover(flight, info.x, info.y);
+        const id = flight?.id ?? null;
         if (id !== hoveredId) {
           hoveredId = id;
           render();
         }
       },
+      // hover isn't reported while a button is down: the card would hang over a moving globe
+      onDragStart: () => setHover(null),
       onClick: (info) => {
         if (info.layer?.id.startsWith("aircraft-") && info.object) onselect(info.object as LiveFlight);
         else if (info.layer?.id === "labels") {
@@ -1395,7 +1441,11 @@
   });
 </script>
 
-<div class="globe" bind:this={container}></div>
+<div class="globe" bind:this={container} bind:clientWidth={areaWidth} bind:clientHeight={areaHeight}>
+  {#if hoverCard}
+    <HoverCard {...hoverCard} x={pointer.x} y={pointer.y} width={areaWidth} height={areaHeight} />
+  {/if}
+</div>
 
 <style>
   .globe {
@@ -1417,9 +1467,5 @@
   }
   :global(.aircraft-tooltip .tt-sub) {
     color: var(--text-2);
-  }
-  :global(.aircraft-tooltip .tt-row) {
-    color: var(--text-2);
-    font-size: var(--text-sm);
   }
 </style>

@@ -854,8 +854,9 @@
     const minPx = minPxAt(zoom);
     /** On-screen size of an aircraft whose largest dimension is `meters`. */
     const screenPx = (meters: number) => {
-      // zoomed out everything sits at the floor; keep a hint of big versus small
-      const floor = minPx * Math.min(1.25, Math.max(0.8, Math.sqrt(meters / MODEL_SIZE.narrow)));
+      // zoomed out everything sits at the floor, so the floor itself has to say
+      // big from small: an A380 reads about 1.8x an A320, a Cessna about 0.6x
+      const floor = minPx * Math.min(2, Math.max(0.6, (meters / MODEL_SIZE.narrow) ** 0.8));
       return Math.min(MAX_PX, Math.max(floor, meters / mpp));
     };
     const depth = depthAt(zoom);

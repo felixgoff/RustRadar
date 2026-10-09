@@ -243,10 +243,18 @@
         </div>
       {/each}
     </div>
-    <div class="track" role="progressbar" aria-label="Flight progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-      <div class="fill" style="width: {pct}%"></div>
-      <span class="marker" style="left: {pct}%"><Plane size={14} strokeWidth={2} /></span>
-    </div>
+    <!-- without progress data the aircraft has no place on the line: drawing it
+         at the origin would claim it hasn't left -->
+    {#if progress}
+      <div class="track" role="progressbar" aria-label="Flight progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+        <div class="fill" style="transform: scaleX({pct / 100})"></div>
+        <div class="run" style="transform: translateX({pct}%)">
+          <span class="marker"><Plane size={14} strokeWidth={2} /></span>
+        </div>
+      </div>
+    {:else}
+      <div class="track unknown" aria-hidden="true"></div>
+    {/if}
     {#if progress}
       <p class="distances">
         {km(progress.traversed_distance)} flown · {km(progress.remaining_distance)} to go{progress.remaining_time > 0
@@ -434,13 +442,12 @@
     {/if}
     <div class="actions">
       <button
-        class="icon-button"
+        class="button"
         aria-pressed={following}
-        aria-label={following ? "Stop following" : "Follow with the camera"}
         title={following ? "Stop following (C)" : "Follow with the camera (C)"}
         onclick={onfollow}
       >
-        <LocateFixed size={18} strokeWidth={1.75} />
+        <LocateFixed size={14} strokeWidth={1.75} /> Follow
       </button>
       <button class="button" onclick={() => openUrl(fr24Url)}>
         Flightradar24 <ExternalLink size={14} strokeWidth={1.75} />
@@ -679,18 +686,30 @@
     margin: var(--space-2) 7px;
     background: var(--line-control);
   }
+  .track.unknown {
+    background: var(--line);
+  }
+  /* progress moves by transform, not width or left, so it never relays out */
   .fill {
     height: 100%;
     background: var(--amber);
-    transition: width 600ms var(--ease-out);
+    transform-origin: left;
+    transition: transform 600ms var(--ease-out);
+  }
+  /* a full-width layer slid along by the progress: its percentage is of the
+     track, which the marker alone could not give */
+  .run {
+    position: absolute;
+    inset: 0;
+    transition: transform 600ms var(--ease-out);
   }
   .marker {
     position: absolute;
     top: 50%;
+    left: 0;
     display: grid;
     color: var(--amber);
     transform: translate(-50%, -50%) rotate(45deg);
-    transition: left 600ms var(--ease-out);
   }
   .distances {
     font-size: var(--text-sm);
@@ -904,15 +923,25 @@
     height: 12px;
   }
 
+  /* pinned: following the aircraft starts here, so it can't scroll away */
   footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
+    gap: var(--space-2);
     margin-top: auto;
     padding: var(--space-3) var(--space-4);
     border-top: 1px solid var(--line);
+    background: var(--surface);
   }
+  /* "Reconnecting…" and both buttons don't fit one line: the buttons wrap
+     below and keep to the right */
   .actions {
+    margin-left: auto;
     display: flex;
     align-items: center;
     gap: var(--space-2);

@@ -3,8 +3,9 @@
 //
 // Each type comes at two levels of detail (a couple of hundred triangles for
 // the wide view, a couple of thousand up close) plus a top-down silhouette
-// used when the map is flat. Geometry is in metres in RustRadar's frame:
-// nose along +y, right wing +x, up +z.
+// used when the map is flat, and most carry landing gear as a separate mesh.
+// Geometry is in metres in RustRadar's frame: nose along +y, right wing +x,
+// up +z.
 import { Geometry } from "@luma.gl/engine";
 import type { Part } from "./liveries";
 
@@ -21,12 +22,25 @@ interface PackedLod {
   parts: Partial<Record<Part, [number, number]>>;
 }
 
+interface PackedGear {
+  /** Byte offsets into `meshes.bin`, each 4-byte aligned. */
+  positions: number;
+  normals: number;
+  indices: number;
+  vertices: number;
+  triangles: number;
+  /** Height of the plane the struts hang from; the whole gear lies below it. */
+  attachZ: number;
+}
+
 interface PackedModel {
   /** Largest dimension in metres. */
   size: number;
   span: number;
   length: number;
   lods: PackedLod[];
+  /** Absent for types that never show gear (helicopter, glider). */
+  gear?: PackedGear;
 }
 
 interface Index {
@@ -46,23 +60,41 @@ export interface ModelLod {
   parts: [Part, Geometry][];
 }
 
+export interface ModelGear {
+  /** Nose and main gear, extended, in the same frame as the levels of detail. */
+  geometry: Geometry;
+  /**
+   * Height (model z, metres) of the plane the struts hang from. Scaling the
+   * gear vertically about it, from 1 down to 0, retracts it into the airframe.
+   */
+  attachZ: number;
+}
+
 export interface AircraftModel {
   name: string;
   size: number;
   lods: ModelLod[];
+  /** Landing gear, or `null` for types without any. */
+  gear: ModelGear | null;
 }
 
 /** Levels of detail, coarsest first. */
 export const LOD_COUNT = 2;
 
-function geometries(buffer: ArrayBuffer, lod: PackedLod): ModelLod {
-  const { vertices, triangles } = lod;
-  const positions = new Float32Array(buffer, lod.positions, vertices * 3);
-  const packed = new Int8Array(buffer, lod.normals, vertices * 3);
-  const indices = new Uint16Array(buffer, lod.indices, triangles * 3);
+/** Maps one packed mesh's sections onto the file, without copying the positions. */
+function mesh(buffer: ArrayBuffer, packed: Omit<PackedLod, "parts">) {
+  const { vertices, triangles } = packed;
+  const positions = new Float32Array(buffer, packed.positions, vertices * 3);
+  const bytes = new Int8Array(buffer, packed.normals, vertices * 3);
+  const indices = new Uint16Array(buffer, packed.indices, triangles * 3);
   // normals ship as signed bytes; the GPU wants floats
-  const normals = Float32Array.from(packed, (v) => v / 127);
+  const normals = Float32Array.from(bytes, (v) => v / 127);
   const attributes = { positions: { size: 3, value: positions }, normals: { size: 3, value: normals } };
+  return { indices, attributes };
+}
+
+function geometries(buffer: ArrayBuffer, lod: PackedLod): ModelLod {
+  const { indices, attributes } = mesh(buffer, lod);
   const build = (subset: Uint16Array) =>
     new Geometry({ topology: "triangle-list", indices: subset, attributes });
   return {
@@ -72,6 +104,12 @@ function geometries(buffer: ArrayBuffer, lod: PackedLod): ModelLod {
       build(indices.subarray(start * 3, (start + count) * 3)),
     ]),
   };
+}
+
+function gear(buffer: ArrayBuffer, packed: PackedGear | undefined): ModelGear | null {
+  if (!packed) return null;
+  const { indices, attributes } = mesh(buffer, packed);
+  return { geometry: new Geometry({ topology: "triangle-list", indices, attributes }), attachZ: packed.attachZ };
 }
 
 class AircraftModels {
@@ -99,7 +137,12 @@ class AircraftModels {
       fetch(`${BASE}/meshes.bin`).then((r) => r.arrayBuffer()),
     ]);
     for (const [name, packed] of Object.entries(index.models)) {
-      this.models.set(name, { name, size: packed.size, lods: packed.lods.map((lod) => geometries(buffer, lod)) });
+      this.models.set(name, {
+        name,
+        size: packed.size,
+        lods: packed.lods.map((lod) => geometries(buffer, lod)),
+        gear: gear(buffer, packed.gear),
+      });
     }
     for (const [type, name] of Object.entries(index.types)) this.byType.set(type, name);
     for (const [icon, name] of Object.entries(index.icons)) this.byIcon.set(icon, name);

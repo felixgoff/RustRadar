@@ -6,6 +6,30 @@
 // and lift-offs, derive pitch, bank and gear, and blend every correction in
 // over a few seconds so that nothing on the globe ever jumps or freezes.
 //
+// BY DESIGN THE MAP SHOWS EACH AIRCRAFT A FEW SECONDS IN THE PAST (2-12 s; see
+// `drawnTime`). Drawn at "now", an aircraft is usually past its newest data
+// and extrapolating, then corrected when the next report lands: that is what
+// made aircraft jerk about. Drawn slightly in the past it is almost always
+// between known positions, so it can follow a smoothed path through them:
+//
+// - Positions (and altitudes) are fitted on arrival with a cubic smoothing
+//   spline (`smoothSpline`), which approximates the samples instead of passing
+//   through each noisy one; its stiffness averages over about the latest three
+//   samples. Track, heading, speed, turn rate (bank) and vertical rate come
+//   from the fitted curve, which is C2 and evaluated per frame as a Hermite
+//   piece, as cheaply as before.
+// - The delay is chosen per aircraft from its data cadence and how far ahead
+//   its newest sample reaches (`noteArrival`), and eases between values at no
+//   more than ~10% of real time (`retarget`), so playback never jumps.
+// - Each report's state (phase, gear, field, measured attitude) takes over
+//   when the drawn time reaches the report's time, not on arrival, so what is
+//   drawn is consistent; past the newest data the extrapolation carries on as
+//   before, from the end of the smoothed curve.
+// - Any change to the curve at the drawn time (a new sample, a state taking
+//   over) is blended out matching position AND velocity (C1).
+//
+// Only the drawing is delayed: the panel's numbers come from the feed itself.
+//
 // The selected aircraft can also get measured state from a second source
 // (adsb.lol, see `Motion.measure`): its position samples interleave with
 // Flightradar24's by time, and its transponder-reported heading, bank, turn
@@ -104,8 +128,19 @@ const GRAVITY_MS2 = 9.80665;
 
 // --- Samples -----------------------------------------------------------------
 
-/** How much horizontal history a track keeps. */
-const SAMPLE_WINDOW_MS = 60_000;
+/**
+ * How much horizontal history a track keeps (and fits): the drawn time is
+ * never more than ~22 s behind the newest sample (a 12 s delay, ~10 s of
+ * look-ahead), so older samples are of no use.
+ */
+const SAMPLE_WINDOW_MS = 30_000;
+/**
+ * A report this far (m) off the smoothed path of the samples before it is a
+ * jump in the data: the old samples are dropped rather than smoothed into it.
+ */
+const JUMP_M = 150;
+/** ...checked for reports up to this long (ms) past those samples. */
+const JUMP_LOOKAHEAD_MS = 4_000;
 /** A newer report's samples replace old ones from this long before its own time on. */
 const MERGE_EPSILON_MS = 500;
 /** Samples closer together than this are duplicates (and would make the spline's tangents explode). */
@@ -172,8 +207,18 @@ const HEADING_MIN_SPEED_MS = 1;
 
 /** Critically damped decay rate, 1/s: (1 + k t) e^{-k t} is ~1% after 3 s. */
 const BLEND_RATE = 2.2;
-/** After this long the correction is gone (< 0.01%). */
-const BLEND_END_S = 6;
+/** After k·t this large the correction is gone (< 0.01%): 6 s at the full rate. */
+const BLEND_END_KT = 13.2;
+/**
+ * Small corrections (the smoothed curve moving by metres as a new sample
+ * comes in) are blended out more slowly, so that their acceleration stays
+ * under this (m/s², a gentle turn's worth)...
+ */
+const GENTLE_ACCEL = 3;
+/** ...but no slower than this rate, 1/s (~1% after 13 s)... */
+const MIN_BLEND_RATE = 0.5;
+/** ...and only below this size (m), back to the full rate by twice it (a real jump in the data is resolved quickly). */
+const GENTLE_MAX_M = 40;
 /** Larger corrections than this are a different aircraft position altogether: snap. */
 const SNAP_DISTANCE_M = 5_000;
 /** If the previous data was older than this, its extrapolation means little: snap. */
@@ -200,6 +245,74 @@ const MAX_CAPTURE_FT = 800;
 const SRC_FR24 = 1;
 const SRC_ADSB = 2;
 const SRC_MLAT = 0;
+
+// --- Delayed, smoothed playback --------------------------------------------------------
+
+/** The drawn time trails the server clock by this much at least and at most. */
+const MIN_DELAY_MS = 2_000;
+const MAX_DELAY_MS = 12_000;
+/**
+ * The delay changes at no more than about this rate (seconds per second):
+ * while it adjusts, playback runs at 90-110% of real time, which nobody sees.
+ */
+const DELAY_RATE = 0.1;
+/**
+ * ...and its rate changes by at most this much per second, so the playback
+ * speeds up or slows down by under 1% a second (2.5 m/s² at 250 m/s).
+ */
+const DELAY_ACCEL = 0.01;
+/** Delay targets this close to the current one are ignored, so the delay isn't forever on the move. */
+const DELAY_DEADBAND_MS = 500;
+/** Weight of a new cadence or lead measurement in the delay target. */
+const DELAY_SMOOTHING = 0.3;
+/** Data cadence assumed until two reports are seen (Flightradar24's refresh). */
+const DEFAULT_CADENCE_MS = 8_000;
+const MIN_CADENCE_MS = 1_000;
+const MAX_CADENCE_MS = 60_000;
+/** The drawn time stays this far (one sample spacing, within these bounds) behind the newest sample. */
+const MIN_MARGIN_MS = 1_000;
+const MAX_MARGIN_MS = 3_000;
+/**
+ * Smoothing-spline stiffness for positions, s³ (per unit sample weight). The
+ * fitted curve averages over about (λ × spacing)^¼ seconds either side: 2.5 s
+ * for Flightradar24's 2 s look-ahead, 2.8 s for adsb.lol's 3 s polls. About
+ * three samples, that is, which takes out the jitter with little lag.
+ */
+const SMOOTH_LAMBDA = 20;
+/** The same for altitude (25 ft steps, a report every 3-15 s): about ±5-7 s. */
+const ALT_SMOOTH_LAMBDA = 200;
+/** Sample weights by source (inverse variance relative to ~10 m). */
+const WEIGHT_FR24 = 1;
+const WEIGHT_ADSB = 1;
+const WEIGHT_MLAT = 0.04;
+/** Weight of a reported velocity as the slope at the newest sample, when that sample is the report itself. */
+const REPORTED_SLOPE_WEIGHT = 10;
+/** The smoothing's reference path turns (and changes speed) as the data does for this long before the newest sample, s... */
+const REF_FULL_S = 12;
+/** ...fading to straight and steady by this long before it. */
+const REF_ZERO_S = 24;
+/** Fitting passes: around the report's estimated turn and speed change, then twice around those read off the previous pass. */
+const REF_PASSES = 3;
+/** Those are read off two chords of this length (ms) ending at the newest sample... */
+const REF_CHORD_MS = 6_000;
+/** ...or shorter ones, down to this (s). */
+const REF_MIN_CHORD_S = 2;
+/** The drawn turn rate (for the bank) is the smoothed heading's change over ±this, ms. */
+const TURN_WINDOW_MS = 2_000;
+/** Past the newest sample the turn rate eases from the path's into the prediction's over this long, s. */
+const TURN_HANDOVER_S = 3;
+/** Past the newest altitude the vertical rate eases from the smoothed curve's into the estimate's with this time constant, s. */
+const VRATE_HANDOVER_S = 3;
+/** Altitude differences up to this (ft) are never a jump in the data, whatever the rate (quantisation). */
+const ALT_STEP_FT = 300;
+/** Altitude history kept, ms. */
+const ALT_WINDOW_MS = 60_000;
+/** Report states kept (each takes over when the drawn time reaches it). */
+const MAX_STATES = 16;
+/** Measured attitude history kept, ms. */
+const MEAS_HISTORY_MS = 30_000;
+/** A pose further than this from the previous one (in time) is a fresh look: a state taking over isn't blended. */
+const CONTINUITY_GAP_MS = 1_000;
 
 // --- Airports ----------------------------------------------------------------------
 
@@ -278,6 +391,8 @@ const GEAR_FALLBACK_KT = 180;
 // --- Housekeeping ----------------------------------------------------------------------
 
 const TRACK_TTL_MS = 15 * 60_000;
+/** Newer reports taken in per frame at most (~10 µs each); new aircraft always are. */
+const INGEST_BUDGET = 600;
 const PRUNE_INTERVAL_MS = 60_000;
 /** Clock offsets: a sample this far from the current offset is a re-sync, not jitter. */
 const CLOCK_RESYNC_MS = 5_000;
@@ -340,12 +455,76 @@ function verticalIntegralInverse(applied: number): number {
   return disc < 0 ? NaN : VERTICAL_FADE_START_S + span - Math.sqrt(disc);
 }
 
-/** Critically damped decay of a correction applied `t` seconds ago: 1 → 0 with zero slope at 0. */
-function blend(t: number): number {
+/** Critically damped decay (rate k) of a correction applied `t` seconds ago: 1 → 0 with zero slope at 0. */
+function blend(t: number, k: number): number {
   if (t <= 0) return 1;
-  if (t >= BLEND_END_S) return 0;
-  const kt = BLEND_RATE * t;
+  const kt = k * t;
+  if (kt >= BLEND_END_KT) return 0;
   return (1 + kt) * Math.exp(-kt);
+}
+
+/**
+ * Blend rate for a small correction of `x0` m with a rate difference of `v0`
+ * m/s: the slowest that keeps its peak acceleration (≈ 2 k v0 + k² x0) under
+ * GENTLE_ACCEL, within MIN_BLEND_RATE..BLEND_RATE.
+ */
+function gentleRate(x0: number, v0: number): number {
+  const k = x0 > 1e-6 ? (-v0 + Math.sqrt(v0 * v0 + x0 * GENTLE_ACCEL)) / x0 : v0 > 1e-6 ? GENTLE_ACCEL / (2 * v0) : BLEND_RATE;
+  return clamp(k, MIN_BLEND_RATE, BLEND_RATE);
+}
+
+/**
+ * A correction being blended out, critically damped from an offset and its
+ * rate: x(t) = (x0 + (v0 + k x0) t) e^{-kt}, so the drawn position and its
+ * velocity are both continuous (C1). Restarting one from its current offset
+ * and rate at the same k continues the same curve, so corrections simply add.
+ */
+class Blend {
+  ms = -Infinity;
+  k = BLEND_RATE;
+  x = 0;
+  y = 0;
+  vx = 0;
+  vy = 0;
+  // results of `at`
+  px = 0;
+  py = 0;
+  pvx = 0;
+  pvy = 0;
+  /** `scale` converts the units to metres for the gentle rate. */
+  constructor(readonly scale = 1) {}
+
+  /** The offset and its rate at `nowMs`, into px/py/pvx/pvy (all 0 once it is over). */
+  at(nowMs: number): void {
+    const t = Math.max(0, (nowMs - this.ms) / 1000);
+    const k = this.k;
+    if (!(k * t < BLEND_END_KT)) {
+      this.px = this.py = this.pvx = this.pvy = 0;
+      return;
+    }
+    const e = Math.exp(-k * t);
+    const cx = this.vx + k * this.x;
+    const cy = this.vy + k * this.y;
+    this.px = (this.x + cx * t) * e;
+    this.py = (this.y + cy * t) * e;
+    this.pvx = (this.vx - k * cx * t) * e;
+    this.pvy = (this.vy - k * cy * t) * e;
+  }
+
+  /** Adds a correction and its rate at `nowMs` to what is left of this one; on at rate `k`, or the gentle rate for the sum. */
+  add(nowMs: number, dx: number, dy: number, dvx: number, dvy: number, k: number | null): void {
+    this.at(nowMs);
+    this.x = this.px + dx;
+    this.y = this.py + dy;
+    this.vx = this.pvx + dvx;
+    this.vy = this.pvy + dvy;
+    this.ms = nowMs;
+    this.k = k ?? gentleRate(Math.hypot(this.x, this.y) * this.scale, Math.hypot(this.vx, this.vy) * this.scale);
+  }
+
+  clear(): void {
+    this.ms = -Infinity;
+  }
 }
 
 /** Weight of a track's measured values at time T: 1 while fresh, easing to 0 (the estimates) once stale. */
@@ -370,6 +549,26 @@ function airPitch(vsFpm: number, speedMs: number, phase: Phase, agl: number): nu
   if ((phase === "approach" || phase === "flare") && agl < FLARE_MAX_AGL_FT)
     offset = PITCH_OFFSET.approach + (PITCH_OFFSET.flare - PITCH_OFFSET.approach) * (1 - Math.max(0, agl) / FLARE_MAX_AGL_FT);
   return clamp(gamma + offset, MIN_PITCH, MAX_PITCH);
+}
+
+/**
+ * What a report said and predicted, kept so that it takes over only when the
+ * drawn time reaches it: the drawn aircraft is a few seconds in the past, and
+ * its phase, gear and height have to be those of that moment.
+ */
+interface State {
+  reportMs: number;
+  phase: Phase;
+  trackDeg: number;
+  /** Reported altitude (ft) and vertical rate (fpm). */
+  alt: number;
+  vrate: number;
+  field: Airport | null;
+  fieldElev: number;
+  liftoffMs: number;
+  touchdownMs: number;
+  touchdownPitch: number;
+  capAlt: number;
 }
 
 /** Per-aircraft state: samples, latest report, estimates, prediction and blending. */
@@ -405,15 +604,54 @@ class Track {
   vrRefGround = false;
   phase: Phase = "cruise";
 
-  // horizontal samples, oldest first; x/y/mx/my are in the local frame around the newest
+  // horizontal samples, oldest first; x/y (raw) and fx/fy/mx/my (smoothed
+  // values and slopes, m and m/s) are in the local frame around the newest
   n = 0;
   ts: number[] = [];
   lats: number[] = [];
   lons: number[] = [];
   xs: number[] = [];
   ys: number[] = [];
+  fx: number[] = [];
+  fy: number[] = [];
   mx: number[] = [];
   my: number[] = [];
+  /** Turn rate of the smoothed path at each sample, rad/s, clockwise positive. */
+  om: number[] = [];
+
+  // altitude samples (airborne only), oldest first, and the smoothed values (ft) and slopes (ft/s)
+  ats: number[] = [];
+  avs: number[] = [];
+  afv: number[] = [];
+  afd: number[] = [];
+
+  /** Each report's state, oldest first: the one in effect at the drawn time is used. */
+  states: State[] = [];
+  /** The state last drawn (its reportMs). */
+  activeMs = NaN;
+  /** When pose() was last called. */
+  lastPoseMs = -Infinity;
+
+  // measured attitude history: roll (and its bias to the model's bank) and crab, by time
+  rollTs: number[] = [];
+  rolls: number[] = [];
+  rollBiases: number[] = [];
+  crabTs: number[] = [];
+  crabs: number[] = [];
+
+  // drawing delay: eases from `dFrom` (slope `dSlope`) at `dMs` to `dTo` over `dDur`, ms
+  dFrom = MIN_DELAY_MS;
+  dTo = MIN_DELAY_MS;
+  dSlope = 0;
+  dMs = -Infinity;
+  dDur = 0;
+  /** Smoothed data cadence (ms between reports) and delay target, ms. */
+  cadenceMs = DEFAULT_CADENCE_MS;
+  delayTarget = NaN;
+  /** Newest sample time when data last arrived. */
+  newestMs = -Infinity;
+  /** Data time of the last arrival that extended the samples. */
+  arrivalDataMs = -Infinity;
   refLat = 0;
   refLon = 0;
   /** Per sample source (SRC_*), kept only once measured samples are mixed in. */
@@ -428,8 +666,6 @@ class Track {
   measPosMs = -Infinity;
   /** Nose heading minus track, degrees. */
   crab = 0;
-  /** Measured bank minus the model's bank at `measMs`, degrees. */
-  rollBias = 0;
   /** True airspeed, m/s (0: unknown). */
   tasMs = 0;
   /** Track (deg) the autopilot is turning onto, NaN if none. */
@@ -454,11 +690,17 @@ class Track {
   touchdownPitch = 0;
   liftoffMs = NaN;
 
-  // correction being blended out
+  // the angles' correction being blended out
   offMs = -Infinity;
-  offE = 0;
-  offN = 0;
-  offAlt = 0;
+  /**
+   * Position (east/north, m) and height (ft) corrections: a large one (a jump
+   * in the data) at the full rate, small ones (the smoothed curve moving as
+   * samples come in) gently, so their acceleration stays small.
+   */
+  fast = new Blend();
+  gentle = new Blend();
+  altFast = new Blend(FEET_TO_M);
+  altGentle = new Blend(FEET_TO_M);
   offHdg = 0;
   offTrk = 0;
   offPitch = 0;
@@ -487,9 +729,20 @@ interface Raw {
   vsFpm: number;
   agl: number;
   ground: boolean;
+  /** Velocity east/north, m/s of drawn time (of real time, once `drawn` scaled it). */
+  vE: number;
+  vN: number;
+  /** Bank before the measured roll's bias. */
+  modelBank: number;
+  /** The state's field is known (gear logic). */
+  hasField: boolean;
 }
 
 const newRaw = (): Raw => ({
+  vE: 0,
+  vN: 0,
+  modelBank: 0,
+  hasField: false,
   lat: 0,
   lon: 0,
   altMsl: 0,
@@ -550,6 +803,9 @@ export class Motion {
   private clockOffset = 0;
   private clockSynced = false;
   private lastPrune = -Infinity;
+  /** Reports still to be taken in this frame (`budgetMs`). */
+  private budget = 0;
+  private budgetMs = NaN;
   private byIata = new Map<string, Airport>();
   private grid = new Map<number, Airport[]>();
 
@@ -589,22 +845,50 @@ export class Motion {
       this.tracks.set(f.id, tr);
     }
     tr.touched = nowMs;
-    if (tr.n === 0 || f.timestampMs > tr.fr24Ms) this.ingest(tr, f, nowMs);
+    if (tr.n === 0) this.ingest(tr, f, nowMs);
+    else if (f.timestampMs > tr.fr24Ms) {
+      // a snapshot brings every aircraft's report at once: take in at most so many a frame
+      // (one frame being one `nowMs`); the rest are drawn as they were for a frame or two,
+      // which changes nothing on screen, since the drawn time is seconds behind anyway
+      if (nowMs !== this.budgetMs) {
+        this.budgetMs = nowMs;
+        this.budget = INGEST_BUDGET;
+      }
+      if (this.budget > 0) {
+        this.budget--;
+        this.ingest(tr, f, nowMs);
+      }
+    }
     if (nowMs - this.lastPrune > PRUNE_INTERVAL_MS) this.prune(nowMs);
 
-    const raw = this.evaluate(tr, nowMs, scratchA);
-    let { lat, lon, drawAlt: altFt, heading, track, pitch, bank } = raw;
-    const w = blend((nowMs - tr.offMs) / 1000);
-    if (w > 0) {
-      lat += (tr.offN * w) / M_PER_DEG;
-      lon = wrapLon(lon + (tr.offE * w) / (M_PER_DEG * Math.max(Math.cos(lat * DEG), 1e-3)));
-      altFt = Math.max(0, altFt + tr.offAlt * w);
-      heading = wrap360(heading + tr.offHdg * w);
-      track = wrap360(track + tr.offTrk * w);
-      pitch = clamp(pitch + tr.offPitch * w, MIN_PITCH, MAX_PITCH);
-      bank = clamp(bank + tr.offBank * w, -MAX_BANK, MAX_BANK);
-    }
-    return { lon, lat, altFt, heading, track, pitch, bank, gear: this.gear(tr, raw, nowMs), phase: raw.phase };
+    // drawn a few seconds in the past, by design (see the top of this file)
+    const T = drawTime(tr, nowMs);
+    const state = stateAt(tr, T);
+    if (state.reportMs !== tr.activeMs) this.takeOver(tr, nowMs, T, state);
+    tr.lastPoseMs = nowMs;
+    const raw = this.drawn(tr, nowMs, T, state, scratchA, true);
+    return {
+      lon: raw.lon,
+      lat: raw.lat,
+      altFt: raw.drawAlt,
+      heading: raw.heading,
+      track: raw.track,
+      pitch: clamp(raw.pitch, MIN_PITCH, MAX_PITCH),
+      bank: clamp(raw.bank, -MAX_BANK, MAX_BANK),
+      gear: this.gear(tr, raw, nowMs),
+      phase: raw.phase,
+    };
+  }
+
+  /**
+   * The (server) time an aircraft is drawn at: `nowMs` less its delay, which
+   * is 2-12 s and changes smoothly. Trails and anything else that shows where
+   * the aircraft has been should stop at this time, or they run ahead of it.
+   * `nowMs` itself for an aircraft not seen yet.
+   */
+  drawnTime(id: number, nowMs: number = this.now()): number {
+    const tr = this.tracks.get(id);
+    return tr && tr.n > 0 ? drawTime(tr, nowMs) : nowMs;
   }
 
   /**
@@ -623,9 +907,10 @@ export class Motion {
         tr.meas = null;
         tr.measMs = -Infinity;
         tr.crab = 0;
-        tr.rollBias = 0;
         tr.tasMs = 0;
         tr.navTrack = NaN;
+        tr.rollTs.length = tr.rolls.length = tr.rollBiases.length = 0;
+        tr.crabTs.length = tr.crabs.length = 0;
         this.refresh(tr);
       });
       return;
@@ -636,7 +921,7 @@ export class Motion {
     const newPosition = positioned && posMs! > tr.measPosMs;
     if (!newPosition && !(m.seenMs > tr.measMs)) return; // nothing new
     tr.touched = nowMs;
-    this.blendAround(tr, nowMs, () => this.applyMeasured(tr, m, newPosition));
+    this.blendAround(tr, nowMs, () => this.applyMeasured(tr, m, newPosition, nowMs));
   }
 
   /** Same airport-relative drawing height for points of the aircraft's trail (so the trail meets the model). */
@@ -683,49 +968,131 @@ export class Motion {
   private ingest(tr: Track, f: LiveFlight, nowMs: number): void {
     const first = tr.n === 0;
     const t = Number.isFinite(f.timestampMs) ? f.timestampMs : nowMs;
-    if (first) this.update(tr, f, t, true);
-    else this.blendAround(tr, nowMs, () => this.update(tr, f, t, false));
+    if (first) this.update(tr, f, t, true, nowMs);
+    else this.blendAround(tr, nowMs, () => this.update(tr, f, t, false, nowMs));
   }
 
-  /** Applies `change` to an existing track, blending from the pose drawn before it to the one after. */
-  private blendAround(tr: Track, nowMs: number, change: () => void): void {
-    const before = scratchA;
-    const previousMs = tr.reportMs;
-    {
-      // what is on screen right now, correction included
-      this.evaluate(tr, nowMs, before);
-      const w = blend((nowMs - tr.offMs) / 1000);
-      before.lat += (tr.offN * w) / M_PER_DEG;
-      before.lon = wrapLon(before.lon + (tr.offE * w) / (M_PER_DEG * Math.max(Math.cos(before.lat * DEG), 1e-3)));
-      before.drawAlt = Math.max(0, before.drawAlt + tr.offAlt * w);
-      before.heading = wrap360(before.heading + tr.offHdg * w);
-      before.track = wrap360(before.track + tr.offTrk * w);
-      before.pitch += tr.offPitch * w;
-      before.bank += tr.offBank * w;
+  /**
+   * The model at drawn time `T` as it moves in real time at `nowMs`: its
+   * velocities scaled by the playback rate (the delay may be easing), and with
+   * the correction being blended out if `withOffsets`.
+   */
+  private drawn(tr: Track, nowMs: number, T: number, state: State, out: Raw, withOffsets: boolean): Raw {
+    this.evaluate(tr, T, out, state);
+    const rate = 1 - delaySlope(tr, nowMs);
+    out.vE *= rate;
+    out.vN *= rate;
+    out.vsFpm *= rate;
+    if (!withOffsets) return out;
+    // position and height: the corrections being blended out (C1)
+    const { fast, gentle, altFast, altGentle } = tr;
+    fast.at(nowMs);
+    gentle.at(nowMs);
+    const dE = fast.px + gentle.px;
+    const dN = fast.py + gentle.py;
+    if (dE !== 0 || dN !== 0) {
+      out.lat += dN / M_PER_DEG;
+      out.lon = wrapLon(out.lon + dE / (M_PER_DEG * Math.max(Math.cos(out.lat * DEG), 1e-3)));
+      out.vE += fast.pvx + gentle.pvx;
+      out.vN += fast.pvy + gentle.pvy;
     }
+    altFast.at(nowMs);
+    altGentle.at(nowMs);
+    const dA = altFast.px + altGentle.px;
+    if (dA !== 0) {
+      out.drawAlt = Math.max(0, out.drawAlt + dA);
+      out.vsFpm += (altFast.pvx + altGentle.pvx) * 60;
+    }
+    const age = (nowMs - tr.offMs) / 1000;
+    // the angles: from the offset with zero rate, at the full rate as before
+    const w = blend(age, BLEND_RATE);
+    if (w === 0) return out;
+    out.heading = wrap360(out.heading + tr.offHdg * w);
+    out.track = wrap360(out.track + tr.offTrk * w);
+    out.pitch += tr.offPitch * w;
+    out.bank += tr.offBank * w;
+    return out;
+  }
 
-    change();
-
-    const after = this.evaluate(tr, nowMs, scratchB);
+  /** Starts blending out the difference between what was drawn (`before`) and the model now (`after`). */
+  private setOffsets(tr: Track, nowMs: number, before: Raw, after: Raw, snapBeforeMs: number): void {
+    const { fast, gentle, altFast, altGentle } = tr;
     const cosLat = Math.max(Math.cos(after.lat * DEG), 1e-3);
     const offE = wrap180(before.lon - after.lon) * M_PER_DEG * cosLat;
     const offN = (before.lat - after.lat) * M_PER_DEG;
-    if (Math.hypot(offE, offN) > SNAP_DISTANCE_M || nowMs - previousMs > SNAP_AGE_MS) {
+    if (Math.hypot(offE, offN) > SNAP_DISTANCE_M || nowMs - snapBeforeMs > SNAP_AGE_MS) {
+      fast.clear();
+      gentle.clear();
+      altFast.clear();
+      altGentle.clear();
       tr.offMs = -Infinity;
       return;
     }
+    // what changed now, beyond the corrections already under way (which carry on as they were),
+    // goes to the fast blend if large and the gentle one if small
+    fast.at(nowMs);
+    gentle.at(nowMs);
+    const dE = offE - fast.px - gentle.px;
+    const dN = offN - fast.py - gentle.py;
+    const dVE = before.vE - after.vE - fast.pvx - gentle.pvx;
+    const dVN = before.vN - after.vN - fast.pvy - gentle.pvy;
+    const w = smoothstep((Math.hypot(dE, dN) - GENTLE_MAX_M) / GENTLE_MAX_M);
+    fast.add(nowMs, w * dE, w * dN, w * dVE, w * dVN, BLEND_RATE);
+    gentle.add(nowMs, (1 - w) * dE, (1 - w) * dN, (1 - w) * dVE, (1 - w) * dVN, null);
+    altFast.at(nowMs);
+    altGentle.at(nowMs);
+    const dA = before.drawAlt - after.drawAlt - altFast.px - altGentle.px;
+    const dVA = (before.vsFpm - after.vsFpm) / 60 - altFast.pvx - altGentle.pvx;
+    const wa = smoothstep((Math.abs(dA) * FEET_TO_M - GENTLE_MAX_M) / GENTLE_MAX_M);
+    altFast.add(nowMs, wa * dA, 0, wa * dVA, 0, BLEND_RATE);
+    altGentle.add(nowMs, (1 - wa) * dA, 0, (1 - wa) * dVA, 0, null);
+    // the angles, from the offset with zero rate as before
     tr.offMs = nowMs;
-    tr.offE = offE;
-    tr.offN = offN;
-    tr.offAlt = before.drawAlt - after.drawAlt;
     tr.offHdg = wrap180(before.heading - after.heading);
     tr.offTrk = wrap180(before.track - after.track);
     tr.offPitch = before.pitch - after.pitch;
     tr.offBank = before.bank - after.bank;
   }
 
+  /** The state drawn last frame, if the previous pose was a moment ago; else the one in effect at `T`. */
+  private shownState(tr: Track, nowMs: number, T: number): State {
+    if (Math.abs(nowMs - tr.lastPoseMs) <= CONTINUITY_GAP_MS) {
+      for (const s of tr.states) if (s.reportMs === tr.activeMs) return s;
+    }
+    return stateAt(tr, T);
+  }
+
+  /** The drawn time has reached a newer (or, going back, older) report's state: blend over to it. */
+  private takeOver(tr: Track, nowMs: number, T: number, state: State): void {
+    if (Math.abs(nowMs - tr.lastPoseMs) <= CONTINUITY_GAP_MS) {
+      const prev = tr.states.find((s) => s.reportMs === tr.activeMs);
+      if (prev) {
+        const before = this.drawn(tr, nowMs, T, prev, scratchA, true);
+        const after = this.drawn(tr, nowMs, T, state, scratchB, false);
+        this.setOffsets(tr, nowMs, before, after, nowMs);
+      }
+    }
+    tr.activeMs = state.reportMs;
+  }
+
+  /** Applies `change` to an existing track, blending from the pose drawn before it to the one after. */
+  private blendAround(tr: Track, nowMs: number, change: () => void): void {
+    const previousMs = tr.reportMs;
+    // what is on screen right now, correction included
+    const T = drawTime(tr, nowMs);
+    const before = this.drawn(tr, nowMs, T, this.shownState(tr, nowMs, T), scratchA, true);
+
+    change();
+
+    // the delay eases from where it was, so the drawn time is still T
+    const state = stateAt(tr, T);
+    const after = this.drawn(tr, nowMs, T, state, scratchB, false);
+    tr.activeMs = state.reportMs;
+    this.setOffsets(tr, nowMs, before, after, previousMs);
+  }
+
   /** Updates samples, estimates, phase and predictions from a report. */
-  private update(tr: Track, f: LiveFlight, t: number, first: boolean): void {
+  private update(tr: Track, f: LiveFlight, t: number, first: boolean, nowMs: number): void {
     const dtReport = first ? NaN : (t - tr.reportMs) / 1000;
     const prevSpeed = tr.speedKt;
     const prevTrack = tr.trackDeg;
@@ -740,7 +1107,10 @@ export class Motion {
     if (!first && t < tr.reportMs) {
       // older than measured state already taken in: only its samples and route are news
       this.selectField(tr, f);
-      if (mergeMixed(tr, f, t, true) !== null) this.refresh(tr);
+      if (mergeMixed(tr, f, t, true) !== null) {
+        this.refresh(tr);
+        noteArrival(tr, nowMs);
+      }
       return;
     }
     tr.reportMs = t;
@@ -750,6 +1120,8 @@ export class Motion {
     tr.onGround = !!f.onGround;
     tr.lat0 = Number.isFinite(f.lat) ? clamp(f.lat, -90, 90) : 0;
     tr.lon0 = Number.isFinite(f.lon) ? wrapLon(f.lon) : 0;
+    if (tr.onGround) tr.ats.length = tr.avs.length = 0;
+    else if (Number.isFinite(f.alt)) addAltitude(tr, t, f.alt);
 
     this.selectField(tr, f);
     const reportedOnly = tr.mixed ? mergeMixed(tr, f, t, false)! : mergeSamples(tr, f);
@@ -810,23 +1182,37 @@ export class Motion {
 
     this.measuredRates(tr, t);
     tr.phase = decidePhase(tr, prevPhase);
-    computeTangents(tr, reportedOnly);
-    this.predict(tr);
-    this.measuredAttitude(tr);
+    this.refit(tr, reportedOnly);
+    noteArrival(tr, nowMs);
   }
 
   /** Re-derives the extrapolation after samples or estimates changed without a newer report. */
   private refresh(tr: Track): void {
-    computeTangents(tr, tr.ts[tr.n - 1] === tr.reportMs);
+    this.refit(tr, tr.ts[tr.n - 1] === tr.reportMs);
+  }
+
+  /** Smoothed curves, extrapolation and predictions, the latest state's snapshot, and the measured roll's bias. */
+  private refit(tr: Track, reportedOnly: boolean): void {
+    fitTrack(tr, reportedOnly);
+    fitAltitude(tr);
     this.predict(tr);
+    turnNodes(tr);
+    snapshot(tr);
     this.measuredAttitude(tr);
   }
 
   /** Takes in a measured state; a newer position also becomes the track's latest report. */
-  private applyMeasured(tr: Track, m: Measured, newPosition: boolean): void {
+  private applyMeasured(tr: Track, m: Measured, newPosition: boolean, nowMs: number): void {
     tr.meas = m;
     tr.measMs = Math.max(tr.measMs, m.seenMs);
     const prevPhase = tr.phase;
+    // the attitude's history, so that it is shown at the drawn time
+    if (!m.onGround) {
+      if (Number.isFinite(m.roll)) pushSeries(tr.rollTs, tr.rolls, m.seenMs, clamp(m.roll!, -MAX_BANK, MAX_BANK));
+      const track = Number.isFinite(m.track) ? m.track! : tr.trackDeg;
+      if (Number.isFinite(m.trueHeading))
+        pushSeries(tr.crabTs, tr.crabs, m.seenMs, clamp(wrap180(m.trueHeading! - track), -MAX_CRAB, MAX_CRAB));
+    }
     if (newPosition) {
       const t = m.positionMs!;
       tr.measPosMs = t;
@@ -839,8 +1225,13 @@ export class Motion {
         tr.lon0 = wrapLon(m.lon!);
         tr.onGround = !!m.onGround;
         // Flightradar24 reports 0 ft on the ground too
-        if (tr.onGround) tr.alt = 0;
-        else if (Number.isFinite(m.altBaro)) tr.alt = m.altBaro!;
+        if (tr.onGround) {
+          tr.alt = 0;
+          tr.ats.length = tr.avs.length = 0;
+        } else if (Number.isFinite(m.altBaro)) {
+          tr.alt = m.altBaro!;
+          addAltitude(tr, t, tr.alt);
+        }
         if (Number.isFinite(m.gs)) tr.speedKt = Math.max(0, m.gs!);
         if (Number.isFinite(m.track)) tr.trackDeg = wrap360(m.track!);
         this.selectField(tr, null);
@@ -853,6 +1244,7 @@ export class Motion {
     this.measuredRates(tr, tr.reportMs);
     tr.phase = decidePhase(tr, prevPhase);
     this.refresh(tr);
+    noteArrival(tr, nowMs);
   }
 
   /** Measured turn and vertical rates, airspeed, crab and selected heading replace the estimates while fresh at `t`. */
@@ -888,13 +1280,15 @@ export class Motion {
     }
   }
 
-  /** The measured bank as an offset to the model's own at the time it was reported. */
+  /** Each measured bank as an offset to the model's own at the time it was reported (interpolated at the drawn time). */
   private measuredAttitude(tr: Track): void {
-    tr.rollBias = 0;
-    const roll = tr.meas?.roll;
-    if (typeof roll !== "number" || !Number.isFinite(roll) || tr.onGround) return;
-    const raw = this.evaluate(tr, tr.measMs, scratchC);
-    if (!raw.ground) tr.rollBias = clamp(roll, -MAX_BANK, MAX_BANK) - raw.bank;
+    const n = tr.rollTs.length;
+    tr.rollBiases.length = n;
+    tr.rollBiases.fill(0); // the model's own bank (`modelBank`) is what is compared
+    for (let k = 0; k < n; k++) {
+      const raw = this.evaluate(tr, tr.rollTs[k], scratchC);
+      tr.rollBiases[k] = raw.ground ? 0 : tr.rolls[k] - raw.modelBank;
+    }
   }
 
   /** Destination within 40 km, else origin within 40 km, else the nearest within 15 km, else the previous one while within 60 km. */
@@ -959,7 +1353,13 @@ export class Motion {
       default: {
         // airborne: does the descent reach the field within the vertical horizon?
         if ((tr.phase === "approach" || tr.phase === "flare") && tr.field && tr.vrate < 0) {
-          const needed = Math.max(0, (tr.alt - tr.fieldElev) / (-tr.vrate / 60));
+          // from the smoothed altitude, as drawn, where the newest altitude is this report's
+          const na = tr.ats.length;
+          const alt0 =
+            na > 0 && tr.ats[na - 1] >= tr.reportMs - COINCIDENT_MS
+              ? tr.afv[na - 1] + ((clamp(tr.afd[na - 1] * 60, -MAX_VRATE_FPM, MAX_VRATE_FPM) - tr.vrate) / 60) * VRATE_HANDOVER_S
+              : tr.alt;
+          const needed = Math.max(0, (alt0 - tr.fieldElev) / (-tr.vrate / 60));
           const t = verticalIntegralInverse(needed);
           if (Number.isFinite(t)) tr.touchdownMs = tr.reportMs + t * 1000;
         }
@@ -995,16 +1395,23 @@ export class Motion {
     tr.capAlt = captureAltitude(tr);
   }
 
-  /** The model at time T (server ms), without blending, into `out`. */
-  private evaluate(tr: Track, T: number, out: Raw): Raw {
+  /**
+   * The model at drawn time T (server ms), without blending, into `out`: the
+   * smoothed path inside the samples, the extrapolation past them, and the
+   * vertical profile, phase and attitude of `state` (by default the report
+   * state in effect at T).
+   */
+  private evaluate(tr: Track, T: number, out: Raw, state?: State): Raw {
+    const S = state ?? stateAt(tr, T);
     // --- horizontal
     const n = tr.n;
-    const tLast = tr.ts[n - 1];
+    const last = n - 1;
+    const tLast = tr.ts[last];
     let x: number;
     let y: number;
     let vx: number;
     let vy: number;
-    let turnRad = tr.turnRate * DEG; // rad/s
+    let omega: number; // turn rate, rad/s
     let bankFade = 1;
     let pathHeading = tr.h0; // heading to keep when the aircraft stops
     if (T >= tLast) {
@@ -1018,19 +1425,23 @@ export class Motion {
       const h0 = tr.h0;
       const sTurn = Math.min(s, tr.sTurnMax);
       const h = h0 + k * sTurn;
+      // from the end of the smoothed path, along its direction
+      x = tr.fx[last];
+      y = tr.fy[last];
       if (Math.abs(k * sTurn) < 1e-9) {
-        x = sTurn * Math.sin(h0);
-        y = sTurn * Math.cos(h0);
+        x += sTurn * Math.sin(h0);
+        y += sTurn * Math.cos(h0);
       } else {
         // constant-curvature arc: d(east)/ds = sin h, d(north)/ds = cos h, h = h0 + k s
-        x = (Math.cos(h0) - Math.cos(h)) / k;
-        y = (Math.sin(h) - Math.sin(h0)) / k;
+        x += (Math.cos(h0) - Math.cos(h)) / k;
+        y += (Math.sin(h) - Math.sin(h0)) / k;
       }
       x += (s - sTurn) * Math.sin(h);
       y += (s - sTurn) * Math.cos(h);
       vx = v * Math.sin(h);
       vy = v * Math.cos(h);
       pathHeading = h;
+      let turnRad: number;
       if (tr.turnEndS < TURN_HORIZON_S) {
         // rolling out onto the selected heading
         turnRad = dt < tr.turnEndS ? k * v : 0;
@@ -1039,59 +1450,57 @@ export class Motion {
         turnRad = dt < TURN_HORIZON_S ? k * v : 0;
         bankFade = dt <= BANK_FADE_START_S ? 1 : Math.max(0, (TURN_HORIZON_S - dt) / (TURN_HORIZON_S - BANK_FADE_START_S));
       }
+      // the smoothed path's own turn rate hands over to the prediction's
+      omega = n > 1 ? tr.om[last] + (turnRad - tr.om[last]) * smoothstep(dt / TURN_HANDOVER_S) : turnRad;
     } else if (T <= tr.ts[0]) {
       const dt = Math.max((T - tr.ts[0]) / 1000, -BACKWARD_LIMIT_S);
-      x = tr.xs[0] + tr.mx[0] * dt;
-      y = tr.ys[0] + tr.my[0] * dt;
+      x = tr.fx[0] + tr.mx[0] * dt;
+      y = tr.fy[0] + tr.my[0] * dt;
       vx = tr.mx[0];
       vy = tr.my[0];
+      omega = tr.om[0];
     } else {
-      // cubic Hermite between samples i and i+1
-      let i = n - 2;
-      while (i > 0 && T < tr.ts[i]) i--;
-      const h = (tr.ts[i + 1] - tr.ts[i]) / 1000;
-      const u = (T - tr.ts[i]) / 1000 / h;
-      const u2 = u * u;
-      const u3 = u2 * u;
-      const h00 = 2 * u3 - 3 * u2 + 1;
-      const h10 = u3 - 2 * u2 + u;
-      const h01 = 3 * u2 - 2 * u3;
-      const h11 = u3 - u2;
-      const d00 = 6 * u2 - 6 * u;
-      const d10 = 3 * u2 - 4 * u + 1;
-      const d11 = 3 * u2 - 2 * u;
-      x = h00 * tr.xs[i] + h10 * h * tr.mx[i] + h01 * tr.xs[i + 1] + h11 * h * tr.mx[i + 1];
-      y = h00 * tr.ys[i] + h10 * h * tr.my[i] + h01 * tr.ys[i + 1] + h11 * h * tr.my[i + 1];
-      vx = (d00 * (tr.xs[i] - tr.xs[i + 1])) / h + d10 * tr.mx[i] + d11 * tr.mx[i + 1];
-      vy = (d00 * (tr.ys[i] - tr.ys[i + 1])) / h + d10 * tr.my[i] + d11 * tr.my[i + 1];
+      // the smoothed path: a cubic Hermite piece between samples i and i+1
+      hermite(tr, T);
+      x = hx;
+      y = hy;
+      vx = hvx;
+      vy = hvy;
+      omega = tr.om[hi] + (tr.om[hi + 1] - tr.om[hi]) * hu;
     }
     const lat = clamp(tr.refLat + y / M_PER_DEG, -90, 90);
     const cosMid = Math.max(Math.cos(((tr.refLat + lat) / 2) * DEG), 1e-3);
     out.lat = lat;
     out.lon = wrapLon(tr.refLon + x / (M_PER_DEG * cosMid));
+    out.vE = vx;
+    out.vN = vy;
     const speed = Math.hypot(vx, vy);
     out.speedMs = speed;
     out.track =
-      tr.phase === "parked"
-        ? tr.trackDeg
+      S.phase === "parked"
+        ? S.trackDeg
         : wrap360((speed > HEADING_MIN_SPEED_MS ? Math.atan2(vx, vy) : pathHeading) / DEG);
-    // measured values count while fresh (the nose's crab, the bank, the airspeed), then ease out
+    // measured values count while fresh (the nose's crab, the bank, the airspeed), then ease out;
+    // the crab and bank as they were at T
     const mw = measWeight(tr, T);
-    out.heading = mw > 0 ? wrap360(out.track + tr.crab * mw) : out.track;
+    out.heading = mw > 0 ? wrap360(out.track + seriesAt(tr.crabTs, tr.crabs, T, tr.crab) * mw) : out.track;
 
     // --- vertical, phase and attitude
-    let phase = tr.phase;
-    const field = tr.field;
-    const floor = field ? tr.fieldElev : Math.min(0, tr.alt);
+    let phase = S.phase;
+    const field = S.field;
+    const fieldElev = S.fieldElev;
+    const floor = field ? fieldElev : Math.min(0, S.alt);
+    out.hasField = field !== null;
     out.bank = 0;
+    out.modelBank = 0;
     out.vsFpm = 0;
     out.agl = NaN;
     if (GROUND.has(phase)) {
       out.ground = true;
-      out.altMsl = field ? tr.fieldElev : 0;
+      out.altMsl = field ? fieldElev : 0;
       out.pitch = 0;
       if (phase === "landingRoll" && speed < TAXI_MAX_KT * KNOTS_TO_MS) phase = "taxi";
-      const lo = tr.liftoffMs;
+      const lo = S.liftoffMs;
       if (phase === "takeoffRoll" && Number.isFinite(lo)) {
         if (T < lo) out.pitch = ROTATION_PITCH * smoothstep(1 - (lo - T) / (ROTATION_S * 1000));
         else {
@@ -1108,52 +1517,80 @@ export class Motion {
         }
       }
     } else {
-      const td = tr.touchdownMs;
+      const td = S.touchdownMs;
       if (Number.isFinite(td) && T >= td) {
         // predicted landing roll
         out.ground = true;
-        out.altMsl = tr.fieldElev;
+        out.altMsl = fieldElev;
         out.agl = 0;
         phase = speed < TAXI_MAX_KT * KNOTS_TO_MS ? "taxi" : "landingRoll";
-        out.pitch = tr.touchdownPitch * (1 - smoothstep((T - td) / (TOUCHDOWN_EASE_S * 1000)));
+        out.pitch = S.touchdownPitch * (1 - smoothstep((T - td) / (TOUCHDOWN_EASE_S * 1000)));
       } else {
-        const dtR = (T - tr.reportMs) / 1000;
-        let climb = (tr.vrate * verticalIntegral(dtR)) / 60;
-        let vsWeight = verticalWeight(dtR);
-        const cap = tr.capAlt;
-        if (cap === cap) {
-          // altitude capture: ease onto the selected altitude (C1: the rate goes smoothly to 0)
-          const d = cap - tr.alt;
-          const band = clamp(Math.abs(tr.vrate) * CAPTURE_FT_PER_FPM, MIN_CAPTURE_FT, MAX_CAPTURE_FT);
-          const kk = Math.min(1, band / Math.abs(d));
-          const x = climb / d;
-          if (x >= 1 + kk) {
-            climb = d;
-            vsWeight = 0;
-          } else if (x > 1 - kk) {
-            const u = x - (1 - kk);
-            climb = d * (x - (u * u) / (4 * kk));
-            vsWeight *= 1 - u / (2 * kk);
+        const na = tr.ats.length;
+        let alt: number;
+        let vs: number;
+        if (na > 1 && T >= tr.ats[0] && T <= tr.ats[na - 1]) {
+          // inside the altitude samples: the smoothed curve and its slope
+          altitudeAt(tr, T);
+          alt = hx;
+          vs = hvx * 60;
+        } else {
+          // past them: on from the smoothed newest altitude (or the report) at the
+          // estimated rate, the curve's own rate easing into it (C1)
+          let baseMs = S.reportMs;
+          let base = S.alt;
+          let baseRate = S.vrate * verticalWeight(0);
+          if (na > 0 && T >= tr.ats[0]) {
+            baseMs = tr.ats[na - 1];
+            base = tr.afv[na - 1];
+            baseRate = clamp(tr.afd[na - 1] * 60, -MAX_VRATE_FPM, MAX_VRATE_FPM);
           }
+          const dtR = (T - S.reportMs) / 1000;
+          const dtB = (baseMs - S.reportMs) / 1000;
+          const extra = baseRate - S.vrate * verticalWeight(dtB);
+          const ease = Math.exp(-Math.max(0, (T - baseMs) / 1000) / VRATE_HANDOVER_S);
+          let climb =
+            (S.vrate * (verticalIntegral(dtR) - verticalIntegral(dtB))) / 60 + (extra / 60) * VRATE_HANDOVER_S * (1 - ease);
+          let vsScale = 1;
+          let vsWeight = verticalWeight(dtR);
+          const cap = S.capAlt;
+          if (cap === cap) {
+            // altitude capture: ease onto the selected altitude (C1: the rate goes smoothly to 0)
+            const d = cap - base;
+            const band = clamp(Math.abs(S.vrate) * CAPTURE_FT_PER_FPM, MIN_CAPTURE_FT, MAX_CAPTURE_FT);
+            const kk = Math.min(1, band / Math.abs(d));
+            const xx = climb / d;
+            if (xx >= 1 + kk) {
+              climb = d;
+              vsScale = 0;
+            } else if (xx > 1 - kk) {
+              const u = xx - (1 - kk);
+              climb = d * (xx - (u * u) / (4 * kk));
+              vsScale = 1 - u / (2 * kk);
+            }
+          }
+          alt = base + climb;
+          vs = (S.vrate * vsWeight + extra * ease) * vsScale;
         }
-        const alt = tr.alt + climb;
         out.ground = false;
         out.altMsl = clamp(alt, floor, MAX_ALT_FT);
-        out.vsFpm = alt === out.altMsl ? tr.vrate * vsWeight : 0;
+        out.vsFpm = alt === out.altMsl ? vs : 0;
         if (field) {
-          out.agl = out.altMsl - tr.fieldElev;
+          out.agl = out.altMsl - fieldElev;
           if (phase === "approach" && out.agl < FLARE_MAX_AGL_FT) phase = "flare";
         }
         // the flight-path angle is through the air: true airspeed when measured
         const airSpeed = mw > 0 && tr.tasMs > 0 ? speed + (tr.tasMs - speed) * mw : speed;
         out.pitch = airPitch(out.vsFpm, airSpeed, phase, out.agl);
-        const bank = Math.atan2(speed * turnRad, GRAVITY_MS2) / DEG;
-        out.bank = clamp(bank * bankFade + tr.rollBias * mw, -MAX_BANK, MAX_BANK);
+        const bank = Math.atan2(speed * omega, GRAVITY_MS2) / DEG;
+        out.modelBank = clamp(bank * bankFade, -MAX_BANK, MAX_BANK);
+        const bias = mw > 0 ? seriesAt(tr.rollTs, tr.rollBiases, T, 0) * mw : 0;
+        out.bank = clamp(out.modelBank + bias, -MAX_BANK, MAX_BANK);
       }
     }
     out.phase = phase;
     if (out.ground) out.drawAlt = 0;
-    else if (Number.isFinite(tr.liftoffMs) && !field) out.drawAlt = out.agl; // predicted climb off an unknown field
+    else if (Number.isFinite(S.liftoffMs) && !field) out.drawAlt = out.agl; // predicted climb off an unknown field
     else out.drawAlt = Math.max(0, out.altMsl - fieldRemoval(tr, out.lat, out.lon));
     return out;
   }
@@ -1163,7 +1600,7 @@ export class Motion {
     let down: boolean;
     const phase = raw.phase;
     if (raw.ground || GROUND.has(phase)) down = true;
-    else if (tr.field) {
+    else if (raw.hasField) {
       down =
         ((phase === "approach" || phase === "flare") && raw.agl < GEAR_APPROACH_AGL_FT) ||
         (phase === "initialClimb" && raw.agl < GEAR_CLIMB_AGL_FT);
@@ -1254,6 +1691,25 @@ function mergeSamples(tr: Track, f: LiveFlight): boolean {
     const km = distanceKm(lats[n - 1], lons[n - 1], tr.lat0, tr.lon0);
     const plausible = (Math.max(tr.speedKt, 250) * 2 * KNOTS_TO_MS * gap) / 1000 + 0.5;
     if (km > plausible || km * 1000 > SNAP_DISTANCE_M) n = 0;
+    // so does a report well off the path the old samples smoothed to: the old ones were wrong
+    else if (tr.fx.length === tr.n && tr.n > 1 && t >= ts[0] && t <= ts[tr.n - 1] + JUMP_LOOKAHEAD_MS) {
+      const last = tr.n - 1;
+      let x: number;
+      let y: number;
+      if (t <= ts[last]) {
+        hermite(tr, t);
+        x = hx;
+        y = hy;
+      } else {
+        // just past them: straight on is good to well inside JUMP_M over a few seconds
+        const dt = (t - ts[last]) / 1000;
+        x = tr.fx[last] + tr.mx[last] * dt;
+        y = tr.fy[last] + tr.my[last] * dt;
+      }
+      const lat = tr.refLat + y / M_PER_DEG;
+      const lon = tr.refLon + x / (M_PER_DEG * Math.max(Math.cos(((tr.refLat + lat) / 2) * DEG), 1e-3));
+      if (distanceKm(lat, lon, tr.lat0, tr.lon0) * 1000 > JUMP_M) n = 0;
+    }
   }
   ts.length = lats.length = lons.length = n;
   // old samples all end before t - MERGE_EPSILON_MS, so the report point always goes in
@@ -1441,64 +1897,586 @@ function mergeMeasured(tr: Track, t: number, lat: number, lon: number, src: numb
   return inserted;
 }
 
+// --- Smoothing -------------------------------------------------------------------------
+
+/** Solver scratch, grown as needed: fits run for every aircraft in every snapshot. */
+let splineBuf = new Float64Array(0);
+const weightBuf: number[] = [];
+
 /**
- * Velocities at the samples for the Hermite spline: the three-point
- * derivative inside (exact for a parabola), and at the ends the chord turned
- * by half its heading change, which is the tangent of a circular arc. The
- * newest sample's chord spans this report's whole buffer (positions are
- * quantised to ~1 m, too coarse for one 2 s chord to give a speed that holds
- * for minutes of extrapolation); if it is the report point itself, it takes
- * the reported velocity.
+ * Cubic smoothing spline. Finds the piecewise cubic f, in Hermite form (node
+ * values `f` and slopes `d` at the sample times `ts`, ms), that minimises
+ *
+ *     Σ w_i (f(t_i) - y_i)²  +  λ ∫ f''(t)² dt                  (t in seconds)
+ *     [ + endSlopeW (f'(t_last) - endSlope)² ]
+ *
+ * i.e. the smoothest curve that stays close to the samples: it approximates
+ * them instead of passing through each noisy one. The optimum is the natural
+ * smoothing spline, which is C2. λ sets how far it averages: about
+ * (λ / (w · samples per second))^¼ seconds either side, so sparse samples
+ * are followed closely and dense noisy ones averaged. The normal equations are
+ * block tridiagonal (2×2 blocks: value and slope per sample), solved in O(n);
+ * series `a` and `b` (east and north) share the system.
  */
-function computeTangents(tr: Track, reportedOnly: boolean): void {
-  const n = tr.n;
-  const parked = tr.phase === "parked";
-  const omega = tr.turnRate * DEG;
-  tr.mx.length = tr.my.length = n;
-  const reportedV = parked ? 0 : tr.speedKt * KNOTS_TO_MS;
-  const reportedX = reportedV * Math.sin(tr.trackDeg * DEG);
-  const reportedY = reportedV * Math.cos(tr.trackDeg * DEG);
-  if (n === 1) {
-    tr.mx[0] = reportedX;
-    tr.my[0] = reportedY;
-    return;
-  }
+function smoothSpline(
+  n: number,
+  ts: number[],
+  ws: number[] | null,
+  lambda: number,
+  ya: number[],
+  fa: number[],
+  da: number[],
+  yb: number[] | null,
+  fb: number[] | null,
+  db: number[] | null,
+  endSlopeW: number,
+  endSlopeA: number,
+  endSlopeB: number,
+): void {
+  const S = 11;
+  if (splineBuf.length < n * S) splineBuf = new Float64Array(Math.max(n * S, 2 * splineBuf.length));
+  const B = splineBuf;
+  // assembly and forward elimination
   for (let i = 0; i < n; i++) {
-    if (i === 0 || i === n - 1) {
-      if (i === n - 1 && reportedOnly) {
-        tr.mx[i] = reportedX;
-        tr.my[i] = reportedY;
-        continue;
-      }
-      let a = 0;
-      let b = 1;
-      if (i === n - 1) {
-        b = n - 1;
-        a = b - 1;
-        while (a > 0 && tr.ts[a - 1] >= tr.reportMs) a--;
-      }
-      const dt = (tr.ts[b] - tr.ts[a]) / 1000;
-      // rotate the chord clockwise by ±ω·dt/2 onto the arc's end tangent, and
-      // lengthen it from chord to arc length
-      const th = ((i === 0 ? -1 : 1) * omega * dt) / 2;
-      const arc = Math.abs(th) > 1e-6 ? Math.abs(th) / Math.sin(Math.abs(th)) : 1;
-      const cx = ((tr.xs[b] - tr.xs[a]) / dt) * arc;
-      const cy = ((tr.ys[b] - tr.ys[a]) / dt) * arc;
-      const c = Math.cos(th);
-      const s = Math.sin(th);
-      tr.mx[i] = cx * c + cy * s;
-      tr.my[i] = -cx * s + cy * c;
-    } else {
-      const d0 = (tr.ts[i] - tr.ts[i - 1]) / 1000;
-      const d1 = (tr.ts[i + 1] - tr.ts[i]) / 1000;
-      const c0x = (tr.xs[i] - tr.xs[i - 1]) / d0;
-      const c0y = (tr.ys[i] - tr.ys[i - 1]) / d0;
-      const c1x = (tr.xs[i + 1] - tr.xs[i]) / d1;
-      const c1y = (tr.ys[i + 1] - tr.ys[i]) / d1;
-      tr.mx[i] = (d1 * c0x + d0 * c1x) / (d0 + d1);
-      tr.my[i] = (d1 * c0y + d0 * c1y) / (d0 + d1);
+    const w = ws ? ws[i] : 1;
+    let a = w;
+    let b = 0;
+    let c = 0;
+    let u00 = 0;
+    let u01 = 0;
+    let u10 = 0;
+    let u11 = 0;
+    let raf = w * ya[i];
+    let rad = 0;
+    let rbf = yb ? w * yb[i] : 0;
+    let rbd = 0;
+    // ∫f''² over a piece of length h is (4/h³)[3Δ² - 3hΔ(d0+d1) + h²(d0² + d0 d1 + d1²)], Δ = f1 - f0
+    if (i > 0) {
+      const h = (ts[i] - ts[i - 1]) / 1000;
+      const cc = (lambda * 4) / (h * h * h);
+      a += 3 * cc;
+      b -= 1.5 * h * cc;
+      c += h * h * cc;
+    }
+    if (i < n - 1) {
+      const h = (ts[i + 1] - ts[i]) / 1000;
+      const cc = (lambda * 4) / (h * h * h);
+      a += 3 * cc;
+      b += 1.5 * h * cc;
+      c += h * h * cc;
+      u00 = -3 * cc;
+      u01 = 1.5 * h * cc;
+      u10 = -1.5 * h * cc;
+      u11 = 0.5 * h * h * cc;
+    }
+    if (i === n - 1 && endSlopeW > 0) {
+      c += endSlopeW;
+      rad += endSlopeW * endSlopeA;
+      rbd += endSlopeW * endSlopeB;
+    }
+    if (i > 0) {
+      // eliminate the previous block: L = Uᵀ D⁻¹, D -= L U, r -= L r'
+      const o = (i - 1) * S;
+      const det = B[o] * B[o + 2] - B[o + 1] * B[o + 1];
+      const i00 = B[o + 2] / det;
+      const i01 = -B[o + 1] / det;
+      const i11 = B[o] / det;
+      const q00 = B[o + 3];
+      const q01 = B[o + 4];
+      const q10 = B[o + 5];
+      const q11 = B[o + 6];
+      const l00 = q00 * i00 + q10 * i01;
+      const l01 = q00 * i01 + q10 * i11;
+      const l10 = q01 * i00 + q11 * i01;
+      const l11 = q01 * i01 + q11 * i11;
+      a -= l00 * q00 + l01 * q10;
+      b -= l00 * q01 + l01 * q11;
+      c -= l10 * q01 + l11 * q11;
+      raf -= l00 * B[o + 7] + l01 * B[o + 8];
+      rad -= l10 * B[o + 7] + l11 * B[o + 8];
+      rbf -= l00 * B[o + 9] + l01 * B[o + 10];
+      rbd -= l10 * B[o + 9] + l11 * B[o + 10];
+    }
+    const o = i * S;
+    B[o] = a;
+    B[o + 1] = b;
+    B[o + 2] = c;
+    B[o + 3] = u00;
+    B[o + 4] = u01;
+    B[o + 5] = u10;
+    B[o + 6] = u11;
+    B[o + 7] = raf;
+    B[o + 8] = rad;
+    B[o + 9] = rbf;
+    B[o + 10] = rbd;
+  }
+  // back substitution
+  let zaf = 0;
+  let zad = 0;
+  let zbf = 0;
+  let zbd = 0;
+  for (let i = n - 1; i >= 0; i--) {
+    const o = i * S;
+    let raf = B[o + 7];
+    let rad = B[o + 8];
+    let rbf = B[o + 9];
+    let rbd = B[o + 10];
+    if (i < n - 1) {
+      raf -= B[o + 3] * zaf + B[o + 4] * zad;
+      rad -= B[o + 5] * zaf + B[o + 6] * zad;
+      rbf -= B[o + 3] * zbf + B[o + 4] * zbd;
+      rbd -= B[o + 5] * zbf + B[o + 6] * zbd;
+    }
+    const det = B[o] * B[o + 2] - B[o + 1] * B[o + 1];
+    const i00 = B[o + 2] / det;
+    const i01 = -B[o + 1] / det;
+    const i11 = B[o] / det;
+    zaf = i00 * raf + i01 * rad;
+    zad = i01 * raf + i11 * rad;
+    zbf = i00 * rbf + i01 * rbd;
+    zbd = i01 * rbf + i11 * rbd;
+    fa[i] = zaf;
+    da[i] = zad;
+    if (fb && db) {
+      fb[i] = zbf;
+      db[i] = zbd;
     }
   }
+}
+
+// Scratch for `fitTrack`: the reference path and the residuals' fit.
+const refX: number[] = [];
+const refY: number[] = [];
+const refVX: number[] = [];
+const refVY: number[] = [];
+const resX: number[] = [];
+const resY: number[] = [];
+const resFX: number[] = [];
+const resFY: number[] = [];
+const resDX: number[] = [];
+const resDY: number[] = [];
+
+/** Seconds' worth of the reference turn (and speed change) `back` seconds before the newest sample: full, then fading out. */
+function referenceSpan(back: number): number {
+  if (back <= REF_FULL_S) return back;
+  const span = REF_ZERO_S - REF_FULL_S;
+  const u = Math.min(back, REF_ZERO_S) - REF_FULL_S;
+  return REF_FULL_S + u - (u * u) / (2 * span);
+}
+
+/**
+ * The smoothed horizontal path through the samples (values fx/fy, slopes
+ * mx/my). A smoothing spline penalises acceleration, so on its own it would
+ * straighten a steady turn (a constant sideways acceleration) by tens of
+ * metres. Instead it smooths the samples' difference from a reference path
+ * that turns, and changes speed, as the data itself does over the last
+ * ~12 s, then adds the reference back: a steady turn costs nothing and only
+ * the jitter is taken out. The first pass's reference takes the report's
+ * estimates; the next two read the turn and acceleration off the pass before
+ * (each pass cuts the dependence on the estimates ~6-fold), so the result
+ * comes from the data and changes as little as it does from report to report. A newest
+ * sample that is the report itself (no look-ahead) takes the reported
+ * velocity as its slope, softly.
+ */
+function fitTrack(tr: Track, reportedOnly: boolean): void {
+  const n = tr.n;
+  tr.fx.length = tr.fy.length = tr.mx.length = tr.my.length = n;
+  const v = tr.phase === "parked" ? 0 : tr.speedKt * KNOTS_TO_MS;
+  const rx = v * Math.sin(tr.trackDeg * DEG);
+  const ry = v * Math.cos(tr.trackDeg * DEG);
+  if (n === 1) {
+    tr.fx[0] = tr.xs[0];
+    tr.fy[0] = tr.ys[0];
+    tr.mx[0] = rx;
+    tr.my[0] = ry;
+    return;
+  }
+  let ws: number[] | null = null;
+  if (tr.mixed) {
+    weightBuf.length = n;
+    for (let i = 0; i < n; i++)
+      weightBuf[i] = tr.src[i] === SRC_MLAT ? WEIGHT_MLAT : tr.src[i] === SRC_ADSB ? WEIGHT_ADSB : WEIGHT_FR24;
+    ws = weightBuf;
+  }
+  // seeded with the report's estimates, then refined from the data itself
+  const moving = tr.phase !== "parked" && v > HEADING_MIN_SPEED_MS;
+  let omega = moving ? tr.turnRate * DEG : 0;
+  let accel = moving ? tr.accel * KNOTS_TO_MS : 0;
+  for (let pass = 0; pass < REF_PASSES; pass++) {
+    fitAround(tr, ws, reportedOnly, rx, ry, omega, accel, pass === 0);
+    if (pass === REF_PASSES - 1 || tr.phase === "parked") break;
+    // the turn and speed change of this pass's path: two chords over the last ~12 s
+    const tEnd = tr.ts[n - 1];
+    const t0 = Math.max(tr.ts[0], tEnd - 2 * REF_CHORD_MS);
+    const w = (tEnd - t0) / 2000;
+    if (w < REF_MIN_CHORD_S) break;
+    hermite(tr, t0);
+    const x0 = hx;
+    const y0 = hy;
+    hermite(tr, t0 + w * 1000);
+    const x1 = hx;
+    const y1 = hy;
+    const x2 = tr.fx[n - 1];
+    const y2 = tr.fy[n - 1];
+    const s1 = Math.hypot(x1 - x0, y1 - y0) / w;
+    const s2 = Math.hypot(x2 - x1, y2 - y1) / w;
+    const turn = s1 > HEADING_MIN_SPEED_MS && s2 > HEADING_MIN_SPEED_MS
+      ? (wrap180((Math.atan2(x2 - x1, y2 - y1) - Math.atan2(x1 - x0, y1 - y0)) / DEG) * DEG) / w
+      : 0;
+    const nextOmega = clamp(turn, -MAX_TURN_DEG_S * DEG, MAX_TURN_DEG_S * DEG);
+    const nextAccel = clamp((s2 - s1) / w, -MAX_ACCEL_KTS * KNOTS_TO_MS, MAX_ACCEL_KTS * KNOTS_TO_MS);
+    // straight and steady, as assumed: the fit stands
+    if (Math.abs(nextOmega - omega) < 0.02 * DEG && Math.abs(nextAccel - accel) < 0.02) break;
+    omega = nextOmega;
+    accel = nextAccel;
+  }
+}
+
+/** One pass of `fitTrack`: the smoothed residual from a reference turning at `omega` (rad/s) and accelerating at `accel` (m/s²). */
+function fitAround(
+  tr: Track,
+  ws: number[] | null,
+  reportedOnly: boolean,
+  rx: number,
+  ry: number,
+  omega: number,
+  accel: number,
+  first: boolean,
+): void {
+  const n = tr.n;
+  // the reference, integrated back from the newest sample (from the report's velocity, or the previous pass's):
+  // heading h(a) = hEnd - ω F(a), speed v(a) = vEnd - accel F(a), `a` seconds back, F = referenceSpan
+  const plain = omega === 0 && accel === 0;
+  const tEnd = tr.ts[n - 1];
+  let vEnd = 0;
+  let hEnd = 0;
+  if (!plain && first) {
+    // the reported velocity, carried on to the newest sample
+    const since = clamp((tEnd - tr.reportMs) / 1000, 0, TURN_HORIZON_S);
+    vEnd = Math.max(0, Math.hypot(rx, ry) + accel * Math.min(since, ACCEL_HORIZON_S));
+    hEnd = tr.trackDeg * DEG + omega * since;
+  } else if (!plain) {
+    vEnd = Math.hypot(tr.mx[n - 1], tr.my[n - 1]);
+    hEnd = Math.atan2(tr.mx[n - 1], tr.my[n - 1]);
+  }
+  refX.length = refY.length = refVX.length = refVY.length = resX.length = resY.length = n;
+  let x = 0;
+  let y = 0;
+  refX[n - 1] = 0;
+  refY[n - 1] = 0;
+  refVX[n - 1] = vEnd * Math.sin(hEnd);
+  refVY[n - 1] = vEnd * Math.cos(hEnd);
+  for (let i = n - 2; i >= 0; i--) {
+    if (plain) {
+      refX[i] = refY[i] = refVX[i] = refVY[i] = 0;
+      continue;
+    }
+    const a0 = (tEnd - tr.ts[i + 1]) / 1000;
+    const a1 = (tEnd - tr.ts[i]) / 1000;
+    const steps = Math.max(1, Math.ceil(a1 - a0));
+    const da = (a1 - a0) / steps;
+    for (let k = 0; k < steps; k++) {
+      const F = referenceSpan(a0 + (k + 0.5) * da);
+      const h = hEnd - omega * F;
+      const speed = Math.max(0, vEnd - accel * F);
+      x -= speed * Math.sin(h) * da;
+      y -= speed * Math.cos(h) * da;
+    }
+    const F = referenceSpan(a1);
+    const h = hEnd - omega * F;
+    const speed = Math.max(0, vEnd - accel * F);
+    refX[i] = x;
+    refY[i] = y;
+    refVX[i] = speed * Math.sin(h);
+    refVY[i] = speed * Math.cos(h);
+  }
+  for (let i = 0; i < n; i++) {
+    resX[i] = tr.xs[i] - refX[i];
+    resY[i] = tr.ys[i] - refY[i];
+  }
+  resFX.length = resFY.length = resDX.length = resDY.length = n;
+  smoothSpline(
+    n,
+    tr.ts,
+    ws,
+    SMOOTH_LAMBDA,
+    resX,
+    resFX,
+    resDX,
+    resY,
+    resFY,
+    resDY,
+    reportedOnly ? REPORTED_SLOPE_WEIGHT : 0,
+    rx - refVX[n - 1],
+    ry - refVY[n - 1],
+  );
+  for (let i = 0; i < n; i++) {
+    tr.fx[i] = resFX[i] + refX[i];
+    tr.fy[i] = resFY[i] + refY[i];
+    tr.mx[i] = resDX[i] + refVX[i];
+    tr.my[i] = resDY[i] + refVY[i];
+  }
+}
+
+/** The smoothed altitude through the airborne altitude samples. */
+function fitAltitude(tr: Track): void {
+  const n = tr.ats.length;
+  tr.afv.length = tr.afd.length = n;
+  if (n === 0) return;
+  if (n === 1) {
+    tr.afv[0] = tr.avs[0];
+    tr.afd[0] = tr.vrate / 60;
+    return;
+  }
+  smoothSpline(n, tr.ats, null, ALT_SMOOTH_LAMBDA, tr.avs, tr.afv, tr.afd, null, null, null, 0, 0, 0);
+}
+
+/** An airborne altitude (ft) at `t`; a sample within a second of the newest replaces it, an older one is dropped. */
+function addAltitude(tr: Track, t: number, alt: number): void {
+  const { ats, avs } = tr;
+  let n = ats.length;
+  if (n && t < ats[n - 1] - COINCIDENT_MS) return;
+  // a change no aircraft can fly (beyond 25 ft steps) is a jump in the data: start over
+  if (n && Math.abs(alt - avs[n - 1]) > ALT_STEP_FT) {
+    const dtMin = Math.max(t - ats[n - 1], COINCIDENT_MS) / 60_000;
+    if (Math.abs(alt - avs[n - 1]) / dtMin > 1.25 * MAX_VRATE_FPM) ats.length = avs.length = n = 0;
+  }
+  if (n && Math.abs(t - ats[n - 1]) < COINCIDENT_MS) {
+    ats[n - 1] = Math.max(t, ats[n - 1]);
+    avs[n - 1] = alt;
+  } else {
+    ats.push(t);
+    avs.push(alt);
+  }
+  while (ats.length > 1 && ats[0] < t - ALT_WINDOW_MS) {
+    ats.shift();
+    avs.shift();
+  }
+}
+
+// Scratch results of `hermite`/`altitudeAt`: value(s), slope(s), segment and fraction.
+let hx = 0;
+let hy = 0;
+let hvx = 0;
+let hvy = 0;
+let hi = 0;
+let hu = 0;
+
+/** The smoothed horizontal path at T (inside the samples) into hx/hy (m) and hvx/hvy (m/s), segment hi at fraction hu. */
+function hermite(tr: Track, T: number): void {
+  const ts = tr.ts;
+  let i = tr.n - 2;
+  while (i > 0 && T < ts[i]) i--;
+  const h = (ts[i + 1] - ts[i]) / 1000;
+  const u = (T - ts[i]) / 1000 / h;
+  const u2 = u * u;
+  const u3 = u2 * u;
+  const h00 = 2 * u3 - 3 * u2 + 1;
+  const h10 = u3 - 2 * u2 + u;
+  const h01 = 3 * u2 - 2 * u3;
+  const h11 = u3 - u2;
+  const d00 = 6 * u2 - 6 * u;
+  const d10 = 3 * u2 - 4 * u + 1;
+  const d11 = 3 * u2 - 2 * u;
+  const { fx, fy, mx, my } = tr;
+  hx = h00 * fx[i] + h10 * h * mx[i] + h01 * fx[i + 1] + h11 * h * mx[i + 1];
+  hy = h00 * fy[i] + h10 * h * my[i] + h01 * fy[i + 1] + h11 * h * my[i + 1];
+  hvx = (d00 * (fx[i] - fx[i + 1])) / h + d10 * mx[i] + d11 * mx[i + 1];
+  hvy = (d00 * (fy[i] - fy[i + 1])) / h + d10 * my[i] + d11 * my[i + 1];
+  hi = i;
+  hu = u;
+}
+
+/** The smoothed altitude at T (inside its samples) into hx (ft) and hvx (ft/s). */
+function altitudeAt(tr: Track, T: number): void {
+  const ts = tr.ats;
+  let i = ts.length - 2;
+  while (i > 0 && T < ts[i]) i--;
+  const h = (ts[i + 1] - ts[i]) / 1000;
+  const u = (T - ts[i]) / 1000 / h;
+  const u2 = u * u;
+  const u3 = u2 * u;
+  const f = tr.afv;
+  const d = tr.afd;
+  hx = (2 * u3 - 3 * u2 + 1) * f[i] + (u3 - 2 * u2 + u) * h * d[i] + (3 * u2 - 2 * u3) * f[i + 1] + (u3 - u2) * h * d[i + 1];
+  hvx = ((6 * u2 - 6 * u) * (f[i] - f[i + 1])) / h + (3 * u2 - 4 * u + 1) * d[i] + (3 * u2 - 2 * u) * d[i + 1];
+}
+
+/**
+ * The smoothed path's turn rate at each sample (rad/s, for the bank): its
+ * heading's change over ±2 s, which averages out what jitter is left.
+ */
+function turnNodes(tr: Track): void {
+  const n = tr.n;
+  tr.om.length = n;
+  const first = tr.ts[0];
+  const newest = tr.ts[n - 1];
+  const max = MAX_TURN_DEG_S * DEG;
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(first, tr.ts[i] - TURN_WINDOW_MS);
+    const b = Math.min(newest, tr.ts[i] + TURN_WINDOW_MS);
+    let w = 0;
+    if (b - a >= 500) {
+      hermite(tr, a);
+      const ax = hvx;
+      const ay = hvy;
+      hermite(tr, b);
+      if (Math.hypot(ax, ay) > HEADING_MIN_SPEED_MS && Math.hypot(hvx, hvy) > HEADING_MIN_SPEED_MS)
+        w = (wrap180((Math.atan2(hvx, hvy) - Math.atan2(ax, ay)) / DEG) * DEG) / ((b - a) / 1000);
+    }
+    tr.om[i] = clamp(w, -max, max);
+  }
+}
+
+/** A time series (measured attitude) takes a newer value; the last half minute is kept. */
+function pushSeries(ts: number[], vs: number[], t: number, v: number): void {
+  const n = ts.length;
+  if (n && t <= ts[n - 1]) {
+    if (t === ts[n - 1]) vs[n - 1] = v;
+    return;
+  }
+  ts.push(t);
+  vs.push(v);
+  while (ts.length > 1 && ts[0] < t - MEAS_HISTORY_MS) {
+    ts.shift();
+    vs.shift();
+  }
+}
+
+/** Slope (per ms) of a series at sample j for a monotone C1 cubic: none at a peak, a dip or an end, never overshooting. */
+function seriesSlope(ts: number[], vs: number[], j: number): number {
+  if (j <= 0 || j >= ts.length - 1) return 0;
+  const d0 = (vs[j] - vs[j - 1]) / (ts[j] - ts[j - 1]);
+  const d1 = (vs[j + 1] - vs[j]) / (ts[j + 1] - ts[j]);
+  if (d0 * d1 <= 0) return 0;
+  const m = (vs[j + 1] - vs[j - 1]) / (ts[j + 1] - ts[j - 1]);
+  const max = 3 * Math.min(Math.abs(d0), Math.abs(d1));
+  return Math.abs(m) > max ? Math.sign(m) * max : m;
+}
+
+/** A time series at T: a monotone C1 cubic between its values, held flat beyond its ends; `fallback` if empty. */
+function seriesAt(ts: number[], vs: number[], T: number, fallback: number): number {
+  const n = ts.length;
+  if (n === 0) return fallback;
+  if (T <= ts[0]) return vs[0];
+  if (T >= ts[n - 1]) return vs[n - 1];
+  let i = n - 2;
+  while (i > 0 && T < ts[i]) i--;
+  const h = ts[i + 1] - ts[i];
+  const u = (T - ts[i]) / h;
+  const m0 = seriesSlope(ts, vs, i) * h;
+  const m1 = seriesSlope(ts, vs, i + 1) * h;
+  const u2 = u * u;
+  const u3 = u2 * u;
+  return (2 * u3 - 3 * u2 + 1) * vs[i] + (u3 - 2 * u2 + u) * m0 + (3 * u2 - 2 * u3) * vs[i + 1] + (u3 - u2) * m1;
+}
+
+// --- Report states and the drawing delay ---------------------------------------------------
+
+/** Keeps the latest report's state (replacing an earlier snapshot of the same report). */
+function snapshot(tr: Track): void {
+  const s = tr.states;
+  while (s.length && s[s.length - 1].reportMs >= tr.reportMs) s.pop();
+  s.push({
+    reportMs: tr.reportMs,
+    phase: tr.phase,
+    trackDeg: tr.trackDeg,
+    alt: tr.alt,
+    vrate: tr.vrate,
+    field: tr.field,
+    fieldElev: tr.fieldElev,
+    liftoffMs: tr.liftoffMs,
+    touchdownMs: tr.touchdownMs,
+    touchdownPitch: tr.touchdownPitch,
+    capAlt: tr.capAlt,
+  });
+  if (s.length > MAX_STATES) s.shift();
+}
+
+/** The report state in effect at T: the newest one not after it (the oldest kept, before them all). */
+function stateAt(tr: Track, T: number): State {
+  const s = tr.states;
+  let i = s.length - 1;
+  while (i > 0 && s[i].reportMs > T) i--;
+  return s[i];
+}
+
+/** The drawing delay at `nowMs`, ms: a C1 ease (cubic Hermite) from `dFrom` with slope `dSlope` to `dTo`. */
+function delayAt(tr: Track, nowMs: number): number {
+  if (!(tr.dDur > 0)) return tr.dTo;
+  const u = (nowMs - tr.dMs) / tr.dDur;
+  if (u >= 1) return tr.dTo;
+  if (u <= 0) return tr.dFrom;
+  const u2 = u * u;
+  const u3 = u2 * u;
+  return (2 * u3 - 3 * u2 + 1) * tr.dFrom + (u3 - 2 * u2 + u) * tr.dDur * tr.dSlope + (3 * u2 - 2 * u3) * tr.dTo;
+}
+
+/** The delay's rate of change at `nowMs` (ms per ms): the drawn time runs at 1 minus this. */
+function delaySlope(tr: Track, nowMs: number): number {
+  if (!(tr.dDur > 0)) return 0;
+  const u = (nowMs - tr.dMs) / tr.dDur;
+  if (u >= 1) return 0;
+  if (u <= 0) return tr.dSlope;
+  return ((6 * u * u - 6 * u) * (tr.dFrom - tr.dTo)) / tr.dDur + (3 * u * u - 4 * u + 1) * tr.dSlope;
+}
+
+/** The time a track is drawn at. */
+const drawTime = (tr: Track, nowMs: number) => nowMs - delayAt(tr, nowMs);
+
+/** Eases the delay towards `target` from where it is now, at most ~DELAY_RATE; `first` sets it outright. */
+function retarget(tr: Track, nowMs: number, target: number, first: boolean): void {
+  if (first) {
+    tr.dFrom = tr.dTo = target;
+    tr.dSlope = 0;
+    tr.dDur = 0;
+    tr.dMs = nowMs;
+    return;
+  }
+  if (Math.abs(target - tr.dTo) < DELAY_DEADBAND_MS) return;
+  const from = delayAt(tr, nowMs);
+  tr.dSlope = delaySlope(tr, nowMs);
+  tr.dFrom = from;
+  tr.dTo = target;
+  tr.dMs = nowMs;
+  // long enough that the rate stays under DELAY_RATE (a cubic ease peaks at 1.5x its
+  // average) and changes gently: |D''| ≤ (6|Δ|/L + 4|s|)/L ≤ DELAY_ACCEL
+  const delta = Math.abs(target - from);
+  const s = Math.abs(tr.dSlope);
+  const j = DELAY_ACCEL / 1000; // per ms
+  tr.dDur = Math.max(1_000, (1.5 * delta) / DELAY_RATE, (4 * s + Math.sqrt(16 * s * s + 24 * j * delta)) / (2 * j));
+}
+
+/**
+ * Data that reaches further arrived: adapt the delay. The drawn time should
+ * still be a margin (one sample spacing) short of the newest sample when the
+ * next data is due, one cadence from now, so the delay is
+ *
+ *     cadence + margin - (newest sample - now)
+ *
+ * within 2-12 s. Flightradar24's look-ahead often reaches ~8 s past now, so
+ * with its ~8 s cadence the delay is near its 2 s floor; adsb.lol (every 3 s,
+ * ~1 s old) gives ~5-6 s; a report without look-ahead every minute, 12 s.
+ * The target is smoothed over reports and the delay eases towards it.
+ */
+function noteArrival(tr: Track, nowMs: number): void {
+  const n = tr.n;
+  if (n === 0) return;
+  const newest = tr.ts[n - 1];
+  if (!(newest > tr.newestMs)) return;
+  const first = tr.newestMs === -Infinity;
+  tr.newestMs = newest;
+  const dataMs = tr.reportMs;
+  if (Number.isFinite(tr.arrivalDataMs) && dataMs > tr.arrivalDataMs) {
+    const gap = clamp(dataMs - tr.arrivalDataMs, MIN_CADENCE_MS, MAX_CADENCE_MS);
+    tr.cadenceMs += DELAY_SMOOTHING * (gap - tr.cadenceMs);
+  }
+  tr.arrivalDataMs = Math.max(tr.arrivalDataMs, dataMs);
+  const k = Math.min(3, n - 1);
+  const margin = clamp(k > 0 ? (newest - tr.ts[n - 1 - k]) / k : MAX_MARGIN_MS, MIN_MARGIN_MS, MAX_MARGIN_MS);
+  const target = clamp(tr.cadenceMs + margin - (newest - nowMs), MIN_DELAY_MS, MAX_DELAY_MS);
+  tr.delayTarget = first || !Number.isFinite(tr.delayTarget) ? target : tr.delayTarget + DELAY_SMOOTHING * (target - tr.delayTarget);
+  retarget(tr, nowMs, tr.delayTarget, first);
 }
 
 /**

@@ -1000,7 +1000,10 @@
     const selectedPose = selected ? motion.pose(selected, now) : null;
     if (selected && selectedPose) {
       const pos = at(selectedPose, ex);
-      const trail = (details?.trail ?? []).filter((p) => p.latitude || p.longitude);
+      // the aircraft is drawn a few seconds in the past: trail points newer than that
+      // would run on past it and back, so the trail stops at the drawn time
+      const drawnS = motion.drawnTime(selected.id, now) / 1000;
+      const trail = (details?.trail ?? []).filter((p) => (p.latitude || p.longitude) && !(p.timestamp > drawnS));
       // the same airport-relative heights as the aircraft, so the trail meets it
       const path = trail.map((p) => [
         p.longitude,

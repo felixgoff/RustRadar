@@ -97,6 +97,11 @@ const rotate = (m, x, y, z) => {
  * hold 9 numbers per triangle. The authored normals are kept rather than
  * derived from the winding, which is inconsistent across these models and
  * would light most of the airframe from the inside.
+ *
+ * `nodes` maps each node's name (its id when unnamed) to the scene-space
+ * bounds `{ lo, hi }` of every triangle in it and its children, so named parts
+ * such as wheel wells can be located on the flattened airframe. Nodes sharing
+ * a name are merged; nodes with no geometry are left out.
  */
 export function readTriangles(bytes, externalBuffers = {}) {
   const { json: gltf, body } = parseGlb(bytes);
@@ -113,10 +118,13 @@ export function readTriangles(bytes, externalBuffers = {}) {
 
   const positions = [];
   const normals = [];
+  const nodes = {};
   const walk = (id, parent) => {
     const node = gltf.nodes[id];
     if (!node) return;
     const world = multiply(parent, localMatrix(node));
+    // this node's subtree is the run of positions it and its children append
+    const first = positions.length;
     for (const meshId of node.meshes ?? []) {
       for (const primitive of gltf.meshes[meshId]?.primitives ?? []) {
         if ((primitive.mode ?? 4) !== 4) continue; // triangles only
@@ -146,10 +154,20 @@ export function readTriangles(bytes, externalBuffers = {}) {
       }
     }
     for (const child of node.children ?? []) walk(child, world);
+    if (positions.length > first) {
+      const key = node.name || id;
+      const box = (nodes[key] ??= { lo: [Infinity, Infinity, Infinity], hi: [-Infinity, -Infinity, -Infinity] });
+      for (let i = first; i < positions.length; i += 3) {
+        for (let c = 0; c < 3; c++) {
+          box.lo[c] = Math.min(box.lo[c], positions[i + c]);
+          box.hi[c] = Math.max(box.hi[c], positions[i + c]);
+        }
+      }
+    }
   };
 
   const identity = Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
   const scene = gltf.scenes?.[gltf.scene] ?? Object.values(gltf.scenes ?? {})[0];
   for (const id of scene?.nodes ?? Object.keys(gltf.nodes)) walk(id, identity);
-  return { positions: Float32Array.from(positions), normals: Float32Array.from(normals) };
+  return { positions: Float32Array.from(positions), normals: Float32Array.from(normals), nodes };
 }

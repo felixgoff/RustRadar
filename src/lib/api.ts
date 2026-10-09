@@ -21,6 +21,15 @@ export interface LiveFlight {
   destination: string;
   /** Flightradar24's icon class, e.g. `A320`, `B747`, `EC` (helicopter). */
   icon: string;
+  /**
+   * The aircraft's recent history (Flightradar24's position buffer):
+   * `[Δlat, Δlon, Δms]` back from the report, each point at
+   * `lat - Δlat·1e-5`, `lon - Δlon·1e-5` and `timestampMs - Δms`, newest first
+   * (Δms increasing). Up to ~10 s, overlapping the previous reports' positions.
+   */
+  positions?: [number, number, number][];
+  /** Feet per minute; only when signed in. */
+  vspeed?: number;
 }
 
 export interface LiveSnapshot {
@@ -170,6 +179,8 @@ export interface Airport {
   country: string;
   lat: number;
   lon: number;
+  /** Field elevation, feet, where known. */
+  alt?: number | null;
   size: number;
   /** IANA timezone name. */
   timezone: string;
@@ -273,6 +284,29 @@ export const search = (query: string) => invoke<FindEntry[]>("search", { query }
 
 export const referenceData = () => invoke<ReferenceData>("reference_data");
 
+/** One end of a runway, from OurAirports. */
+export interface RunwayEnd {
+  /** e.g. `22L` */
+  ident: string;
+  /** The physical end of the runway; the landing threshold may be displaced from it. */
+  lat: number;
+  lon: number;
+  elevationFt?: number | null;
+  /** Feet from the physical end to the landing threshold. */
+  displacedFt: number;
+}
+
+export interface Runway {
+  lengthFt?: number | null;
+  widthFt?: number | null;
+  surface: string;
+  ends: [RunwayEnd, RunwayEnd];
+}
+
+/** Runways of airports by ICAO code (OurAirports, cached weekly); unknown airports are left out. */
+export const airportRunways = (airports: string[]) =>
+  invoke<Record<string, Runway[]>>("airport_runways", { airports });
+
 export const airportBoard = (code: string, mode: BoardMode, page = 1) =>
   invoke<Board>("airport_board", { code, mode, page });
 
@@ -320,6 +354,79 @@ export interface OpenSkyPoint {
 
 /** The flight an aircraft is on now, by Mode S address (six hex digits). */
 export const openskyTrack = (icao24: string) => invoke<OpenSkyPoint[]>("opensky_track", { icao24 });
+
+/**
+ * One aircraft as adsb.lol reports it: what its transponder broadcasts,
+ * including what Flightradar24's anonymous feed leaves out. ODbL: credit
+ * "adsb.lol contributors" wherever it is shown. Absent values are left out.
+ */
+export interface AdsbAircraft {
+  /** ICAO 24-bit address, lowercase hex. */
+  hex: string;
+  callsign: string;
+  reg: string;
+  typecode: string;
+  /** How it was received: `adsb_icao`, `mlat`, `tisb_icao`, ... */
+  source: string;
+  /** The position is multilaterated. */
+  mlat: boolean;
+  lat?: number;
+  lon?: number;
+  /** Unix ms of the position. */
+  positionMs?: number;
+  /** Unix ms of the latest message of any kind. */
+  seenMs: number;
+  onGround: boolean;
+  /** Feet. */
+  altBaro?: number;
+  altGeom?: number;
+  /** Knots; degrees true. */
+  gs?: number;
+  track?: number;
+  trueHeading?: number;
+  magHeading?: number;
+  /** Bank, degrees, right wing down positive. */
+  roll?: number;
+  /** Degrees per second, clockwise positive. */
+  trackRate?: number;
+  /** Feet per minute. */
+  baroRate?: number;
+  geomRate?: number;
+  /** Knots, and Mach. */
+  ias?: number;
+  tas?: number;
+  mach?: number;
+  /** Where the wind blows from, degrees true, and its speed, knots. */
+  windDir?: number;
+  windSpeed?: number;
+  /** °C */
+  oat?: number;
+  tat?: number;
+  /** Selected altitudes (autopilot panel, FMS), feet; selected heading, degrees. */
+  navAltitudeMcp?: number;
+  navAltitudeFms?: number;
+  navHeading?: number;
+  /** hPa */
+  navQnh?: number;
+  navModes?: string[];
+  squawk?: string;
+  emergency?: string;
+  category?: string;
+}
+
+export interface AdsbSnapshot {
+  /** adsb.lol's clock when it answered, Unix ms. */
+  nowMs: number;
+  aircraft: AdsbAircraft[];
+}
+
+/** One aircraft from adsb.lol by Mode S address (six hex digits); polite spacing and backoff are applied by the backend. */
+export const adsbHex = (hex: string) => invoke<AdsbSnapshot>("adsb_hex", { hex });
+
+/** Aircraft from adsb.lol using a callsign, for when the Mode S address isn't known yet. */
+export const adsbCallsign = (callsign: string) => invoke<AdsbSnapshot>("adsb_callsign", { callsign });
+
+export const ADSB_LOL_URL = "https://adsb.lol";
 
 export const sessionInfo = () => invoke<SessionInfo>("session_info");
 

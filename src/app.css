@@ -5,10 +5,12 @@
  * values: altitudes, speeds, codes, times.
  */
 /* Overpass's middle dot has no advance width, so " · " separators collide
-   with the next word: take that one glyph from the system UI font */
+   with the next word: take that one glyph from the system UI font (Windows,
+   macOS, then the usual Linux desktops, where the AppImage runs) */
 @font-face {
   font-family: "Middle Dot";
-  src: local("Segoe UI"), local("Helvetica Neue"), local("Arial");
+  src: local("Segoe UI"), local("Helvetica Neue"), local("Arial"), local("Noto Sans"), local("DejaVu Sans"),
+    local("Liberation Sans"), local("Cantarell");
   unicode-range: U+00B7;
 }
 
@@ -187,6 +189,12 @@ ol {
 }
 .button:hover {
   background: var(--surface-hover);
+}
+/* a toggle that is on: the selection amber, as on pressed icon buttons */
+.button[aria-pressed="true"] {
+  border-color: var(--amber);
+  background: var(--amber-soft);
+  color: var(--amber);
 }
 
 /* status labels: the tone backs up words, never replaces them */

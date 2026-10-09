@@ -16,7 +16,16 @@
     X,
   } from "@lucide/svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { aircraftHistory, airlineLogoUrl, type FlightDetails, type HistoryRow, type LiveFlight } from "./api";
+  import {
+    ADSB_LOL_URL,
+    aircraftHistory,
+    airlineLogoUrl,
+    type AdsbAircraft,
+    type FlightDetails,
+    type HistoryRow,
+    type LiveFlight,
+  } from "./api";
+  import { verticalRate } from "./adsb";
   import AltitudeChart from "./AltitudeChart.svelte";
   import { ALTITUDE_STOPS } from "./geo";
   import { airlineIcao, reference } from "./reference.svelte";
@@ -32,6 +41,8 @@
     authenticated: boolean;
     /** How many track points came from the OpenSky Network. */
     openskyAdded?: number;
+    /** What the aircraft's transponder reports, from adsb.lol, while recent. */
+    measured?: AdsbAircraft | null;
     /** Whether the camera follows this aircraft. */
     following: boolean;
     /** Return to the airport board this flight was opened from. */
@@ -53,6 +64,7 @@
     authenticated,
     following,
     openskyAdded = 0,
+    measured = null,
     back = null,
     onfollow,
     onselect,
@@ -104,6 +116,24 @@
   const km = (m: number) => `${Math.round(m / 1000).toLocaleString()} km`;
   // squawk codes are four octal digits, transmitted in base 10
   const squawk = (code: number) => (code ? code.toString(8).padStart(4, "0") : "—");
+  // measured values: "—" when the aircraft doesn't report them
+  const fmt = (v: number | undefined, unit = "", digits = 0) =>
+    v === undefined || !Number.isFinite(v) ? "—" : `${v.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })}${unit}`;
+  const signed = (v: number | undefined) => (v === undefined ? "—" : `${v > 0 ? "+" : ""}${v.toLocaleString()} fpm`);
+  const degrees = (v: number | undefined) => (v === undefined ? "—" : `${String(Math.round(v) % 360).padStart(3, "0")}°`);
+  const MODES: Record<string, string> = {
+    autopilot: "Autopilot",
+    vnav: "VNAV",
+    althold: "Altitude hold",
+    approach: "Approach",
+    lnav: "LNAV",
+    tcas: "TCAS",
+  };
+  /** FR24's vertical speed when signed in, else the transponder's from adsb.lol. */
+  const fr24Vs = $derived(info && authenticated ? info.vertical_speed : undefined);
+  const measuredVs = $derived(measured ? verticalRate(measured) : undefined);
+  const fr24Squawk = $derived(info && authenticated ? info.squawk : 0);
+  const selectedAlt = $derived(measured?.navAltitudeMcp ?? measured?.navAltitudeFms);
   const sentence = (s: string) => s.charAt(0) + s.slice(1).toLowerCase().replaceAll("_", " ");
 
   const departure = $derived.by(() => {
@@ -243,10 +273,18 @@
         </div>
       {/each}
     </div>
-    <div class="track" role="progressbar" aria-label="Flight progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-      <div class="fill" style="width: {pct}%"></div>
-      <span class="marker" style="left: {pct}%"><Plane size={14} strokeWidth={2} /></span>
-    </div>
+    <!-- without progress data the aircraft has no place on the line: drawing it
+         at the origin would claim it hasn't left -->
+    {#if progress}
+      <div class="track" role="progressbar" aria-label="Flight progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+        <div class="fill" style="transform: scaleX({pct / 100})"></div>
+        <div class="run" style="transform: translateX({pct}%)">
+          <span class="marker"><Plane size={14} strokeWidth={2} /></span>
+        </div>
+      </div>
+    {:else}
+      <div class="track unknown" aria-hidden="true"></div>
+    {/if}
     {#if progress}
       <p class="distances">
         {km(progress.traversed_distance)} flown · {km(progress.remaining_distance)} to go{progress.remaining_time > 0
@@ -283,15 +321,74 @@
       <dl class="facts">
         <div><dt>Altitude</dt><dd class="data">{onGround ? "On ground" : `${altitude.toLocaleString()} ft`}</dd></div>
         <div><dt>Ground speed</dt><dd class="data">{info?.ground_speed ?? flight.speed} kt</dd></div>
-        <div title={authenticated ? undefined : LOGIN_HINT}>
-          <dt>Vertical speed</dt>
-          <dd class="data">{info && authenticated ? `${info.vertical_speed > 0 ? "+" : ""}${info.vertical_speed} fpm` : "—"}</dd>
-        </div>
+        {#if fr24Vs === undefined && measuredVs !== undefined}
+          <div title="Reported by the aircraft, via adsb.lol">
+            <dt>Vertical speed</dt>
+            <dd class="data">{signed(measuredVs)} <span class="via">adsb.lol</span></dd>
+          </div>
+        {:else}
+          <div title={authenticated ? undefined : LOGIN_HINT}>
+            <dt>Vertical speed</dt>
+            <dd class="data">{signed(fr24Vs)}</dd>
+          </div>
+        {/if}
         <div><dt>Track</dt><dd class="data">{info?.track ?? flight.track}°</dd></div>
-        <div title={authenticated ? undefined : LOGIN_HINT}><dt>Squawk</dt><dd class="data">{squawk(info?.squawk ?? 0)}</dd></div>
+        {#if !fr24Squawk && measured?.squawk}
+          <div title="Reported by the aircraft, via adsb.lol">
+            <dt>Squawk</dt>
+            <dd class="data">{measured.squawk} <span class="via">adsb.lol</span></dd>
+          </div>
+        {:else}
+          <div title={authenticated ? undefined : LOGIN_HINT}><dt>Squawk</dt><dd class="data">{squawk(info?.squawk ?? 0)}</dd></div>
+        {/if}
         <div><dt>Phase</dt><dd>{progress ? sentence(progress.flight_stage) : "—"}</dd></div>
         <div class="wide" title={authenticated ? undefined : LOGIN_HINT}><dt>Airspace</dt><dd>{info?.airspace || "—"}</dd></div>
       </dl>
+      {#if measured}
+        <section class="measured" aria-label="Reported by the aircraft">
+          <header>
+            <h3>Reported by the aircraft</h3>
+            <button
+              class="via link"
+              title="Community ADS-B data from adsb.lol, under the Open Database Licence"
+              onclick={() => openUrl(ADSB_LOL_URL)}
+            >
+              adsb.lol <ExternalLink size={11} strokeWidth={2} />
+            </button>
+          </header>
+          <dl class="facts">
+            <div><dt>Heading</dt><dd class="data">{degrees(measured.trueHeading)}</dd></div>
+            <div><dt>Bank</dt><dd class="data">{measured.roll === undefined ? "—" : `${Math.abs(measured.roll).toFixed(0)}° ${measured.roll > 0.5 ? "R" : measured.roll < -0.5 ? "L" : ""}`.trim()}</dd></div>
+            <div><dt>GNSS altitude</dt><dd class="data">{fmt(measured.altGeom, " ft")}</dd></div>
+            <div><dt>IAS</dt><dd class="data">{fmt(measured.ias, " kt")}</dd></div>
+            <div><dt>TAS</dt><dd class="data">{fmt(measured.tas, " kt")}</dd></div>
+            <div><dt>Mach</dt><dd class="data">{fmt(measured.mach, "", 3)}</dd></div>
+            <div title="Set on the autopilot (or by the flight management system)">
+              <dt>Selected alt.</dt>
+              <dd class="data">{fmt(selectedAlt, " ft")}</dd>
+            </div>
+            <div title="Set on the autopilot; magnetic"><dt>Selected hdg</dt><dd class="data">{degrees(measured.navHeading)}</dd></div>
+            <div><dt>OAT</dt><dd class="data">{fmt(measured.oat, " °C")}</dd></div>
+            <div class="wide" title="Derived from the aircraft's airspeed, heading and ground track">
+              <dt>Wind</dt>
+              <dd class="data">
+                {measured.windDir === undefined || measured.windSpeed === undefined
+                  ? "—"
+                  : `${degrees(measured.windDir)} at ${measured.windSpeed} kt`}
+              </dd>
+            </div>
+            {#if measured.navModes?.length}
+              <div class="wide">
+                <dt>Autopilot modes</dt>
+                <dd>{measured.navModes.map((m) => MODES[m] ?? m.toUpperCase()).join(" · ")}</dd>
+              </div>
+            {/if}
+          </dl>
+          {#if measured.mlat}
+            <p class="note">Position by multilateration: less precise than the aircraft's own.</p>
+          {/if}
+        </section>
+      {/if}
       <AltitudeChart trail={details?.trail ?? []} timeZone={origin?.timezone} place={origin?.iata || flight.origin || undefined} />
     {:else if tab === "route"}
       <div class="stack">
@@ -320,10 +417,30 @@
             {day(airac.expires)}.
           </p>
         {:else}
+          {@const arrival = route?.arrival}
+          {@const dest = route?.destination ? route.destination.iata || route.destination.icao : "the destination"}
           <p class="explain">
-            The map shows the track flown so far and the great-circle path to the destination. That's an estimate:
-            the filed route follows airways and waypoints of AIRAC cycle {airac.ident}, and Flightradar24 shares flight
-            plans only with signed-in subscribers.
+            {#if route && route.ahead.length > 1}
+              {#if arrival}
+                The path ahead is an estimate: the great circle to {dest}, then a turn onto a straight final to runway
+                <span class="data">{arrival.runway}</span> down a 3° glide path.
+                {#if arrival.reason === "aligned"}
+                  The aircraft is lined up with that runway.
+                {:else if arrival.reason === "traffic"}
+                  Other aircraft are using that runway now.
+                {:else}
+                  The runway in use depends on the wind, which isn't known here, so it's a guess.
+                {/if}
+                Controllers vector arrivals, so the turns are a guess too.
+              {:else}
+                The path ahead is an estimate: the great circle to {dest}, descending at 3°. Its runways aren't known, so
+                the path ends at the airport.
+              {/if}
+            {:else}
+              The map shows the track flown so far.
+            {/if}
+            The filed route follows airways and waypoints of AIRAC cycle {airac.ident}; Flightradar24 shares flight plans
+            only with signed-in subscribers.
           </p>
           {#if !authenticated}
             <button class="button" onclick={onsignin}>Sign in to Flightradar24</button>
@@ -352,10 +469,32 @@
             <li><span class="swatch solid"></span><span>Filed route</span></li>
           {:else}
             {#if route && route.ahead.length > 1}
-              <li><span class="swatch ahead"></span><span>Great circle to the destination</span></li>
+              <li>
+                <span class="swatch ahead"></span>
+                <span>
+                  {#if route.arrival}
+                    Estimated path to runway <span class="data">{route.arrival.runway}</span>
+                  {:else}
+                    Estimated path to the airport
+                  {/if}
+                </span>
+              </li>
             {/if}
             {#if route && route.before.length > 1}
-              <li><span class="swatch before"></span><span>Departure to the first tracked position</span></li>
+              <li>
+                <span class="swatch before"></span>
+                <span>
+                  {#if route.departure}
+                    Estimated take-off from runway <span class="data">{route.departure.runway}</span> to the first
+                    tracked position
+                  {:else}
+                    Estimated departure to the first tracked position
+                  {/if}
+                </span>
+              </li>
+            {/if}
+            {#if route && (route.arrival || route.departure)}
+              <li class="credit"><small class="source">Runways from OurAirports</small></li>
             {/if}
           {/if}
         </ul>
@@ -434,13 +573,12 @@
     {/if}
     <div class="actions">
       <button
-        class="icon-button"
+        class="button"
         aria-pressed={following}
-        aria-label={following ? "Stop following" : "Follow with the camera"}
         title={following ? "Stop following (C)" : "Follow with the camera (C)"}
         onclick={onfollow}
       >
-        <LocateFixed size={18} strokeWidth={1.75} />
+        <LocateFixed size={14} strokeWidth={1.75} /> Follow
       </button>
       <button class="button" onclick={() => openUrl(fr24Url)}>
         Flightradar24 <ExternalLink size={14} strokeWidth={1.75} />
@@ -679,18 +817,30 @@
     margin: var(--space-2) 7px;
     background: var(--line-control);
   }
+  .track.unknown {
+    background: var(--line);
+  }
+  /* progress moves by transform, not width or left, so it never relays out */
   .fill {
     height: 100%;
     background: var(--amber);
-    transition: width 600ms var(--ease-out);
+    transform-origin: left;
+    transition: transform 600ms var(--ease-out);
+  }
+  /* a full-width layer slid along by the progress: its percentage is of the
+     track, which the marker alone could not give */
+  .run {
+    position: absolute;
+    inset: 0;
+    transition: transform 600ms var(--ease-out);
   }
   .marker {
     position: absolute;
     top: 50%;
+    left: 0;
     display: grid;
     color: var(--amber);
     transform: translate(-50%, -50%) rotate(45deg);
-    transition: left 600ms var(--ease-out);
   }
   .distances {
     font-size: var(--text-sm);
@@ -760,6 +910,43 @@
   .facts .wide {
     grid-column: 1 / -1;
   }
+  .measured {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--line);
+  }
+  .measured header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .measured h3 {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-2);
+  }
+  /* a value's source, when it isn't Flightradar24 */
+  .via {
+    font-family: var(--font-ui);
+    font-size: var(--text-xs);
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .via.link {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+  }
+  .via.link:hover {
+    color: var(--text-1);
+  }
   .facts.compact {
     gap: var(--space-2) var(--space-3);
   }
@@ -812,6 +999,10 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
+  }
+  /* under the entries' text, past the swatches */
+  .legend .credit {
+    padding-left: calc(28px + var(--space-3));
   }
   .swatch {
     flex: none;
@@ -904,15 +1095,25 @@
     height: 12px;
   }
 
+  /* pinned: following the aircraft starts here, so it can't scroll away */
   footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
+    gap: var(--space-2);
     margin-top: auto;
     padding: var(--space-3) var(--space-4);
     border-top: 1px solid var(--line);
+    background: var(--surface);
   }
+  /* "Reconnecting…" and both buttons don't fit one line: the buttons wrap
+     below and keep to the right */
   .actions {
+    margin-left: auto;
     display: flex;
     align-items: center;
     gap: var(--space-2);

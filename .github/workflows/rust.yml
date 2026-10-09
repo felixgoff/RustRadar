@@ -57,6 +57,9 @@ jobs:
       - name: Frontend check (svelte-check)
         run: bun run check
 
+      - name: Unit tests
+        run: bun test src
+
       # tauri::generate_context!() needs frontendDist (../build) to exist at compile time.
       - name: Build frontend
         run: bun run build

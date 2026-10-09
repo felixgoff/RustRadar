@@ -19,6 +19,7 @@
     Deck,
     DirectionalLight,
     _GlobeView as GlobeView,
+    _GlobeViewport as GlobeViewport,
     LightingEffect,
     LinearInterpolator,
     WebMercatorViewport,
@@ -35,6 +36,7 @@
   import { BitmapLayer, IconLayer, PathLayer, ScatterplotLayer, SolidPolygonLayer, TextLayer } from "@deck.gl/layers";
   import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
   import { SphereGeometry } from "@luma.gl/engine";
+  import type { Device } from "@luma.gl/core";
   import { load } from "@loaders.gl/core";
   import { MVTLoader } from "@loaders.gl/mvt";
   // decode vector tiles off the main thread with a bundled worker, not one from a CDN
@@ -52,17 +54,17 @@
   import { aircraftModels, type AircraftModel } from "./aircraft";
   import { nightPolygons } from "./daynight";
   import { RADAR_LEVELS_KM, type RadarTile } from "./radar";
-  import { mergeMeshes, type PolygonData } from "./radar-mesh";
+  import type { PolygonData } from "./radar-mesh";
+  import { ArenaLayer, MeshArena, type ArenaData, type ArenaPiece } from "./radar-arena";
   import { loadRadarTile, loadVolume, radarCoverageKey, setRadarCoverage, type MeasuredVolume } from "./radar-pool";
   import { liveries, type Livery, type Part } from "./liveries";
-  import type { LonLat, Route } from "./routes";
+  import { distanceKm, trimToPosition, type LonLat, type PathPoint, type Route } from "./routes";
   import {
     AIRCRAFT_COLOR,
     altitudeColor,
     cosAngle,
     effectiveExaggeration,
     elevation,
-    extrapolate,
     metersPerPixel,
     SELECTED_COLOR,
     unwrapLongitude,
@@ -71,6 +73,13 @@
     type Basemap,
   } from "./geo";
   import { MODEL_KINDS, MODEL_SIZE, modelFor, models, sizeOf, type ModelKind } from "./models";
+  import { motion, type Pose } from "./motion";
+  import { screenAngle } from "./screen";
+  import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection } from "./shadow";
+  import HoverCard from "./HoverCard.svelte";
+  import { flightDetails, isRateLimited } from "./api";
+  import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
+  import { reference } from "./reference.svelte";
 
   interface Props {
     flights: LiveFlight[];
@@ -129,6 +138,41 @@
   /** GlobeView switches to a flat Web Mercator projection above this zoom. */
   const FLAT_ABOVE_ZOOM = 12;
   const LIMITS = { minZoom: 0.5, maxZoom: 18, maxPitch: 60 };
+  /** Following an aircraft, the camera can come down nearly level with it and circle it. */
+  const FOLLOW_MAX_PITCH = 85;
+  /** ...and close in until the camera is this many of its lengths away, so it can't end up inside it. */
+  const FOLLOW_CLOSEST = 1.3;
+  /** Past this the map tiles have long run out of detail. */
+  const FOLLOW_MAX_ZOOM = 23;
+
+  /**
+   * The closest zoom while locked on an aircraft: until it fills the screen,
+   * worked out from its real size, so the camera can't end up inside it.
+   */
+  function followMaxZoom(flight: LiveFlight): number {
+    const size = aircraftModels.forFlight(flight.typecode, flight.icon)?.size ?? sizeOf(flight.icon);
+    // the camera sits CAMERA_HEIGHTS viewport heights back from its target
+    const closest = (FOLLOW_CLOSEST * size) / (CAMERA_HEIGHTS * Math.max(1, container?.clientHeight ?? 900));
+    const zoom = Math.log2(metersPerPixel(0, flight.lat) / closest);
+    return Math.min(FOLLOW_MAX_ZOOM, Math.max(LIMITS.maxZoom, zoom));
+  }
+
+  /**
+   * The camera's limits, as handed to deck.gl. Locked on an aircraft they open
+   * up: close in until it fills the screen and tilt down to almost level, to
+   * look at it from any side.
+   */
+  function limits() {
+    if (!(follow && selected)) return LIMITS;
+    // GlobeController shifts its zoom limits by latitude (its zoomAdjust); undo
+    // that so the aircraft's limit is the zoom actually reached
+    const shift = Math.log2(Math.max(0.05, Math.cos(selected.lat * DEGREES)));
+    return { minZoom: LIMITS.minZoom, maxZoom: followMaxZoom(selected) - shift, maxPitch: FOLLOW_MAX_PITCH };
+  }
+  /** The closest zoom reachable now, in the view's own terms. */
+  const maxZoomNow = () => (follow && selected ? followMaxZoom(selected) : LIMITS.maxZoom);
+  /** Whether the last render was locked on an aircraft, to notice the lock ending. */
+  let wasLocked = false;
   /** TileJSON for OpenFreeMap's vector tiles; the tile URL changes with each planet build. */
   const OPENFREEMAP = "https://tiles.openfreemap.org/planet";
   const ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services";
@@ -171,6 +215,43 @@
   const FLAT_PITCH = 5;
   /** From this zoom the detailed meshes are worth their triangles. */
   const CLOSE_ZOOM = 11;
+  /** Model depth from which landing gear is drawn (about zoom 8.5). */
+  const GEAR_DEPTH = 0.8;
+  /** Struts and tyres in one grey: light enough to read against the night map. */
+  const GEAR_COLOR: [number, number, number] = [178, 182, 190];
+  /**
+   * Shadows fade in over these zooms: the models have full depth from zoom 9,
+   * and before that a shadow would be a speck under a floor-sized silhouette.
+   */
+  const SHADOW_ZOOM: [number, number] = [9, 11];
+  /** The app's navy ink, so a shadow darkens the map rather than greying it. */
+  const SHADOW_COLOR: [number, number, number] = [4, 8, 16];
+  // On the ground, under the aircraft. Every shadow triangle lies on the same
+  // plane, and writing depth lets only the first one at a pixel through, so
+  // the wing over the fuselage doesn't darken twice (nor two shadows that
+  // overlap). The ground layers write no depth, so there is nothing to fight.
+  const SHADOW_PARAMETERS = { ...NO_CULL, depthWriteEnabled: true, depthCompare: "less" } as const;
+  /** Lowest point (model z, metres) of each mesh, where it stands; worked out once per mesh. */
+  const lowestPoints = new WeakMap<object, number>();
+  function lowestZ(mesh: { attributes: Record<string, { value: ArrayLike<number> } | undefined> }): number {
+    let z = lowestPoints.get(mesh);
+    if (z === undefined) {
+      const positions = mesh.attributes.positions?.value ?? [];
+      z = 0;
+      for (let i = 2; i < positions.length; i += 3) z = Math.min(z, positions[i]);
+      lowestPoints.set(mesh, z);
+    }
+    return z;
+  }
+  // reused by the shadow accessors, which deck.gl copies out of at once
+  const shadowMatrixOut = new Array<number>(16).fill(0);
+  const shadowSunOut = [0, 0, 0];
+  const shadowPositionOut: [number, number, number] = [0, 0, 0];
+  const shadowColorOut: [number, number, number, number] = [...SHADOW_COLOR, 0];
+  /** How far ahead (screen pixels at the view centre) an icon's heading is sampled. */
+  const ICON_HEADING_STEP_PX = 20;
+  /** The silhouettes' border: the app's navy ink (`--ink`), nearly opaque. */
+  const OUTLINE_COLOR: [number, number, number, number] = [8, 12, 20, 215];
   // White aircraft have to read as white against a dark map, so most of the
   // light is ambient and the directional part only models the airframe.
   const MESH_MATERIAL = { ambient: 0.72, diffuse: 0.42, shininess: 48, specular: [255, 236, 200] };
@@ -580,9 +661,19 @@
    */
   const radarPolygons = (
     props: Record<string, unknown> | null,
-    own: { id: string; data: PolygonData; opacity: number; parameters: object; z?: number; bottom?: number },
+    own: {
+      id: string;
+      data: PolygonData | ArenaData;
+      /** For an arena's data (radar-arena.ts): how much of it to draw, and its version. */
+      arena?: { indexCount: number; version: number };
+      opacity: number;
+      parameters: object;
+      z?: number;
+      bottom?: number;
+    },
   ) =>
-    new SolidPolygonLayer(props ?? {}, {
+    new (own.arena ? ArenaLayer : SolidPolygonLayer)(props ?? {}, {
+      ...own.arena,
       id: own.id,
       data: own.data as never,
       _normalize: false,
@@ -623,51 +714,72 @@
     radarVersion++;
   };
   /**
-   * The lifted layers of all tiles in view, merged: one slice layer and one
-   * wall layer per height rather than two per tile per height (hundreds of
-   * draw calls, each tile's whole mesh uploaded again for every height).
-   * Merged again only when the tiles change.
+   * The lifted layers' buffers, a slices and a walls arena per height
+   * (radar-arena.ts): updated in place as tiles come and go, so a pan uploads
+   * only the tiles it brings into view. Freed while the view is flat.
    */
-  let liftedData: { version: number; levels: { km: number; slices: PolygonData | null; walls: PolygonData | null }[] } = {
-    version: -1,
-    levels: [],
-  };
-  function mergedLevels() {
-    if (liftedData.version !== radarVersion) {
-      const levels = RADAR_LEVELS_KM.map((km, i) => {
-        // each tile's levels run up from the lowest without gaps, so index i is this height
-        const parts = radarTiles.flatMap((tile) => (tile.levels[i] ? [{ tile, fromBand: tile.levels[i].fromBand }] : []));
-        return {
-          km,
-          slices: mergeMeshes(parts.map(({ tile, fromBand }) => ({ mesh: tile.slices, fromBand }))),
-          walls: mergeMeshes(parts.flatMap(({ tile, fromBand }) => (tile.walls ? [{ mesh: tile.walls, fromBand }] : []))),
-        };
+  let arenas: { slices: MeshArena; walls: MeshArena }[] | null = null;
+  let arenasVersion = -1;
+  /** deck.gl's GPU device, for the arenas' buffers; set once it has one. */
+  let device: Device | null = null;
+  function liftedArenas(gpu: Device) {
+    arenas ??= RADAR_LEVELS_KM.map(() => ({ slices: new MeshArena(gpu, 2), walls: new MeshArena(gpu, 3) }));
+    if (arenasVersion !== radarVersion) {
+      arenasVersion = radarVersion;
+      arenas.forEach(({ slices, walls }, i) => {
+        const slicePieces = new Map<RadarTile, ArenaPiece>();
+        const wallPieces = new Map<RadarTile, ArenaPiece>();
+        for (const tile of radarTiles) {
+          // each tile's levels run up from the lowest without gaps, so index i is this height
+          const level = tile.levels[i];
+          if (!level) continue;
+          slicePieces.set(tile, { mesh: tile.slices, fromBand: level.fromBand });
+          if (tile.walls) wallPieces.set(tile, { mesh: tile.walls, fromBand: level.fromBand });
+        }
+        slices.update(slicePieces);
+        walls.update(wallPieces);
       });
-      liftedData = { version: radarVersion, levels };
     }
-    return liftedData.levels;
+    return arenas;
   }
   let lifted: { key: string; layers: Layer[] } = { key: "", layers: [] };
+  function freeArenas() {
+    if (!arenas) return;
+    for (const { slices, walls } of arenas) {
+      slices.destroy();
+      walls.destroy();
+    }
+    arenas = null;
+    arenasVersion = -1;
+    lifted = { key: "", layers: [] };
+  }
   /** Built again only when the tiles, the height scale or the tilt change. */
   function radarLifted(ex: number, lift: number): Layer[] {
     const scale = Math.round(ex * 10) / 10;
+    if (!lift || !device) {
+      freeArenas();
+      return [];
+    }
     const key = `${scale}/${lift}/${radarVersion}`;
     if (lifted.key !== key) {
       const layers: Layer[] = [];
-      if (lift > 0) {
-        // higher layers keep only the stronger echoes, so cells rise like towers
-        mergedLevels().forEach(({ km, slices, walls }, i) => {
-          if (!slices) return;
-          const opacity = Math.max(0.16, 0.34 - i * 0.03) * lift;
-          const z = elevation(km * FEET_PER_KM, scale);
-          layers.push(radarPolygons(null, { id: `radar-lift-${km}`, data: slices, opacity, parameters: RADAR_LIFTED, z }));
-          // walled down to the layer below, the lowest to the ground, so the stack has no gaps
-          const bottom = i ? elevation(RADAR_LEVELS_KM[i - 1] * FEET_PER_KM, scale) : 0;
-          if (walls) {
-            layers.push(radarPolygons(null, { id: `radar-wall-${km}`, data: walls, opacity, parameters: RADAR_LIFTED, z, bottom }));
-          }
-        });
-      }
+      // higher layers keep only the stronger echoes, so cells rise like towers
+      liftedArenas(device).forEach(({ slices, walls }, i) => {
+        if (!slices.data) return;
+        const km = RADAR_LEVELS_KM[i];
+        const opacity = Math.max(0.16, 0.34 - i * 0.03) * lift;
+        const z = elevation(km * FEET_PER_KM, scale);
+        const { data, indexCount, version } = slices;
+        const arena = { indexCount, version };
+        layers.push(radarPolygons(null, { id: `radar-lift-${km}`, data, arena, opacity, parameters: RADAR_LIFTED, z }));
+        // walled down to the layer below, the lowest to the ground, so the stack has no gaps
+        const bottom = i ? elevation(RADAR_LEVELS_KM[i - 1] * FEET_PER_KM, scale) : 0;
+        if (walls.data) {
+          const { data, indexCount, version } = walls;
+          const arena = { indexCount, version };
+          layers.push(radarPolygons(null, { id: `radar-wall-${km}`, data, arena, opacity, parameters: RADAR_LIFTED, z, bottom }));
+        }
+      });
       lifted = { key, layers };
     }
     return lifted.layers;
@@ -718,19 +830,40 @@
     return layers;
   }
 
-  const dashed = new PathStyleExtension({ dash: true });
+  // dashes measured along the whole path, not per segment: the estimated
+  // routes are sampled every few kilometres, and per-segment dashes would
+  // squeeze into a solid line wherever the segments are short on screen
+  const dashed = new PathStyleExtension({ dash: true, highPrecisionDash: true });
   const DASHED = [dashed];
   const ROUTE_AHEAD: [number, number, number, number] = [252, 180, 66, 210];
   const ROUTE_BEFORE: [number, number, number, number] = [241, 238, 231, 110];
   const ROUTE_FILED: [number, number, number, number] = [241, 238, 231, 150];
 
-  /** A ground path that climbs or descends linearly between two heights. */
-  function ramp(points: LonLat[], fromZ: number, toZ: number): [number, number, number][] {
-    const n = Math.max(1, points.length - 1);
-    return points.map(([lon, lat], i) => [lon, lat, fromZ + ((toZ - fromZ) * i) / n]);
+  /** Route heights (ft MSL) as drawn: airport-relative like the aircraft and its trail, then exaggerated. */
+  function drawnRoute(points: readonly PathPoint[], id: number, ex: number): [number, number, number][] {
+    return points.map(([lon, lat, alt]) => [lon, lat, elevation(motion.drawAltitude(id, alt, lat, lon), ex)]);
   }
 
-  function routeLayers(r: Route, pos: [number, number, number], trailStartZ: number): Layer[] {
+  /** Over this distance the estimate ahead eases from the aircraft's drawn height into its own profile. */
+  const AHEAD_BLEND_M = 15_000;
+
+  /**
+   * The estimated path ahead, from the aircraft as drawn now: the route is
+   * worked out at each report, and the aircraft moves on along it between them.
+   */
+  function drawnAhead(ahead: readonly PathPoint[], pos: [number, number, number], id: number, ex: number) {
+    const path = drawnRoute(trimToPosition(ahead, [pos[0], pos[1]]), id, ex);
+    const dz = pos[2] - path[0][2];
+    let walked = 0;
+    for (let i = 1; i < path.length && walked < AHEAD_BLEND_M; i++) {
+      walked += distanceKm([path[i - 1][0], path[i - 1][1]], [path[i][0], path[i][1]]) * 1000;
+      path[i][2] = Math.max(0, path[i][2] + dz * Math.max(0, 1 - walked / AHEAD_BLEND_M));
+    }
+    path[0] = pos;
+    return path;
+  }
+
+  function routeLayers(r: Route, pos: [number, number, number], id: number, ex: number): Layer[] {
     const layers: Layer[] = [];
     if (r.filed.length > 1) {
       layers.push(
@@ -758,31 +891,28 @@
       layers.push(
         new PathLayer<{ path: [number, number, number][] }, PathStyleExtensionProps>({
           id: "route-before",
-          data: [{ path: ramp(r.before, 0, trailStartZ) }],
+          // ends at the trail's first point, at the same height
+          data: [{ path: drawnRoute(r.before, id, ex) }],
           getPath: (d) => d.path,
           getColor: ROUTE_BEFORE,
           getWidth: 1.5,
           widthUnits: "pixels",
           getDashArray: [3, 3],
-          dashJustified: true,
           extensions: DASHED,
           parameters: NO_CULL,
         }),
       );
     }
     if (r.ahead.length > 1) {
-      // from the aircraft as drawn now, descending to the destination
-      const ahead = [[pos[0], pos[1]] as LonLat, ...r.ahead.slice(1)];
       layers.push(
         new PathLayer<{ path: [number, number, number][] }, PathStyleExtensionProps>({
           id: "route-ahead",
-          data: [{ path: ramp(ahead, pos[2], 0) }],
+          data: [{ path: drawnAhead(r.ahead, pos, id, ex) }],
           getPath: (d) => d.path,
           getColor: ROUTE_AHEAD,
           getWidth: 2,
           widthUnits: "pixels",
           getDashArray: [4, 3],
-          dashJustified: true,
           extensions: DASHED,
           parameters: NO_CULL,
           updateTriggers: { getPath: tick },
@@ -839,13 +969,33 @@
     a[2] + (b[2] - a[2]) * t,
   ];
 
-  function positionOf(f: LiveFlight, now: number, ex: number): [number, number, number] {
-    const [lon, lat] = extrapolate(f, now);
-    return [lon, lat, elevation(f.alt, ex)];
+  const at = (pose: Pose, ex: number): [number, number, number] => [pose.lon, pose.lat, elevation(pose.altFt, ex)];
+
+  /**
+   * deck.gl's `[pitch, yaw, roll]` turns the mesh about its own y, z and x axes.
+   * The models put the nose on +y and the right wing on +x, so deck's "pitch"
+   * is the aircraft's bank and its "roll" the aircraft's pitch. Both act in the
+   * model's own frame, before the yaw, so their signs hold on the globe too.
+   */
+  const orientationOf = (pose: Pose, yawOffset: number): [number, number, number] => [
+    pose.bank,
+    yawOffset - pose.heading,
+    pose.pitch,
+  ];
+
+  /**
+   * Where the mesh's up axis points after `orientationOf`: the third column of
+   * deck.gl's rotation (`@deck.gl/mesh-layers` utils/matrix.ts). Retracting the
+   * gear scales it about its attach plane, whose offset has to follow the tilt.
+   */
+  function upAxis([p, y, r]: [number, number, number]): [number, number, number] {
+    const [sp, cp, sy, cy, sr, cr] = [p, p, y, y, r, r].map((a, i) => (i % 2 ? Math.cos : Math.sin)(a * DEGREES));
+    return [sy * sr + cy * sp * cr, -cy * sr + sy * sp * cr, cp * cr];
   }
 
   function buildLayers(): Layer[] {
-    const now = Date.now();
+    // the motion model's clock follows the feed's, not this machine's
+    const now = motion.now();
     const { longitude: cLon, latitude: cLat, zoom, bearing, pitch } = view;
     const flat = zoom > FLAT_ABOVE_ZOOM;
     const ex = effectiveExaggeration(exaggeration, zoom);
@@ -857,7 +1007,8 @@
       // zoomed out everything sits at the floor, so the floor itself has to say
       // big from small: an A380 reads about 1.8x an A320, a Cessna about 0.6x
       const floor = minPx * Math.min(2, Math.max(0.6, (meters / MODEL_SIZE.narrow) ** 0.8));
-      return Math.min(MAX_PX, Math.max(floor, meters / mpp));
+      // following an aircraft lifts the ceiling: everything at true scale, however close
+      return Math.min(follow && selected ? Infinity : MAX_PX, Math.max(floor, meters / mpp));
     };
     const depth = depthAt(zoom);
     const material = meshMaterial(depth);
@@ -879,6 +1030,7 @@
       real: AircraftModel | null;
       kind: ModelKind;
       flights: LiveFlight[];
+      poses: Pose[];
       positions: [number, number, number][];
       liveries: Livery[];
       index: Map<number, number>;
@@ -888,6 +1040,7 @@
     const lockedOn = follow ? selected?.id : undefined;
     const groups = new Map<string, Group>();
     const icons: LiveFlight[] = [];
+    const iconPoses: Pose[] = [];
     const iconPositions: [number, number, number][] = [];
     const iconNames: string[] = [];
     const iconSizes: number[] = [];
@@ -896,10 +1049,12 @@
     for (const f of flights) {
       if (f.id !== lockedOn && cosAngle(f.lon, f.lat, cLon, cLat) <= minCos) continue;
       const real = aircraftModels.forFlight(f.typecode, f.icon);
+      const pose = motion.pose(f, now);
       if (useIcons && real) {
         iconIndex.set(f.id, icons.length);
         icons.push(f);
-        iconPositions.push(positionOf(f, now, ex));
+        iconPoses.push(pose);
+        iconPositions.push(at(pose, ex));
         iconNames.push(real.name);
         iconSizes.push(real.size);
         continue;
@@ -908,11 +1063,27 @@
       const [kind] = modelFor(f.icon);
       const id = real ? `t-${real.name}` : `k-${kind}`;
       let group = groups.get(id);
-      if (!group) groups.set(id, (group = { real, kind, flights: [], positions: [], liveries: [], index: new Map() }));
+      if (!group) groups.set(id, (group = { real, kind, flights: [], poses: [], positions: [], liveries: [], index: new Map() }));
       group.index.set(f.id, group.flights.length);
       group.flights.push(f);
-      group.positions.push(positionOf(f, now, ex));
+      group.poses.push(pose);
+      group.positions.push(at(pose, ex));
       if (liveryAmount > 0) group.liveries.push(liveries.forFlight(f));
+    }
+
+    // Models are centred on their bounding box, so an aircraft placed by its
+    // origin at height 0 would stand with its wheels below the map. Raise each
+    // by how far its wheels hang below the origin at the size it's drawn, so
+    // one on the ground stands on them (a few metres in the air is invisible).
+    for (const group of groups.values()) {
+      const real = group.real;
+      const mesh = real?.gear?.geometry ?? real?.lods[Math.min(detail, real.lods.length - 1)].combined ?? models()[group.kind].combined;
+      const wheels = -lowestZ(mesh);
+      const divisor = real?.size ?? MODEL_SIZE[group.kind];
+      group.positions.forEach((position, i) => {
+        const s = (screenPx(real?.size ?? sizeOf(group.flights[i].icon)) * mpp) / divisor;
+        position[2] += wheels * s * Math.max(0.04, depth);
+      });
     }
 
     const layers: Layer[] = [earthLayer(basemap)];
@@ -925,12 +1096,13 @@
       if (Date.now() - radarCheckedAt > 600_000) refreshRadar();
       const lift = liftFor(pitch);
       if (radarUrl) layers.push(radarLayer(radarUrl), ...radarLifted(ex, lift));
+      else freeArenas();
       // only the sources on screen are worth fetching; each is tens of megabytes
       if (isTauri() && Date.now() - measuredCheckedAt > 120_000) {
         refreshMeasured(viewArea(view, container.clientWidth, container.clientHeight));
       }
       for (const volume of measured) layers.push(...measuredLayers(volume, ex, lift));
-    }
+    } else freeArenas();
     if (daylight) layers.push(nightLayer(now));
     if (tileUrl && buildings && flat && zoom >= 13) layers.push(buildingLayer(tileUrl));
     if (tileUrl && labels && fontsReady) {
@@ -940,10 +1112,19 @@
       layers.push(labelTileLayer(tileUrl), textLayer(withoutMarked(labelsInView(cLon, cLat, zoom), marked)));
     }
 
-    if (selected) {
-      const pos = positionOf(selected, now, ex);
-      const trail = (details?.trail ?? []).filter((p) => p.latitude || p.longitude);
-      const path = trail.map((p) => [p.longitude, p.latitude, elevation(p.altitude, ex)]);
+    const selectedPose = selected ? motion.pose(selected, now) : null;
+    if (selected && selectedPose) {
+      const pos = at(selectedPose, ex);
+      // the aircraft is drawn a few seconds in the past: trail points newer than that
+      // would run on past it and back, so the trail stops at the drawn time
+      const drawnS = motion.drawnTime(selected.id, now) / 1000;
+      const trail = (details?.trail ?? []).filter((p) => (p.latitude || p.longitude) && !(p.timestamp > drawnS));
+      // the same airport-relative heights as the aircraft, so the trail meets it
+      const path = trail.map((p) => [
+        p.longitude,
+        p.latitude,
+        elevation(motion.drawAltitude(selected.id, p.altitude, p.latitude, p.longitude), ex),
+      ]);
       path.push(pos);
       const colors = trail.map((p) => [...altitudeColor(p.altitude), 255]);
       colors.push([...altitudeColor(selected.alt), 255]);
@@ -971,12 +1152,78 @@
           updateTriggers: { getPath: tick },
         }),
       );
-      if (route) layers.push(...routeLayers(route, pos, path.length > 1 ? path[0][2] : pos[2]));
+      if (route) layers.push(...routeLayers(route, pos, selected.id, ex));
     }
     if (airport) layers.push(...airportMarkers("focus-airport", [airport]));
 
     const meshes = models();
     const selectedId = selected?.id;
+
+    // Shadows on the ground, from the real sun: all of them first, so every
+    // aircraft draws over every shadow.
+    const shadowFade = clamp01((zoom - SHADOW_ZOOM[0]) / (SHADOW_ZOOM[1] - SHADOW_ZOOM[0]));
+    if (shadowFade > 0) {
+      const sun = sunDirection(now);
+      for (const [id, group] of groups) {
+        const real = group.real?.lods[Math.min(detail, group.real.lods.length - 1)];
+        const shape = real ?? meshes[group.kind];
+        const metres = group.real?.size;
+        const divisor = metres ?? MODEL_SIZE[group.kind];
+        const n = group.poses.length;
+        // per aircraft: toward the sun in the mesh's local frame, and opacity
+        const toSun = new Float64Array(3 * n);
+        const alpha = new Float32Array(n);
+        const casting: number[] = [];
+        for (let i = 0; i < n; i++) {
+          const pose = group.poses[i];
+          const [e, north, up] = localSun(sun, pose.lat, pose.lon, shadowSunOut);
+          // the true size and height, so the fade doesn't change with zoom
+          const a = shadowOpacity(pose.altFt, metres ?? sizeOf(group.flights[i].icon), up) * shadowFade;
+          if (a < SHADOW_MIN_ALPHA) continue;
+          // the globe's local frame is the flat one turned half a turn (see `orientationOf`)
+          toSun[3 * i] = flat ? e : -e;
+          toSun[3 * i + 1] = flat ? north : -north;
+          toSun[3 * i + 2] = up;
+          alpha[i] = a;
+          casting.push(i);
+        }
+        if (!casting.length) continue;
+        layers.push(
+          new SimpleMeshLayer<number>({
+            id: `shadow-${id}-${detail}`,
+            data: casting,
+            mesh: shape.combined,
+            getPosition: (i) => {
+              const [lon, lat] = group.positions[i];
+              shadowPositionOut[0] = lon;
+              shadowPositionOut[1] = lat;
+              return shadowPositionOut;
+            },
+            // the aircraft's own orientation and scale, squashed onto the
+            // ground along the sun's rays from the height it is drawn at
+            getTransformMatrix: (i) => {
+              const s = (screenPx(metres ?? sizeOf(group.flights[i].icon)) * mpp) / divisor;
+              shadowSunOut[0] = toSun[3 * i];
+              shadowSunOut[1] = toSun[3 * i + 1];
+              shadowSunOut[2] = toSun[3 * i + 2];
+              const scale = [s, s, s * Math.max(0.04, depth)];
+              const orientation = orientationOf(group.poses[i], yawOffset);
+              // aircraft are raised onto their wheels (above), so the ground is the map
+              return shadowMatrix(orientation, scale, shadowSunOut, group.positions[i][2], shadowMatrixOut);
+            },
+            getColor: (i) => {
+              shadowColorOut[3] = Math.round(alpha[i] * 255);
+              return shadowColorOut;
+            },
+            material: false,
+            pickable: false,
+            parameters: SHADOW_PARAMETERS,
+            updateTriggers: { getPosition: tick, getTransformMatrix: tick, getColor: tick },
+          }),
+        );
+      }
+    }
+
     for (const [id, group] of groups) {
       const real = group.real?.lods[Math.min(detail, group.real.lods.length - 1)];
       const shape = real ?? meshes[group.kind];
@@ -987,7 +1234,7 @@
       const shared = {
         data: group.flights,
         getPosition: (_: LiveFlight, { index }: { index: number }) => group.positions[index],
-        getOrientation: (f: LiveFlight): [number, number, number] => [0, yawOffset - f.track, 0],
+        getOrientation: (_: LiveFlight, { index }: { index: number }) => orientationOf(group.poses[index], yawOffset),
         getScale: (f: LiveFlight): [number, number, number] => {
           const s = (screenPx(metres ?? sizeOf(f.icon)) * mpp) / divisor;
           // flattened into a silhouette when zoomed out
@@ -1000,7 +1247,45 @@
         highlightColor: [252, 180, 66, 150] as [number, number, number, number],
         parameters: NO_CULL,
       };
-      const triggers = { getPosition: tick, getOrientation: yawOffset, getScale: [mpp, minPx, depth] };
+      const triggers = { getPosition: tick, getOrientation: [tick, yawOffset], getScale: [mpp, minPx, depth] };
+      const gear = group.real?.gear;
+      // gear only once the models have depth; a silhouette has nowhere to hang it
+      if (gear && depth >= GEAR_DEPTH) {
+        const down: number[] = [];
+        group.poses.forEach((pose, i) => pose.gear > 0 && down.push(i));
+        if (down.length) {
+          const flatten = Math.max(0.04, depth);
+          layers.push(
+            new SimpleMeshLayer<number>({
+              id: `gear-${id}`,
+              data: down,
+              mesh: gear.geometry,
+              getPosition: (i) => group.positions[i],
+              getOrientation: (i) => orientationOf(group.poses[i], yawOffset),
+              // retracted by squashing it up into the airframe about its attach plane
+              getScale: (i) => {
+                const s = (screenPx(metres!) * mpp) / divisor;
+                return [s, s, s * flatten * group.poses[i].gear];
+              },
+              getTranslation: (i) => {
+                const s = (screenPx(metres!) * mpp) / divisor;
+                const lift = gear.attachZ * (1 - group.poses[i].gear) * s * flatten;
+                const [x, y, z] = upAxis(orientationOf(group.poses[i], yawOffset));
+                return [x * lift, y * lift, z * lift];
+              },
+              getColor: GEAR_COLOR,
+              material,
+              parameters: NO_CULL,
+              updateTriggers: {
+                getPosition: tick,
+                getOrientation: [tick, yawOffset],
+                getScale: [tick, mpp, minPx, depth],
+                getTranslation: [tick, mpp, minPx, depth, yawOffset],
+              },
+            }),
+          );
+        }
+      }
       if (liveryAmount === 0) {
         layers.push(
           new SimpleMeshLayer<LiveFlight>({
@@ -1027,6 +1312,43 @@
     }
 
     if (icons.length) {
+      // each icon turned to its heading as seen on screen, which away from the
+      // middle of the globe is not simply `bearing - heading` (see screenAngle)
+      // built from the view state rather than asked of deck.gl, whose
+      // `getViewports` can assert while a camera move is under way; icons only
+      // show below zoom 11, where the view is always the globe projection
+      const viewport = new GlobeViewport({ ...view, width: container.clientWidth, height: container.clientHeight });
+      const step = ICON_HEADING_STEP_PX * mpp;
+      const iconAngles = iconPoses.map((pose, i) => {
+        const angle = screenAngle(viewport, iconPositions[i], pose.heading, step);
+        return angle ?? bearing - pose.heading;
+      });
+      // a thin dark border under every silhouette, so they stand out on bright
+      // weather and imagery and from each other where traffic is dense
+      if (aircraftModels.outlineAtlas) {
+        layers.push(
+          new IconLayer<LiveFlight>({
+            id: "aircraft-icon-outlines",
+            data: icons,
+            getPosition: (_, { index }) => iconPositions[index],
+            getIcon: (_, { index }) => iconNames[index],
+            iconAtlas: aircraftModels.outlineAtlas,
+            iconMapping: aircraftModels.outlineMapping,
+            // the same silhouette size, in a cell padded for the border
+            getSize: (_, { index }) => screenPx(iconSizes[index]) * 1.06 * aircraftModels.outlineScale,
+            getAngle: (_, { index }) => iconAngles[index],
+            getColor: OUTLINE_COLOR,
+            sizeUnits: "pixels",
+            billboard: true,
+            parameters: NO_CULL,
+            updateTriggers: {
+              getPosition: tick,
+              getAngle: [tick, bearing, pitch, zoom, cLon, cLat],
+              getSize: [mpp, minPx],
+            },
+          }),
+        );
+      }
       layers.push(
         new IconLayer<LiveFlight>({
           id: "aircraft-icons",
@@ -1039,7 +1361,7 @@
           getSize: (_, { index }) => screenPx(iconSizes[index]) * 1.06,
           // the icons point north; `getAngle` turns anticlockwise on screen,
           // and a rotated map has already turned the world underneath them
-          getAngle: (f) => bearing - f.track,
+          getAngle: (_, { index }) => iconAngles[index],
           getColor: (f) => (f.id === selectedId ? SELECTED_COLOR : AIRCRAFT_COLOR),
           sizeUnits: "pixels",
           billboard: true,
@@ -1049,7 +1371,7 @@
           parameters: NO_CULL,
           updateTriggers: {
             getPosition: tick,
-            getAngle: [tick, bearing],
+            getAngle: [tick, bearing, pitch, zoom, cLon, cLat],
             getSize: [mpp, minPx],
             getColor: selectedId,
           },
@@ -1058,11 +1380,11 @@
     }
 
     // ring the selection, drawn over neighbouring aircraft but not through the globe
-    if (selected && cosAngle(selected.lon, selected.lat, cLon, cLat) > 0) {
+    if (selected && selectedPose && cosAngle(selectedPose.lon, selectedPose.lat, cLon, cLat) > 0) {
       layers.push(
         new ScatterplotLayer({
           id: "selection-ring",
-          data: [positionOf(selected, now, ex)],
+          data: [at(selectedPose, ex)],
           getPosition: (d) => d,
           getRadius: screenPx(sizeOf(selected.icon)) * 0.6 + 4,
           radiusUnits: "pixels",
@@ -1095,8 +1417,10 @@
    * leaves the aim stale for every frame of a zoom, and the aircraft jumps.
    */
   function lockedView(v: ViewState, flight: LiveFlight): ViewState {
-    const [lon, lat] = extrapolate(flight, Date.now());
-    const altitude = elevation(flight.alt, effectiveExaggeration(exaggeration, v.zoom));
+    // the same pose the model is drawn at, or the camera shakes against it
+    const pose = motion.pose(flight, motion.now());
+    const [lon, lat] = [pose.lon, pose.lat];
+    const altitude = elevation(pose.altFt, effectiveExaggeration(exaggeration, v.zoom));
     // Close in, the projection is flat and can raise the camera's target to the
     // aircraft's own height, which centres it at any tilt, bearing and zoom. A
     // ground point aimed along the bearing can't: the camera sits only a few
@@ -1135,7 +1459,7 @@
       // and the off-screen culling both read it
       onviewchange?.(view);
       raised = Boolean(view.position);
-      deck?.setProps({ initialViewState: { ...view, ...LIMITS } });
+      deck?.setProps({ initialViewState: { ...view, ...limits() } });
     } else if (raised && !(follow && selected)) {
       // the lock was released with the camera raised: bring it back to the ground
       raised = false;
@@ -1144,6 +1468,16 @@
       const grounded: ViewState = { ...view, position: [0, 0, 0] };
       deck?.setProps({ initialViewState: { ...grounded, ...LIMITS } });
     }
+    // released from a lock closer or flatter than the free camera allows: ease back within its limits
+    const locked = Boolean(follow && selected);
+    if (wasLocked && !locked && (view.zoom > LIMITS.maxZoom || view.pitch > LIMITS.maxPitch)) {
+      goTo(
+        { zoom: Math.min(view.zoom, LIMITS.maxZoom), pitch: Math.min(view.pitch, LIMITS.maxPitch) },
+        600,
+        ["zoom", "pitch"],
+      );
+    }
+    wasLocked = locked;
     deck?.setProps({ layers: buildLayers() });
   }
 
@@ -1166,7 +1500,7 @@
       initialViewState: {
         ...view,
         ...target,
-        ...LIMITS,
+        ...limits(),
         transitionDuration: duration,
         transitionInterpolator: new LinearInterpolator(props),
       },
@@ -1179,13 +1513,13 @@
     const target = {
       longitude: unwrapLongitude(view.longitude, longitude),
       latitude,
-      zoom: Math.min(zoom ?? (near ? Math.max(view.zoom, 8) : 8), LIMITS.maxZoom),
+      zoom: Math.min(zoom ?? (near ? Math.max(view.zoom, 8) : 8), maxZoomNow()),
     };
     goTo(target, 1500, ["longitude", "latitude", "zoom"]);
   }
 
   export function zoomBy(delta: number) {
-    const zoom = Math.min(LIMITS.maxZoom, Math.max(LIMITS.minZoom, view.zoom + delta));
+    const zoom = Math.min(maxZoomNow(), Math.max(LIMITS.minZoom, view.zoom + delta));
     goTo({ zoom }, 250, ["zoom"]);
   }
 
@@ -1200,30 +1534,68 @@
 
   const escape = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
+  /** Airport labels get deck's tooltip; aircraft get the {@link HoverCard}. */
   function tooltip(info: PickingInfo) {
-    if (info.layer?.id === "labels") {
-      const p = (info.object as LabelFeature | undefined)?.properties;
-      if (p?.layerName !== "aerodrome_label") return null;
-      return {
-        html: `<div class="tt-head">${escape(nameOf(p))}</div><div class="tt-sub">Open departures and arrivals</div>`,
-        className: "aircraft-tooltip",
-      };
-    }
-    return flightTooltip(info as PickingInfo<LiveFlight>);
-  }
-
-  function flightTooltip({ object, layer }: PickingInfo<LiveFlight>) {
-    if (!object || !layer?.id.startsWith("aircraft-")) return null;
-    const route = object.origin || object.destination ? `${object.origin || "?"} – ${object.destination || "?"}` : "";
-    const altitude = object.onGround ? "On ground" : `${object.alt.toLocaleString()} ft`;
+    if (info.layer?.id !== "labels") return null;
+    const p = (info.object as LabelFeature | undefined)?.properties;
+    if (p?.layerName !== "aerodrome_label") return null;
     return {
-      html: `<div class="tt-head data">${escape(object.callsign || object.flight || "No callsign")}</div>
-        <div class="tt-sub">${escape([object.typecode, object.reg].filter(Boolean).join(" · "))}</div>
-        ${route ? `<div class="tt-row data">${escape(route)}</div>` : ""}
-        <div class="tt-row data">${altitude} · ${object.speed} kt</div>`,
+      html: `<div class="tt-head">${escape(nameOf(p))}</div><div class="tt-sub">Open departures and arrivals</div>`,
       className: "aircraft-tooltip",
     };
   }
+
+  // The hover card. The pointer's position is kept apart from the flight, so
+  // moving over one aircraft only moves the card and recomputes nothing else.
+  let hoverFlight = $state.raw<LiveFlight | null>(null);
+  let pointer = $state({ x: 0, y: 0 });
+  let areaWidth = $state(0);
+  let areaHeight = $state(0);
+  /** Bumped when a details request settles, so the card reads the loader again. */
+  let hoverVersion = $state(0);
+  const hoverLoader = new HoverLoader({ fetch: flightDetails, isRateLimited, onchange: () => hoverVersion++ });
+  onDestroy(() => hoverLoader.dispose());
+
+  /** The selected flight's details are already streaming in: no need to ask again. */
+  const ownDetails = (id: number) => (id === selected?.id && details ? details : null);
+
+  function setHover(flight: LiveFlight | null, x = 0, y = 0) {
+    if (flight) pointer = { x, y };
+    if (flight?.id === hoverFlight?.id) return;
+    hoverLoader.hover(flight && !ownDetails(flight.id) ? flight.id : null);
+    hoverFlight = flight;
+  }
+
+  /** The latest report of the hovered flight, as the feed refreshes under a resting pointer. */
+  const hovered = $derived.by(() => {
+    const id = hoverFlight?.id;
+    return id === undefined ? null : (flights.find((f) => f.id === id) ?? hoverFlight);
+  });
+
+  const hoverCard = $derived.by(() => {
+    if (!hovered) return null;
+    void hoverVersion;
+    void reference.ready; // airports resolve once the reference data is in
+    const own = ownDetails(hovered.id);
+    const info = own ? hoverInfo(own) : hoverLoader.info(hovered.id);
+    const status = own ? ("ready" as const) : hoverLoader.status(hovered.id);
+    const origin = reference.airport(hovered.origin);
+    const destination = reference.airport(hovered.destination);
+    let progress: { value: number; measured: boolean } | null = null;
+    if (info?.progressPct != null) progress = { value: info.progressPct / 100, measured: true };
+    else {
+      const estimate = routeProgress(hovered, origin, destination);
+      if (estimate !== null) progress = { value: estimate, measured: false };
+    }
+    return {
+      flight: hovered,
+      from: origin?.city || hovered.origin,
+      to: destination?.city || hovered.destination,
+      progress,
+      info,
+      status,
+    };
+  });
 
   onMount(() => {
     deck = new Deck<GlobeView>({
@@ -1233,6 +1605,7 @@
       controller: controllerFor(false),
       effects: [lighting],
       pickingRadius: 6,
+      onDeviceInitialized: (d) => (device = d),
       onViewStateChange: ({ viewState }) => {
         const { longitude, latitude, zoom, bearing = 0, pitch = 0 } = viewState as Partial<ViewState>;
         view = { longitude: longitude!, latitude: latitude!, zoom: zoom!, bearing, pitch };
@@ -1245,12 +1618,16 @@
       getTooltip: tooltip,
       getCursor: ({ isDragging, isHovering }) => (isDragging ? "grabbing" : isHovering ? "pointer" : "grab"),
       onHover: (info) => {
-        const id = info.layer?.id.startsWith("aircraft-") ? ((info.object as LiveFlight | undefined)?.id ?? null) : null;
+        const flight = info.layer?.id.startsWith("aircraft-") ? ((info.object as LiveFlight | undefined) ?? null) : null;
+        setHover(flight, info.x, info.y);
+        const id = flight?.id ?? null;
         if (id !== hoveredId) {
           hoveredId = id;
           render();
         }
       },
+      // hover isn't reported while a button is down: the card would hang over a moving globe
+      onDragStart: () => setHover(null),
       onClick: (info) => {
         if (info.layer?.id.startsWith("aircraft-") && info.object) onselect(info.object as LiveFlight);
         else if (info.layer?.id === "labels") {
@@ -1280,6 +1657,7 @@
 
   onDestroy(() => {
     cancelAnimationFrame(frame);
+    freeArenas();
     deck?.finalize();
     deck = null;
   });
@@ -1292,7 +1670,11 @@
   });
 </script>
 
-<div class="globe" bind:this={container}></div>
+<div class="globe" bind:this={container} bind:clientWidth={areaWidth} bind:clientHeight={areaHeight}>
+  {#if hoverCard}
+    <HoverCard {...hoverCard} x={pointer.x} y={pointer.y} width={areaWidth} height={areaHeight} />
+  {/if}
+</div>
 
 <style>
   .globe {
@@ -1314,9 +1696,5 @@
   }
   :global(.aircraft-tooltip .tt-sub) {
     color: var(--text-2);
-  }
-  :global(.aircraft-tooltip .tt-row) {
-    color: var(--text-2);
-    font-size: var(--text-sm);
   }
 </style>

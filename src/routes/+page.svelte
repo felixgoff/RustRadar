@@ -2,6 +2,8 @@
   import { onDestroy, onMount, untrack } from "svelte";
   import { Funnel, Radar, RefreshCw, TriangleAlert } from "@lucide/svelte";
   import {
+    adsbCallsign,
+    adsbHex,
     followFlight,
     isRateLimited,
     isTauri,
@@ -12,6 +14,7 @@
     signOut,
     topFlights,
     unfollowFlight,
+    type AdsbAircraft,
     type BoundingBox,
     type FindEntry,
     type FlightDetails,
@@ -32,6 +35,8 @@
   import TopFlights from "$lib/TopFlights.svelte";
   import { activeCount, loadPersisted, matcher, persist, serverCategories, type Filters } from "$lib/filters";
   import { cosAngle, viewArea } from "$lib/geo";
+  import { motion } from "$lib/motion";
+  import { matchAdsb } from "$lib/adsb";
   import { reference } from "$lib/reference.svelte";
   import { mergeTrail, routeFor } from "$lib/routes";
 
@@ -96,6 +101,11 @@
   $effect(() => persist($state.snapshot(settings), $state.snapshot(filters)));
 
   const flights = $derived(snapshot?.flights ?? []);
+
+  // field elevations, for landings, takeoffs and heights near airports
+  $effect(() => {
+    if (reference.ready) motion.setAirports(reference.airports);
+  });
   const byId = $derived(new Map(flights.map((f) => [f.id, f])));
   const filtered = $derived(flights.filter(matcher($state.snapshot(filters) as Filters)));
   const active = $derived(activeCount(filters));
@@ -155,7 +165,8 @@
 
   const route = $derived.by(() => {
     void reference.ready; // airports resolve once the reference data is in
-    return selected ? routeFor(selected, shownDetails) : null;
+    // other traffic shows which runways are in use
+    return selected ? routeFor(selected, shownDetails, flights) : null;
   });
 
   // fetch the track once the aircraft is known, then now and then while it is open
@@ -177,6 +188,68 @@
       clearInterval(timer);
     };
   });
+  // adsb.lol: what the selected aircraft's own transponder reports (heading,
+  // bank, rates, air data, autopilot targets). Asked for that aircraft only,
+  // every few seconds while the window is visible, slower after errors; the
+  // backend adds its own spacing, cache and backoff.
+  const ADSB_POLL_MS = 3_000;
+  const ADSB_MAX_BACKOFF = 16;
+  /** Measured data is shown for this long after the aircraft last reported. */
+  const ADSB_SHOW_MS = 60_000;
+  let adsb = $state.raw<{ id: number; aircraft: AdsbAircraft; seenAt: number } | null>(null);
+  const selectedCallsign = $derived(selected?.callsign ?? "");
+  const adsbQuery = $derived(
+    settings.adsb && selectedId !== null && (icao24 || selectedCallsign)
+      ? `${selectedId}|${icao24 ?? `cs:${selectedCallsign}`}`
+      : null,
+  );
+  $effect(() => {
+    if (!adsbQuery || !isTauri()) return;
+    const id = selectedId!;
+    const hex = icao24;
+    const callsign = selectedCallsign;
+    let stopped = false;
+    let failures = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      if (stopped) return;
+      if (document.visibilityState !== "hidden") {
+        try {
+          const snap = hex ? await adsbHex(hex) : await adsbCallsign(callsign);
+          if (stopped) return;
+          // without the address, the callsign match is checked against where the flight is
+          const f = untrack(() => selected);
+          const match = matchAdsb(snap.aircraft, { hex, callsign, reg: f?.reg ?? "", lat: f?.lat ?? NaN, lon: f?.lon ?? NaN });
+          if (match) {
+            // its `now` is when adsb.lol answered: the age of the data on our clock
+            adsb = { id, aircraft: match, seenAt: Date.now() - Math.max(0, snap.nowMs - match.seenMs) };
+            motion.measure(id, match);
+          }
+          failures = 0;
+        } catch {
+          failures++; // unreachable or resting: Flightradar24's data stands alone meanwhile
+        }
+      }
+      if (!stopped) timer = setTimeout(poll, ADSB_POLL_MS * Math.min(2 ** failures, ADSB_MAX_BACKOFF));
+    };
+    poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  });
+  // a deselected aircraft (or the source switched off) goes back to the estimates, eased
+  let measuredId: number | null = null;
+  $effect(() => {
+    const want = settings.adsb ? selectedId : null;
+    if (measuredId !== null && measuredId !== want) motion.measure(measuredId, null);
+    measuredId = want;
+    if (untrack(() => adsb)?.id !== want) adsb = null;
+  });
+  const measured = $derived(
+    adsb && adsb.id === selectedId && settings.adsb && now - adsb.seenAt < ADSB_SHOW_MS ? adsb.aircraft : null,
+  );
+
   const boardAirport = $derived.by(() => {
     void reference.ready;
     return reference.airport(boardCode);
@@ -209,6 +282,8 @@
     let limited = false;
     try {
       snapshot = await liveFlights(area, serverCategories($state.snapshot(filters) as Filters));
+      // aircraft are drawn on the feed's clock, so a wrong system clock can't misplace them
+      motion.syncClock(snapshot.serverTimeMs);
       regional = area !== null;
       lastUpdate = Date.now();
       feedError = null;
@@ -281,7 +356,7 @@
 
   function select(
     id: number | null,
-    opts: { hint?: LiveFlight; fly?: boolean; follow?: boolean; keepZoom?: boolean; fromBoard?: boolean } = {},
+    opts: { hint?: LiveFlight; fly?: boolean; follow?: boolean; fromBoard?: boolean } = {},
   ) {
     if (id === selectedId && !opts.fly) return;
     selectedId = id;
@@ -296,9 +371,9 @@
     }
     const known = byId.get(id) ?? opts.hint;
     if (opts.fly) {
-      // a click on the map keeps the zoom: the aircraft is already in view and
-      // the camera only has to centre on it. Picks from a list fly in instead.
-      flyZoom = opts.keepZoom ? view.zoom : undefined;
+      // picks from a list fly in; a click on the map leaves the camera alone,
+      // and only the panel's follow button (or C) locks it to the aircraft
+      flyZoom = undefined;
       if (known) globe.flyTo(known.lon, known.lat, flyZoom);
       else flyPending = true;
     }
@@ -320,7 +395,6 @@
       const { lat, lon, callsign } = entry.detail;
       select(id, {
         fly: true,
-        follow: true,
         hint: {
           id, lat, lon, track: 0, alt: 0, speed: 0, onGround: false, timestampMs: 0,
           callsign: callsign ?? "", flight: "", reg: "", typecode: "", origin: "", destination: "", icon: "",
@@ -387,6 +461,8 @@
       settings.weather && "Radar: NOAA MRMS, Deutscher Wetterdienst, RainViewer",
       settings.basemap === "satellite" && "Imagery: Esri, Maxar, Earthstar Geographics",
       merged.added > 0 && "Track: OpenSky Network",
+      // ODbL asks for attribution wherever the data is shown
+      measured && "Aircraft data: © adsb.lol contributors, ODbL",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]
       .filter(Boolean)
@@ -436,7 +512,7 @@
     daylight={settings.daylight}
     weather={settings.weather}
     follow={following}
-    onselect={(f) => select(f?.id ?? null, { fly: !!f, follow: !!f, keepZoom: true })}
+    onselect={(f) => select(f?.id ?? null)}
     onairport={openAirport}
     onviewchange={(v) => (view = v)}
   />
@@ -515,7 +591,7 @@
         flights={top}
         failed={topFailed}
         {selectedId}
-        onpick={(f) => select(f.flight_id, { fly: true, follow: true })}
+        onpick={(f) => select(f.flight_id, { fly: true })}
         onretry={refreshTop}
       />
     </section>
@@ -528,7 +604,7 @@
         code={boardCode}
         airport={boardAirport}
         {selectedId}
-        onselect={(id) => select(id, { fly: true, follow: true, fromBoard: true })}
+        onselect={(id) => select(id, { fly: true, fromBoard: true })}
         onlocate={() => boardAirport && globe.flyTo(boardAirport.lon, boardAirport.lat, 11)}
         onclose={() => (boardCode = null)}
       />
@@ -540,13 +616,14 @@
       flight={selected}
       details={shownDetails}
       openskyAdded={merged.added}
+      {measured}
       {route}
       status={followState}
       {authenticated}
       {following}
       back={fromBoard && boardCode ? { label: `${boardCode} departures and arrivals`, onclick: () => select(null) } : null}
       onfollow={() => (following = !following)}
-      onselect={(id) => select(id, { fly: true, follow: true })}
+      onselect={(id) => select(id, { fly: true })}
       onairport={openAirport}
       onsignin={() => controls.openAccount()}
       onclose={() => select(null)}
@@ -564,6 +641,7 @@
     bind:liveries={settings.liveries}
     bind:daylight={settings.daylight}
     bind:weather={settings.weather}
+    bind:adsb={settings.adsb}
     bind:exaggeration={settings.exaggeration}
     {session}
     inset={selected || boardCode ? PANEL_INSET : 0}

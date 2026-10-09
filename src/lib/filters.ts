@@ -102,6 +102,8 @@ export interface Settings {
   liveries: boolean;
   daylight: boolean;
   weather: boolean;
+  /** Measured data for the selected aircraft from adsb.lol. */
+  adsb: boolean;
   exaggeration: number;
 }
 
@@ -112,6 +114,7 @@ export const DEFAULT_SETTINGS: Settings = {
   liveries: true,
   daylight: true,
   weather: false,
+  adsb: true,
   exaggeration: 10,
 };
 

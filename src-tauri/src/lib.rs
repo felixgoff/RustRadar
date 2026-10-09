@@ -1,3 +1,4 @@
+mod adsblol;
 mod board;
 mod dwd;
 mod liveries;
@@ -5,6 +6,7 @@ mod mrms;
 mod opensky;
 mod radar;
 mod reference;
+mod runways;
 mod session;
 mod updater;
 
@@ -41,6 +43,8 @@ struct AppState {
     follow: Mutex<Option<JoinHandle<()>>>,
     /// Airlines and airports, loaded once.
     reference: tokio::sync::Mutex<Option<Arc<reference::ReferenceData>>>,
+    /// Runways by airport, loaded once.
+    runways: tokio::sync::Mutex<Option<Arc<runways::RunwayData>>>,
     /// Logo-derived livery colours per IATA code, loaded from disk on first use.
     colors: tokio::sync::Mutex<Option<liveries::ColorCache>>,
     /// The newest volume from each 3D radar source, keyed by its name.
@@ -90,10 +94,39 @@ struct LiveFlight {
     destination: String,
     /// Flightradar24's icon class, e.g. `A320`, `B744`, `EC` (helicopter)
     icon: String,
+    /// The aircraft's recent history: positions before `lat`/`lon`, as
+    /// `[Δlat, Δlon, Δms]` back from the report, each point at
+    /// `lat - Δlat·1e-5`, `lon - Δlon·1e-5` and `timestamp_ms - Δms`, newest
+    /// first (Δms increasing). Flightradar24 sends up to ~10 s of them; they
+    /// overlap the previous reports' positions, so motion can be played back
+    /// through them rather than guessed.
+    positions: Vec<[i32; 3]>,
+    /// Feet per minute; only requested, so only present, when signed in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vspeed: Option<i32>,
+}
+
+/// Furthest back a buffered position may be; anything else is corrupt
+/// (upstream occasionally sends an underflowed delta near 2^32).
+const MAX_BUFFER_MS: u32 = 60_000;
+
+/// The usable part of a position buffer (recent history, newest first):
+/// strictly increasing times back from the report, within range.
+fn buffered_positions(buffer: Option<&fr24::proto::common::PositionBuffer>) -> Vec<[i32; 3]> {
+    let mut last = 0;
+    let mut out = Vec::new();
+    for p in buffer.map(|b| b.recent_positions_list.as_slice()).unwrap_or_default() {
+        if p.delta_ms > last && p.delta_ms <= MAX_BUFFER_MS {
+            last = p.delta_ms;
+            out.push([p.delta_lat, p.delta_lon, p.delta_ms as i32]);
+        }
+    }
+    out
 }
 
 impl From<fr24::proto::common::Flight> for LiveFlight {
     fn from(f: fr24::proto::common::Flight) -> Self {
+        let positions = buffered_positions(f.position_buffer.as_ref());
         let extra = f.extra_info.unwrap_or_default();
         let route = extra.route.unwrap_or_default();
         Self {
@@ -114,6 +147,8 @@ impl From<fr24::proto::common::Flight> for LiveFlight {
             icon: Icon::try_from(f.icon)
                 .map(|i| i.as_str_name().to_owned())
                 .unwrap_or_default(),
+            positions,
+            vspeed: None,
         }
     }
 }
@@ -147,6 +182,11 @@ async fn live_flights(
     if let Some(services) = services.filter(|s| !s.is_empty()) {
         template.services = services;
     }
+    // vertical speed is a signed-in field; anonymous requests get four, all used
+    let signed_in = fr24.auth().is_some();
+    if signed_in {
+        template.fields.push(fr24::grpc::LiveFeedField::Vspeed);
+    }
     let world = fr24
         .live_feed_area(&template, area, WORLD_CONCURRENCY)
         .await;
@@ -163,7 +203,17 @@ async fn live_flights(
             .iter()
             .map(|(b, e)| format!("{:.0}..{:.0}: {e}", b.west, b.east))
             .collect(),
-        flights: world.flights.into_iter().map(LiveFlight::from).collect(),
+        flights: world
+            .flights
+            .into_iter()
+            .map(|f| {
+                let vspeed = f.extra_info.as_ref().map(|e| e.vspeed);
+                LiveFlight {
+                    vspeed: if signed_in { vspeed } else { None },
+                    ..LiveFlight::from(f)
+                }
+            })
+            .collect(),
         elapsed_ms: start.elapsed().as_millis() as u64,
         authenticated: fr24.auth().is_some(),
     })
@@ -305,6 +355,38 @@ async fn reference_data(
     let data = Arc::new(reference::load(&state.client(), &path).await?);
     *slot = Some(data.clone());
     Ok(data)
+}
+
+/// The runways of the given airports (ICAO codes), from a disk cache of
+/// OurAirports' list refreshed weekly. Airports it doesn't know are left out.
+#[tauri::command]
+async fn airport_runways(
+    airports: Vec<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<HashMap<String, Vec<runways::Runway>>> {
+    let data = {
+        let mut slot = state.runways.lock().await;
+        match slot.as_ref() {
+            Some(data) => data.clone(),
+            None => {
+                let path = cache_file(&app, "runways.json")?;
+                let http = state.client().http().clone();
+                let data = Arc::new(runways::load(&http, &path).await?);
+                *slot = Some(data.clone());
+                data
+            }
+        }
+    };
+    Ok(airports
+        .into_iter()
+        .take(16)
+        .filter_map(|code| {
+            let code = code.trim().to_ascii_uppercase();
+            let list = data.airports.get(&code)?.clone();
+            Some((code, list))
+        })
+        .collect())
 }
 
 /// Arrivals or departures at an airport (IATA code), one page at a time.
@@ -542,6 +624,7 @@ pub fn run() {
             fr24: RwLock::new(Arc::new(fr24)),
             follow: Mutex::new(None),
             reference: tokio::sync::Mutex::new(None),
+            runways: tokio::sync::Mutex::new(None),
             colors: tokio::sync::Mutex::new(None),
             radar: tokio::sync::Mutex::new(HashMap::new()),
             radar_fetching: Mutex::new(HashSet::new()),
@@ -572,12 +655,15 @@ pub fn run() {
             top_flights,
             search,
             reference_data,
+            airport_runways,
             airport_board,
             aircraft_history,
             airline_colors,
             radar_frame,
             radar_image,
             opensky_track,
+            adsblol::adsb_hex,
+            adsblol::adsb_callsign,
             session::session_info,
             session::sign_in,
             session::sign_out,
@@ -597,6 +683,18 @@ mod tests {
             west,
             east,
         }
+    }
+
+    #[test]
+    fn buffered_positions_keep_only_sane_increasing_times() {
+        use fr24::proto::common::{PositionBuffer, RecentPosition};
+        let at = |delta_ms| RecentPosition { delta_lat: 1, delta_lon: 2, delta_ms };
+        let buffer = PositionBuffer {
+            recent_positions_list: vec![at(2000), at(1500), at(4000), at(4_294_961_250), at(6000)],
+        };
+        let kept: Vec<i32> = buffered_positions(Some(&buffer)).iter().map(|p| p[2]).collect();
+        assert_eq!(kept, [2000, 4000, 6000]);
+        assert!(buffered_positions(None).is_empty());
     }
 
     #[test]

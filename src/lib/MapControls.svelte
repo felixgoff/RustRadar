@@ -13,6 +13,7 @@
     liveries: boolean;
     daylight: boolean;
     weather: boolean;
+    adsb: boolean;
     exaggeration: number;
     session: SessionInfo | null;
     /** Extra space on the right, e.g. for an open side panel. */
@@ -35,6 +36,7 @@
     liveries = $bindable(),
     daylight = $bindable(),
     weather = $bindable(),
+    adsb = $bindable(),
     exaggeration = $bindable(),
     session,
     inset = 0,
@@ -150,6 +152,13 @@
             <small>Rain and snow from RainViewer, updated every 10 min</small>
           </span>
           <input type="checkbox" role="switch" bind:checked={weather} />
+        </label>
+        <label class="switch">
+          <span>
+            Aircraft-reported data
+            <small>Heading, bank, airspeeds and autopilot settings of the selected aircraft, from adsb.lol</small>
+          </span>
+          <input type="checkbox" role="switch" bind:checked={adsb} />
         </label>
       </div>
 

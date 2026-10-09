@@ -17,6 +17,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # A push to main (or a v* tag) publishes a release the installed apps update from.
+  RELEASE: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
 
 jobs:
   # Fast feedback: frontend type-check + Rust tests for the whole workspace.
@@ -124,19 +126,24 @@ jobs:
           # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Windows: configure bundle.windows.certificateThumbprint / signCommand in tauri.conf.json
           # (see https://v2.tauri.app/distribute/sign/windows/).
-          # Updater artifacts (only if the updater plugin is added later):
-          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Signs the update bundles; the matching public key is in tauri.conf.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: bun tauri
-          args: ${{ matrix.args }}
+          # Update bundles and their signatures only for releases: pull requests
+          # (forks, bots) have no signing key, and don't need them.
+          args: ${{ matrix.args }} ${{ env.RELEASE == 'true' && '--config src-tauri/tauri.updater.conf.json' || '' }}
           # Installers as workflow artifacts on every run (push, PR, tag).
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: "[name]_[version]_[platform]_[arch]_[bundle]"
-          # Only create/upload to a (draft) GitHub Release when a v* tag is pushed;
-          # an empty tagName makes tauri-action skip the release step.
-          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-          releaseName: "RustRadar ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install this version."
-          releaseDraft: true
+          # Every push to main publishes a release named after the version in
+          # tauri.conf.json (bump it to ship), with a latest.json that installed
+          # apps read at launch. A v* tag publishes under its own name instead.
+          tagName: ${{ env.RELEASE == 'true' && (startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v__VERSION__') || '' }}
+          releaseName: "RustRadar v__VERSION__"
+          releaseBody: "Installed copies update to this version automatically the next time they open."
+          # Not a draft: `releases/latest/download/latest.json` only sees published releases.
+          releaseDraft: false
           prerelease: false
+          includeUpdaterJson: true

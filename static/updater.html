@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RustRadar</title>
+    <!-- Shown by src-tauri/src/updater.rs while an update installs, before the app opens. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #04060b;
+        color: #e9edf3;
+        font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+        overflow: hidden;
+        user-select: none;
+        cursor: default;
+      }
+      main {
+        box-sizing: border-box;
+        height: 100%;
+        padding: 0 32px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 14px;
+        border: 1px solid #1b2230;
+      }
+      h1 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 650;
+        letter-spacing: 0.02em;
+      }
+      #status {
+        margin: 0;
+        color: #9aa5b8;
+      }
+      .bar {
+        height: 3px;
+        background: #141a26;
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      #fill {
+        height: 100%;
+        width: 0;
+        background: #fcb442;
+        transition: width 0.15s ease-out;
+      }
+      /* size unknown yet: a sliver that sweeps across */
+      .indeterminate #fill {
+        width: 30%;
+        animation: sweep 1.2s ease-in-out infinite;
+      }
+      @keyframes sweep {
+        from {
+          transform: translateX(-100%);
+        }
+        to {
+          transform: translateX(340%);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .indeterminate #fill {
+          animation: none;
+          width: 100%;
+          opacity: 0.4;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>RustRadar</h1>
+      <p id="status">Updating RustRadar…</p>
+      <div class="bar indeterminate" id="bar"><div id="fill"></div></div>
+    </main>
+    <script>
+      // called from Rust with { status, fraction }
+      window.__update = ({ status, fraction }) => {
+        document.getElementById("status").textContent = status;
+        const bar = document.getElementById("bar");
+        bar.classList.toggle("indeterminate", fraction == null);
+        if (fraction != null) document.getElementById("fill").style.width = `${Math.round(fraction * 100)}%`;
+      };
+    </script>
+  </body>
+</html>

@@ -137,6 +137,41 @@
   /** GlobeView switches to a flat Web Mercator projection above this zoom. */
   const FLAT_ABOVE_ZOOM = 12;
   const LIMITS = { minZoom: 0.5, maxZoom: 18, maxPitch: 60 };
+  /** Following an aircraft, the camera can come down nearly level with it and circle it. */
+  const FOLLOW_MAX_PITCH = 85;
+  /** ...and close in until the camera is this many of its lengths away, so it can't end up inside it. */
+  const FOLLOW_CLOSEST = 1.3;
+  /** Past this the map tiles have long run out of detail. */
+  const FOLLOW_MAX_ZOOM = 23;
+
+  /**
+   * The closest zoom while locked on an aircraft: until it fills the screen,
+   * worked out from its real size, so the camera can't end up inside it.
+   */
+  function followMaxZoom(flight: LiveFlight): number {
+    const size = aircraftModels.forFlight(flight.typecode, flight.icon)?.size ?? sizeOf(flight.icon);
+    // the camera sits CAMERA_HEIGHTS viewport heights back from its target
+    const closest = (FOLLOW_CLOSEST * size) / (CAMERA_HEIGHTS * Math.max(1, container?.clientHeight ?? 900));
+    const zoom = Math.log2(metersPerPixel(0, flight.lat) / closest);
+    return Math.min(FOLLOW_MAX_ZOOM, Math.max(LIMITS.maxZoom, zoom));
+  }
+
+  /**
+   * The camera's limits, as handed to deck.gl. Locked on an aircraft they open
+   * up: close in until it fills the screen and tilt down to almost level, to
+   * look at it from any side.
+   */
+  function limits() {
+    if (!(follow && selected)) return LIMITS;
+    // GlobeController shifts its zoom limits by latitude (its zoomAdjust); undo
+    // that so the aircraft's limit is the zoom actually reached
+    const shift = Math.log2(Math.max(0.05, Math.cos(selected.lat * DEGREES)));
+    return { minZoom: LIMITS.minZoom, maxZoom: followMaxZoom(selected) - shift, maxPitch: FOLLOW_MAX_PITCH };
+  }
+  /** The closest zoom reachable now, in the view's own terms. */
+  const maxZoomNow = () => (follow && selected ? followMaxZoom(selected) : LIMITS.maxZoom);
+  /** Whether the last render was locked on an aircraft, to notice the lock ending. */
+  let wasLocked = false;
   /** TileJSON for OpenFreeMap's vector tiles; the tile URL changes with each planet build. */
   const OPENFREEMAP = "https://tiles.openfreemap.org/planet";
   const ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services";
@@ -942,7 +977,8 @@
       // zoomed out everything sits at the floor, so the floor itself has to say
       // big from small: an A380 reads about 1.8x an A320, a Cessna about 0.6x
       const floor = minPx * Math.min(2, Math.max(0.6, (meters / MODEL_SIZE.narrow) ** 0.8));
-      return Math.min(MAX_PX, Math.max(floor, meters / mpp));
+      // following an aircraft lifts the ceiling: everything at true scale, however close
+      return Math.min(follow && selected ? Infinity : MAX_PX, Math.max(floor, meters / mpp));
     };
     const depth = depthAt(zoom);
     const material = meshMaterial(depth);
@@ -1312,7 +1348,7 @@
       // and the off-screen culling both read it
       onviewchange?.(view);
       raised = Boolean(view.position);
-      deck?.setProps({ initialViewState: { ...view, ...LIMITS } });
+      deck?.setProps({ initialViewState: { ...view, ...limits() } });
     } else if (raised && !(follow && selected)) {
       // the lock was released with the camera raised: bring it back to the ground
       raised = false;
@@ -1321,6 +1357,16 @@
       const grounded: ViewState = { ...view, position: [0, 0, 0] };
       deck?.setProps({ initialViewState: { ...grounded, ...LIMITS } });
     }
+    // released from a lock closer or flatter than the free camera allows: ease back within its limits
+    const locked = Boolean(follow && selected);
+    if (wasLocked && !locked && (view.zoom > LIMITS.maxZoom || view.pitch > LIMITS.maxPitch)) {
+      goTo(
+        { zoom: Math.min(view.zoom, LIMITS.maxZoom), pitch: Math.min(view.pitch, LIMITS.maxPitch) },
+        600,
+        ["zoom", "pitch"],
+      );
+    }
+    wasLocked = locked;
     deck?.setProps({ layers: buildLayers() });
   }
 
@@ -1343,7 +1389,7 @@
       initialViewState: {
         ...view,
         ...target,
-        ...LIMITS,
+        ...limits(),
         transitionDuration: duration,
         transitionInterpolator: new LinearInterpolator(props),
       },
@@ -1356,13 +1402,13 @@
     const target = {
       longitude: unwrapLongitude(view.longitude, longitude),
       latitude,
-      zoom: Math.min(zoom ?? (near ? Math.max(view.zoom, 8) : 8), LIMITS.maxZoom),
+      zoom: Math.min(zoom ?? (near ? Math.max(view.zoom, 8) : 8), maxZoomNow()),
     };
     goTo(target, 1500, ["longitude", "latitude", "zoom"]);
   }
 
   export function zoomBy(delta: number) {
-    const zoom = Math.min(LIMITS.maxZoom, Math.max(LIMITS.minZoom, view.zoom + delta));
+    const zoom = Math.min(maxZoomNow(), Math.max(LIMITS.minZoom, view.zoom + delta));
     goTo({ zoom }, 250, ["zoom"]);
   }
 

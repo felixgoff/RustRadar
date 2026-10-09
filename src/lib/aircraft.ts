@@ -50,8 +50,16 @@ interface Index {
   /** Flightradar24 icon class to model name, for types not in `types`. */
   icons: Record<string, string>;
   lods: number[];
-  icon: { cell: number; columns: number; names: string[] };
+  icon: {
+    cell: number;
+    columns: number;
+    names: string[];
+    /** The silhouettes grown into a border, in larger cells padded by `pad` px. */
+    outline?: { cell: number; pad: number };
+  };
 }
+
+type IconMapping = Record<string, { x: number; y: number; width: number; height: number; mask: boolean }>;
 
 export interface ModelLod {
   /** Every triangle, for drawing an aircraft in one colour. */
@@ -116,7 +124,12 @@ class AircraftModels {
   /** Resolved once the meshes and the silhouette atlas are ready to draw. */
   loaded = false;
   iconAtlas: string | null = null;
-  iconMapping: Record<string, { x: number; y: number; width: number; height: number; mask: boolean }> = {};
+  iconMapping: IconMapping = {};
+  /** The silhouettes' border atlas, drawn under them; `null` if the build has none. */
+  outlineAtlas: string | null = null;
+  outlineMapping: IconMapping = {};
+  /** How much bigger an outline cell is than a silhouette cell. */
+  outlineScale = 1;
 
   private models = new Map<string, AircraftModel>();
   private byType = new Map<string, string>();
@@ -147,17 +160,22 @@ class AircraftModels {
     for (const [type, name] of Object.entries(index.types)) this.byType.set(type, name);
     for (const [icon, name] of Object.entries(index.icons)) this.byIcon.set(icon, name);
 
-    const { cell, columns, names } = index.icon;
-    names.forEach((name, i) => {
-      this.iconMapping[name] = {
-        x: (i % columns) * cell,
-        y: Math.floor(i / columns) * cell,
-        width: cell,
-        height: cell,
-        mask: true, // a white alpha mask, so `getColor` tints it
-      };
-    });
+    const { cell, columns, names, outline } = index.icon;
+    // white alpha masks, so `getColor` tints them
+    const mapping = (size: number): IconMapping =>
+      Object.fromEntries(
+        names.map((name, i) => [
+          name,
+          { x: (i % columns) * size, y: Math.floor(i / columns) * size, width: size, height: size, mask: true },
+        ]),
+      );
+    this.iconMapping = mapping(cell);
     this.iconAtlas = `${BASE}/icons.png`;
+    if (outline) {
+      this.outlineMapping = mapping(outline.cell);
+      this.outlineAtlas = `${BASE}/icons-outline.png`;
+      this.outlineScale = outline.cell / cell;
+    }
     this.loaded = true;
   }
 

@@ -20,6 +20,14 @@ const OUT = new URL("../../static/aircraft/", import.meta.url);
 const LODS = [220, 2600];
 /** Pixels per silhouette cell in the atlas. */
 const ICON = 128;
+/**
+ * The silhouettes' border, drawn under them so they stand out on bright
+ * weather and imagery: the shape grown by `OUTLINE_RADIUS` cell pixels (about
+ * one screen pixel at a typical icon size), in a cell padded by `OUTLINE_PAD`
+ * on every side because the silhouettes come within 4 px of their cell's edge.
+ */
+const OUTLINE_RADIUS = 9;
+const OUTLINE_PAD = 12;
 const PARTS = ["top", "belly", "wings", "tail", "engines"];
 
 /**
@@ -617,6 +625,36 @@ function silhouette(triangles, size, cellPx) {
   return out;
 }
 
+/**
+ * A silhouette grown by `radius` into a cell padded by `pad`: each pixel takes
+ * the strongest source pixel within reach, faded over the last pixel of the
+ * radius, so the border is even all round and its edge anti-aliased.
+ */
+function outline(mask, cellPx, pad, radius) {
+  const size = cellPx + 2 * pad;
+  const reach = [];
+  for (let dy = -radius - 1; dy <= radius + 1; dy++) {
+    for (let dx = -radius - 1; dx <= radius + 1; dx++) {
+      const weight = Math.min(1, Math.max(0, radius + 0.5 - Math.hypot(dx, dy)));
+      if (weight > 0) reach.push(dx, dy, weight);
+    }
+  }
+  const out = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let best = 0;
+      for (let k = 0; k < reach.length && best < 255; k += 3) {
+        const sx = x - pad + reach[k];
+        const sy = y - pad + reach[k + 1];
+        if (sx < 0 || sy < 0 || sx >= cellPx || sy >= cellPx) continue;
+        best = Math.max(best, mask[sy * cellPx + sx] * reach[k + 2]);
+      }
+      out[y * size + x] = Math.round(best);
+    }
+  }
+  return out;
+}
+
 const crcTable = Array.from({ length: 256 }, (_, i) => {
   let c = i;
   for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
@@ -764,11 +802,25 @@ icons.forEach((mask, i) => {
 });
 index.icon.columns = columns;
 
+const OUTLINE_CELL = ICON + 2 * OUTLINE_PAD;
+const outlines = new Uint8Array(columns * OUTLINE_CELL * rows * OUTLINE_CELL);
+icons.forEach((mask, i) => {
+  const grown = outline(mask, ICON, OUTLINE_PAD, OUTLINE_RADIUS);
+  const [cx, cy] = [(i % columns) * OUTLINE_CELL, Math.floor(i / columns) * OUTLINE_CELL];
+  for (let y = 0; y < OUTLINE_CELL; y++) {
+    outlines.set(grown.subarray(y * OUTLINE_CELL, (y + 1) * OUTLINE_CELL), (cy + y) * columns * OUTLINE_CELL + cx);
+  }
+});
+index.icon.outline = { cell: OUTLINE_CELL, pad: OUTLINE_PAD };
+
 mkdirSync(OUT, { recursive: true });
 writeFileSync(new URL("meshes.bin", OUT), Buffer.concat(meshes));
 writeFileSync(new URL("icons.png", OUT), png(columns * ICON, rows * ICON, atlas));
+const outlinePng = png(columns * OUTLINE_CELL, rows * OUTLINE_CELL, outlines);
+writeFileSync(new URL("icons-outline.png", OUT), outlinePng);
 writeFileSync(new URL("index.json", OUT), JSON.stringify(index));
 console.log(
   `\n${index.icon.names.length} models · meshes.bin ${(Buffer.concat(meshes).length / 1024).toFixed(0)} KB · ` +
-    `icons.png ${(png(columns * ICON, rows * ICON, atlas).length / 1024).toFixed(0)} KB (${columns}x${rows})`,
+    `icons.png ${(png(columns * ICON, rows * ICON, atlas).length / 1024).toFixed(0)} KB (${columns}x${rows}) · ` +
+    `icons-outline.png ${(outlinePng.length / 1024).toFixed(0)} KB`,
 );

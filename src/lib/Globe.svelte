@@ -175,6 +175,8 @@
   const GEAR_DEPTH = 0.8;
   /** Struts and tyres in one grey: light enough to read against the night map. */
   const GEAR_COLOR: [number, number, number] = [178, 182, 190];
+  /** The silhouettes' border: the app's navy ink (`--ink`), nearly opaque. */
+  const OUTLINE_COLOR: [number, number, number, number] = [8, 12, 20, 215];
   // White aircraft have to read as white against a dark map, so most of the
   // light is ambient and the directional part only models the airframe.
   const MESH_MATERIAL = { ambient: 0.72, diffuse: 0.42, shininess: 48, specular: [255, 236, 200] };
@@ -1100,6 +1102,32 @@
     }
 
     if (icons.length) {
+      // a thin dark border under every silhouette, so they stand out on bright
+      // weather and imagery and from each other where traffic is dense
+      if (aircraftModels.outlineAtlas) {
+        layers.push(
+          new IconLayer<LiveFlight>({
+            id: "aircraft-icon-outlines",
+            data: icons,
+            getPosition: (_, { index }) => iconPositions[index],
+            getIcon: (_, { index }) => iconNames[index],
+            iconAtlas: aircraftModels.outlineAtlas,
+            iconMapping: aircraftModels.outlineMapping,
+            // the same silhouette size, in a cell padded for the border
+            getSize: (_, { index }) => screenPx(iconSizes[index]) * 1.06 * aircraftModels.outlineScale,
+            getAngle: (_, { index }) => bearing - iconPoses[index].heading,
+            getColor: OUTLINE_COLOR,
+            sizeUnits: "pixels",
+            billboard: true,
+            parameters: NO_CULL,
+            updateTriggers: {
+              getPosition: tick,
+              getAngle: [tick, bearing],
+              getSize: [mpp, minPx],
+            },
+          }),
+        );
+      }
       layers.push(
         new IconLayer<LiveFlight>({
           id: "aircraft-icons",

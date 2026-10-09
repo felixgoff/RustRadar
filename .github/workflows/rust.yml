@@ -50,6 +50,10 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      # The version is in four files; the updater and --locked both depend on them agreeing.
+      - name: Versions agree
+        run: bun run bump --check
+
       - name: Frontend check (svelte-check)
         run: bun run check
 

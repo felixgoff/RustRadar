@@ -224,6 +224,7 @@ fn jwt_exp(token: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     #[test]
     fn ini() {
@@ -248,5 +249,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(auth.access_token(), Some(token));
+    }
+
+    #[test]
+    fn login_with_expired_token_returns_none() {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"exp":1}"#);
+        let token = format!("e30.{payload}.sig");
+        assert_eq!(login_with_token_subscription_key("key", Some(&token)).unwrap(), None);
+    }
+
+    #[test]
+    fn login_with_malformed_token_returns_error() {
+        let err = login_with_token_subscription_key("key", Some("not-a-jwt")).unwrap_err();
+        assert!(matches!(err, Error::Auth(ref msg) if msg == "failed to parse token"));
     }
 }

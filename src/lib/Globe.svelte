@@ -75,6 +75,7 @@
   import { MODEL_KINDS, MODEL_SIZE, modelFor, models, sizeOf, type ModelKind } from "./models";
   import { motion, type Pose } from "./motion";
   import { screenAngle } from "./screen";
+  import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection } from "./shadow";
   import HoverCard from "./HoverCard.svelte";
   import { flightDetails, isRateLimited } from "./api";
   import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
@@ -218,6 +219,35 @@
   const GEAR_DEPTH = 0.8;
   /** Struts and tyres in one grey: light enough to read against the night map. */
   const GEAR_COLOR: [number, number, number] = [178, 182, 190];
+  /**
+   * Shadows fade in over these zooms: the models have full depth from zoom 9,
+   * and before that a shadow would be a speck under a floor-sized silhouette.
+   */
+  const SHADOW_ZOOM: [number, number] = [9, 11];
+  /** The app's navy ink, so a shadow darkens the map rather than greying it. */
+  const SHADOW_COLOR: [number, number, number] = [4, 8, 16];
+  // On the ground, under the aircraft. Every shadow triangle lies on the same
+  // plane, and writing depth lets only the first one at a pixel through, so
+  // the wing over the fuselage doesn't darken twice (nor two shadows that
+  // overlap). The ground layers write no depth, so there is nothing to fight.
+  const SHADOW_PARAMETERS = { ...NO_CULL, depthWriteEnabled: true, depthCompare: "less" } as const;
+  /** Lowest point (model z, metres) of each mesh, where it stands; worked out once per mesh. */
+  const lowestPoints = new WeakMap<object, number>();
+  function lowestZ(mesh: { attributes: Record<string, { value: ArrayLike<number> } | undefined> }): number {
+    let z = lowestPoints.get(mesh);
+    if (z === undefined) {
+      const positions = mesh.attributes.positions?.value ?? [];
+      z = 0;
+      for (let i = 2; i < positions.length; i += 3) z = Math.min(z, positions[i]);
+      lowestPoints.set(mesh, z);
+    }
+    return z;
+  }
+  // reused by the shadow accessors, which deck.gl copies out of at once
+  const shadowMatrixOut = new Array<number>(16).fill(0);
+  const shadowSunOut = [0, 0, 0];
+  const shadowPositionOut: [number, number, number] = [0, 0, 0];
+  const shadowColorOut: [number, number, number, number] = [...SHADOW_COLOR, 0];
   /** How far ahead (screen pixels at the view centre) an icon's heading is sampled. */
   const ICON_HEADING_STEP_PX = 20;
   /** The silhouettes' border: the app's navy ink (`--ink`), nearly opaque. */
@@ -1113,6 +1143,77 @@
 
     const meshes = models();
     const selectedId = selected?.id;
+
+    // Shadows on the ground, from the real sun: all of them first, so every
+    // aircraft draws over every shadow.
+    const shadowFade = clamp01((zoom - SHADOW_ZOOM[0]) / (SHADOW_ZOOM[1] - SHADOW_ZOOM[0]));
+    if (shadowFade > 0) {
+      const sun = sunDirection(now);
+      for (const [id, group] of groups) {
+        const real = group.real?.lods[Math.min(detail, group.real.lods.length - 1)];
+        const shape = real ?? meshes[group.kind];
+        const metres = group.real?.size;
+        const divisor = metres ?? MODEL_SIZE[group.kind];
+        // Aircraft are placed by their model origin, so one on the ground is
+        // drawn with its wheels below the map. The shadow goes on the plane
+        // the wheels stand on, which meets them at touchdown and never cuts
+        // through the airframe (writing depth on the map's plane, it would).
+        const wheels = lowestZ(group.real?.gear?.geometry ?? shape.combined);
+        const n = group.poses.length;
+        // per aircraft: toward the sun in the mesh's local frame, and opacity
+        const toSun = new Float64Array(3 * n);
+        const alpha = new Float32Array(n);
+        const casting: number[] = [];
+        for (let i = 0; i < n; i++) {
+          const pose = group.poses[i];
+          const [e, north, up] = localSun(sun, pose.lat, pose.lon, shadowSunOut);
+          // the true size and height, so the fade doesn't change with zoom
+          const a = shadowOpacity(pose.altFt, metres ?? sizeOf(group.flights[i].icon), up) * shadowFade;
+          if (a < SHADOW_MIN_ALPHA) continue;
+          // the globe's local frame is the flat one turned half a turn (see `orientationOf`)
+          toSun[3 * i] = flat ? e : -e;
+          toSun[3 * i + 1] = flat ? north : -north;
+          toSun[3 * i + 2] = up;
+          alpha[i] = a;
+          casting.push(i);
+        }
+        if (!casting.length) continue;
+        layers.push(
+          new SimpleMeshLayer<number>({
+            id: `shadow-${id}-${detail}`,
+            data: casting,
+            mesh: shape.combined,
+            getPosition: (i) => {
+              const [lon, lat] = group.positions[i];
+              shadowPositionOut[0] = lon;
+              shadowPositionOut[1] = lat;
+              return shadowPositionOut;
+            },
+            // the aircraft's own orientation and scale, squashed onto the
+            // ground along the sun's rays from the height it is drawn at
+            getTransformMatrix: (i) => {
+              const s = (screenPx(metres ?? sizeOf(group.flights[i].icon)) * mpp) / divisor;
+              shadowSunOut[0] = toSun[3 * i];
+              shadowSunOut[1] = toSun[3 * i + 1];
+              shadowSunOut[2] = toSun[3 * i + 2];
+              const scale = [s, s, s * Math.max(0.04, depth)];
+              const orientation = orientationOf(group.poses[i], yawOffset);
+              const ground = wheels * scale[2];
+              return shadowMatrix(orientation, scale, shadowSunOut, group.positions[i][2], shadowMatrixOut, ground);
+            },
+            getColor: (i) => {
+              shadowColorOut[3] = Math.round(alpha[i] * 255);
+              return shadowColorOut;
+            },
+            material: false,
+            pickable: false,
+            parameters: SHADOW_PARAMETERS,
+            updateTriggers: { getPosition: tick, getTransformMatrix: tick, getColor: tick },
+          }),
+        );
+      }
+    }
+
     for (const [id, group] of groups) {
       const real = group.real?.lods[Math.min(detail, group.real.lods.length - 1)];
       const shape = real ?? meshes[group.kind];

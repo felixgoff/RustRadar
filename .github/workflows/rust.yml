@@ -118,6 +118,15 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      # Fail in seconds, naming the mistake, rather than after the whole build
+      # when signing the update bundles. Prints only lengths, never the key.
+      - name: Check signing key
+        if: env.RELEASE == 'true'
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bash scripts/check-signing-key.sh
+
       # Note: crates/fr24 compiles its protos with protox (pure Rust), so no protoc is needed.
       - uses: tauri-apps/tauri-action@v1
         id: tauri

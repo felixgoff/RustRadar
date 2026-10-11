@@ -95,6 +95,8 @@
     exaggeration: number;
     basemap: Basemap;
     labels: boolean;
+    /** Place-name size, as a multiple of the default (a setting). */
+    labelScale: number;
     buildings: boolean;
     /** Paint aircraft in airline colours when zoomed in. */
     liveries: boolean;
@@ -120,6 +122,7 @@
     exaggeration,
     basemap,
     labels,
+    labelScale,
     buildings,
     liveries: showLiveries,
     daylight,
@@ -534,16 +537,6 @@
   const LABEL_FONT_SETTINGS = { sdf: true, fontSize: 64, buffer: 6 };
   const LABEL_COLLISION_PROPS = { sizeScale: 1.3 };
   const labelPosition = (f: LabelFeature) => f.geometry.coordinates;
-  /** A window this size (CSS px) shows labels at their base size. */
-  const LABEL_REFERENCE_DIAGONAL = Math.hypot(1440, 900);
-  const LABEL_MAX_SCALE = 1.4;
-  /**
-   * Labels grow with the window: a big or ultrawide monitor shows far more map
-   * and is read from further away, so fixed 11-14 px names turn into specks.
-   * The square root keeps the growth gentle; about 1.4x on a 3440x1440 screen.
-   */
-  const labelScaleFor = (width: number, height: number) =>
-    Math.min(LABEL_MAX_SCALE, Math.max(1, Math.sqrt(Math.hypot(width, height) / LABEL_REFERENCE_DIAGONAL)));
   const textLayer = (data: LabelFeature[], sizeScale: number) =>
     new TextLayer<LabelFeature, CollisionFilterExtensionProps<LabelFeature>>({
       id: "labels",
@@ -1166,7 +1159,7 @@
         labelTileLayer(tileUrl),
         textLayer(
           withoutMarked(labelsInView(cLon, cLat, zoom), marked),
-          labelScaleFor(container.clientWidth, container.clientHeight),
+          labelScale,
         ),
       );
     }
@@ -1724,7 +1717,7 @@
 
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
-    void [flights, selected, details, route, airport, place, exaggeration, basemap, labels, buildings];
+    void [flights, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
     void [showLiveries, daylight, weather, follow];
     render();
   });

@@ -192,12 +192,13 @@
 </aside>
 
 <style>
+  /* anchored to the bottom, clear of the attribution line, growing upwards */
   .panel {
     position: absolute;
-    top: var(--space-4);
+    bottom: 28px;
     right: var(--space-4);
     width: 360px;
-    max-height: calc(100% - var(--space-4) * 2);
+    max-height: calc(100% - var(--space-4) - 28px);
     display: flex;
     flex-direction: column;
     animation: enter 200ms var(--ease-out);
@@ -289,6 +290,7 @@
   .board {
     flex: 1;
     min-height: 0;
+    overflow-x: hidden;
     overflow-y: auto;
     padding: var(--space-2);
     transition: opacity 150ms var(--ease-out);

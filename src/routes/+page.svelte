@@ -22,6 +22,7 @@
     type LiveFlight,
     type LiveSnapshot,
     type OpenSkyPoint,
+    type Place,
     type SessionInfo,
     type TopFlight,
   } from "$lib/api";
@@ -39,6 +40,7 @@
   import { matchAdsb } from "$lib/adsb";
   import { reference } from "$lib/reference.svelte";
   import { mergeTrail, routeFor } from "$lib/routes";
+  import { placeView } from "$lib/places";
 
   // A world refresh costs ~20 requests, a regional one a handful: poll the
   // world less often, and back off when Flightradar24 says to slow down.
@@ -97,6 +99,10 @@
   let flyPending = false;
   /** Zoom for that pending fly-to; undefined lets `flyTo` choose one. */
   let flyZoom: number | undefined;
+  /** A place picked in the search, marked on the globe until dismissed. */
+  let place = $state.raw<Place | null>(null);
+  /** Places rank toward the view's centre once it is zoomed in past the whole planet. */
+  const near = $derived(view.zoom >= 5 ? { lat: view.latitude, lon: view.longitude } : null);
 
   $effect(() => persist($state.snapshot(settings), $state.snapshot(filters)));
 
@@ -403,6 +409,15 @@
     }
   }
 
+  /** Fly to a place and mark it; nothing is selected or followed. */
+  function pickPlace(p: Place) {
+    // a camera locked on an aircraft can't fly anywhere else
+    following = false;
+    place = p;
+    const target = placeView(p, window.innerWidth, window.innerHeight);
+    globe.flyTo(target.lon, target.lat, target.zoom);
+  }
+
   async function handleSignIn(email: string, password: string) {
     session = await signIn(email, password);
     // fetch again with the session: the feed, and the open flight's details (flight plan)
@@ -441,6 +456,7 @@
     if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === "Escape") {
       if (helpOpen) helpOpen = false;
+      else if (place) place = null;
       else if (selectedId !== null) select(null);
       else if (boardCode) boardCode = null;
       else if (filtersOpen) filtersOpen = false;
@@ -504,6 +520,7 @@
     details={shownDetails}
     {route}
     airport={boardAirport ?? null}
+    {place}
     exaggeration={settings.exaggeration}
     basemap={settings.basemap}
     labels={settings.labels}
@@ -512,7 +529,10 @@
     daylight={settings.daylight}
     weather={settings.weather}
     follow={following}
-    onselect={(f) => select(f?.id ?? null)}
+    onselect={(f) => {
+      place = null;
+      select(f?.id ?? null);
+    }}
     onairport={openAirport}
     onviewchange={(v) => (view = v)}
   />
@@ -530,7 +550,13 @@
         {/if}
       </header>
 
-      <SearchBox bind:this={searchBox} onpick={pickSearch} />
+      <SearchBox
+        bind:this={searchBox}
+        onpick={pickSearch}
+        onplace={pickPlace}
+        onquery={() => (place = null)}
+        {near}
+      />
 
       <div class="toolbar">
         <button

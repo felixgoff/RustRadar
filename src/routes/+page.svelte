@@ -524,6 +524,7 @@
     exaggeration={settings.exaggeration}
     basemap={settings.basemap}
     labels={settings.labels}
+    labelScale={settings.labelSize}
     buildings={settings.buildings}
     liveries={settings.liveries}
     daylight={settings.daylight}
@@ -663,6 +664,7 @@
     pitch={view.pitch}
     bind:basemap={settings.basemap}
     bind:labels={settings.labels}
+    bind:labelSize={settings.labelSize}
     bind:buildings={settings.buildings}
     bind:liveries={settings.liveries}
     bind:daylight={settings.daylight}

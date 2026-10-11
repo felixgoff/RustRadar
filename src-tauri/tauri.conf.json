@@ -39,7 +39,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdDOERGRDc5NUM3RDYzQkIKUldTN1kzMWNlZjJOZkFHTFFkR3RUUmhjSUNkZWRCQU1UUWNDbEU1V0pRcEYyUTJSNHgyazhsWmcK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI4RjA2Rjc5Njk4MUIxMUQKUldRZHNZRnBlVy93S05xU3BUY2sxM0V1VHdHQ2h4amlxVE1TTXpZN2l5MzJGS1JBaDM1dytjdXIK",
       "endpoints": [
         "https://github.com/felixgoff/RustRadar/releases/latest/download/latest.json"
       ],

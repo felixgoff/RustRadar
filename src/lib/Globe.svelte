@@ -531,13 +531,24 @@
   const LABEL_FONT_SETTINGS = { sdf: true, fontSize: 64, buffer: 6 };
   const LABEL_COLLISION_PROPS = { sizeScale: 1.3 };
   const labelPosition = (f: LabelFeature) => f.geometry.coordinates;
-  const textLayer = (data: LabelFeature[]) =>
+  /** A window this size (CSS px) shows labels at their base size. */
+  const LABEL_REFERENCE_DIAGONAL = Math.hypot(1440, 900);
+  const LABEL_MAX_SCALE = 1.4;
+  /**
+   * Labels grow with the window: a big or ultrawide monitor shows far more map
+   * and is read from further away, so fixed 11-14 px names turn into specks.
+   * The square root keeps the growth gentle; about 1.4x on a 3440x1440 screen.
+   */
+  const labelScaleFor = (width: number, height: number) =>
+    Math.min(LABEL_MAX_SCALE, Math.max(1, Math.sqrt(Math.hypot(width, height) / LABEL_REFERENCE_DIAGONAL)));
+  const textLayer = (data: LabelFeature[], sizeScale: number) =>
     new TextLayer<LabelFeature, CollisionFilterExtensionProps<LabelFeature>>({
       id: "labels",
       data,
       getPosition: labelPosition,
       getText: labelText,
       getSize: labelSize,
+      sizeScale,
       getColor: labelColor,
       fontFamily: LABEL_FONT,
       fontWeight: 600,
@@ -1109,7 +1120,13 @@
       const marked = [airport, ...(selected && route ? [route.origin, route.destination] : [])]
         .map((a) => a?.iata)
         .filter((code): code is string => Boolean(code));
-      layers.push(labelTileLayer(tileUrl), textLayer(withoutMarked(labelsInView(cLon, cLat, zoom), marked)));
+      layers.push(
+        labelTileLayer(tileUrl),
+        textLayer(
+          withoutMarked(labelsInView(cLon, cLat, zoom), marked),
+          labelScaleFor(container.clientWidth, container.clientHeight),
+        ),
+      );
     }
 
     const selectedPose = selected ? motion.pose(selected, now) : null;

@@ -995,6 +995,173 @@ test("the buffer is history: a braking roll is drawn slowing down, an accelerati
   }
 });
 
+interface BankFrame {
+  /** Drawn time, s from T0. */
+  T: number;
+  bank: number;
+  track: number;
+}
+
+/**
+ * Flies Flightradar24-like reports through 16 ms frames, as `fly` does (a
+ * report every 8 s holding the 8 s before it, 2 s apart, each arriving
+ * `latency` s after its time) at 250 kt, turning at `rate(s)` deg/s (clockwise) `s`
+ * seconds from T0 and heading north at s = 0; the reports are at
+ * s = `phase` + 8k. Positions are off by up to ±`noise` m, each moment's the
+ * same in every report that holds it. Returns every frame from drawn time
+ * `from` s to `to` s.
+ */
+function flyRates(rate: (s: number) => number, phase: number, noise = 0, from = -20, to = 30, latency = 4): BankFrame[] {
+  // the path, integrated in 10 ms steps from 40 s before `from`, then moved to the origin at s = 0
+  const v = 250 * KT;
+  const dt = 0.01;
+  const s0 = from - 40;
+  const steps = Math.ceil((to + 20 - s0) / dt);
+  const es = new Float64Array(steps + 1);
+  const ns = new Float64Array(steps + 1);
+  const hs = new Float64Array(steps + 1);
+  for (let k = 0; k < steps; k++) {
+    const r = rate(s0 + (k + 0.5) * dt) * DEG;
+    const mid = hs[k] + (r * dt) / 2;
+    es[k + 1] = es[k] + v * Math.sin(mid) * dt;
+    ns[k + 1] = ns[k] + v * Math.cos(mid) * dt;
+    hs[k + 1] = hs[k] + r * dt;
+  }
+  const at = (arr: Float64Array, s: number) => {
+    const x = (s - s0) / dt;
+    const k = Math.min(steps - 1, Math.max(0, Math.floor(x)));
+    return arr[k] + (arr[k + 1] - arr[k]) * (x - k);
+  };
+  const h0 = at(hs, 0);
+  const e0 = at(es, 0);
+  const n0 = at(ns, 0);
+  const jitter = (s: number, axis: number) => {
+    const x = Math.sin((s * 2 + axis) * 12.9898) * 43758.5453;
+    return noise * ((x - Math.floor(x)) * 2 - 1);
+  };
+  // rotated so that the heading at s = 0 is north
+  const measured = (s: number) => {
+    const e = at(es, s) - e0;
+    const n = at(ns, s) - n0;
+    const c = Math.cos(h0);
+    const si = Math.sin(h0);
+    return offset(45, 10, e * c - n * si + jitter(s, 0), e * si + n * c + jitter(s, 1));
+  };
+  const report = (k: number): LiveFlight => {
+    const s = phase + 8 * k;
+    const [lat, lon] = measured(s);
+    const track = (((at(hs, s) - h0) / DEG) % 360 + 360) % 360;
+    return flight({ lat, lon, track, alt: 20_000, speed: 250, timestampMs: T0 + s * 1000, positions: history(lat, lon, (d) => measured(s - d)) });
+  };
+  const m = new Motion();
+  let k = Math.floor((from - 40 - phase) / 8);
+  let f = report(k);
+  const frames: BankFrame[] = [];
+  for (let t = T0 + (phase + 8 * k + latency) * 1000; ; t += 16) {
+    while (T0 + (phase + 8 * (k + 1) + latency) * 1000 <= t) f = report(++k);
+    const p = m.pose(f, t);
+    const T = (m.drawnTime(1, t) - T0) / 1000;
+    if (T > to) break;
+    if (T >= from) frames.push({ T, bank: p.bank, track: p.track });
+  }
+  return frames;
+}
+
+/** The frame drawn nearest `T`. */
+const frameAt = (frames: BankFrame[], T: number) =>
+  frames.reduce((best, f) => (Math.abs(f.T - T) < Math.abs(best.T - T) ? f : best));
+
+/** Largest change of the bank from one frame to the next. */
+const bankStep = (frames: BankFrame[]) =>
+  frames.reduce((w, f, i) => (i ? Math.max(w, Math.abs(f.bank - frames[i - 1].bank)) : w), 0);
+
+/** A coordinated turn's bank at 250 kt and `rate` deg/s: atan(v ω / g). */
+const physicalBank = (rate: number) => Math.atan((250 * KT * rate * DEG) / 9.80665) / DEG;
+
+test("the bank rolls into a turn from the data ahead, before the heading swings", () => {
+  // straight north, then from s = 0 a right turn at 2 deg/s (a coordinated bank of ~24.6 deg;
+  // at 3 deg/s it would be ~34.5 deg, past the 30 deg the bank is held to); the drawn aircraft
+  // is ~12 s behind, so the reports already hold what it does next
+  const bank = physicalBank(2);
+  const frames = flyRates((s) => (s < 0 ? 0 : 2), 4);
+  const at = (T: number) => frameAt(frames, T);
+  // wings level well before the turn...
+  expect(Math.abs(at(-5).bank)).toBeLessThan(2);
+  // ...already rolling in a second before the heading starts to swing, which it hasn't yet...
+  expect(at(-1).bank).toBeGreaterThan(8);
+  expect(Math.abs(((at(-1).track + 540) % 360) - 180)).toBeLessThan(1);
+  // ...more than half way as it does...
+  expect(at(0).bank).toBeGreaterThan(0.5 * bank);
+  // ...and banked to the turn once in it
+  expect(at(5).bank).toBeGreaterThan(18);
+  expect(at(5).bank).toBeLessThan(28);
+});
+
+test("a turn's bank, whenever the reports come: level before it, never the wrong way, at the physical bank in it", () => {
+  // reports at every phase of their 8 s cycle against the turn, arriving 1 s or 4 s late (the drawn
+  // time then has ~3-11 s or ~0-8 s of data ahead of it)
+  for (const rate of [2, -2]) {
+    const bank = physicalBank(rate);
+    for (const latency of [1, 4]) {
+      for (let phase = 0; phase < 8; phase++) {
+        const frames = flyRates((s) => (s < 0 ? 0 : rate), phase, 0, -20, 30, latency);
+        for (const f of frames) {
+          if (f.T <= -6) expect(Math.abs(f.bank)).toBeLessThan(2);
+          expect(f.bank * Math.sign(rate)).toBeGreaterThan(-1);
+          if (f.T >= 6) expect(Math.abs(f.bank - bank)).toBeLessThan(0.15 * Math.abs(bank));
+        }
+        // rolling smoothly, report arrivals included (under ~19 deg/s)
+        expect(bankStep(frames)).toBeLessThan(0.3);
+      }
+    }
+  }
+});
+
+test("the wings level as the turn ends, as they rolled in as it began", () => {
+  for (const rate of [2, -2]) {
+    const bank = physicalBank(rate);
+    for (const latency of [1, 4]) {
+      for (let phase = 0; phase < 8; phase++) {
+        // a turn that ends at s = 0, heading north
+        const frames = flyRates((s) => (s < 0 ? rate : 0), phase, 0, -20, 30, latency);
+        for (const f of frames) {
+          if (f.T <= -6) expect(Math.abs(f.bank - bank)).toBeLessThan(0.15 * Math.abs(bank));
+          // level a few seconds on: by 4 s with the straight in the data, by 6 s whenever the
+          // next report comes (the end of the data can't tell a straight from a gentle turn)
+          if (f.T >= (latency === 1 ? 4 : 6)) expect(Math.abs(f.bank)).toBeLessThan(2);
+          expect(f.bank * Math.sign(rate)).toBeGreaterThan(-1.5);
+        }
+        expect(bankStep(frames)).toBeLessThan(0.3);
+      }
+    }
+    // the roll-out mirrors the roll-in: rolled out by as much as the same turn starting then had rolled in
+    const into = flyRates((s) => (s < 0 ? 0 : rate), 4);
+    const out = flyRates((s) => (s < 0 ? rate : 0), 4);
+    for (let T = -3; T <= 4; T += 0.5) {
+      expect(Math.abs(frameAt(into, T).bank + frameAt(out, T).bank - bank)).toBeLessThan(2);
+    }
+    // rolling out before the turn ends
+    expect(Math.abs(frameAt(out, 0).bank)).toBeLessThan(0.5 * Math.abs(bank));
+  }
+});
+
+test("the bank doesn't wobble with noisy positions", () => {
+  // positions off by up to ±10 m (±30 m: as in `fly`, more than Flightradar24's ADS-B data has), straight
+  // and in a turn: the bank stays near the truth's and changes no faster than an aircraft rolls
+  for (const [noise, rmsMax] of [
+    [10, 2],
+    [30, 5],
+  ]) {
+    for (const rate of [0, 2]) {
+      const frames = flyRates(() => rate, 4, noise, 0, 120);
+      const bank = physicalBank(rate);
+      const rms = Math.sqrt(frames.reduce((sum, f) => sum + (f.bank - bank) ** 2, 0) / frames.length);
+      expect(rms).toBeLessThan(rmsMax);
+      expect(bankStep(frames)).toBeLessThan(noise === 10 ? 0.15 : 0.3);
+    }
+  }
+});
+
 test("the buffer is history: it tells which way a turn goes", () => {
   // first sighted heading north, the buffer holding the 8 s of turn before it
   for (const rate of [2, -2]) {

@@ -302,18 +302,28 @@ const WEIGHT_ADSB = 1;
 const WEIGHT_MLAT = 0.04;
 /** Weight of a reported velocity as the slope at the newest sample, when that sample is the report itself. */
 const REPORTED_SLOPE_WEIGHT = 10;
-/** The smoothing's reference path turns (and changes speed) as the data does for this long before the newest sample, s... */
+/** The first fitting pass's reference path turns (and changes speed) at the report's estimates for this long before the newest sample, s... */
 const REF_FULL_S = 12;
 /** ...fading to straight and steady by this long before it. */
 const REF_ZERO_S = 24;
-/** Fitting passes: around the report's estimated turn and speed change, then twice around those read off the previous pass. */
+/** Fitting passes: around the report's estimated turn and speed change, then twice around each moment's own, read off the previous pass. */
 const REF_PASSES = 3;
-/** Those are read off two chords of this length (ms) ending at the newest sample... */
-const REF_CHORD_MS = 6_000;
-/** ...or shorter ones, down to this (s). */
+/** Those are each sample's heading and speed change over ±this (ms) on the previous pass's path... */
+const REF_LOCAL_MS = 4_000;
+/** ...or as much of it as the samples cover, down to this (s). */
 const REF_MIN_CHORD_S = 2;
 /** The drawn turn rate (for the bank) is the smoothed heading's change over ±this, ms. */
 const TURN_WINDOW_MS = 2_000;
+/**
+ * The bank is read off the path this far ahead of the drawn time, ms. The map
+ * shows aircraft seconds in the past, so what they did next is known: a real
+ * aircraft rolls in before its heading swings and levels its wings as the
+ * turn ends, so the bank follows the turn a moment early, from data rather
+ * than a guess (never past the newest sample). With the path's turn rate
+ * itself averaged over a few seconds (the smoothing, and TURN_WINDOW_MS),
+ * a turn that starts at once is about half banked a second before it does.
+ */
+const BANK_LEAD_MS = 1_000;
 /** Past the newest sample the turn rate eases from the path's into the prediction's over this long, s. */
 const TURN_HANDOVER_S = 3;
 /** Past the newest altitude the vertical rate eases from the smoothed curve's into the estimate's with this time constant, s. */
@@ -757,6 +767,10 @@ class Track {
   my: number[] = [];
   /** Turn rate of the smoothed path at each sample, rad/s, clockwise positive. */
   om: number[] = [];
+  /** The last fit's reference turn rate (rad/s) and acceleration (m/s²) at its sample times, which seed the next. */
+  rTs: number[] = [];
+  rOm: number[] = [];
+  rAc: number[] = [];
 
   // altitude samples (airborne only), oldest first: reported pressure altitudes (ft) and their
   // correction weights; the corrected values (ft), and the smoothed values (ft) and slopes (ft/s)
@@ -1804,21 +1818,29 @@ export class Motion {
       }
       // the smoothed path's own turn rate hands over to the prediction's
       omega = n > 1 ? tr.om[last] + (turnRad - tr.om[last]) * smoothstep(dt / TURN_HANDOVER_S) : turnRad;
-    } else if (T <= tr.ts[0]) {
-      const dt = Math.max((T - tr.ts[0]) / 1000, -BACKWARD_LIMIT_S);
-      x = tr.fx[0] + tr.mx[0] * dt;
-      y = tr.fy[0] + tr.my[0] * dt;
-      vx = tr.mx[0];
-      vy = tr.my[0];
-      omega = tr.om[0];
     } else {
-      // the smoothed path: a cubic Hermite piece between samples i and i+1
-      hermite(tr, T);
-      x = hx;
-      y = hy;
-      vx = hvx;
-      vy = hvy;
-      omega = tr.om[hi] + (tr.om[hi + 1] - tr.om[hi]) * hu;
+      if (T <= tr.ts[0]) {
+        const dt = Math.max((T - tr.ts[0]) / 1000, -BACKWARD_LIMIT_S);
+        x = tr.fx[0] + tr.mx[0] * dt;
+        y = tr.fy[0] + tr.my[0] * dt;
+        vx = tr.mx[0];
+        vy = tr.my[0];
+      } else {
+        // the smoothed path: a cubic Hermite piece between samples i and i+1
+        hermite(tr, T);
+        x = hx;
+        y = hy;
+        vx = hvx;
+        vy = hvy;
+      }
+      // the turn rate for the bank: what the path does a moment later, which the data already
+      // holds (the aircraft is drawn seconds in the past), so the wings roll in before the
+      // heading swings and level before it settles; as far as the data goes
+      const lead = Math.min(T + BANK_LEAD_MS, tLast);
+      if (lead > tr.ts[0]) {
+        hermite(tr, lead);
+        omega = tr.om[hi] + (tr.om[hi + 1] - tr.om[hi]) * hu;
+      } else omega = tr.om[0];
     }
     const lat = clamp(tr.refLat + y / M_PER_DEG, -90, 90);
     const cosMid = Math.max(Math.cos(((tr.refLat + lat) / 2) * DEG), 1e-3);
@@ -2291,6 +2313,7 @@ function nearestSample(tr: Track, t: number): number {
 /** Drops all samples (a jump in the data: they would poison the spline). */
 function clearSamples(tr: Track): void {
   tr.ts.length = tr.lats.length = tr.lons.length = tr.src.length = 0;
+  tr.rTs.length = tr.rOm.length = tr.rAc.length = 0;
 }
 
 /** Window trim, sample count, source bookkeeping and the local frame (around the newest sample), after a merge. */
@@ -2488,11 +2511,15 @@ function smoothSpline(
   }
 }
 
-// Scratch for `fitTrack`: the reference path and the residuals' fit.
+// Scratch for `fitTrack`: the reference path, its turn rate and acceleration per sample, and the residuals' fit.
 const refX: number[] = [];
 const refY: number[] = [];
 const refVX: number[] = [];
 const refVY: number[] = [];
+const refOm: number[] = [];
+const refAc: number[] = [];
+const nextOm: number[] = [];
+const nextAc: number[] = [];
 const resX: number[] = [];
 const resY: number[] = [];
 const resFX: number[] = [];
@@ -2500,12 +2527,10 @@ const resFY: number[] = [];
 const resDX: number[] = [];
 const resDY: number[] = [];
 
-/** Seconds' worth of the reference turn (and speed change) `back` seconds before the newest sample: full, then fading out. */
-function referenceSpan(back: number): number {
-  if (back <= REF_FULL_S) return back;
-  const span = REF_ZERO_S - REF_FULL_S;
-  const u = Math.min(back, REF_ZERO_S) - REF_FULL_S;
-  return REF_FULL_S + u - (u * u) / (2 * span);
+/** How much of the first pass's (constant) reference turn applies `back` seconds before the newest sample: full, then fading out. */
+function referenceWeight(back: number): number {
+  if (back <= REF_FULL_S) return 1;
+  return Math.max(0, (REF_ZERO_S - back) / (REF_ZERO_S - REF_FULL_S));
 }
 
 /**
@@ -2513,12 +2538,19 @@ function referenceSpan(back: number): number {
  * mx/my). A smoothing spline penalises acceleration, so on its own it would
  * straighten a steady turn (a constant sideways acceleration) by tens of
  * metres. Instead it smooths the samples' difference from a reference path
- * that turns, and changes speed, as the data itself does over the last
- * ~12 s, then adds the reference back: a steady turn costs nothing and only
- * the jitter is taken out. The first pass's reference takes the report's
- * estimates; the next two read the turn and acceleration off the pass before
- * (each pass cuts the dependence on the estimates ~6-fold), so the result
- * comes from the data and changes as little as it does from report to report. A newest
+ * that turns, and changes speed, as the data itself does, then adds the
+ * reference back: a turn costs nothing and only the jitter is taken out.
+ *
+ * The reference turns and changes speed at each moment's own rates, given
+ * per sample. One constant turn across a straight leg and the turn after it
+ * would bend the straight part (the spline only smooths the difference), so
+ * the aircraft would be drawn turning, and banked, seconds before it did; a
+ * reference that is straight where the data is and turns where it does
+ * leaves nothing to bend. The first pass takes the last fit's rates where it
+ * covered the same moments (it had the data either side of them) and the
+ * report's estimates, fading out with age, for the rest; the next two read
+ * them off the pass before, over ±REF_LOCAL_MS. Averaged over seconds
+ * (several samples), they leave the jitter mostly to the spline. A newest
  * sample that is the report itself (as it is unless a measured one is newer)
  * takes the reported velocity as its slope, softly.
  */
@@ -2542,63 +2574,107 @@ function fitTrack(tr: Track, reportedOnly: boolean): void {
       weightBuf[i] = tr.src[i] === SRC_MLAT ? WEIGHT_MLAT : tr.src[i] === SRC_ADSB ? WEIGHT_ADSB : WEIGHT_FR24;
     ws = weightBuf;
   }
-  // seeded with the report's estimates, then refined from the data itself
+  // seeded with the report's estimates (fading out with age), then each moment's own, from the data
   const moving = tr.phase !== "parked" && v > HEADING_MIN_SPEED_MS;
-  let omega = moving ? tr.turnRate * DEG : 0;
-  let accel = moving ? tr.accel * KNOTS_TO_MS : 0;
+  const omega = moving ? tr.turnRate * DEG : 0;
+  const accel = moving ? tr.accel * KNOTS_TO_MS : 0;
+  refOm.length = refAc.length = n;
+  const tEnd = tr.ts[n - 1];
+  for (let i = 0; i < n; i++) {
+    const w = referenceWeight((tEnd - tr.ts[i]) / 1000);
+    refOm[i] = omega * w;
+    refAc[i] = accel * w;
+  }
+  // where the last fit covered the same moments, its rates are the better start (it had the data either side)
+  if (moving) {
+    const { rTs, rOm, rAc } = tr;
+    const m = rTs.length;
+    let j = 0;
+    for (let i = 0; i < n && m > 1; i++) {
+      const t = tr.ts[i];
+      if (t < rTs[0] || t > rTs[m - 1]) continue;
+      while (j < m - 2 && rTs[j + 1] < t) j++;
+      const u = (t - rTs[j]) / (rTs[j + 1] - rTs[j]);
+      refOm[i] = rOm[j] + (rOm[j + 1] - rOm[j]) * u;
+      refAc[i] = rAc[j] + (rAc[j + 1] - rAc[j]) * u;
+    }
+  }
   for (let pass = 0; pass < REF_PASSES; pass++) {
-    fitAround(tr, ws, reportedOnly, rx, ry, omega, accel, pass === 0);
-    if (pass === REF_PASSES - 1 || tr.phase === "parked") break;
-    // the turn and speed change of this pass's path: two chords over the last ~12 s
-    const tEnd = tr.ts[n - 1];
-    const t0 = Math.max(tr.ts[0], tEnd - 2 * REF_CHORD_MS);
-    const w = (tEnd - t0) / 2000;
-    if (w < REF_MIN_CHORD_S) break;
-    hermite(tr, t0);
-    const x0 = hx;
-    const y0 = hy;
-    hermite(tr, t0 + w * 1000);
-    const x1 = hx;
-    const y1 = hy;
-    const x2 = tr.fx[n - 1];
-    const y2 = tr.fy[n - 1];
-    const s1 = Math.hypot(x1 - x0, y1 - y0) / w;
-    const s2 = Math.hypot(x2 - x1, y2 - y1) / w;
-    const turn = s1 > HEADING_MIN_SPEED_MS && s2 > HEADING_MIN_SPEED_MS
-      ? (wrap180((Math.atan2(x2 - x1, y2 - y1) - Math.atan2(x1 - x0, y1 - y0)) / DEG) * DEG) / w
-      : 0;
-    const nextOmega = clamp(turn, -MAX_TURN_DEG_S * DEG, MAX_TURN_DEG_S * DEG);
-    const nextAccel = clamp((s2 - s1) / w, -MAX_ACCEL_KTS * KNOTS_TO_MS, MAX_ACCEL_KTS * KNOTS_TO_MS);
-    // straight and steady, as assumed: the fit stands
-    if (Math.abs(nextOmega - omega) < 0.02 * DEG && Math.abs(nextAccel - accel) < 0.02) break;
-    omega = nextOmega;
-    accel = nextAccel;
+    fitAround(tr, ws, reportedOnly, rx, ry, pass === 0);
+    if (pass === REF_PASSES - 1 || !moving) break;
+    // each sample's turn and speed change on this pass's path
+    localRates(tr, nextOm, nextAc, refOm, refAc);
+    let change = 0;
+    for (let i = 0; i < n; i++) {
+      change = Math.max(change, Math.abs(nextOm[i] - refOm[i]) / (0.02 * DEG), Math.abs(nextAc[i] - refAc[i]) / 0.02);
+      refOm[i] = nextOm[i];
+      refAc[i] = nextAc[i];
+    }
+    // as assumed: the fit stands
+    if (change < 1) break;
+  }
+  tr.rTs.length = tr.rOm.length = tr.rAc.length = n;
+  for (let i = 0; i < n; i++) {
+    tr.rTs[i] = tr.ts[i];
+    tr.rOm[i] = moving ? refOm[i] : 0;
+    tr.rAc[i] = moving ? refAc[i] : 0;
   }
 }
 
-/** One pass of `fitTrack`: the smoothed residual from a reference turning at `omega` (rad/s) and accelerating at `accel` (m/s²). */
-function fitAround(
-  tr: Track,
-  ws: number[] | null,
-  reportedOnly: boolean,
-  rx: number,
-  ry: number,
-  omega: number,
-  accel: number,
-  first: boolean,
-): void {
+/**
+ * Turn rate (rad/s) and acceleration (m/s²) of the smoothed path at each
+ * sample, from its heading's and speed's change over ±REF_LOCAL_MS (as much
+ * of that as the samples cover), into `om`/`ac`; where that is shorter than
+ * REF_MIN_CHORD_S, the sample keeps `om0`/`ac0`'s.
+ */
+function localRates(tr: Track, om: number[], ac: number[], om0: number[], ac0: number[]): void {
   const n = tr.n;
-  // the reference, integrated back from the newest sample (from the report's velocity, or the previous pass's):
-  // heading h(a) = hEnd - ω F(a), speed v(a) = vEnd - accel F(a), `a` seconds back, F = referenceSpan
-  const plain = omega === 0 && accel === 0;
+  om.length = ac.length = n;
+  const first = tr.ts[0];
+  const newest = tr.ts[n - 1];
+  const maxTurn = MAX_TURN_DEG_S * DEG;
+  const maxAccel = MAX_ACCEL_KTS * KNOTS_TO_MS;
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(first, tr.ts[i] - REF_LOCAL_MS);
+    const b = Math.min(newest, tr.ts[i] + REF_LOCAL_MS);
+    let w = om0[i];
+    let acc = ac0[i];
+    if (b - a >= REF_MIN_CHORD_S * 1000) {
+      w = 0;
+      hermite(tr, a);
+      const ax = hvx;
+      const ay = hvy;
+      hermite(tr, b);
+      const s0 = Math.hypot(ax, ay);
+      const s1 = Math.hypot(hvx, hvy);
+      const dt = (b - a) / 1000;
+      if (s0 > HEADING_MIN_SPEED_MS && s1 > HEADING_MIN_SPEED_MS)
+        w = (wrap180((Math.atan2(hvx, hvy) - Math.atan2(ax, ay)) / DEG) * DEG) / dt;
+      acc = (s1 - s0) / dt;
+    }
+    om[i] = clamp(w, -maxTurn, maxTurn);
+    ac[i] = clamp(acc, -maxAccel, maxAccel);
+  }
+}
+
+/**
+ * One pass of `fitTrack`: the smoothed residual from a reference turning at
+ * refOm (rad/s) and accelerating at refAc (m/s²), each given per sample and
+ * linear between them, integrated back from the newest sample (from the
+ * report's velocity on the first pass, or the previous pass's).
+ */
+function fitAround(tr: Track, ws: number[] | null, reportedOnly: boolean, rx: number, ry: number, first: boolean): void {
+  const n = tr.n;
+  let plain = true;
+  for (let i = 0; i < n && plain; i++) plain = refOm[i] === 0 && refAc[i] === 0;
   const tEnd = tr.ts[n - 1];
   let vEnd = 0;
   let hEnd = 0;
   if (!plain && first) {
     // the reported velocity, carried on to the newest sample
     const since = clamp((tEnd - tr.reportMs) / 1000, 0, TURN_HORIZON_S);
-    vEnd = Math.max(0, Math.hypot(rx, ry) + accel * Math.min(since, ACCEL_HORIZON_S));
-    hEnd = tr.trackDeg * DEG + omega * since;
+    vEnd = Math.max(0, Math.hypot(rx, ry) + refAc[n - 1] * Math.min(since, ACCEL_HORIZON_S));
+    hEnd = tr.trackDeg * DEG + refOm[n - 1] * since;
   } else if (!plain) {
     vEnd = Math.hypot(tr.mx[n - 1], tr.my[n - 1]);
     hEnd = Math.atan2(tr.mx[n - 1], tr.my[n - 1]);
@@ -2606,6 +2682,8 @@ function fitAround(
   refX.length = refY.length = refVX.length = refVY.length = resX.length = resY.length = n;
   let x = 0;
   let y = 0;
+  let h = hEnd;
+  let speed = vEnd;
   refX[n - 1] = 0;
   refY[n - 1] = 0;
   refVX[n - 1] = vEnd * Math.sin(hEnd);
@@ -2615,20 +2693,21 @@ function fitAround(
       refX[i] = refY[i] = refVX[i] = refVY[i] = 0;
       continue;
     }
-    const a0 = (tEnd - tr.ts[i + 1]) / 1000;
-    const a1 = (tEnd - tr.ts[i]) / 1000;
-    const steps = Math.max(1, Math.ceil(a1 - a0));
-    const da = (a1 - a0) / steps;
+    // back from sample i+1 to sample i in steps of at most a second, at the rates between them
+    const span = (tr.ts[i + 1] - tr.ts[i]) / 1000;
+    const steps = Math.max(1, Math.ceil(span));
+    const da = span / steps;
     for (let k = 0; k < steps; k++) {
-      const F = referenceSpan(a0 + (k + 0.5) * da);
-      const h = hEnd - omega * F;
-      const speed = Math.max(0, vEnd - accel * F);
-      x -= speed * Math.sin(h) * da;
-      y -= speed * Math.cos(h) * da;
+      const u = 1 - (k + 0.5) / steps; // from sample i (0) to i+1 (1)
+      const w = refOm[i] + (refOm[i + 1] - refOm[i]) * u;
+      const acc = refAc[i] + (refAc[i + 1] - refAc[i]) * u;
+      const hMid = h - (w * da) / 2;
+      const vMid = Math.max(0, speed - (acc * da) / 2);
+      x -= vMid * Math.sin(hMid) * da;
+      y -= vMid * Math.cos(hMid) * da;
+      h -= w * da;
+      speed = Math.max(0, speed - acc * da);
     }
-    const F = referenceSpan(a1);
-    const h = hEnd - omega * F;
-    const speed = Math.max(0, vEnd - accel * F);
     refX[i] = x;
     refY[i] = y;
     refVX[i] = speed * Math.sin(h);

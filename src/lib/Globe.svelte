@@ -75,7 +75,8 @@
   import { MODEL_KINDS, MODEL_SIZE, modelFor, models, sizeOf, type ModelKind } from "./models";
   import { motion, type Pose } from "./motion";
   import { screenAngle } from "./screen";
-  import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection } from "./shadow";
+  import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection, sunlight } from "./shadow";
+  import { BuildingLayer, buildingHeight } from "./building-layer";
   import HoverCard from "./HoverCard.svelte";
   import { flightDetails, isRateLimited } from "./api";
   import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
@@ -232,11 +233,23 @@
   const SHADOW_ZOOM: [number, number] = [9, 11];
   /** The app's navy ink, so a shadow darkens the map rather than greying it. */
   const SHADOW_COLOR: [number, number, number] = [4, 8, 16];
-  // On the ground, under the aircraft. Every shadow triangle lies on the same
-  // plane, and writing depth lets only the first one at a pixel through, so
-  // the wing over the fuselage doesn't darken twice (nor two shadows that
-  // overlap). The ground layers write no depth, so there is nothing to fight.
-  const SHADOW_PARAMETERS = { ...NO_CULL, depthWriteEnabled: true, depthCompare: "less" } as const;
+  // On the ground, under the aircraft. Every shadow, an aircraft's or a
+  // building's, marks the stencil where it darkens, and only an unmarked pixel
+  // takes one: the wing over the fuselage doesn't darken twice, nor two
+  // shadows that overlap. (Depth can't do this reliably: overlapping triangles
+  // on one plane interpolate slightly different depths, and the overlaps
+  // speckle.) They test depth so buildings in front hide them, and write none;
+  // the ground layers write none either, so there is nothing to fight.
+  const SHADOW_PARAMETERS = {
+    ...NO_CULL,
+    depthWriteEnabled: false,
+    depthCompare: "less-equal",
+    stencilWriteMask: 0xff,
+    stencilCompare: "equal",
+    stencilPassOperation: "increment-clamp",
+    stencilFailOperation: "keep",
+    stencilDepthFailOperation: "keep",
+  } as const;
   /** Lowest point (model z, metres) of each mesh, where it stands; worked out once per mesh. */
   const lowestPoints = new WeakMap<object, number>();
   function lowestZ(mesh: { attributes: Record<string, { value: ArrayLike<number> } | undefined> }): number {
@@ -278,11 +291,35 @@
     return m;
   }
 
+  /** The scene light's usual direction, a fixed key light from the north-east. */
+  const KEY_LIGHT: [number, number, number] = [-1, -2, -3];
+  const keyLight = new DirectionalLight({ color: [255, 244, 225], intensity: 0.7, direction: KEY_LIGHT });
+  const KEY_LIGHT_UNIT = [...keyLight.direction];
+  /** The sine of the usual light's altitude (about 53°). */
+  const KEY_LIGHT_UP = -KEY_LIGHT_UNIT[2];
   const lighting = new LightingEffect({
     ambient: new AmbientLight({ color: [255, 255, 255], intensity: 1 }),
     camera: new CameraLight({ color: [255, 248, 235], intensity: 0.55 }),
-    sun: new DirectionalLight({ color: [255, 244, 225], intensity: 0.7, direction: [-1, -2, -3] }),
+    sun: keyLight,
   });
+  /**
+   * Points the key light along the real sun's rays, by `weight` (0..1) of the
+   * way from its usual direction, so sunlit walls face the sun and agree with
+   * the shadows. Only in the flat projection, whose common space is east,
+   * north and up; deck.gl reads the direction afresh each frame.
+   */
+  function aimKeyLight(toSun: readonly number[], weight: number) {
+    // From the sun's bearing, but no steeper than the usual light: a high sun
+    // straight onto the roofs would leave every wall in the dark.
+    const across = Math.hypot(toSun[0], toSun[1]) || 1;
+    const up = Math.min(toSun[2], KEY_LIGHT_UP);
+    const flat = Math.sqrt(1 - up * up) / across;
+    const ray = [-toSun[0] * flat, -toSun[1] * flat, -up];
+    const d = keyLight.direction;
+    for (let i = 0; i < 3; i++) d[i] = KEY_LIGHT_UNIT[i] + (ray[i] - KEY_LIGHT_UNIT[i]) * weight;
+    const n = Math.hypot(d[0], d[1], d[2]) || 1;
+    for (let i = 0; i < 3; i++) d[i] /= n;
+  }
 
   // Layers are rebuilt as cheap descriptors on every render; deck.gl matches
   // them by id and keeps their GPU resources and tile caches. Everything they
@@ -570,10 +607,24 @@
     specularColor: [60, 66, 80] as [number, number, number],
   };
   const BUILDING_COLOR: [number, number, number] = [58, 68, 84];
-  const buildingHeight = (f: { properties: Record<string, unknown> }) =>
-    f.properties.hide_3d ? 0 : Number(f.properties.render_height ?? 6);
-  const buildingLayer = (url: string) =>
-    new MVTLayer({
+  const BUILDING_SUBLAYER_PROPS = { "polygons-fill": { _windingOrder: "CCW" } };
+  const buildingElevation = (f: { properties: Record<string, unknown> }) => buildingHeight(f.properties);
+  /**
+   * The sun the building shadows were last cast with. It moves about 0.25°
+   * a minute; the shadows are recast once it has moved this far (about every
+   * minute), never per frame.
+   */
+  const SHADOW_SUN_STEP = Math.cos((0.25 * Math.PI) / 180);
+  let buildingSun: [number, number, number] | null = null;
+  function shadowSun(now: number) {
+    const sun = sunDirection(now);
+    if (!buildingSun || sun[0] * buildingSun[0] + sun[1] * buildingSun[1] + sun[2] * buildingSun[2] < SHADOW_SUN_STEP) {
+      buildingSun = sun;
+    }
+    return buildingSun;
+  }
+  const buildingLayer = (url: string, sun: readonly number[]) =>
+    new BuildingLayer({
       id: "buildings",
       data: url,
       minZoom: 13,
@@ -582,10 +633,18 @@
       extruded: true,
       filled: true,
       stroked: false,
-      getElevation: buildingHeight,
+      getElevation: buildingElevation,
       getFillColor: BUILDING_COLOR,
       material: BUILDING_MATERIAL,
       parameters: NO_CULL,
+      // Vector tiles wind outlines clockwise with y pointing down, which in
+      // the tile's own numbers is counter-clockwise: said so, the walls get
+      // outward normals and are lit from the side the light is on.
+      _subLayerProps: BUILDING_SUBLAYER_PROPS,
+      // their shadows, on the ground under them and under the aircraft's
+      sun,
+      shadowColor: SHADOW_COLOR,
+      shadowParameters: SHADOW_PARAMETERS,
     });
 
   // Night shading, recomputed each minute: four nested bands (sunset and the
@@ -1150,7 +1209,12 @@
       for (const volume of measured) layers.push(...measuredLayers(volume, ex, lift));
     } else freeArenas();
     if (daylight) layers.push(nightLayer(now));
-    if (tileUrl && buildings && flat && zoom >= 13) layers.push(buildingLayer(tileUrl));
+    const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= 13);
+    if (showBuildings) layers.push(buildingLayer(tileUrl!, shadowSun(now)));
+    // close in over buildings, the key light comes from the real sun (fading
+    // back to its usual direction as the sun sets), so walls and shadows agree
+    const toSunHere = localSun(sunDirection(now), cLat, cLon);
+    aimKeyLight(toSunHere, buildings && flat ? sunlight(toSunHere[2]) * clamp01(zoom - FLAT_ABOVE_ZOOM) : 0);
     if (tileUrl && labels && fontsReady) {
       const marked = [airport, ...(selected && route ? [route.origin, route.destination] : [])]
         .map((a) => a?.iata)
@@ -1657,6 +1721,8 @@
       initialViewState: { ...view, ...LIMITS },
       controller: controllerFor(false),
       effects: [lighting],
+      // the shadows mark it (SHADOW_PARAMETERS); deck.gl clears it each frame
+      deviceProps: { webgl: { stencil: true } },
       pickingRadius: 6,
       onDeviceInitialized: (d) => (device = d),
       onViewStateChange: ({ viewState }) => {

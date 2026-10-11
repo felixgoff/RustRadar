@@ -111,6 +111,16 @@ const MEMBER_FRACTION = 0.1;
 const LOW_SUN_DEG = 6;
 
 /**
+ * How strongly the sun casts shadows (0..1), from its altitude sine: none at
+ * night, rising from the horizon to full strength at {@link LOW_SUN_DEG}.
+ * Aircraft and buildings fade by the same measure, so their shadows agree.
+ */
+export function sunlight(sinSun: number): number {
+  if (!(sinSun > 0)) return 0;
+  return Math.min(1, Math.asin(Math.min(1, sinSun)) / DEG / LOW_SUN_DEG);
+}
+
+/**
  * Opacity (0..1) of the shadow of an aircraft `sizeM` long at `altFt` above
  * the ground, with the sun's altitude sine `sinSun`.
  *
@@ -126,9 +136,8 @@ const LOW_SUN_DEG = 6;
  * all sooner. None at night.
  */
 export function shadowOpacity(altFt: number, sizeM: number, sinSun: number): number {
-  if (!(sinSun > 0)) return 0;
-  const sunDeg = Math.asin(Math.min(1, sinSun)) / DEG;
-  const light = Math.min(1, sunDeg / LOW_SUN_DEG);
+  const light = sunlight(sinSun);
+  if (light === 0) return 0;
   const slant = (Math.max(0, altFt) * FEET_TO_M) / sinSun;
   const crisp = (MEMBER_FRACTION * sizeM) / SUN_DIAMETER;
   const contrast = slant <= crisp ? 1 : (crisp / slant) ** 1.5;

@@ -98,6 +98,8 @@ export function matcher(f: Filters): (flight: LiveFlight) => boolean {
 export interface Settings {
   basemap: Basemap;
   labels: boolean;
+  /** Place-name size on the map, as a multiple of the default. */
+  labelSize: number;
   buildings: boolean;
   liveries: boolean;
   daylight: boolean;
@@ -110,6 +112,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   basemap: "dark",
   labels: true,
+  labelSize: 1,
   buildings: true,
   liveries: true,
   daylight: true,

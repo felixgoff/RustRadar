@@ -9,6 +9,7 @@
     pitch: number;
     basemap: Basemap;
     labels: boolean;
+    labelSize: number;
     buildings: boolean;
     liveries: boolean;
     daylight: boolean;
@@ -32,6 +33,7 @@
     pitch,
     basemap = $bindable(),
     labels = $bindable(),
+    labelSize = $bindable(),
     buildings = $bindable(),
     liveries = $bindable(),
     daylight = $bindable(),
@@ -47,6 +49,14 @@
     onsignout,
     onhelp,
   }: Props = $props();
+
+  /** Place-name sizes on offer, as multiples of the default. */
+  const LABEL_SIZES: [number, string][] = [
+    [0.85, "Small"],
+    [1, "Medium"],
+    [1.25, "Large"],
+    [1.5, "Extra large"],
+  ];
 
   const TILT = 55;
   let open = $state<"layers" | "account" | null>(null);
@@ -125,6 +135,15 @@
           <span>Place names</span>
           <input type="checkbox" role="switch" bind:checked={labels} />
         </label>
+        <fieldset class="segmented" disabled={!labels}>
+          <legend>Place name size</legend>
+          {#each LABEL_SIZES as [value, label] (value)}
+            <label>
+              <input type="radio" name="label-size" {value} bind:group={labelSize} />
+              <span>{label}</span>
+            </label>
+          {/each}
+        </fieldset>
         <label class="switch">
           <span>
             3D buildings
@@ -354,6 +373,16 @@
   }
   .segmented label:hover span {
     background: var(--surface-hover);
+  }
+  /* e.g. the place-name size while place names are off */
+  .segmented:disabled {
+    opacity: 0.4;
+  }
+  .segmented:disabled span {
+    cursor: default;
+  }
+  .segmented:disabled label:hover span {
+    background: none;
   }
   .segmented input:checked + span {
     background: var(--amber);

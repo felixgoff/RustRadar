@@ -1,6 +1,7 @@
 mod adsblol;
 mod board;
 mod dwd;
+mod geocode;
 mod liveries;
 mod mrms;
 mod opensky;
@@ -664,6 +665,7 @@ pub fn run() {
             opensky_track,
             adsblol::adsb_hex,
             adsblol::adsb_callsign,
+            geocode::geocode,
             session::session_info,
             session::sign_in,
             session::sign_out,

@@ -89,6 +89,8 @@
     route: Route | null;
     /** An airport to mark, e.g. the one whose board is open. */
     airport: Airport | null;
+    /** A searched place to mark: a small dot and its name. */
+    place?: { lon: number; lat: number; name: string } | null;
     /** Vertical exaggeration of altitudes when zoomed out, 1 = true scale. */
     exaggeration: number;
     basemap: Basemap;
@@ -114,6 +116,7 @@
     details,
     route,
     airport,
+    place = null,
     exaggeration,
     basemap,
     labels,
@@ -531,13 +534,24 @@
   const LABEL_FONT_SETTINGS = { sdf: true, fontSize: 64, buffer: 6 };
   const LABEL_COLLISION_PROPS = { sizeScale: 1.3 };
   const labelPosition = (f: LabelFeature) => f.geometry.coordinates;
-  const textLayer = (data: LabelFeature[]) =>
+  /** A window this size (CSS px) shows labels at their base size. */
+  const LABEL_REFERENCE_DIAGONAL = Math.hypot(1440, 900);
+  const LABEL_MAX_SCALE = 1.4;
+  /**
+   * Labels grow with the window: a big or ultrawide monitor shows far more map
+   * and is read from further away, so fixed 11-14 px names turn into specks.
+   * The square root keeps the growth gentle; about 1.4x on a 3440x1440 screen.
+   */
+  const labelScaleFor = (width: number, height: number) =>
+    Math.min(LABEL_MAX_SCALE, Math.max(1, Math.sqrt(Math.hypot(width, height) / LABEL_REFERENCE_DIAGONAL)));
+  const textLayer = (data: LabelFeature[], sizeScale: number) =>
     new TextLayer<LabelFeature, CollisionFilterExtensionProps<LabelFeature>>({
       id: "labels",
       data,
       getPosition: labelPosition,
       getText: labelText,
       getSize: labelSize,
+      sizeScale,
       getColor: labelColor,
       fontFamily: LABEL_FONT,
       fontWeight: 600,
@@ -963,6 +977,45 @@
     ];
   }
 
+  /** A searched place: quieter than an airport's amber, which means selection. */
+  function placeMarker(p: { lon: number; lat: number; name: string }): Layer[] {
+    const data = [p];
+    const position = (d: typeof p): LonLat => [d.lon, d.lat];
+    return [
+      new ScatterplotLayer<typeof p>({
+        id: "place-dot",
+        data,
+        getPosition: position,
+        getRadius: 4,
+        radiusUnits: "pixels",
+        getFillColor: [241, 238, 231, 255],
+        stroked: true,
+        getLineColor: MARKER_LINE,
+        getLineWidth: 2,
+        lineWidthUnits: "pixels",
+        billboard: true,
+        parameters: { ...NO_CULL, depthCompare: "always" },
+      }),
+      new TextLayer<typeof p>({
+        id: "place-name",
+        data,
+        getPosition: position,
+        getText: (d) => d.name,
+        getSize: 12,
+        getColor: [241, 238, 231, 230],
+        getPixelOffset: [0, -14],
+        fontFamily: LABEL_FONT,
+        fontWeight: 600,
+        fontSettings: LABEL_FONT_SETTINGS,
+        outlineWidth: 3,
+        outlineColor: LABEL_OUTLINE,
+        billboard: true,
+        characterSet: "auto",
+        parameters: LABEL_PARAMETERS,
+      }),
+    ];
+  }
+
   const mix = (a: [number, number, number], b: [number, number, number], t: number): [number, number, number] => [
     a[0] + (b[0] - a[0]) * t,
     a[1] + (b[1] - a[1]) * t,
@@ -1109,7 +1162,13 @@
       const marked = [airport, ...(selected && route ? [route.origin, route.destination] : [])]
         .map((a) => a?.iata)
         .filter((code): code is string => Boolean(code));
-      layers.push(labelTileLayer(tileUrl), textLayer(withoutMarked(labelsInView(cLon, cLat, zoom), marked)));
+      layers.push(
+        labelTileLayer(tileUrl),
+        textLayer(
+          withoutMarked(labelsInView(cLon, cLat, zoom), marked),
+          labelScaleFor(container.clientWidth, container.clientHeight),
+        ),
+      );
     }
 
     const selectedPose = selected ? motion.pose(selected, now) : null;
@@ -1155,6 +1214,7 @@
       if (route) layers.push(...routeLayers(route, pos, selected.id, ex));
     }
     if (airport) layers.push(...airportMarkers("focus-airport", [airport]));
+    if (place) layers.push(...placeMarker(place));
 
     const meshes = models();
     const selectedId = selected?.id;
@@ -1664,7 +1724,7 @@
 
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
-    void [flights, selected, details, route, airport, exaggeration, basemap, labels, buildings];
+    void [flights, selected, details, route, airport, place, exaggeration, basemap, labels, buildings];
     void [showLiveries, daylight, weather, follow];
     render();
   });

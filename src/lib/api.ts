@@ -282,6 +282,41 @@ export const topFlights = () => invoke<TopFlight[]>("top_flights");
 
 export const search = (query: string) => invoke<FindEntry[]>("search", { query });
 
+/** A coarse category of a place, for its icon and how close to fly. */
+export type PlaceKind =
+  | "address"
+  | "street"
+  | "poi"
+  | "airport"
+  | "district"
+  | "city"
+  | "town"
+  | "postcode"
+  | "region"
+  | "country";
+
+/** A place or address from Photon (© OpenStreetMap contributors, ODbL). */
+export interface Place {
+  /** Its name, or the street and number, e.g. `Damrak 1`. */
+  name: string;
+  /** A readable address line, e.g. `Damrak 1, 1012 LG Amsterdam, Netherlands`. */
+  label: string;
+  kind: PlaceKind;
+  /** What a named place is, e.g. `Hotel`, `Canal` (points of interest only). */
+  category?: string;
+  lat: number;
+  lon: number;
+  /** `[west, south, east, north]`, degrees, when the place has an extent. */
+  bbox?: [number, number, number, number];
+}
+
+/**
+ * Places and addresses matching `query` (at least 3 characters), ranked toward
+ * `near` when given. Rate-limited in Rust; rejects while the service rests.
+ */
+export const geocode = (query: string, near?: { lat: number; lon: number } | null, lang?: string) =>
+  invoke<Place[]>("geocode", { query, lat: near?.lat ?? null, lon: near?.lon ?? null, lang: lang ?? null });
+
 export const referenceData = () => invoke<ReferenceData>("reference_data");
 
 /** One end of a runway, from OurAirports. */

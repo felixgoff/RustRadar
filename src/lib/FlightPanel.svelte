@@ -588,12 +588,14 @@
 </aside>
 
 <style>
+  /* anchored to the bottom, clear of the attribution line, growing upwards */
   .panel {
     position: absolute;
-    top: var(--space-4);
+    bottom: 28px;
     right: var(--space-4);
     width: 360px;
-    max-height: calc(100% - var(--space-4) * 2);
+    max-height: calc(100% - var(--space-4) - 28px);
+    overflow-x: hidden;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -756,7 +758,10 @@
     max-width: 110px;
   }
 
+  /* the progress marker's layer slides along past the track's end: clip it here,
+     or the scrolling panel grows a strip of empty space to the right */
   .route {
+    overflow-x: clip;
     display: flex;
     flex-direction: column;
     gap: var(--space-3);

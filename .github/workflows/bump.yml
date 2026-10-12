@@ -1,0 +1,39 @@
+name: Bump version
+
+# Actions > Bump version > Run workflow: changes the version in all four files
+# (scripts/version.mjs) and commits it to the branch picked under "Use workflow
+# from", with no clone needed. Merging that to main then publishes the release.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "patch, minor, major, or an exact version like 0.3.0"
+        required: true
+        default: patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bump-${{ github.ref }}
+
+jobs:
+  bump:
+    name: Bump version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Change the version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: node scripts/version.mjs "$(printf '%s' "$BUMP" | tr -d '[:space:]')"
+
+      - name: Commit and push
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Version $version"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "### Version $version committed to \`${GITHUB_REF_NAME}\`" >> "$GITHUB_STEP_SUMMARY"

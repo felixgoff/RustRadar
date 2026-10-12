@@ -37,7 +37,6 @@
     BitmapLayer,
     IconLayer,
     PathLayer,
-    PolygonLayer,
     ScatterplotLayer,
     SolidPolygonLayer,
     TextLayer,
@@ -91,7 +90,8 @@
   import { flightDetails, isRateLimited } from "./api";
   import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
   import { reference } from "./reference.svelte";
-  import { hullPolygon, shipAtlas, shipColor, shipIcon, shipIconScale, shipIconSize, shipKindLabel } from "./ships";
+  import { offsetEastNorth, shipMeshes, shipPlacement, type ShipClass } from "./ship-models";
+  import { shipAtlas, shipColor, shipIcon, shipIconScale, shipIconSize, shipKindLabel } from "./ships";
 
   interface Props {
     flights: LiveFlight[];
@@ -121,6 +121,10 @@
     /** Keep the camera centred on the selected aircraft. */
     follow: boolean;
     onselect: (flight: LiveFlight | null) => void;
+    /** The selected ship, ringed in the selection amber. */
+    selectedShip?: Ship | null;
+    /** A ship was clicked. */
+    onshipselect?: (ship: Ship) => void;
     /** An airport label was clicked. */
     onairport?: (iata: string) => void;
     onviewchange?: (view: ViewState) => void;
@@ -144,6 +148,8 @@
     weather,
     follow,
     onselect,
+    selectedShip = null,
+    onshipselect,
     onairport,
     onviewchange,
   }: Props = $props();
@@ -1142,46 +1148,133 @@
     return [sy * sr + cy * sp * cr, -cy * sr + sy * sp * cr, cp * cr];
   }
 
-  // Ships: icons on the water, and close in their true-scale hulls. Their data
-  // arrays are built once per ship list; only the icons' screen angles follow
-  // the camera.
-  /** Above this zoom ships with dimensions and a heading are drawn as hulls at true scale. */
-  const HULL_ZOOM = 13;
+  // Ships: icons on the water, and close in 3D models at true scale. Their
+  // data arrays are built once per ship list; only the icons' screen angles
+  // follow the camera, and which ships are big enough for a model is redone
+  // in quarter-zoom steps.
+  /**
+   * From this zoom ships under way (heading known) are drawn as 3D models;
+   * it is above FLAT_ABOVE_ZOOM, so always in the flat projection.
+   */
+  const SHIP_MESH_ZOOM = 12.5;
+  /** ...each once it would be this many pixels long; smaller ones stay icons until then. */
+  const SHIP_MESH_MIN_PX = 14;
   const SHIP_ALPHA = 235;
   /** Old positions are drawn faded. */
   const SHIP_OLD_ALPHA = 105;
-  const SHIP_HULL_LINE: [number, number, number, number] = [8, 12, 20, 200];
+  const SHIP_MESH_COLOR: ShipColor = [255, 255, 255, 255];
+  const SHIP_MESH_OLD_COLOR: ShipColor = [255, 255, 255, 120];
   const SHIP_PARAMETERS = { ...NO_CULL, depthWriteEnabled: false } as const;
+  /**
+   * The aircraft's lights (sun, camera and ambient) on darker, coloured
+   * paint: less ambient than the white airframes need, so decks seen from
+   * straight above keep their colours instead of washing out.
+   */
+  const SHIP_MESH_MATERIAL = { ambient: 0.5, diffuse: 0.48, shininess: 24, specularColor: [40, 40, 40] as [number, number, number] };
   type ShipColor = [number, number, number, number];
-  type ShipHull = { index: number; polygon: LonLat[]; color: ShipColor };
+  /** One ship drawn as a model: where, how big and which way, worked out once. */
+  type ShipModel = {
+    index: number;
+    position: [number, number, number];
+    scale: [number, number, number];
+    heading: number;
+    /** The hull's centre from the reported position, metres east and north. */
+    east: number;
+    north: number;
+    /** The zoom from which it is long enough on screen to be a model. */
+    minZoom: number;
+  };
   type ShipData = {
     list: Ship[];
     positions: [number, number, number][];
     icons: string[];
     colors: ShipColor[];
-    /** Indices of all ships, and of those without a hull (the icons shown close in). */
+    /** Indices of all ships. */
     all: number[];
-    unhulled: number[];
-    hulls: ShipHull[];
+    /** Ships that can be drawn as a model, by class. */
+    models: Map<ShipClass, ShipModel[]>;
+    /** Close in: the models shown and the ships left as icons, for one quarter-zoom step. */
+    split: { step: number; models: Map<ShipClass, ShipModel[]>; icons: number[] } | null;
   };
   let shipData: ShipData | null = null;
   let shipAtlasData: ReturnType<typeof shipAtlas> | undefined;
   function shipsFor(list: Ship[]): ShipData {
     if (shipData?.list === list) return shipData;
-    const data: ShipData = { list, positions: [], icons: [], colors: [], all: [], unhulled: [], hulls: [] };
+    const data: ShipData = { list, positions: [], icons: [], colors: [], all: [], models: new Map(), split: null };
     list.forEach((ship, i) => {
       const color: ShipColor = [...shipColor(ship.kind), ship.old ? SHIP_OLD_ALPHA : SHIP_ALPHA];
-      data.positions.push([ship.lon, ship.lat, 0]);
+      const position: [number, number, number] = [ship.lon, ship.lat, 0];
+      data.positions.push(position);
       data.icons.push(shipIcon(ship));
       data.colors.push(color);
       data.all.push(i);
-      if (ship.dims && ship.heading !== null) {
-        const fill: ShipColor = [color[0], color[1], color[2], ship.old ? 110 : 215];
-        data.hulls.push({ index: i, polygon: hullPolygon(ship.lon, ship.lat, ship.dims, ship.heading), color: fill });
-      } else data.unhulled.push(i);
+      // a moored ship reports no heading: no telling which way to draw it
+      if (ship.heading === null) return;
+      const place = shipPlacement(ship);
+      const [east, north] = offsetEastNorth(place.right, place.ahead, ship.heading);
+      let group = data.models.get(place.cls);
+      if (!group) data.models.set(place.cls, (group = []));
+      group.push({
+        index: i,
+        position,
+        scale: place.scale,
+        heading: ship.heading,
+        east,
+        north,
+        minZoom: Math.log2((metersPerPixel(0, ship.lat) * SHIP_MESH_MIN_PX) / place.length),
+      });
     });
     shipData = data;
     return data;
+  }
+  /** Which ships are models and which icons at `zoom`, in quarter steps so the split is rarely redone. */
+  function shipSplit(data: ShipData, zoom: number) {
+    const step = Math.floor(zoom * 4) / 4;
+    if (data.split?.step === step) return data.split;
+    const models = new Map<ShipClass, ShipModel[]>();
+    const shown = new Uint8Array(data.list.length);
+    for (const [cls, group] of data.models) {
+      const big = group.filter((d) => step >= d.minZoom);
+      big.forEach((d) => (shown[d.index] = 1));
+      if (big.length) models.set(cls, big);
+    }
+    const icons = data.all.filter((i) => !shown[i]);
+    return (data.split = { step, models, icons });
+  }
+  /**
+   * The models, one instanced layer per class. Each is turned like the
+   * aircraft (`orientationOf`) and offset so its AIS reference point lands on
+   * the reported position; the globe's local frame is the flat one turned
+   * half a turn, so there the offset is too.
+   */
+  function shipMeshLayers(split: NonNullable<ShipData["split"]>, flat: boolean): Layer[] {
+    const meshes = shipMeshes();
+    const yawOffset = flat ? 0 : 180;
+    const sign = flat ? 1 : -1;
+    const list = shipData?.list ?? [];
+    const layers: Layer[] = [];
+    for (const [cls, group] of split.models) {
+      layers.push(
+        new SimpleMeshLayer<ShipModel>({
+          id: `ship-mesh-${cls}`,
+          data: group,
+          mesh: meshes[cls].geometry,
+          getPosition: (d) => d.position,
+          getOrientation: (d) => [0, yawOffset - d.heading, 0],
+          getScale: (d) => d.scale,
+          getTranslation: (d) => [sign * d.east, sign * d.north, 0],
+          // the colours are the mesh's own; old positions fade
+          getColor: (d) => (list[d.index]?.old ? SHIP_MESH_OLD_COLOR : SHIP_MESH_COLOR),
+          material: SHIP_MESH_MATERIAL,
+          pickable: true,
+          autoHighlight: true,
+          highlightColor: [252, 180, 66, 110],
+          parameters: NO_CULL,
+          updateTriggers: { getOrientation: yawOffset, getTranslation: sign },
+        }),
+      );
+    }
+    return layers;
   }
   /** The icons' angles on screen, kept while neither the camera nor the ships move. */
   let shipAngles: { key: string; list: Ship[] | null; angles: Float32Array; version: number } = {
@@ -1195,25 +1288,8 @@
     const data = shipsFor(list);
     if (!list.length) return [];
     shipAtlasData ??= shipAtlas();
-    const hulls = zoom > HULL_ZOOM && data.hulls.length > 0;
-    const layers: Layer[] = [];
-    if (hulls) {
-      layers.push(
-        new PolygonLayer<ShipHull>({
-          id: "ship-hulls",
-          data: data.hulls,
-          getPolygon: (d) => d.polygon,
-          getFillColor: (d) => d.color,
-          getLineColor: SHIP_HULL_LINE,
-          getLineWidth: 1,
-          lineWidthUnits: "pixels",
-          filled: true,
-          stroked: true,
-          pickable: true,
-          parameters: SURFACE_NO_CULL,
-        }),
-      );
-    }
+    const split = zoom >= SHIP_MESH_ZOOM ? shipSplit(data, zoom) : null;
+    const layers: Layer[] = split ? shipMeshLayers(split, flat) : [];
     if (!shipAtlasData) return layers;
     const key = `${zoom},${bearing},${pitch},${longitude},${latitude}`;
     if (shipAngles.key !== key || shipAngles.list !== list) {
@@ -1236,7 +1312,7 @@
     layers.push(
       new IconLayer<number>({
         id: "ship-icons",
-        data: hulls ? data.unhulled : data.all,
+        data: split ? split.icons : data.all,
         getPosition: (i) => data.positions[i],
         getIcon: (i) => data.icons[i],
         iconAtlas: shipAtlasData.atlas as never,
@@ -1380,7 +1456,10 @@
     const toSunHere = localSun(sunDirection(now), cLat, cLon);
     aimKeyLight(toSunHere, buildings && flat ? sunlight(toSunHere[2]) * clamp01(zoom - FLAT_ABOVE_ZOOM) : 0);
     // on the water, under the labels and every aircraft
+    const shipRing = selectedShip ? shipSelectionLayers(selectedShip, mpp, zoom, cLon, cLat) : null;
+    if (shipRing) layers.push(shipRing.halo);
     layers.push(...shipLayers(ships, flat, mpp));
+    if (shipRing) layers.push(shipRing.ring);
     if (tileUrl && labels && fontsReady) {
       const marked = [airport, ...(selected && route ? [route.origin, route.destination] : [])]
         .map((a) => a?.iata)
@@ -1828,17 +1907,57 @@
     goTo({ pitch }, 400, ["pitch"]);
   }
 
+  /**
+   * The selected ship: a soft amber halo under it and a ring over it, sized to
+   * clear its icon zoomed out and its true-scale hull close in, so it reads at
+   * every zoom. Nothing while it is round the back of the globe.
+   */
+  function shipSelectionLayers(ship: Ship, mpp: number, zoom: number, cLon: number, cLat: number) {
+    if (zoom <= FLAT_ABOVE_ZOOM && cosAngle(ship.lon, ship.lat, cLon, cLat) <= 0) return null;
+    const hullPx = ship.dims ? Math.max(ship.dims[0], ship.dims[1]) / mpp : 0;
+    const radius = Math.max(shipIconSize(ship, zoom) / 2 + 5, hullPx + 6);
+    const common = {
+      data: [[ship.lon, ship.lat, 0] as [number, number, number]],
+      getPosition: (d: [number, number, number]) => d,
+      getRadius: radius,
+      radiusUnits: "pixels" as const,
+      billboard: true,
+      parameters: { ...NO_CULL, depthWriteEnabled: false, depthCompare: "always" as const },
+      updateTriggers: { getRadius: radius },
+    };
+    return {
+      halo: new ScatterplotLayer({ ...common, id: "ship-selection-halo", filled: true, stroked: false, getFillColor: [252, 180, 66, 56] }),
+      ring: new ScatterplotLayer({
+        ...common,
+        id: "ship-selection-ring",
+        filled: false,
+        stroked: true,
+        getLineColor: [252, 180, 66, 235],
+        getLineWidth: 2,
+        lineWidthUnits: "pixels",
+      }),
+    };
+  }
+
+  /** The ship a pick landed on, whichever of the ship layers drew it. */
+  function pickedShip(info: PickingInfo): Ship | null {
+    const o = info.object as unknown;
+    if (!info.layer?.id.startsWith("ship-") || info.layer.id.startsWith("ship-selection") || o == null) return null;
+    const list = shipData?.list ?? ships;
+    if (typeof o === "number") return list[o] ?? null;
+    if (typeof o === "object") {
+      if ("mmsi" in o) return o as Ship;
+      if ("index" in o && typeof o.index === "number") return list[o.index] ?? null;
+    }
+    return null;
+  }
+
   const escape = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
   /** Airport labels and ships get deck's tooltip; aircraft get the {@link HoverCard}. */
   function tooltip(info: PickingInfo) {
-    const shipIndex =
-      info.layer?.id === "ship-icons"
-        ? (info.object as number | undefined)
-        : info.layer?.id === "ship-hulls"
-          ? (info.object as { index: number } | undefined)?.index
-          : undefined;
-    const ship = shipIndex !== undefined ? shipData?.list[shipIndex] : undefined;
+    // icons and models alike (the models carry their ship's index)
+    const ship = pickedShip(info);
     if (ship) {
       const length = ship.dims ? ` · ${ship.dims[0] + ship.dims[1]} m` : "";
       return {
@@ -1941,7 +2060,9 @@
       // hover isn't reported while a button is down: the card would hang over a moving globe
       onDragStart: () => setHover(null),
       onClick: (info) => {
+        const ship = pickedShip(info);
         if (info.layer?.id.startsWith("aircraft-") && info.object) onselect(info.object as LiveFlight);
+        else if (ship) onshipselect?.(ship);
         else if (info.layer?.id === "labels") {
           const p = (info.object as LabelFeature | undefined)?.properties;
           if (p?.layerName === "aerodrome_label" && p.iata) onairport?.(String(p.iata));
@@ -1977,7 +2098,7 @@
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
     void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
-    void [showLiveries, daylight, weather, follow];
+    void [showLiveries, daylight, weather, follow, selectedShip];
     render();
   });
 </script>

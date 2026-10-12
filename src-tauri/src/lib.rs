@@ -675,6 +675,7 @@ pub fn run() {
             taxiways::airport_taxiways,
             export::save_export,
             ships::ships_in_view,
+            ships::ship_details,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

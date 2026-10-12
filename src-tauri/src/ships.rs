@@ -439,6 +439,187 @@ pub async fn ships_in_view(west: f64, south: f64, east: f64, north: f64, zoom: f
     Ok(ships)
 }
 
+// One ship's particulars, from the card VesselFinder's map opens on a click.
+
+const CLICK_URL: &str = "https://www.vesselfinder.com/api/pub/click";
+/// A ship's card is answered from memory for this long.
+const DETAILS_REUSE: Duration = Duration::from_secs(60);
+
+/// An AIS navigational status: the standard code and its wording.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NavStatus {
+    pub code: u8,
+    pub label: String,
+}
+
+/// The AIS navigational status's wording; none for "not defined" (15), the
+/// reserved codes and anything out of range.
+fn nav_status(code: i64) -> Option<NavStatus> {
+    let label = match code {
+        0 => "Under way using engine",
+        1 => "At anchor",
+        2 => "Not under command",
+        3 => "Restricted manoeuvrability",
+        4 => "Constrained by draught",
+        5 => "Moored",
+        6 => "Aground",
+        7 => "Engaged in fishing",
+        8 => "Under way sailing",
+        11 => "Towing astern",
+        12 => "Pushing ahead or towing alongside",
+        14 => "Emergency beacon active",
+        _ => return None,
+    };
+    Some(NavStatus { code: code as u8, label: label.to_owned() })
+}
+
+/// What VesselFinder knows about one ship. Values the feed leaves out, or
+/// gives as 0 where 0 means "not known", are `None`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShipDetails {
+    pub name: Option<String>,
+    pub imo: Option<u32>,
+    pub mmsi: u32,
+    /// VesselFinder's own type wording, e.g. "Container Ship".
+    pub type_label: Option<String>,
+    /// The flag state's name.
+    pub flag: Option<String>,
+    /// The flag's ISO 3166 code, upper case.
+    pub flag_code: Option<String>,
+    pub length_m: Option<f64>,
+    pub beam_m: Option<f64>,
+    /// As last reported by the crew.
+    pub draught_m: Option<f64>,
+    pub max_draught_m: Option<f64>,
+    pub gross_tonnage: Option<u32>,
+    pub deadweight: Option<u32>,
+    pub year_built: Option<u16>,
+    /// As entered by the crew: often a UN/LOCODE (`UKSOU`), sometimes free text.
+    pub destination: Option<String>,
+    /// As entered by the crew, Unix seconds.
+    pub eta_unix: Option<i64>,
+    /// Speed over ground, knots.
+    pub speed_kn: Option<f64>,
+    /// Course over ground, degrees.
+    pub course_deg: Option<f64>,
+    pub nav_status: Option<NavStatus>,
+    /// When the position was reported, Unix seconds.
+    pub position_unix: Option<i64>,
+    /// The position came by satellite AIS.
+    pub satellite: bool,
+    /// For `https://static.vesselfinder.net/ship-photo/{photoId}/1`.
+    pub photo_id: Option<String>,
+    /// A search-and-rescue aircraft.
+    pub sar: bool,
+}
+
+/// A number the feed may send as a number or a string; `None` for anything else.
+fn number(v: &serde_json::Value, key: &str) -> Option<f64> {
+    match v.get(key)? {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+    .filter(|n: &f64| n.is_finite())
+}
+
+/// A number where 0 (or less) means "not known".
+fn positive(v: &serde_json::Value, key: &str) -> Option<f64> {
+    number(v, key).filter(|n| *n > 0.0)
+}
+
+fn text(v: &serde_json::Value, key: &str) -> Option<String> {
+    let s = v.get(key)?.as_str()?.trim();
+    (!s.is_empty()).then(|| s.to_owned())
+}
+
+/// Reads VesselFinder's ship card for `mmsi`.
+pub fn parse_details(body: &[u8], mmsi: u32) -> Result<ShipDetails, String> {
+    let v: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("VesselFinder sent an unreadable ship card: {e}"))?;
+    if !v.is_object() {
+        return Err("VesselFinder sent an unreadable ship card".into());
+    }
+    let satellite = v.get("sl").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let reported = positive(&v, "ts").map(|t| t as i64);
+    let by_satellite = positive(&v, "slts").map(|t| t as i64);
+    Ok(ShipDetails {
+        // a ship that never broadcast its name is listed under its MMSI
+        name: text(&v, "name").filter(|n| *n != mmsi.to_string()),
+        imo: positive(&v, "imo").map(|n| n as u32),
+        mmsi,
+        type_label: text(&v, "type").filter(|t| !t.eq_ignore_ascii_case("unknown type")),
+        flag: text(&v, "country"),
+        flag_code: text(&v, "a2").map(|c| c.to_uppercase()),
+        length_m: positive(&v, "al"),
+        beam_m: positive(&v, "aw"),
+        // decimetres
+        draught_m: positive(&v, "draught").map(|d| d / 10.0),
+        max_draught_m: positive(&v, "drm"),
+        gross_tonnage: positive(&v, "gt").map(|n| n as u32),
+        deadweight: positive(&v, "dw").map(|n| n as u32),
+        year_built: positive(&v, "y").filter(|y| *y >= 1800.0 && *y < 2200.0).map(|y| y as u16),
+        destination: text(&v, "dest"),
+        eta_unix: positive(&v, "etaTS").map(|t| t as i64),
+        // AIS's own "not available": 102.3 kn and 360°
+        speed_kn: number(&v, "ss").filter(|s| (0.0..102.3).contains(s)),
+        course_deg: number(&v, "cu").filter(|c| (0.0..360.0).contains(c)),
+        nav_status: number(&v, ".ns").and_then(|c| nav_status(c as i64)),
+        // a satellite fix has its own time
+        position_unix: if satellite { by_satellite.or(reported) } else { reported },
+        satellite,
+        photo_id: text(&v, "pic"),
+        sar: number(&v, "m9") == Some(1.0) || mmsi.to_string().starts_with("111"),
+    })
+}
+
+fn details_cache() -> &'static tokio::sync::Mutex<std::collections::HashMap<u32, (Instant, ShipDetails)>> {
+    static CACHE: OnceLock<tokio::sync::Mutex<std::collections::HashMap<u32, (Instant, ShipDetails)>>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// One ship's particulars, voyage and last report. Shares the map feed's
+/// spacing and backoff (it is the same host); a ship asked for within a minute
+/// is answered from memory.
+#[tauri::command]
+pub async fn ship_details(mmsi: u32) -> CmdResult<ShipDetails> {
+    if mmsi == 0 {
+        return Err("not a ship".into());
+    }
+    {
+        let mut cache = details_cache().lock().await;
+        cache.retain(|_, (at, _)| at.elapsed() < DETAILS_REUSE);
+        if let Some((_, hit)) = cache.get(&mmsi) {
+            return Ok(hit.clone());
+        }
+    }
+    let wait = {
+        let mut cache = state().lock().await;
+        if let Some(until) = cache.blocked_until {
+            let left = until.saturating_duration_since(Instant::now());
+            if !left.is_zero() {
+                return Err(format!("VesselFinder is resting; retrying in {} s", left.as_secs().max(1)));
+            }
+        }
+        cache.reserve()
+    };
+    if !wait.is_zero() {
+        tokio::time::sleep(wait).await;
+    }
+    let body = match request(&format!("{CLICK_URL}/{mmsi}")).await {
+        Ok(body) => body,
+        Err((e, retry_after)) => {
+            state().lock().await.failed(retry_after);
+            return Err(e);
+        }
+    };
+    state().lock().await.succeeded();
+    let details = parse_details(&body, mmsi)?;
+    details_cache().lock().await.insert(mmsi, (Instant::now(), details.clone()));
+    Ok(details)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,6 +762,85 @@ mod tests {
         assert!(cache.blocked_until.unwrap() <= Instant::now() + BACKOFF_MAX);
         cache.succeeded();
         assert!(cache.blocked_until.is_none());
+    }
+
+    const COSCO: &str = r#"{"ss":4.7,"country":"Singapore","imo":9472189,"al":366,"pic":"9472189-477135600-299be9811ce3bed383f282988903c896","dest":"UKSOU","type":"Container Ship","m9":0,"gt":141823,"a2":"sg","r":2,"cu":88.5,"dw":140146,".ns":0,"etaTS":1793300400,"draught":93,"aw":48,"slp":false,"name":"COSCO EXCELLENCE","y":2012,"sl":false,"drm":"15.5","scn":0,"ts":1791837457}"#;
+    const MARAN: &str = r#"{"country":"Bahamas","imo":9438858,"pic":"9438858-311027700-a3b9df2ac00f8c75f52175a724744580","dest":"CAPTAIN OF","type":"Crude Oil Tanker","dw":109290,"etaTS":1791808200,"sl":true,"drm":"15.0","scn":0,"ss":0.3,"al":249,"m9":0,"gt":66563,"slts":1791837386,"a2":"bs","r":2,"cu":146.5,".ns":0,"draught":92,"aw":44,"slp":false,"name":"MARAN AMUNDSEN","y":2010,"ts":1791835274}"#;
+
+    #[test]
+    fn reads_ship_cards() {
+        let cosco = parse_details(COSCO.as_bytes(), 477_135_600).unwrap();
+        assert_eq!(
+            cosco,
+            ShipDetails {
+                name: Some("COSCO EXCELLENCE".into()),
+                imo: Some(9_472_189),
+                mmsi: 477_135_600,
+                type_label: Some("Container Ship".into()),
+                flag: Some("Singapore".into()),
+                flag_code: Some("SG".into()),
+                length_m: Some(366.0),
+                beam_m: Some(48.0),
+                draught_m: Some(9.3),
+                max_draught_m: Some(15.5),
+                gross_tonnage: Some(141_823),
+                deadweight: Some(140_146),
+                year_built: Some(2012),
+                destination: Some("UKSOU".into()),
+                eta_unix: Some(1_793_300_400),
+                speed_kn: Some(4.7),
+                course_deg: Some(88.5),
+                nav_status: Some(NavStatus { code: 0, label: "Under way using engine".into() }),
+                position_unix: Some(1_791_837_457),
+                satellite: false,
+                photo_id: Some("9472189-477135600-299be9811ce3bed383f282988903c896".into()),
+                sar: false,
+            }
+        );
+        let json = serde_json::to_value(&cosco).unwrap();
+        for key in ["typeLabel", "flagCode", "lengthM", "maxDraughtM", "grossTonnage", "etaUnix", "navStatus", "positionUnix", "photoId"] {
+            assert!(json.get(key).is_some(), "{key}");
+        }
+
+        // a satellite fix carries its own, newer time
+        let maran = parse_details(MARAN.as_bytes(), 311_027_700).unwrap();
+        assert!(maran.satellite);
+        assert_eq!(maran.position_unix, Some(1_791_837_386));
+        assert_eq!(maran.destination.as_deref(), Some("CAPTAIN OF"));
+        assert_eq!((maran.length_m, maran.beam_m, maran.draught_m, maran.max_draught_m), (Some(249.0), Some(44.0), Some(9.2), Some(15.0)));
+        assert_eq!((maran.speed_kn, maran.course_deg), (Some(0.3), Some(146.5)));
+        assert_eq!((maran.flag_code.as_deref(), maran.year_built, maran.imo), (Some("BS"), Some(2010), Some(9_438_858)));
+    }
+
+    #[test]
+    fn unknowns_are_none() {
+        let bare = parse_details(br#"{"ss":102.3,"cu":360,"imo":0,"al":0,"aw":0,"draught":0,"drm":"","gt":0,"dw":0,"y":0,"pic":"","dest":" ","etaTS":0,".ns":15,"m9":1,"name":"","sl":true,"ts":1791837457}"#, 111_232_506).unwrap();
+        assert_eq!(bare.name, None);
+        assert_eq!((bare.speed_kn, bare.course_deg, bare.imo, bare.length_m, bare.draught_m, bare.max_draught_m), (None, None, None, None, None, None));
+        assert_eq!((bare.gross_tonnage, bare.deadweight, bare.year_built, bare.photo_id, bare.destination, bare.eta_unix), (None, None, None, None, None, None));
+        assert_eq!(bare.nav_status, None);
+        // satellite without its own time keeps the report's
+        assert_eq!(bare.position_unix, Some(1_791_837_457));
+        assert!(bare.sar);
+        // a ship VesselFinder knows nothing about, as it answers live
+        let unknown = parse_details(br#"{"ss":-1,"country":"Hong Kong","imo":0,"al":0,"pic":"","dest":"","type":"unknown type","m9":0,"gt":0,"d2":0,"a2":"hk","cu":-1,"r":0,"dw":0,"etaTS":0,"draught":0,"aw":0,"lc.":0,"name":"477135600","y":0,"drm":0,"sc.":0,"ts":-1}"#, 477_135_600).unwrap();
+        assert_eq!((unknown.name, unknown.type_label, unknown.speed_kn, unknown.course_deg, unknown.position_unix), (None, None, None, None, None));
+        assert_eq!((unknown.flag.as_deref(), unknown.flag_code.as_deref(), unknown.nav_status), (Some("Hong Kong"), Some("HK"), None));
+        // a ship at rest has a speed of 0, which is known
+        assert_eq!(parse_details(br#"{"ss":0,"cu":0}"#, 1).unwrap().speed_kn, Some(0.0));
+        assert_eq!(nav_status(5).unwrap().label, "Moored");
+        assert!(parse_details(b"[]", 1).is_err());
+        assert!(parse_details(b"<html>", 1).is_err());
+    }
+
+    /// One live ship card; run by hand with `cargo test live_ship_details -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_ship_details() {
+        let ship = ship_details(477_135_600).await.unwrap();
+        eprintln!("{ship:#?}");
+        assert_eq!(ship.mmsi, 477_135_600);
+        assert!(ship.flag.is_some());
     }
 
     /// One live call; run by hand with `cargo test live_vesselfinder -- --ignored`.

@@ -11,6 +11,7 @@
     openskyTrack,
     sessionInfo,
     signIn,
+    shipDetails,
     shipsInView,
     signOut,
     topFlights,
@@ -26,6 +27,7 @@
     type Place,
     type SessionInfo,
     type Ship,
+    type ShipDetails,
     type TopFlight,
   } from "$lib/api";
   import AirportPanel from "$lib/AirportPanel.svelte";
@@ -34,6 +36,7 @@
   import Globe, { type ViewState } from "$lib/Globe.svelte";
   import MapControls from "$lib/MapControls.svelte";
   import SearchBox from "$lib/SearchBox.svelte";
+  import ShipPanel from "$lib/ShipPanel.svelte";
   import ShortcutsHelp from "$lib/ShortcutsHelp.svelte";
   import TopFlights from "$lib/TopFlights.svelte";
   import { activeCount, loadPersisted, matcher, persist, serverCategories, type Filters } from "$lib/filters";
@@ -316,6 +319,63 @@
     shipsSettle = setTimeout(loadShips, SHIPS_SETTLE_MS);
   });
 
+  // The selected ship: its card from VesselFinder, asked for again every
+  // minute while open (the backend keeps each card a minute and shares the
+  // map feed's spacing and backoff). Its position comes from the ship list as
+  // the map refreshes, and stays where it was last seen if the list drops it.
+  const SHIP_DETAILS_REFRESH_MS = 60_000;
+  let pickedShip = $state.raw<Ship | null>(null);
+  let shipCard = $state.raw<{ mmsi: number; details: ShipDetails | null; error: string | null } | null>(null);
+  let shipCardRequest = 0;
+  const selectedShip = $derived.by<Ship | null>(() => {
+    if (!pickedShip) return null;
+    const mmsi = pickedShip.mmsi;
+    return ships.find((s) => s.mmsi === mmsi) ?? pickedShip;
+  });
+  const selectedMmsi = $derived(pickedShip?.mmsi ?? null);
+  // keep the last position on show once the list drops the ship
+  $effect(() => {
+    const live = selectedShip;
+    if (live && live !== untrack(() => pickedShip)) pickedShip = live;
+  });
+
+  async function loadShipCard(mmsi: number) {
+    const request = ++shipCardRequest;
+    // a refresh keeps the card on show; only a new ship (or a retry after a failure) shows the skeletons
+    if (untrack(() => shipCard)?.mmsi !== mmsi || untrack(() => shipCard)?.error) shipCard = { mmsi, details: null, error: null };
+    try {
+      const details = await shipDetails(mmsi);
+      if (request === shipCardRequest) shipCard = { mmsi, details, error: null };
+    } catch (e) {
+      // a failed refresh keeps the card it had
+      const had = untrack(() => shipCard);
+      if (request === shipCardRequest && !(had?.mmsi === mmsi && had.details)) shipCard = { mmsi, details: null, error: String(e) };
+    }
+  }
+  $effect(() => {
+    const mmsi = selectedMmsi;
+    if (mmsi === null || !isTauri()) return;
+    untrack(() => loadShipCard(mmsi));
+    const timer = setInterval(() => document.visibilityState !== "hidden" && loadShipCard(mmsi), SHIP_DETAILS_REFRESH_MS);
+    return () => clearInterval(timer);
+  });
+  // ships switched off: nothing left to show
+  $effect(() => {
+    if (!settings.ships) untrack(() => selectShip(null));
+  });
+
+  /** Opens a ship's card; any flight or airport board closes. */
+  function selectShip(ship: Ship | null) {
+    if (ship?.mmsi === pickedShip?.mmsi && ship) return;
+    pickedShip = ship;
+    shipCardRequest++;
+    shipCard = null;
+    if (ship) {
+      if (selectedId !== null) select(null);
+      boardCode = null;
+    }
+  }
+
   const boardAirport = $derived.by(() => {
     void reference.ready;
     return reference.airport(boardCode);
@@ -460,6 +520,7 @@
       return;
     }
     selectedId = id;
+    if (id !== null) selectShip(null);
     details = null;
     hint = opts.hint ?? null;
     flyPending = false;
@@ -484,6 +545,7 @@
   function openAirport(code: string) {
     boardCode = code.toUpperCase();
     if (selectedId !== null) select(null);
+    selectShip(null);
   }
 
   function pickSearch(entry: FindEntry) {
@@ -559,6 +621,7 @@
       if (helpOpen) helpOpen = false;
       else if (place) place = null;
       else if (selectedId !== null) select(null);
+      else if (pickedShip) selectShip(null);
       else if (boardCode) boardCode = null;
       else if (filtersOpen) filtersOpen = false;
       return;
@@ -635,9 +698,16 @@
     daylight={settings.daylight}
     weather={settings.weather}
     follow={following}
+    {selectedShip}
     onselect={(f) => {
       place = null;
+      // a click on empty map lets go of a ship too
+      if (!f) selectShip(null);
       select(f?.id ?? null);
+    }}
+    onshipselect={(s) => {
+      place = null;
+      selectShip(s);
     }}
     onairport={openAirport}
     onviewchange={(v) => (view = v)}
@@ -770,6 +840,21 @@
     />
   {/if}
 
+  {#if selectedShip}
+    <ShipPanel
+      ship={selectedShip}
+      details={shipCard?.mmsi === selectedShip.mmsi ? shipCard.details : null}
+      error={shipCard?.mmsi === selectedShip.mmsi ? shipCard.error : null}
+      {now}
+      onretry={() => loadShipCard(selectedShip.mmsi)}
+      oncentre={() => {
+        following = false;
+        globe.flyTo(selectedShip.lon, selectedShip.lat, Math.max(view.zoom, 12));
+      }}
+      onclose={() => selectShip(null)}
+    />
+  {/if}
+
   <MapControls
     bind:this={controls}
     zoom={view.zoom}
@@ -786,7 +871,7 @@
     bind:ships={settings.ships}
     bind:exaggeration={settings.exaggeration}
     {session}
-    inset={selected || boardCode ? PANEL_INSET : 0}
+    inset={selected || boardCode || selectedShip ? PANEL_INSET : 0}
     onzoom={(d) => globe.zoomBy(d)}
     onreset={() => globe.resetOrientation()}
     ontilt={(p) => globe.setPitch(p)}

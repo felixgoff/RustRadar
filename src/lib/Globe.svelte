@@ -419,6 +419,32 @@
     mvt: { layers: ["water", "boundary", "transportation", "aeroway"], workerUrl: mvtWorkerUrl },
   };
 
+  // Close in, runways and taxiways drawn as centrelines a few pixels wide end
+  // up far thinner than they are; from here on they get their real width
+  // instead (the tiles don't carry it: typical airliner widths), which is
+  // already wider than the pixel lines at this zoom.
+  const AEROWAY_TRUE_ZOOM = 14;
+  const RUNWAY_WIDTH_M = 45;
+  const TAXIWAY_WIDTH_M = 23;
+  const AEROWAY_LOAD_OPTIONS = { mvt: { layers: ["aeroway"], workerUrl: mvtWorkerUrl } };
+  /** Runway and taxiway centrelines at true width, over the map layer, for close in. */
+  const aerowayLayer = (url: string) =>
+    new MVTLayer({
+      id: "aeroway-true",
+      data: url,
+      minZoom: 0,
+      maxZoom: 14,
+      loadOptions: AEROWAY_LOAD_OPTIONS,
+      filled: false,
+      stroked: false,
+      getLineColor: vectorLine,
+      getLineWidth: ({ properties: p }: MapFeature) => (p.class === "runway" ? RUNWAY_WIDTH_M : TAXIWAY_WIDTH_M),
+      lineWidthUnits: "meters",
+      lineWidthMinPixels: 1,
+      getPointRadius: 0,
+      parameters: SURFACE_NO_CULL,
+    });
+
   // The sphere sits below the surface and is clipped up close (and absent in
   // the flat projection), so land is an explicit polygon under the vector map.
   const LAND_POLYGON = [
@@ -440,7 +466,7 @@
     });
 
   /** MVTLayer decodes tiles per projection, so each projection gets its own layer and cache. */
-  const vectorMapLayer = (url: string, flat: boolean) =>
+  const vectorMapLayer = (url: string, flat: boolean, trueAeroways: boolean) =>
     new MVTLayer({
       id: flat ? "map-flat" : "map-globe",
       data: url,
@@ -451,7 +477,11 @@
       stroked: false,
       getFillColor: vectorFill,
       getLineColor: vectorLine,
-      getLineWidth: vectorLineWidth,
+      // the aeroway layer draws runway and taxiway lines once they are at true width
+      getLineWidth: trueAeroways
+        ? (f: MapFeature) => (f.properties.layerName === "aeroway" ? 0 : vectorLineWidth(f))
+        : vectorLineWidth,
+      updateTriggers: { getLineWidth: trueAeroways },
       lineWidthUnits: "pixels",
       getPointRadius: 0,
       parameters: SURFACE_NO_CULL,
@@ -1201,7 +1231,11 @@
     if (basemap === "satellite") layers.push(imageryLayer());
     else {
       layers.push(landLayer());
-      if (tileUrl) layers.push(vectorMapLayer(tileUrl, flat));
+      if (tileUrl) {
+        const trueAeroways = zoom >= AEROWAY_TRUE_ZOOM;
+        layers.push(vectorMapLayer(tileUrl, flat, trueAeroways));
+        if (trueAeroways) layers.push(aerowayLayer(tileUrl));
+      }
     }
     if (weather) {
       if (Date.now() - radarCheckedAt > 600_000) refreshRadar();

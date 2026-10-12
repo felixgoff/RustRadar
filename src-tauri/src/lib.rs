@@ -9,6 +9,7 @@ mod radar;
 mod reference;
 mod runways;
 mod session;
+mod taxiways;
 mod updater;
 
 use std::collections::{HashMap, HashSet};
@@ -669,6 +670,7 @@ pub fn run() {
             session::session_info,
             session::sign_in,
             session::sign_out,
+            taxiways::airport_taxiways,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

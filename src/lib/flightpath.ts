@@ -577,8 +577,27 @@ function alignedWith(end: RunwayEndInfo, ac: Aircraft): boolean {
   );
 }
 
+/** Landing roll after touchdown, metres: from the aiming point to a taxi speed off the runway. */
+const ROLLOUT_M = 1_400;
+
 /**
- * The landing runway: the one the aircraft is lined up with; else the
+ * Over the runway and along it, landing: the last moments of the flare and
+ * the landing roll, which the ground flag reports only 10-30 s late.
+ */
+function landingOn(end: RunwayEndInfo, ac: Aircraft): boolean {
+  const { along, cross } = centrelineOffset(end, [ac.lon, ac.lat]);
+  const displaced = distanceM(end.start, end.threshold);
+  return (
+    along <= 300 &&
+    along > displaced - end.lengthM &&
+    Math.abs(cross) < 150 &&
+    Math.abs(wrap180(ac.track - end.heading)) < 30 &&
+    ac.altFt - end.elevationFt < 1_000
+  );
+}
+
+/**
+ * The landing runway: the one the aircraft is landing on or lined up with; else the
  * direction other traffic is landing or departing (preferring the parallel
  * arrivals use, then the nearer one); else the one the shortest path reaches.
  */
@@ -591,6 +610,8 @@ export function chooseArrivalRunway(
   if (!ends.length) return null;
   const here: LonLat = [ac.lon, ac.lat];
   const crossOf = (e: RunwayEndInfo) => Math.abs(centrelineOffset(e, here).cross);
+  const landing = ends.filter((e) => landingOn(e, ac));
+  if (landing.length) return { end: landing.reduce((a, b) => (crossOf(b) < crossOf(a) ? b : a)), reason: "aligned" };
   const aligned = ends.filter((e) => alignedWith(e, ac));
   if (aligned.length) return { end: aligned.reduce((a, b) => (crossOf(b) < crossOf(a) ? b : a)), reason: "aligned" };
 
@@ -671,6 +692,17 @@ function arrivalPlan(ac: Aircraft, end: RunwayEndInfo): { length: number; build:
       return [...points, ...straight(points[points.length - 1], end.threshold, fixM).slice(1), aim];
     },
   });
+
+  if (landingOn(end, ac)) {
+    // over the runway already: what is left is the landing roll, straight on
+    // (an approach planned from here would go round and land again)
+    const { along } = centrelineOffset(end, here);
+    const remaining = end.lengthM - distanceM(end.start, end.threshold) - 100;
+    const stopM = Math.min(remaining, AIM_M + ROLLOUT_M);
+    const toGo = stopM + along;
+    if (toGo < 1) return { length: 0, build: () => [here] };
+    return { length: toGo, build: () => [here, destination(end.threshold, end.heading, stopM)] };
+  }
 
   if (alignedWith(end, ac)) {
     // already on (or nearly on) the final: merge onto the centreline a little

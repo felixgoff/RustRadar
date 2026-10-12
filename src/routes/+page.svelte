@@ -11,6 +11,7 @@
     openskyTrack,
     sessionInfo,
     signIn,
+    shipsInView,
     signOut,
     topFlights,
     unfollowFlight,
@@ -24,6 +25,7 @@
     type OpenSkyPoint,
     type Place,
     type SessionInfo,
+    type Ship,
     type TopFlight,
   } from "$lib/api";
   import AirportPanel from "$lib/AirportPanel.svelte";
@@ -35,7 +37,7 @@
   import ShortcutsHelp from "$lib/ShortcutsHelp.svelte";
   import TopFlights from "$lib/TopFlights.svelte";
   import { activeCount, loadPersisted, matcher, persist, serverCategories, type Filters } from "$lib/filters";
-  import { cosAngle, viewArea } from "$lib/geo";
+  import { cosAngle, viewArea, visibleRadius } from "$lib/geo";
   import { motion } from "$lib/motion";
   import { matchAdsb } from "$lib/adsb";
   import { reference } from "$lib/reference.svelte";
@@ -262,6 +264,56 @@
   const measured = $derived(
     adsb && adsb.id === selectedId && settings.adsb && now - adsb.seenAt < ADSB_SHOW_MS ? adsb.aircraft : null,
   );
+
+  // Ships from VesselFinder: the area in view at the zoom in view, once the
+  // camera settles and then every minute while the window is visible. The
+  // backend runs one request at a time and answers an area it fetched in the
+  // last 10 s from memory; an answer for a view since left behind is dropped.
+  const SHIPS_SETTLE_MS = 600;
+  const SHIPS_REFRESH_MS = 60_000;
+  let ships = $state.raw<Ship[]>([]);
+  let shipsRequest = 0;
+  /** Waits for the camera to settle; reset by every move. */
+  let shipsSettle: ReturnType<typeof setTimeout> | undefined;
+  /** The next refresh; kept apart, so a camera that never settles (following an aircraft) still gets one. */
+  let shipsRefresh: ReturnType<typeof setTimeout> | undefined;
+  /** The feed's zoom steps: an answer at another one has the wrong density. */
+  const shipZoom = (zoom: number) => Math.floor(zoom + 1);
+  function stopShips() {
+    clearTimeout(shipsSettle);
+    clearTimeout(shipsRefresh);
+  }
+  async function loadShips() {
+    stopShips();
+    if (!settings.ships || !isTauri()) return;
+    shipsRefresh = setTimeout(loadShips, SHIPS_REFRESH_MS);
+    if (document.visibilityState === "hidden") return;
+    const asked = { ...view };
+    const area = viewArea(asked, window.innerWidth, window.innerHeight) ?? { west: -180, south: -90, east: 180, north: 90 };
+    const request = ++shipsRequest;
+    try {
+      const list = await shipsInView(area, asked.zoom);
+      // dropped if newer was asked meanwhile, or the camera has gone elsewhere
+      const v = view;
+      const radius = visibleRadius(v.zoom, v.pitch, window.innerWidth, window.innerHeight);
+      const away = cosAngle(v.longitude, v.latitude, asked.longitude, asked.latitude) < Math.cos((radius * Math.PI) / 360);
+      if (request !== shipsRequest || !settings.ships || shipZoom(v.zoom) !== shipZoom(asked.zoom) || away) return;
+      ships = list;
+    } catch {
+      // resting after a failure, or unreachable: the ships on show stay
+    }
+  }
+  $effect(() => {
+    void view;
+    if (!settings.ships) {
+      stopShips();
+      shipsRequest++;
+      ships = [];
+      return;
+    }
+    clearTimeout(shipsSettle);
+    shipsSettle = setTimeout(loadShips, SHIPS_SETTLE_MS);
+  });
 
   const boardAirport = $derived.by(() => {
     void reference.ready;
@@ -495,6 +547,7 @@
     p: () => (settings.liveries = !settings.liveries),
     d: () => (settings.daylight = !settings.daylight),
     w: () => (settings.weather = !settings.weather),
+    s: () => (settings.ships = !settings.ships),
   };
 
   function onkeydown(e: KeyboardEvent) {
@@ -527,6 +580,7 @@
       merged.added > 0 && "Track: OpenSky Network",
       // ODbL asks for attribution wherever the data is shown
       measured && "Aircraft data: © adsb.lol contributors, ODbL",
+      settings.ships && "Ships © VesselFinder",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]
       .filter(Boolean)
@@ -555,6 +609,7 @@
     timers.forEach(clearInterval);
     clearTimeout(refreshTimer);
     clearTimeout(viewTimer);
+    stopShips();
   });
 </script>
 
@@ -564,6 +619,7 @@
   <Globe
     bind:this={globe}
     flights={shown}
+    {ships}
     {selected}
     details={shownDetails}
     {route}
@@ -726,6 +782,7 @@
     bind:daylight={settings.daylight}
     bind:weather={settings.weather}
     bind:adsb={settings.adsb}
+    bind:ships={settings.ships}
     bind:exaggeration={settings.exaggeration}
     {session}
     inset={selected || boardCode ? PANEL_INSET : 0}

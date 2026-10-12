@@ -106,6 +106,8 @@ export interface Settings {
   weather: boolean;
   /** Measured data for the selected aircraft from adsb.lol. */
   adsb: boolean;
+  /** Live ship positions from VesselFinder. */
+  ships: boolean;
   exaggeration: number;
 }
 
@@ -118,6 +120,7 @@ export const DEFAULT_SETTINGS: Settings = {
   daylight: true,
   weather: false,
   adsb: true,
+  ships: true,
   exaggeration: 10,
 };
 

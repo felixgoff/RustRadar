@@ -33,7 +33,15 @@
     type PathStyleExtensionProps,
   } from "@deck.gl/extensions";
   import { MVTLayer, TileLayer } from "@deck.gl/geo-layers";
-  import { BitmapLayer, IconLayer, PathLayer, ScatterplotLayer, SolidPolygonLayer, TextLayer } from "@deck.gl/layers";
+  import {
+    BitmapLayer,
+    IconLayer,
+    PathLayer,
+    PolygonLayer,
+    ScatterplotLayer,
+    SolidPolygonLayer,
+    TextLayer,
+  } from "@deck.gl/layers";
   import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
   import { SphereGeometry } from "@luma.gl/engine";
   import type { Device } from "@luma.gl/core";
@@ -49,6 +57,7 @@
     type BoundingBox,
     type FlightDetails,
     type LiveFlight,
+    type Ship,
   } from "./api";
   import { NorthUpGlobeController } from "./controller";
   import { aircraftModels, type AircraftModel } from "./aircraft";
@@ -82,9 +91,12 @@
   import { flightDetails, isRateLimited } from "./api";
   import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
   import { reference } from "./reference.svelte";
+  import { hullPolygon, shipAtlas, shipColor, shipIcon, shipIconScale, shipIconSize, shipKindLabel } from "./ships";
 
   interface Props {
     flights: LiveFlight[];
+    /** Ships to draw on the water, under the aircraft. */
+    ships?: Ship[];
     selected: LiveFlight | null;
     details: FlightDetails | null;
     /** The selected flight's route, filed or estimated. */
@@ -116,6 +128,7 @@
 
   let {
     flights,
+    ships = [],
     selected,
     details,
     route,
@@ -1129,6 +1142,118 @@
     return [sy * sr + cy * sp * cr, -cy * sr + sy * sp * cr, cp * cr];
   }
 
+  // Ships: icons on the water, and close in their true-scale hulls. Their data
+  // arrays are built once per ship list; only the icons' screen angles follow
+  // the camera.
+  /** Above this zoom ships with dimensions and a heading are drawn as hulls at true scale. */
+  const HULL_ZOOM = 13;
+  const SHIP_ALPHA = 235;
+  /** Old positions are drawn faded. */
+  const SHIP_OLD_ALPHA = 105;
+  const SHIP_HULL_LINE: [number, number, number, number] = [8, 12, 20, 200];
+  const SHIP_PARAMETERS = { ...NO_CULL, depthWriteEnabled: false } as const;
+  type ShipColor = [number, number, number, number];
+  type ShipHull = { index: number; polygon: LonLat[]; color: ShipColor };
+  type ShipData = {
+    list: Ship[];
+    positions: [number, number, number][];
+    icons: string[];
+    colors: ShipColor[];
+    /** Indices of all ships, and of those without a hull (the icons shown close in). */
+    all: number[];
+    unhulled: number[];
+    hulls: ShipHull[];
+  };
+  let shipData: ShipData | null = null;
+  let shipAtlasData: ReturnType<typeof shipAtlas> | undefined;
+  function shipsFor(list: Ship[]): ShipData {
+    if (shipData?.list === list) return shipData;
+    const data: ShipData = { list, positions: [], icons: [], colors: [], all: [], unhulled: [], hulls: [] };
+    list.forEach((ship, i) => {
+      const color: ShipColor = [...shipColor(ship.kind), ship.old ? SHIP_OLD_ALPHA : SHIP_ALPHA];
+      data.positions.push([ship.lon, ship.lat, 0]);
+      data.icons.push(shipIcon(ship));
+      data.colors.push(color);
+      data.all.push(i);
+      if (ship.dims && ship.heading !== null) {
+        const fill: ShipColor = [color[0], color[1], color[2], ship.old ? 110 : 215];
+        data.hulls.push({ index: i, polygon: hullPolygon(ship.lon, ship.lat, ship.dims, ship.heading), color: fill });
+      } else data.unhulled.push(i);
+    });
+    shipData = data;
+    return data;
+  }
+  /** The icons' angles on screen, kept while neither the camera nor the ships move. */
+  let shipAngles: { key: string; list: Ship[] | null; angles: Float32Array; version: number } = {
+    key: "",
+    list: null,
+    angles: new Float32Array(0),
+    version: 0,
+  };
+  function shipLayers(list: Ship[], flat: boolean, mpp: number): Layer[] {
+    const { zoom, bearing, pitch, longitude, latitude } = view;
+    const data = shipsFor(list);
+    if (!list.length) return [];
+    shipAtlasData ??= shipAtlas();
+    const hulls = zoom > HULL_ZOOM && data.hulls.length > 0;
+    const layers: Layer[] = [];
+    if (hulls) {
+      layers.push(
+        new PolygonLayer<ShipHull>({
+          id: "ship-hulls",
+          data: data.hulls,
+          getPolygon: (d) => d.polygon,
+          getFillColor: (d) => d.color,
+          getLineColor: SHIP_HULL_LINE,
+          getLineWidth: 1,
+          lineWidthUnits: "pixels",
+          filled: true,
+          stroked: true,
+          pickable: true,
+          parameters: SURFACE_NO_CULL,
+        }),
+      );
+    }
+    if (!shipAtlasData) return layers;
+    const key = `${zoom},${bearing},${pitch},${longitude},${latitude}`;
+    if (shipAngles.key !== key || shipAngles.list !== list) {
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      // the flat projection's viewport above zoom 12, as deck.gl draws it
+      const viewport = flat
+        ? new WebMercatorViewport({ ...view, width, height })
+        : new GlobeViewport({ ...view, width, height });
+      const step = ICON_HEADING_STEP_PX * mpp;
+      const angles = new Float32Array(list.length);
+      const minCos = Math.cos((visibleRadius(zoom, pitch, width, height) * Math.PI) / 180);
+      list.forEach((ship, i) => {
+        if (ship.heading === null || cosAngle(ship.lon, ship.lat, longitude, latitude) <= minCos) return;
+        angles[i] = screenAngle(viewport, data.positions[i], ship.heading, step) ?? bearing - ship.heading;
+      });
+      shipAngles = { key, list, angles, version: shipAngles.version + 1 };
+    }
+    const angles = shipAngles.angles;
+    layers.push(
+      new IconLayer<number>({
+        id: "ship-icons",
+        data: hulls ? data.unhulled : data.all,
+        getPosition: (i) => data.positions[i],
+        getIcon: (i) => data.icons[i],
+        iconAtlas: shipAtlasData.atlas as never,
+        iconMapping: shipAtlasData.mapping as never,
+        getSize: (i) => shipIconSize(list[i], zoom),
+        getAngle: (i) => angles[i],
+        getColor: (i) => data.colors[i],
+        sizeUnits: "pixels",
+        billboard: true,
+        pickable: true,
+        parameters: SHIP_PARAMETERS,
+        updateTriggers: { getAngle: shipAngles.version, getSize: shipIconScale(zoom) },
+      }),
+    );
+    return layers;
+  }
+
   function buildLayers(): Layer[] {
     // the motion model's clock follows the feed's, not this machine's
     const now = motion.now();
@@ -1254,6 +1379,8 @@
     // back to its usual direction as the sun sets), so walls and shadows agree
     const toSunHere = localSun(sunDirection(now), cLat, cLon);
     aimKeyLight(toSunHere, buildings && flat ? sunlight(toSunHere[2]) * clamp01(zoom - FLAT_ABOVE_ZOOM) : 0);
+    // on the water, under the labels and every aircraft
+    layers.push(...shipLayers(ships, flat, mpp));
     if (tileUrl && labels && fontsReady) {
       const marked = [airport, ...(selected && route ? [route.origin, route.destination] : [])]
         .map((a) => a?.iata)
@@ -1703,8 +1830,22 @@
 
   const escape = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
-  /** Airport labels get deck's tooltip; aircraft get the {@link HoverCard}. */
+  /** Airport labels and ships get deck's tooltip; aircraft get the {@link HoverCard}. */
   function tooltip(info: PickingInfo) {
+    const shipIndex =
+      info.layer?.id === "ship-icons"
+        ? (info.object as number | undefined)
+        : info.layer?.id === "ship-hulls"
+          ? (info.object as { index: number } | undefined)?.index
+          : undefined;
+    const ship = shipIndex !== undefined ? shipData?.list[shipIndex] : undefined;
+    if (ship) {
+      const length = ship.dims ? ` · ${ship.dims[0] + ship.dims[1]} m` : "";
+      return {
+        html: `<div class="tt-head">${escape(ship.name)}</div><div class="tt-sub">${escape(shipKindLabel(ship.kind))}${length}</div><div class="tt-sub">MMSI ${ship.mmsi}${ship.old ? " · old position" : ""}</div>`,
+        className: "aircraft-tooltip",
+      };
+    }
     if (info.layer?.id !== "labels") return null;
     const p = (info.object as LabelFeature | undefined)?.properties;
     if (p?.layerName !== "aerodrome_label") return null;
@@ -1835,7 +1976,7 @@
 
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
-    void [flights, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
+    void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
     void [showLiveries, daylight, weather, follow];
     render();
   });

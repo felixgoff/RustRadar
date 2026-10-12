@@ -10,6 +10,7 @@ mod radar;
 mod reference;
 mod runways;
 mod session;
+mod ships;
 mod taxiways;
 mod updater;
 
@@ -673,6 +674,7 @@ pub fn run() {
             session::sign_out,
             taxiways::airport_taxiways,
             export::save_export,
+            ships::ships_in_view,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

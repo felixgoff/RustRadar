@@ -16,6 +16,7 @@
     daylight: boolean;
     weather: boolean;
     adsb: boolean;
+    ships: boolean;
     exaggeration: number;
     session: SessionInfo | null;
     /** Extra space on the right, e.g. for an open side panel. */
@@ -40,6 +41,7 @@
     daylight = $bindable(),
     weather = $bindable(),
     adsb = $bindable(),
+    ships = $bindable(),
     exaggeration = $bindable(),
     session,
     inset = 0,
@@ -210,6 +212,13 @@
             <small>Rain and snow from RainViewer, updated every 10 min</small>
           </span>
           <input type="checkbox" role="switch" bind:checked={weather} />
+        </label>
+        <label class="switch">
+          <span>
+            Ships
+            <small>Live positions from VesselFinder; more appear as you zoom in</small>
+          </span>
+          <input type="checkbox" role="switch" bind:checked={ships} />
         </label>
         <label class="switch">
           <span>

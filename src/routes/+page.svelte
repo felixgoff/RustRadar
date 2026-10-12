@@ -41,6 +41,8 @@
   import { reference } from "$lib/reference.svelte";
   import { mergeTrail, routeFor } from "$lib/routes";
   import { placeView } from "$lib/places";
+  import { afterRound, feedFreshness, type FeedClock } from "$lib/freshness";
+  import { clockAt } from "$lib/time";
 
   // A world refresh costs ~20 requests, a regional one a handful: poll the
   // world less often, and back off when Flightradar24 says to slow down.
@@ -67,11 +69,16 @@
   /** What we know about a selection before it appears in the feed. */
   let hint = $state.raw<LiveFlight | null>(null);
   let followState = $state<FollowState>("connecting");
+  /** When the follow stream gave up: the newest report it had (ms, feed clock). Frozen, so "Last seen" stays put. */
+  let endedSeenMs = $state(0);
+  /** The camera was locked on the aircraft when its stream gave up: lock on again if it resumes. */
+  let relockOnResume = false;
   let feedError = $state<string | null>(null);
   let rateLimited = $state(false);
   let loading = $state(false);
-  let lastUpdate = $state(0);
   let nextRefreshAt = $state(0);
+  /** When the snapshot on show arrived, and the schedule it was fetched on: what its age is measured against. */
+  let shownFeed = $state.raw<FeedClock | null>(null);
   /** Whether the latest snapshot covers only the visible area. */
   let regional = $state(false);
   let backoff = 1;
@@ -286,12 +293,13 @@
     fetchedArea = { area, view: { ...view } };
     lastRequestAt = Date.now();
     let limited = false;
+    let arrived = false;
     try {
       snapshot = await liveFlights(area, serverCategories($state.snapshot(filters) as Filters));
       // aircraft are drawn on the feed's clock, so a wrong system clock can't misplace them
       motion.syncClock(snapshot.serverTimeMs);
       regional = area !== null;
-      lastUpdate = Date.now();
+      arrived = true;
       feedError = null;
       limited = snapshot.errors.some(isRateLimited);
     } catch (e) {
@@ -302,6 +310,8 @@
       rateLimited = limited;
       backoff = limited ? Math.min(backoff * 2, MAX_BACKOFF) : 1;
       const interval = (area ? AREA_REFRESH_MS : WORLD_REFRESH_MS) * backoff;
+      // only new data moves the clock: a failure's longer backoff can't make old data look fresh
+      shownFeed = afterRound(shownFeed, { arrived, at: Date.now(), interval });
       scheduleRefresh(refreshAgain && !limited ? MIN_GAP_MS : interval);
     }
   }
@@ -341,13 +351,15 @@
     }
   }
 
-  function startFollow(id: number) {
-    followState = "connecting";
+  function startFollow(id: number, resuming = false) {
+    followState = resuming ? "reconnecting" : "connecting";
     followFlight(id, (e: FollowEvent) => {
       if (selectedId !== id) return; // a late event for a previous selection
       if (e.event === "details") {
         details = e.data;
         followState = "live";
+        if (relockOnResume) following = true;
+        relockOnResume = false;
         if (flyPending && e.data.flight) {
           flyPending = false;
           globe.flyTo(e.data.flight.longitude, e.data.flight.latitude, flyZoom);
@@ -355,21 +367,51 @@
       } else if (e.event === "error") {
         followState = "reconnecting";
       } else {
-        followState = "ended";
+        followEnded();
       }
-    }).catch(() => (followState = "ended"));
+    }).catch(() => selectedId === id && followEnded());
   }
+
+  /** The open flight stopped reporting: its last values stay on show, and the camera lets go. */
+  function followEnded() {
+    followState = "ended";
+    endedSeenMs = selected?.timestampMs ?? 0;
+    // nothing moves any more to keep in frame; Follow (or C) can still lock on again
+    relockOnResume ||= following;
+    following = false;
+  }
+
+  /** The panel's Follow, or C: the viewer's own choice, which a resumed stream doesn't override. */
+  function toggleFollow() {
+    following = !following;
+    relockOnResume = false;
+  }
+
+  // The stream can give up while the aircraft still reports (its endpoint
+  // rate limited, say). A newer position in the feed shows it is still
+  // flying: ask again, as reconnecting rather than ended. At most once per
+  // feed refresh, since each end records the newest report seen.
+  $effect(() => {
+    if (followState !== "ended" || selectedId === null) return;
+    const reported = byId.get(selectedId)?.timestampMs ?? 0;
+    if (reported > endedSeenMs) untrack(() => startFollow(selectedId!, true));
+  });
 
   function select(
     id: number | null,
     opts: { hint?: LiveFlight; fly?: boolean; follow?: boolean; fromBoard?: boolean } = {},
   ) {
-    if (id === selectedId && !opts.fly) return;
+    if (id === selectedId && !opts.fly) {
+      // another click on a flight that stopped reporting asks again whether it is live
+      if (id !== null && followState === "ended") startFollow(id);
+      return;
+    }
     selectedId = id;
     details = null;
     hint = opts.hint ?? null;
     flyPending = false;
     following = opts.follow ?? false;
+    relockOnResume = false;
     fromBoard = opts.fromBoard ?? false;
     if (id === null) {
       unfollowFlight();
@@ -425,6 +467,11 @@
     if (selectedId !== null) startFollow(selectedId);
   }
 
+  /** From a sign-in prompt in a panel: the keyboard lands in the form, and goes back to the panel when it closes. */
+  function promptSignIn(returnFocus: () => HTMLElement | null) {
+    controls.openAccount({ focusForm: true, returnFocus });
+  }
+
   async function handleSignOut() {
     session = await signOut();
     refreshSoon();
@@ -435,7 +482,7 @@
     "/": () => searchBox.focus(),
     "?": () => (helpOpen = !helpOpen),
     f: () => (filtersOpen = !filtersOpen),
-    c: () => selectedId !== null && (following = !following),
+    c: () => selectedId !== null && toggleFollow(),
     t: () => globe.setPitch(view.pitch > 5 ? 0 : TILT),
     n: () => globe.resetOrientation(),
     "+": () => globe.zoomBy(1),
@@ -469,7 +516,8 @@
     action();
   }
 
-  const age = $derived(lastUpdate ? Math.max(0, Math.round((now - lastUpdate) / 1000)) : null);
+  // quiet while the feed keeps its schedule; past about two refreshes, a warning with the data's age
+  const freshness = $derived(shownFeed ? feedFreshness(Math.max(0, now - shownFeed.at), shownFeed.interval) : null);
   const attribution = $derived(
     [
       `Flight data: Flightradar24 (unofficial API${authenticated ? ", signed in" : ""})`,
@@ -542,13 +590,19 @@
     <section class="surface primary">
       <header class="brand">
         <h1><Radar size={20} strokeWidth={1.75} /> RustRadar</h1>
-        {#if snapshot}
+        {#if snapshot && freshness?.stale}
+          <p class="status" title="Last update at {clockAt(Math.floor((shownFeed?.at ?? 0) / 1000))}{loading ? '; updating now' : ''}">
+            <span class="badge warn">{freshness.label}</span>
+          </p>
+        {:else if snapshot}
           <p class="status" title="{snapshot.requests} requests in {snapshot.elapsedMs} ms">
-            {#if loading}Updating…{:else}Updated {age} s ago{/if}
+            {#if loading}Updating…{:else}{freshness?.label}{/if}
           </p>
         {:else if !feedError}
           <p class="status"><span class="skeleton" style="width: 90px; height: 12px"></span></p>
         {/if}
+        <!-- the age ticks every second: announce only the change to stale -->
+        <span class="visually-hidden" role="status">{freshness?.stale ? "Flight data is out of date" : ""}</span>
       </header>
 
       <SearchBox
@@ -581,7 +635,8 @@
       </div>
 
       {#if rateLimited}
-        <div class="alert" role="status">
+        <!-- expected throttling, not a failure: the warning tone, still in plain sight -->
+        <div class="alert warn" role="status">
           <TriangleAlert size={16} strokeWidth={1.75} />
           <div>
             <p>Flightradar24 is limiting requests. Slowing down; next update in {retryIn} s.</p>
@@ -646,13 +701,14 @@
       {measured}
       {route}
       status={followState}
+      lastSeenMs={followState === "ended" ? endedSeenMs : 0}
       {authenticated}
       {following}
       back={fromBoard && boardCode ? { label: `${boardCode} departures and arrivals`, onclick: () => select(null) } : null}
-      onfollow={() => (following = !following)}
+      onfollow={toggleFollow}
       onselect={(id) => select(id, { fly: true })}
       onairport={openAirport}
-      onsignin={() => controls.openAccount()}
+      onsignin={promptSignIn}
       onclose={() => select(null)}
     />
   {/if}
@@ -746,6 +802,10 @@
     color: var(--text-3);
     white-space: nowrap;
   }
+  /* stale: the status's own size, so the escalation reads as the same line raised */
+  .status .badge {
+    font-size: var(--text-sm);
+  }
   .toolbar {
     display: flex;
     align-items: center;
@@ -788,6 +848,10 @@
     background: var(--danger-soft);
     color: var(--danger);
     font-size: var(--text-md);
+  }
+  .alert.warn {
+    background: var(--warn-soft);
+    color: var(--warn);
   }
   .alert :global(svg) {
     flex: none;

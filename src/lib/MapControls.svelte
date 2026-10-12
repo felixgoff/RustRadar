@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { CircleUserRound, Keyboard, Layers, LoaderCircle, Minus, Navigation2, Plus, Rotate3d } from "@lucide/svelte";
   import type { SessionInfo } from "./api";
   import type { Basemap } from "./geo";
@@ -61,6 +62,10 @@
   const TILT = 55;
   let open = $state<"layers" | "account" | null>(null);
   let root: HTMLDivElement;
+  let firstField = $state<HTMLInputElement>();
+  let signedInState = $state<HTMLElement>();
+  /** Where the keyboard goes back to when the account popover closes, if it was opened from elsewhere. */
+  let returnFocus: (() => HTMLElement | null) | null = null;
 
   let email = $state("");
   let password = $state("");
@@ -71,21 +76,52 @@
   const rotated = $derived(Math.abs(bearing) > 0.5 || tilted);
   const signedIn = $derived(session?.authenticated ?? false);
 
-  /** Opens the account popover, e.g. from a "sign in" prompt elsewhere. */
-  export function openAccount() {
+  /**
+   * Opens the account popover. From a "sign in" prompt elsewhere, `focusForm`
+   * puts the caret in its first field, and `returnFocus` names where the
+   * keyboard goes back to once it closes.
+   */
+  export async function openAccount(opts: { focusForm?: boolean; returnFocus?: () => HTMLElement | null } = {}) {
     open = "account";
     error = null;
+    returnFocus = opts.returnFocus ?? null;
+    if (opts.focusForm) {
+      await tick();
+      firstField?.focus();
+    }
+  }
+
+  /** Closes whichever popover is open. Focus left inside it would fall to the page: it goes back where it came from. */
+  function close() {
+    if (!open) return;
+    open = null;
+    const back = returnFocus;
+    returnFocus = null;
+    if (!back) return;
+    // after the click or key has moved focus on its own, e.g. to the control clicked
+    requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (active && active !== document.body && active.isConnected) return;
+      back()?.focus();
+    });
+  }
+
+  function toggleLayers() {
+    if (open === "layers") return close();
+    // moving on to another popover: nothing to go back to
+    returnFocus = null;
+    open = "layers";
   }
 
   function onpointerdown(e: PointerEvent) {
-    if (open && !root.contains(e.target as Node)) open = null;
+    if (open && !root.contains(e.target as Node)) close();
   }
 
   // in the capture phase, so Escape closes the popover before it closes anything else
   function onkeydowncapture(e: KeyboardEvent) {
     if (e.key !== "Escape" || !open) return;
     e.stopPropagation();
-    open = null;
+    close();
   }
 
   async function submit(e: SubmitEvent) {
@@ -95,6 +131,9 @@
     try {
       await onsignin(email, password);
       password = "";
+      // the form is gone: say so where the keyboard was, rather than dropping it to the page
+      await tick();
+      signedInState?.focus();
     } catch (err) {
       error = String(err);
     } finally {
@@ -191,7 +230,7 @@
     <section class="popover surface account" aria-labelledby="account-heading">
       <h2 id="account-heading">Flightradar24 account</h2>
       {#if signedIn}
-        <p class="state"><span class="badge good">Signed in</span></p>
+        <p class="state" tabindex="-1" bind:this={signedInState}><span class="badge good">Signed in</span></p>
         <p class="note">
           Data your subscription includes, such as filed flight plans, now shows up.{session?.expires
             ? ` The session lasts until ${until(session.expires)}.`
@@ -206,7 +245,7 @@
         <form onsubmit={submit}>
           <label class="field">
             <span>Email</span>
-            <input type="email" autocomplete="username" required bind:value={email} disabled={busy} />
+            <input type="email" autocomplete="username" required bind:value={email} disabled={busy} bind:this={firstField} />
           </label>
           <label class="field">
             <span>Password</span>
@@ -232,7 +271,7 @@
       aria-expanded={open === "layers"}
       aria-pressed={open === "layers"}
       title="Map layers"
-      onclick={() => (open = open === "layers" ? null : "layers")}
+      onclick={toggleLayers}
     >
       <Layers size={18} strokeWidth={1.75} />
     </button>
@@ -243,7 +282,7 @@
       aria-expanded={open === "account"}
       aria-pressed={open === "account"}
       title={signedIn ? "Signed in to Flightradar24" : "Sign in to Flightradar24"}
-      onclick={() => (open === "account" ? (open = null) : openAccount())}
+      onclick={() => (open === "account" ? close() : openAccount())}
     >
       <CircleUserRound size={18} strokeWidth={1.75} />
     </button>
@@ -462,6 +501,10 @@
 
   .account {
     gap: var(--space-3);
+  }
+  /* where the keyboard lands after signing in: read out, not a control, so no ring */
+  .state:focus {
+    outline: none;
   }
   .account h2 {
     font-size: var(--text-base);

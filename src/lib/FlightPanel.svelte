@@ -1,5 +1,8 @@
 <script lang="ts" module>
   export type FollowState = "connecting" | "live" | "reconnecting" | "ended";
+
+  /** Whether "More from the aircraft" is open: kept for the session, from one flight to the next. */
+  const session = { moreOpen: false };
 </script>
 
 <script lang="ts">
@@ -11,6 +14,7 @@
     ExternalLink,
     LoaderCircle,
     LocateFixed,
+    LockKeyhole,
     Plane,
     RefreshCw,
     X,
@@ -26,17 +30,22 @@
     type LiveFlight,
   } from "./api";
   import { verticalRate } from "./adsb";
+  import { aircraftReadings, degrees, listing, type Reading } from "./aircraft-readings";
   import AltitudeChart from "./AltitudeChart.svelte";
+  import Clock from "./Clock.svelte";
   import { ALTITUDE_STOPS } from "./geo";
   import { airlineIcao, reference } from "./reference.svelte";
   import { airacCycle, type Route } from "./routes";
-  import { clockAt, dayAt, delayMinutes, duration, punctuality, toneOf } from "./time";
+  import { missingWithoutSignIn, signInNote } from "./signin-values";
+  import { clockWithZone, dayAt, delayMinutes, duration, punctuality, toneOf } from "./time";
 
   interface Props {
     flight: LiveFlight;
     details: FlightDetails | null;
     route: Route | null;
     status: FollowState;
+    /** Once ended: the newest report there was (Unix ms), frozen, so "Last seen" doesn't creep on with later data. */
+    lastSeenMs?: number;
     /** Squawk, vertical speed, airspace and flight plans are withheld from anonymous users. */
     authenticated: boolean;
     /** How many track points came from the OpenSky Network. */
@@ -52,7 +61,8 @@
     onselect: (flightId: number) => void;
     /** Open an airport's board. */
     onairport: (code: string) => void;
-    onsignin: () => void;
+    /** Open the sign-in form; `returnFocus` says where the keyboard goes back to afterwards. */
+    onsignin: (returnFocus: () => HTMLElement | null) => void;
     onclose: () => void;
   }
 
@@ -61,6 +71,7 @@
     details,
     route,
     status,
+    lastSeenMs = 0,
     authenticated,
     following,
     openskyAdded = 0,
@@ -81,15 +92,25 @@
     ["history", "History"],
   ];
 
-  const LOGIN_HINT = "Shown to signed-in Flightradar24 users only";
   const info = $derived(details?.flight ?? null);
   const aircraft = $derived(details?.aircraft ?? null);
   const schedule = $derived(details?.schedule ?? null);
   const progress = $derived(details?.progress ?? null);
   const loading = $derived(!details && status !== "ended");
+  /** No longer reporting: the live values stay on show as the last ones, dimmed. */
+  const ended = $derived(status === "ended");
+  /** When the last live data for this flight was timed (unix seconds), from whichever source was fresher; 0 if none came. */
+  const seenAt = $derived(
+    Math.floor((lastSeenMs || Math.max(flight.timestampMs || 0, details?.flight?.timestamp_ms || 0)) / 1000),
+  );
   const flightId = $derived(flight.id);
+  /** "Last seen" reads in the altitude chart's zone, the departure airport's, or the viewer's when that isn't known. */
+  const seenZone = $derived(route?.origin?.timezone);
+  const seenPlace = $derived(seenZone ? `${route?.origin?.iata || flight.origin} time` : "your time zone");
 
   let tab = $state<Tab>("overview");
+  /** The pinned footer's height, which keyboard focus scrolls clear of. */
+  let footerHeight = $state(57);
   let photo = $state(0);
   let logoFailed = $state(0);
   $effect(() => {
@@ -116,24 +137,40 @@
   const km = (m: number) => `${Math.round(m / 1000).toLocaleString()} km`;
   // squawk codes are four octal digits, transmitted in base 10
   const squawk = (code: number) => (code ? code.toString(8).padStart(4, "0") : "—");
-  // measured values: "—" when the aircraft doesn't report them
-  const fmt = (v: number | undefined, unit = "", digits = 0) =>
-    v === undefined || !Number.isFinite(v) ? "—" : `${v.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })}${unit}`;
   const signed = (v: number | undefined) => (v === undefined ? "—" : `${v > 0 ? "+" : ""}${v.toLocaleString()} fpm`);
-  const degrees = (v: number | undefined) => (v === undefined ? "—" : `${String(Math.round(v) % 360).padStart(3, "0")}°`);
-  const MODES: Record<string, string> = {
-    autopilot: "Autopilot",
-    vnav: "VNAV",
-    althold: "Altitude hold",
-    approach: "Approach",
-    lnav: "LNAV",
-    tcas: "TCAS",
-  };
   /** FR24's vertical speed when signed in, else the transponder's from adsb.lol. */
   const fr24Vs = $derived(info && authenticated ? info.vertical_speed : undefined);
   const measuredVs = $derived(measured ? verticalRate(measured) : undefined);
   const fr24Squawk = $derived(info && authenticated ? info.squawk : 0);
-  const selectedAlt = $derived(measured?.navAltitudeMcp ?? measured?.navAltitudeFms);
+  /** The transponder's own values: heading, IAS, Mach and wind on show, the rest behind a disclosure. */
+  const readings = $derived(measured ? aircraftReadings(measured) : null);
+
+  /** After "More from the aircraft" opens: scroll what it opened clear of the pinned footer. */
+  function revealMore(e: MouseEvent & { currentTarget: HTMLElement }) {
+    const details = e.currentTarget.parentElement as HTMLDetailsElement;
+    requestAnimationFrame(() => {
+      const panel = details.closest<HTMLElement>(".panel");
+      const footer = panel?.querySelector("footer");
+      if (!details.open || !panel || !footer) return;
+      const hidden = details.getBoundingClientRect().bottom - footer.getBoundingClientRect().top;
+      if (hidden > 0) panel.scrollBy({ top: hidden + 12 });
+    });
+  }
+
+  /** A sign-in prompt: back to it when the form closes, or to the open tab once signing in has removed it. */
+  function signIn(e: MouseEvent & { currentTarget: HTMLElement }) {
+    const from = e.currentTarget;
+    onsignin(() => (from.isConnected ? from : document.getElementById(`tab-${tab}`)));
+  }
+
+  /** Sign-in-only values with nothing to show: named once in a note, not as rows of "—" that read as "not reported". */
+  const gated = $derived(
+    missingWithoutSignIn(authenticated, {
+      verticalSpeed: measuredVs !== undefined,
+      squawk: !!(info?.squawk || measured?.squawk),
+      airspace: !!info?.airspace,
+    }),
+  );
   const sentence = (s: string) => s.charAt(0) + s.slice(1).toLowerCase().replaceAll("_", " ");
 
   const departure = $derived.by(() => {
@@ -196,13 +233,13 @@
     const to = reference.airport(r.destination_iata)?.timezone;
     return {
       day: r.stod ? dayAt(r.stod, from) : "",
-      dep: clockAt(r.atod || r.etod || r.stod, from),
-      arr: clockAt(r.atoa || r.etoa || r.stoa, to),
+      dep: { unix: r.atod || r.etod || r.stod, zone: from },
+      arr: { unix: r.atoa || r.etoa || r.stoa, zone: to },
     };
   };
 </script>
 
-<aside class="panel surface" aria-label="Selected flight">
+<aside class="panel surface" aria-label="Selected flight" style:--footer-height="{footerHeight}px">
   {#if back}
     <button class="back" onclick={back.onclick}><ArrowLeft size={14} strokeWidth={2} /> {back.label}</button>
   {/if}
@@ -216,7 +253,7 @@
       <span class="data value">{aircraft?.typecode || flight.typecode || "—"}</span>
       <span class="data sub">{aircraft?.reg || flight.reg || "—"}</span>
     </div>
-    <div class="cell">
+    <div class="cell" class:dim={ended} title={ended ? "As last reported" : undefined}>
       <span class="data value level">{level}</span>
       <span class="data sub">{info?.ground_speed ?? flight.speed} kt</span>
     </div>
@@ -226,9 +263,9 @@
   </header>
 
   {#if loading}
-    <div class="photo skeleton"></div>
+    <div class="photo skeleton" class:short={back || diverted}></div>
   {:else if image}
-    <div class="photo">
+    <div class="photo" class:short={back || diverted}>
       <button class="image" onclick={() => openUrl(image.url)} title="View this photo on JetPhotos">
         <img src={image.medium || image.thumbnail} alt="{aircraft?.full_description ?? 'Aircraft'} {aircraft?.reg ?? ''}" />
       </button>
@@ -257,6 +294,9 @@
   <section class="route" aria-label="Route">
     <div class="airports">
       {#each [{ code: origin?.iata || flight.origin, airport: origin, time: departure, end: false }, { code: destination?.iata || flight.destination, airport: destination, time: arrival, end: true }] as side (side.end)}
+        <!-- once ended, the arrival is an estimate from live data that stopped: dimmed, and its
+             punctuality no longer a verdict -->
+        {@const stale = ended && side.end && !schedule?.actual_arrival}
         <div class:end={side.end}>
           {#if side.code}
             <button class="code data" title="Departures and arrivals at {side.airport?.name ?? side.code}" onclick={() => onairport(side.code)}>
@@ -266,17 +306,28 @@
             <span class="code data">—</span>
           {/if}
           <span class="city" title={side.airport?.name}>{side.airport?.city || side.airport?.name || ""}</span>
-          <span class="when">
-            {side.time.label} <span class="data">{clockAt(side.time.time, side.airport?.timezone)}</span>
+          <!-- each airport's own clock, named, so no note has to say whose time it is -->
+          <span class="when" class:dim={stale}>
+            {side.time.label} <Clock unix={side.time.time} timeZone={side.airport?.timezone} />
           </span>
-          {#if side.time.delay}<span class="badge {side.time.delay.tone}">{side.time.delay.label}</span>{/if}
+          {#if side.time.delay}
+            <span class="badge {stale ? 'neutral' : side.time.delay.tone}">{side.time.delay.label}</span>
+          {/if}
         </div>
       {/each}
     </div>
     <!-- without progress data the aircraft has no place on the line: drawing it
          at the origin would claim it hasn't left -->
     {#if progress}
-      <div class="track" role="progressbar" aria-label="Flight progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+      <div
+        class="track"
+        class:dim={ended}
+        role="progressbar"
+        aria-label={ended ? "Flight progress, as last reported" : "Flight progress"}
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
         <div class="fill" style="transform: scaleX({pct / 100})"></div>
         <div class="run" style="transform: translateX({pct}%)">
           <span class="marker"><Plane size={14} strokeWidth={2} /></span>
@@ -286,7 +337,7 @@
       <div class="track unknown" aria-hidden="true"></div>
     {/if}
     {#if progress}
-      <p class="distances">
+      <p class="distances" class:dim={ended}>
         {km(progress.traversed_distance)} flown · {km(progress.remaining_distance)} to go{progress.remaining_time > 0
           ? ` · ${duration(progress.remaining_time)} left`
           : ""}
@@ -297,7 +348,6 @@
     {#if diverted}
       <p class="badge bad">Diverted to {destination?.name ?? "another airport"}</p>
     {/if}
-    {#if schedule}<p class="note">Times are local to each airport.</p>{/if}
   </section>
 
   <div class="tabs" role="tablist" aria-label="Flight information">
@@ -318,36 +368,53 @@
 
   <div class="tabpanel" id="tabpanel" role="tabpanel" aria-labelledby="tab-{tab}">
     {#if tab === "overview"}
-      <dl class="facts">
-        <div><dt>Altitude</dt><dd class="data">{onGround ? "On ground" : `${altitude.toLocaleString()} ft`}</dd></div>
-        <div><dt>Ground speed</dt><dd class="data">{info?.ground_speed ?? flight.speed} kt</dd></div>
-        {#if fr24Vs === undefined && measuredVs !== undefined}
-          <div title="Reported by the aircraft, via adsb.lol">
-            <dt>Vertical speed</dt>
-            <dd class="data">{signed(measuredVs)} <span class="via">adsb.lol</span></dd>
-          </div>
-        {:else}
-          <div title={authenticated ? undefined : LOGIN_HINT}>
-            <dt>Vertical speed</dt>
-            <dd class="data">{signed(fr24Vs)}</dd>
-          </div>
+      <!-- altitude and ground speed are in the strip above, and exact feet in the chart: not repeated here.
+           Once ended, Flightradar24's values dim as last reported; the aircraft's own (adsb.lol)
+           keep their own clock and leave a minute after its last message. -->
+      <div class="stack overview">
+        <dl class="facts">
+          {#if fr24Vs === undefined && measuredVs !== undefined}
+            <div title="Reported by the aircraft, via adsb.lol">
+              <dt>Vertical speed</dt>
+              <dd class="data">{signed(measuredVs)} <span class="via">adsb.lol</span></dd>
+            </div>
+          {:else if !gated.includes("verticalSpeed")}
+            <div><dt>Vertical speed</dt><dd class="data" class:dim={ended}>{signed(fr24Vs)}</dd></div>
+          {/if}
+          <div><dt>Track</dt><dd class="data" class:dim={ended}>{degrees(info?.track ?? flight.track)}</dd></div>
+          {#if !fr24Squawk && measured?.squawk}
+            <div title="Reported by the aircraft, via adsb.lol">
+              <dt>Squawk</dt>
+              <dd class="data">{measured.squawk} <span class="via">adsb.lol</span></dd>
+            </div>
+          {:else if !gated.includes("squawk")}
+            <div><dt>Squawk</dt><dd class="data" class:dim={ended}>{squawk(info?.squawk ?? 0)}</dd></div>
+          {/if}
+          <div><dt>Phase</dt><dd class:dim={ended}>{progress ? sentence(progress.flight_stage) : "—"}</dd></div>
+          <!-- no airspace (over the ocean, or not yet loaded) is simply left out -->
+          {#if info?.airspace}
+            <div class="airspace"><dt>Airspace</dt><dd class:dim={ended}>{info.airspace}</dd></div>
+          {/if}
+        </dl>
+        {#if gated.length}
+          <p class="gated">
+            <span class="lock"><LockKeyhole size={12} strokeWidth={2} /></span>
+            <span id="gated-note">{signInNote(gated)}</span>
+            <button class="inline-action" aria-describedby="gated-note" onclick={signIn}>Sign in</button>
+          </p>
         {/if}
-        <div><dt>Track</dt><dd class="data">{info?.track ?? flight.track}°</dd></div>
-        {#if !fr24Squawk && measured?.squawk}
-          <div title="Reported by the aircraft, via adsb.lol">
-            <dt>Squawk</dt>
-            <dd class="data">{measured.squawk} <span class="via">adsb.lol</span></dd>
-          </div>
-        {:else}
-          <div title={authenticated ? undefined : LOGIN_HINT}><dt>Squawk</dt><dd class="data">{squawk(info?.squawk ?? 0)}</dd></div>
-        {/if}
-        <div><dt>Phase</dt><dd>{progress ? sentence(progress.flight_stage) : "—"}</dd></div>
-        <div class="wide" title={authenticated ? undefined : LOGIN_HINT}><dt>Airspace</dt><dd>{info?.airspace || "—"}</dd></div>
-      </dl>
-      {#if measured}
-        <section class="measured" aria-label="Reported by the aircraft">
+      </div>
+      <!-- the zone is named only when known: without it the axis is in the viewer's time -->
+      <AltitudeChart
+        trail={details?.trail ?? []}
+        timeZone={origin?.timezone}
+        place={origin?.timezone ? origin.iata || flight.origin || undefined : undefined}
+        {ended}
+      />
+      {#if readings}
+        <section class="measured" aria-labelledby="measured-heading">
           <header>
-            <h3>Reported by the aircraft</h3>
+            <h3 id="measured-heading">Reported by the aircraft</h3>
             <button
               class="via link"
               title="Community ADS-B data from adsb.lol, under the Open Database Licence"
@@ -356,40 +423,36 @@
               adsb.lol <ExternalLink size={11} strokeWidth={2} />
             </button>
           </header>
-          <dl class="facts">
-            <div><dt>Heading</dt><dd class="data">{degrees(measured.trueHeading)}</dd></div>
-            <div><dt>Bank</dt><dd class="data">{measured.roll === undefined ? "—" : `${Math.abs(measured.roll).toFixed(0)}° ${measured.roll > 0.5 ? "R" : measured.roll < -0.5 ? "L" : ""}`.trim()}</dd></div>
-            <div><dt>GNSS altitude</dt><dd class="data">{fmt(measured.altGeom, " ft")}</dd></div>
-            <div><dt>IAS</dt><dd class="data">{fmt(measured.ias, " kt")}</dd></div>
-            <div><dt>TAS</dt><dd class="data">{fmt(measured.tas, " kt")}</dd></div>
-            <div><dt>Mach</dt><dd class="data">{fmt(measured.mach, "", 3)}</dd></div>
-            <div title="Set on the autopilot (or by the flight management system)">
-              <dt>Selected alt.</dt>
-              <dd class="data">{fmt(selectedAlt, " ft")}</dd>
-            </div>
-            <div title="Set on the autopilot; magnetic"><dt>Selected hdg</dt><dd class="data">{degrees(measured.navHeading)}</dd></div>
-            <div><dt>OAT</dt><dd class="data">{fmt(measured.oat, " °C")}</dd></div>
-            <div class="wide" title="Derived from the aircraft's airspeed, heading and ground track">
-              <dt>Wind</dt>
-              <dd class="data">
-                {measured.windDir === undefined || measured.windSpeed === undefined
-                  ? "—"
-                  : `${degrees(measured.windDir)} at ${measured.windSpeed} kt`}
-              </dd>
-            </div>
-            {#if measured.navModes?.length}
-              <div class="wide">
-                <dt>Autopilot modes</dt>
-                <dd>{measured.navModes.map((m) => MODES[m] ?? m.toUpperCase()).join(" · ")}</dd>
+          {#snippet grid(list: Reading[])}
+            <dl class="facts">
+              {#each list as r (r.label)}
+                <div class:wide={r.wide} title={r.title}>
+                  <dt>{r.label}</dt>
+                  <dd class:data={!r.words}>{r.value ?? "—"}</dd>
+                </div>
+              {/each}
+            </dl>
+          {/snippet}
+          {@render grid(readings.first)}
+          {#if readings.more.length}
+            <details open={session.moreOpen} ontoggle={(e) => (session.moreOpen = e.currentTarget.open)}>
+              <summary onclick={revealMore}>
+                <span class="chevron"><ChevronRight size={14} strokeWidth={2} /></span>
+                More from the aircraft ({readings.more.length})
+              </summary>
+              <div class="more">
+                {@render grid(readings.more)}
+                {#if readings.unreported.length}
+                  <p class="note">Not reported by this aircraft: {listing(readings.unreported)}.</p>
+                {/if}
               </div>
-            {/if}
-          </dl>
-          {#if measured.mlat}
+            </details>
+          {/if}
+          {#if measured?.mlat}
             <p class="note">Position by multilateration: less precise than the aircraft's own.</p>
           {/if}
         </section>
       {/if}
-      <AltitudeChart trail={details?.trail ?? []} timeZone={origin?.timezone} place={origin?.iata || flight.origin || undefined} />
     {:else if tab === "route"}
       <div class="stack">
         <div class="kind">
@@ -443,7 +506,7 @@
             only with signed-in subscribers.
           </p>
           {#if !authenticated}
-            <button class="button" onclick={onsignin}>Sign in to Flightradar24</button>
+            <button class="button" onclick={signIn}>Sign in to Flightradar24</button>
           {/if}
         {/if}
 
@@ -546,7 +609,9 @@
                   <span class="day">{t.day}</span>
                   <span class="data number">{r.number || r.callsign || "—"}</span>
                   <span class="data legs">{r.origin_iata || "?"} – {r.destination_iata || "?"}</span>
-                  <span class="data times">{t.dep} – {t.arr}</span>
+                  <span class="times">
+                    <Clock unix={t.dep.unix} timeZone={t.dep.zone} /> – <Clock unix={t.arr.unix} timeZone={t.arr.zone} />
+                  </span>
                   <span class="status-text" class:good={tone === "good"} class:warn={tone === "warn"} class:bad={tone === "bad"}>
                     {current ? "This flight" : r.status || ""}
                   </span>
@@ -554,31 +619,43 @@
               </li>
             {/each}
           </ol>
-          <p class="note">Live flights open on the map. Times are local to each airport.</p>
+          <p class="note">Live flights open on the map.</p>
         {/if}
       </div>
     {/if}
   </div>
 
-  <footer>
+  <footer bind:offsetHeight={footerHeight}>
+    <!-- the footer's wording swaps whole elements: announce the end from a region that stays put -->
+    <span class="visually-hidden" role="status">
+      {ended ? (seenAt ? `No longer live, last seen ${clockWithZone(seenAt, seenZone)}` : "Not live") : ""}
+    </span>
     {#if status === "live"}
       <span class="status live"><span class="dot"></span>Live</span>
-    {:else if status === "ended"}
-      <span class="status ended">No longer live</span>
+    {:else if ended}
+      <!-- in the chart's zone, so the time lines up with the end of its line -->
+      <span class="status ended" title={seenAt ? `The last report, in ${seenPlace}` : undefined}>
+        <span class="dot"></span>
+        {#if seenAt}<span>Last seen <Clock unix={seenAt} timeZone={seenZone} /></span>{:else}Not live{/if}
+      </span>
     {:else}
       <span class="status">
         <span class="spin"><LoaderCircle size={14} strokeWidth={2} /></span>
         {status === "connecting" ? "Connecting…" : "Reconnecting…"}
       </span>
     {/if}
+    <!-- one row in every state, so the footer never grows over the chart: while the
+         status needs the room, Follow keeps only its icon -->
     <div class="actions">
       <button
         class="button"
+        class:compact={status !== "live"}
         aria-pressed={following}
+        aria-label={status !== "live" ? "Follow" : undefined}
         title={following ? "Stop following (C)" : "Follow with the camera (C)"}
         onclick={onfollow}
       >
-        <LocateFixed size={14} strokeWidth={1.75} /> Follow
+        <LocateFixed size={14} strokeWidth={1.75} />{#if status === "live"} Follow{/if}
       </button>
       <button class="button" onclick={() => openUrl(fr24Url)}>
         Flightradar24 <ExternalLink size={14} strokeWidth={1.75} />
@@ -597,6 +674,8 @@
     max-height: calc(100% - var(--space-4) - 28px);
     overflow-x: hidden;
     overflow-y: auto;
+    /* a control focused by the keyboard scrolls clear of the pinned footer, not under it */
+    scroll-padding-bottom: calc(var(--footer-height, 57px) + var(--space-4));
     display: flex;
     flex-direction: column;
     animation: enter 200ms var(--ease-out);
@@ -612,7 +691,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    padding: var(--space-2) var(--space-4);
+    padding: var(--space-1) var(--space-4);
     border: 0;
     border-bottom: 1px solid var(--line);
     background: none;
@@ -666,15 +745,24 @@
   .level {
     color: var(--amber);
   }
+  /* no longer live: the last values stay readable but stop reading as current */
+  .dim,
+  .dim .value,
+  .dim .sub {
+    color: var(--text-3);
+  }
   .close {
     align-self: center;
     justify-self: center;
   }
 
+  /* wide enough for an aircraft side-on, short enough that the altitude chart
+     stays in view at 1440x900; shorter again when a back row or a diversion
+     takes room above it */
   .photo {
     position: relative;
     flex: none;
-    aspect-ratio: 16 / 9;
+    aspect-ratio: 2 / 1;
     background: var(--surface-raised);
     overflow: hidden;
   }
@@ -692,6 +780,9 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
+  }
+  .photo.short {
+    aspect-ratio: 5 / 2;
   }
   .credit,
   .count {
@@ -764,7 +855,7 @@
     overflow-x: clip;
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-2);
     padding: var(--space-4);
     border-bottom: 1px solid var(--line);
   }
@@ -819,7 +910,7 @@
   .track {
     position: relative;
     height: 2px;
-    margin: var(--space-2) 7px;
+    margin: var(--space-1) 7px;
     background: var(--line-control);
   }
   .track.unknown {
@@ -846,6 +937,13 @@
     display: grid;
     color: var(--amber);
     transform: translate(-50%, -50%) rotate(45deg);
+  }
+  /* where it was last reported, not where it is */
+  .track.dim .fill {
+    background: var(--text-3);
+  }
+  .track.dim .marker {
+    color: var(--text-3);
   }
   .distances {
     font-size: var(--text-sm);
@@ -906,6 +1004,10 @@
     align-items: flex-start;
     gap: var(--space-3);
   }
+  /* the sign-in note is a footnote to the facts above it: kept close */
+  .stack.overview {
+    gap: var(--space-2);
+  }
   .facts {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -915,12 +1017,18 @@
   .facts .wide {
     grid-column: 1 / -1;
   }
+  /* beside Phase, where the names of most sectors fit */
+  .facts .airspace {
+    grid-column: span 2;
+  }
+  /* another source, so a rule sets it apart; its heading sits closer to its
+     values than to the rule, like the chart's */
   .measured {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
-    margin-top: var(--space-4);
-    padding-top: var(--space-3);
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+    padding-top: var(--space-4);
     border-top: 1px solid var(--line);
   }
   .measured header {
@@ -952,8 +1060,70 @@
   .via.link:hover {
     color: var(--text-1);
   }
+  /* the rest of the aircraft's values, on request: a quiet row in the labels' size */
+  summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    width: fit-content;
+    padding: var(--space-1) 0;
+    font-size: var(--text-sm);
+    font-weight: 550;
+    color: var(--text-2);
+    list-style: none;
+    cursor: pointer;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary:hover {
+    color: var(--text-1);
+  }
+  /* the chevron's drawing sits inside its box: pull it back to the labels' edge */
+  .chevron {
+    display: inline-grid;
+    margin-left: -3px;
+    transition: transform 150ms var(--ease-out);
+  }
+  details[open] .chevron {
+    transform: rotate(90deg);
+  }
+  .more {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding-top: var(--space-2);
+  }
   .facts.compact {
     gap: var(--space-2) var(--space-3);
+  }
+  /* sign-in-only values: one quiet line under the facts, at the labels' size and tone */
+  .gated {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-3);
+  }
+  .lock {
+    display: inline-grid;
+    margin-right: calc(-1 * var(--space-1));
+  }
+  .inline-action {
+    padding: 2px 0;
+    border: 0;
+    background: none;
+    font-size: inherit;
+    font-weight: 600;
+    color: var(--text-1);
+    text-decoration: underline var(--line-control);
+    text-underline-offset: 3px;
+    cursor: pointer;
+    transition: text-decoration-color 150ms var(--ease-out);
+  }
+  .inline-action:hover {
+    text-decoration-color: var(--amber);
   }
   dt {
     font-size: var(--text-sm);
@@ -1100,7 +1270,8 @@
     height: 12px;
   }
 
-  /* pinned: following the aircraft starts here, so it can't scroll away */
+  /* pinned: following the aircraft starts here, so it can't scroll away. One
+     row in every state (see .compact), so the chart above keeps its place */
   footer {
     position: sticky;
     bottom: 0;
@@ -1115,13 +1286,17 @@
     border-top: 1px solid var(--line);
     background: var(--surface);
   }
-  /* "Reconnecting…" and both buttons don't fit one line: the buttons wrap
-     below and keep to the right */
+  /* if the text is ever zoomed past one row, the buttons wrap below, to the right */
   .actions {
     margin-left: auto;
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+  .button.compact {
+    justify-content: center;
+    width: 32px;
+    padding: 0;
   }
   .status {
     display: inline-flex;
@@ -1134,8 +1309,14 @@
     color: var(--live);
     font-weight: 600;
   }
+  /* not live is a fact, not a failure: neutral, and a still, hollow dot where Live pulses */
   .status.ended {
-    color: var(--danger);
+    color: var(--text-2);
+  }
+  .status.ended .dot {
+    background: none;
+    box-shadow: inset 0 0 0 1.5px var(--text-3);
+    animation: none;
   }
   .dot {
     width: 8px;

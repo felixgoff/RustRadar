@@ -50,7 +50,8 @@
 // work happens in a local east/north metre frame around each track's newest
 // sample: equirectangular, which is exact enough for the few hundred
 // kilometres an aircraft can cover before its data runs out.
-import type { Airport, LiveFlight } from "./api";
+import type { Airport, LiveFlight, TaxiLine } from "./api";
+import { project, projDist, projX, projY, TaxiNetwork } from "./taxinet";
 
 /**
  * Measured state of one aircraft from a second source (adsb.lol's readsb
@@ -535,6 +536,33 @@ const MIN_SANE_TIME_MS = 1e12;
 type AircraftClass = "jet" | "turboprop" | "light" | "heli";
 
 const GROUND: ReadonlySet<Phase> = new Set<Phase>(["parked", "taxi", "takeoffRoll", "landingRoll"]);
+// Taxiway snapping (`Motion.taxiSnap`): a slow aircraft on the ground is drawn on the
+// airport's taxiway (or runway) centreline when it is near one and moving along it.
+/** Full snap within this distance of a line, m, fading out to none at `SNAP_FAR_M`. */
+const SNAP_NEAR_M = 15;
+const SNAP_FAR_M = 30;
+/** Full snap with the motion within this angle of the line (either way), fading out to none at `SNAP_WIDE_DEG`. */
+const SNAP_ALIGNED_DEG = 20;
+const SNAP_WIDE_DEG = 35;
+/** Snapping fades out between these ground speeds, kt: never on a takeoff or landing roll at speed. */
+const SNAP_SLOW_KT = 25;
+const SNAP_FAST_KT = 35;
+/** The direction of motion this far ahead (drawn time) also counts: at a junction, the line it turns onto. */
+const SNAP_LOOKAHEAD_MS = 3_000;
+/** Nearby lines' pulls are averaged with weights falling off e-fold over this distance, m: wide enough to round a corner. */
+const SNAP_SOFT_M = 15;
+/** A line's share of the pull goes by its alignment with the motion now, this much, and a moment ahead, the rest. */
+const SNAP_NOW_SHARE = 0.7;
+/** The direction ahead follows the model's with this time constant, ms: new reports move it. */
+const SNAP_AHEAD_LAG_MS = 500;
+/** Snapping turns on or off (as the gate opens or closes) at this rate, /s. */
+const SNAP_GATE_RATE = 0.8;
+/** The offset follows its target through a critically damped spring of this rate, /s. */
+const SNAP_SPRING_RATE = 5;
+/** Below this speed (m/s) the direction of motion is the drawn track. */
+const SNAP_MIN_SPEED_MS = 0.5;
+const COS_SNAP_ALIGNED = Math.cos(SNAP_ALIGNED_DEG * (Math.PI / 180));
+const COS_SNAP_WIDE = Math.cos(SNAP_WIDE_DEG * (Math.PI / 180));
 const FROM_TAXI: ReadonlySet<Phase> = new Set<Phase>(["parked", "taxi", "takeoffRoll"]);
 const FROM_LANDING: ReadonlySet<Phase> = new Set<Phase>(["approach", "flare", "landingRoll", "descent"]);
 
@@ -864,6 +892,25 @@ class Track {
   offPitch = 0;
   offBank = 0;
 
+  // taxiway snapping (see `Motion.taxiSnap`)
+  /** The network the aircraft is in, and the gate (0..1, eased) snapping is let through. */
+  snapNet: TaxiNetwork | null = null;
+  snapGate = 0;
+  snapMs = -Infinity;
+  /** The direction of motion `SNAP_LOOKAHEAD_MS` ahead (unit east, north), as last followed, and when. */
+  snapAx = 0;
+  snapAy = 1;
+  snapAheadMs = -Infinity;
+  /** The offset (east, north m; heading deg) last applied before the gate, and its rates (/s; the heading's of `snapHd`). */
+  snapE = 0;
+  snapN = 0;
+  snapH = 0;
+  snapVE = 0;
+  snapVN = 0;
+  snapVH = 0;
+  /** The heading the offset draws (deg), which the heading's spring follows. */
+  snapHd = 0;
+
   // gear animation
   gearTarget = -1;
   gearFrom = 0;
@@ -976,6 +1023,8 @@ export class Motion {
   /** Fields' QNHs interpolated from those around, until anything is learned (`qnhVersion`) or a minute passes. */
   private qnhAround = new Map<Airport, { hpa: number; ms: number; version: number }>();
   private qnhVersion = 0;
+  /** Taxiway networks by airport (ICAO code), as loaded. */
+  private taxiways = new Map<string, TaxiNetwork>();
 
   /** Server-synced clock, ms. Use this everywhere instead of Date.now(). */
   now(): number {
@@ -1003,6 +1052,28 @@ export class Motion {
       if (list) list.push(ap);
       else this.grid.set(key, [ap]);
     }
+  }
+
+  /**
+   * An airport's taxiway, taxilane and runway centrelines (OpenStreetMap), by
+   * its ICAO code: slow aircraft on the ground near them are drawn on them.
+   * `null` (or no lines) forgets the airport's.
+   */
+  setTaxiways(icao: string, lines: readonly TaxiLine[] | null): void {
+    const old = this.taxiways.get(icao);
+    if (lines && lines.length > 0) this.taxiways.set(icao, new TaxiNetwork(lines));
+    else this.taxiways.delete(icao);
+    if (old) for (const tr of this.tracks.values()) if (tr.snapNet === old) tr.snapNet = null;
+  }
+
+  hasTaxiways(icao: string): boolean {
+    return this.taxiways.has(icao);
+  }
+
+  /** The airport an aircraft on the ground is at (its relevant field), or null when it is airborne or unknown. */
+  groundField(id: number): Airport | null {
+    const tr = this.tracks.get(id);
+    return tr && GROUND.has(tr.phase) ? tr.field : null;
   }
 
   /** The pose to draw this aircraft at. Lazily ingests `f` as a new report when it is newer than what the track holds (timestampMs larger), so callers just pass whatever LiveFlight they have. Must be cheap: it is called per visible aircraft per frame (thousands per frame at 20-60 Hz); avoid per-call allocations beyond the returned object. */
@@ -1035,6 +1106,7 @@ export class Motion {
     if (state.reportMs !== tr.activeMs) this.takeOver(tr, nowMs, T, state);
     tr.lastPoseMs = nowMs;
     const raw = this.drawn(tr, nowMs, T, state, scratchA, true);
+    if (this.taxiways.size > 0 || tr.snapGate > 0) this.taxiSnap(tr, raw, nowMs, T);
     return {
       lon: raw.lon,
       lat: raw.lat,
@@ -1959,6 +2031,190 @@ export class Motion {
     return out;
   }
 
+  /**
+   * Draws a slow aircraft on the ground on the airport's taxiway centrelines
+   * (into `raw`'s position, heading and track). Reported positions wander
+   * metres either side of the lines and cut the corners; an aircraft within
+   * `SNAP_FAR_M` of a line and moving along it (either way, within
+   * `SNAP_WIDE_DEG`, now or `SNAP_LOOKAHEAD_MS` ahead: the data is there,
+   * since aircraft are drawn in the past) is pulled onto it and pointed along
+   * it, fully within `SNAP_NEAR_M` and `SNAP_ALIGNED_DEG`.
+   *
+   * Nothing jumps. Each line within `SNAP_FAR_M` gets a share by nearness
+   * (`SNAP_SOFT_M`) and by how well it matches the motion now and a moment
+   * ahead, and the shares blend the lines' nearest points and directions;
+   * the blend pulls as far as it is near and along the motion. Through a
+   * junction the shares hand over from one line to the next as the aircraft
+   * turns, which rounds the corner. The offset follows that pull through a
+   * critically damped spring (the drift across the line fed forward, so
+   * along a line it stays exact), and the whole fades in and out with the
+   * ground speed and phase. A parked aircraft keeps the offset it stopped
+   * with (holding short on a taxiway), but is never pulled onto a line.
+   */
+  private taxiSnap(tr: Track, raw: Raw, nowMs: number, T: number): void {
+    const gap = nowMs - tr.snapMs;
+    tr.snapMs = nowMs;
+    const recent = gap <= CONTINUITY_GAP_MS;
+    // the network the aircraft is in, and where in it
+    let net: TaxiNetwork | null = null;
+    let x = 0;
+    let y = 0;
+    if (raw.ground) {
+      const own = tr.snapNet;
+      if (own && this.taxiways.size > 0 && own.covers((x = own.x(raw.lon)), (y = own.y(raw.lat)))) net = own;
+      else
+        for (const n of this.taxiways.values()) {
+          x = n.x(raw.lon);
+          y = n.y(raw.lat);
+          if (n.covers(x, y)) {
+            net = n;
+            break;
+          }
+        }
+    }
+    const holding = raw.phase === "parked" && net !== null && net === tr.snapNet && tr.snapGate > 0;
+    const target =
+      net === null || (raw.phase === "parked" && !holding)
+        ? 0
+        : 1 - smoothstep((raw.speedMs / KNOTS_TO_MS - SNAP_SLOW_KT) / (SNAP_FAST_KT - SNAP_SLOW_KT));
+    if (!recent) tr.snapGate = target; // not drawn a moment ago: nothing to ease from
+    else {
+      const step = (SNAP_GATE_RATE * gap) / 1000;
+      tr.snapGate = clamp(target, tr.snapGate - step, tr.snapGate + step);
+    }
+    tr.snapNet = net;
+    if (tr.snapGate <= 0 && target <= 0) {
+      tr.snapE = tr.snapN = tr.snapH = 0;
+      tr.snapVE = tr.snapVN = tr.snapVH = 0;
+      return;
+    }
+
+    let e = tr.snapE;
+    let n = tr.snapN;
+    let h = tr.snapH;
+    if (holding) tr.snapVE = tr.snapVN = tr.snapVH = 0;
+    else if (net) {
+      // the direction of motion, now and a moment ahead
+      let dx: number;
+      let dy: number;
+      if (raw.speedMs > SNAP_MIN_SPEED_MS) {
+        dx = raw.vE / raw.speedMs;
+        dy = raw.vN / raw.speedMs;
+      } else {
+        dx = Math.sin(raw.track * DEG);
+        dy = Math.cos(raw.track * DEG);
+      }
+      let fdx = dx;
+      let fdy = dy;
+      let sumA = 0;
+      let sumX = 0;
+      let sumY = 0;
+      let sumHx = 0;
+      let sumHy = 0;
+      const list = net.near(x, y);
+      if (list) {
+        let looked = false;
+        for (let i = 0; i < list.length; i++) {
+          const s = list[i];
+          project(net, s, x, y);
+          if (projDist >= SNAP_FAR_M) continue;
+          if (!looked) {
+            looked = true;
+            const ahead = this.evaluate(tr, T + SNAP_LOOKAHEAD_MS, scratchC);
+            if (ahead.speedMs > SNAP_MIN_SPEED_MS) {
+              fdx = ahead.vE / ahead.speedMs;
+              fdy = ahead.vN / ahead.speedMs;
+            }
+            // the model ahead changes as reports come in (the drawn pose blends that out; this
+            // doesn't): followed with a lag, so the lines it picks don't either
+            if (recent && tr.snapAheadMs === tr.snapMs - gap) {
+              const k = 1 - Math.exp(-gap / SNAP_AHEAD_LAG_MS);
+              fdx = tr.snapAx + (fdx - tr.snapAx) * k;
+              fdy = tr.snapAy + (fdy - tr.snapAy) * k;
+              const l = Math.hypot(fdx, fdy);
+              if (l > 1e-6) {
+                fdx /= l;
+                fdy /= l;
+              } else {
+                fdx = dx;
+                fdy = dy;
+              }
+            }
+            tr.snapAx = fdx;
+            tr.snapAy = fdy;
+            tr.snapAheadMs = nowMs;
+          }
+          const ux = net.ux[s];
+          const uy = net.uy[s];
+          const now = ux * dx + uy * dy;
+          const later = ux * fdx + uy * fdy;
+          // the line's share: by nearness and how well it matches the motion, which shifts
+          // over from line to line as the aircraft turns through a junction
+          const near = smoothstep((SNAP_FAR_M - projDist) / (SNAP_FAR_M - SNAP_NEAR_M));
+          const align = SNAP_NOW_SHARE * now * now + (1 - SNAP_NOW_SHARE) * later * later;
+          const a = near * Math.exp(-projDist / SNAP_SOFT_M) * align;
+          if (!(a > 0)) continue;
+          // pointing along the line the way the aircraft goes
+          const sign = (Math.abs(now) >= Math.abs(later) ? now : later) >= 0 ? a : -a;
+          sumA += a;
+          sumX += a * projX;
+          sumY += a * projY;
+          sumHx += sign * ux;
+          sumHy += sign * uy;
+        }
+      }
+      // the lines' blended point and direction pull as far as they are near and along the motion
+      // (now or a moment ahead): through a junction the blend turns with the aircraft
+      const hl = Math.hypot(sumHx, sumHy);
+      e = n = h = 0;
+      // how fast the offset moves with the aircraft itself (its drift across the line), m/s
+      let ffE = 0;
+      let ffN = 0;
+      if (sumA > 0 && hl > 1e-9 * sumA) {
+        const px = sumX / sumA - x;
+        const py = sumY / sumA - y;
+        const hx = sumHx / hl;
+        const hy = sumHy / hl;
+        const c = Math.max(Math.abs(hx * dx + hy * dy), Math.abs(hx * fdx + hy * fdy));
+        const w =
+          smoothstep((SNAP_FAR_M - Math.hypot(px, py)) / (SNAP_FAR_M - SNAP_NEAR_M)) *
+          smoothstep((c - COS_SNAP_WIDE) / (COS_SNAP_ALIGNED - COS_SNAP_WIDE));
+        if (w > 0) {
+          e = px * w;
+          n = py * w;
+          h = wrap180(Math.atan2(hx, hy) / DEG - raw.track) * w;
+          const along = raw.vE * hx + raw.vN * hy;
+          ffE = -(raw.vE - along * hx) * w;
+          ffN = -(raw.vN - along * hy) * w;
+        }
+      }
+      // followed through critically damped springs, so that what's left of sharp corners, and
+      // a held offset let go, are smoothed out (C1): the offset with its drift fed forward, and
+      // the heading as drawn, which stays put along a line
+      if (recent) {
+        const dt = gap / 1000;
+        e = spring(tr.snapE + ffE * dt, tr.snapVE - ffE, e, dt);
+        tr.snapVE = springV + ffE;
+        n = spring(tr.snapN + ffN * dt, tr.snapVN - ffN, n, dt);
+        tr.snapVN = springV + ffN;
+        const drawn = raw.track + h;
+        const heading = spring(tr.snapHd, tr.snapVH, tr.snapHd + wrap180(drawn - tr.snapHd), dt);
+        tr.snapVH = springV;
+        h = wrap180(heading - raw.track);
+      } else tr.snapVE = tr.snapVN = tr.snapVH = 0;
+    }
+    tr.snapE = e;
+    tr.snapN = n;
+    tr.snapH = h;
+    tr.snapHd = wrap360(raw.track + h);
+    const g = smoothstep(tr.snapGate);
+    if (g <= 0) return;
+    raw.lat = clamp(raw.lat + (g * n) / M_PER_DEG, -90, 90);
+    raw.lon = wrapLon(raw.lon + (g * e) / (M_PER_DEG * Math.max(Math.cos(raw.lat * DEG), 1e-3)));
+    raw.heading = wrap360(raw.heading + g * h);
+    raw.track = wrap360(raw.track + g * h);
+  }
+
   /** Gear fraction, animating towards the target for this pose. */
   private gear(tr: Track, raw: Raw, nowMs: number): number {
     let down: boolean;
@@ -1992,6 +2248,19 @@ export class Motion {
     }
     return current;
   }
+}
+
+// Result of `spring`: the followed value's new rate.
+let springV = 0;
+
+/** A value at `x0` moving at `v0` /s, `dt` s later, following `target` through a critically damped spring at `SNAP_SPRING_RATE`; its new rate into springV. */
+function spring(x0: number, v0: number, target: number, dt: number): number {
+  const k = SNAP_SPRING_RATE;
+  const decay = Math.exp(-k * dt);
+  const d = x0 - target;
+  const b = v0 + k * d;
+  springV = (v0 - k * b * dt) * decay;
+  return target + (d + b * dt) * decay;
 }
 
 // Results of `airAltitude`.

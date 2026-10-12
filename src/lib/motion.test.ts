@@ -1,7 +1,7 @@
 // Unit tests for the aircraft motion model. Run with `bun test src`.
 // @ts-ignore -- bun's types aren't a dependency; svelte-check still type-checks this file
 import * as bunTest from "bun:test";
-import type { Airport, LiveFlight } from "./api";
+import type { Airport, LiveFlight, TaxiLine } from "./api";
 import { Motion, type Measured, type Pose } from "./motion";
 import landings from "./testdata/landings.json";
 
@@ -1510,4 +1510,190 @@ test("a measured crab is kicked out in the flare and gone on the runway", () => 
   const down = crabs.filter((c) => c.altFt < 1);
   expect(down.length).toBeGreaterThan(100);
   for (const c of down) expect(Math.abs(c.crab)).toBeLessThan(0.01);
+});
+
+// --- taxiway snapping
+
+/** A taxiway line through local [east, north] metre points around 45°N 10°E, as OpenStreetMap gives it ([lon, lat]). */
+function taxiLine(points: [number, number][], kind: TaxiLine["kind"] = "taxiway"): TaxiLine {
+  return { kind, points: points.map(([e, n]) => { const [lat, lon] = offset(45, 10, e, n); return [lon, lat]; }) };
+}
+
+const toLocal = (p: { lat: number; lon: number }): [number, number] => [
+  (p.lon - 10) * M_PER_DEG * Math.cos(45 * DEG),
+  (p.lat - 45) * M_PER_DEG,
+];
+
+/** Metres from a local point to a polyline. */
+function offLine(p: [number, number], line: [number, number][]): number {
+  let best = Infinity;
+  for (let i = 1; i < line.length; i++) {
+    const [ax, ay] = line[i - 1];
+    const [bx, by] = line[i];
+    const l2 = (bx - ax) ** 2 + (by - ay) ** 2;
+    const t = Math.max(0, Math.min(1, ((p[0] - ax) * (bx - ax) + (p[1] - ay) * (by - ay)) / l2));
+    best = Math.min(best, Math.hypot(p[0] - ax - t * (bx - ax), p[1] - ay - t * (by - ay)));
+  }
+  return best;
+}
+
+const angleDiff = (a: number, b: number) => Math.abs(((a - b + 540) % 360) - 180);
+
+interface Taxied {
+  /** Largest distance from the centreline where the truth is on a straight leg (> 60 m from the corner), m. */
+  legOff: number;
+  /** Largest heading error from the leg's direction there, deg. */
+  legHeading: number;
+  /** Largest distance from the centreline anywhere, m. */
+  maxOff: number;
+  /** Largest movement in a 16 ms frame, m, and heading change, deg. */
+  maxStep: number;
+  maxTurn: number;
+}
+
+/**
+ * Taxies an L: north along x = 0 from 400 m south of the corner, a 30 m
+ * radius turn right, then east, at 15 kt; Flightradar24-like reports every
+ * 6 s (the 6 s before in the buffer, 2 s apart), each arriving 3 s after its
+ * time, positions off by up to ±`noise` m. Drawn through 16 ms frames.
+ */
+function taxiL(lines: TaxiLine[] | null, noise: number): Taxied {
+  const m = new Motion();
+  if (lines) m.setTaxiways("XTST", lines);
+  const v = 15 * KT;
+  const R = 30;
+  const leg1 = 370;
+  const arc = (Math.PI / 2) * R;
+  const truth = (s: number): [number, number] => {
+    const d = v * s;
+    if (d <= leg1) return [0, -400 + d];
+    if (d <= leg1 + arc) {
+      const a = (d - leg1) / R;
+      return [R - R * Math.cos(a), -R + R * Math.sin(a)];
+    }
+    return [R + (d - leg1 - arc), 0];
+  };
+  const jitter = (s: number, axis: number) => {
+    const x = Math.sin((s * 3 + axis) * 12.9898) * 43758.5453;
+    return noise * ((x - Math.floor(x)) * 2 - 1);
+  };
+  const measured = (s: number) => {
+    const [e, n] = truth(s);
+    return offset(45, 10, e + jitter(s, 0), n + jitter(s, 1));
+  };
+  const report = (k: number): LiveFlight => {
+    const s0 = k * 6;
+    const [lat, lon] = measured(s0);
+    const [e0, n0] = truth(s0);
+    const [e1, n1] = truth(s0 + 0.5);
+    const track = (Math.atan2(e1 - e0, n1 - n0) / DEG + 360) % 360;
+    return flight({ lat, lon, alt: 0, onGround: true, speed: 15, track, timestampMs: T0 + s0 * 1000, positions: history(lat, lon, (d) => measured(s0 - d), [2, 4, 6]) });
+  };
+  const centre: [number, number][] = [[0, -500], [0, 0], [500, 0]];
+  const out: Taxied = { legOff: 0, legHeading: 0, maxOff: 0, maxStep: 0, maxTurn: 0 };
+  let k = 0;
+  let f = report(0);
+  let prev: Pose | null = null;
+  const totalS = (leg1 + arc + 300) / v;
+  for (let t = T0 + 3_000; t < T0 + totalS * 1000; t += 16) {
+    while (T0 + (k + 1) * 6_000 + 3_000 <= t) f = report(++k);
+    const p = m.pose(f, t);
+    if (t < T0 + 20_000) {
+      prev = p;
+      continue; // settling in
+    }
+    const s = (m.drawnTime(1, t) - T0) / 1000;
+    const [te, tn] = truth(s);
+    const off = offLine(toLocal(p), centre);
+    out.maxOff = Math.max(out.maxOff, off);
+    if (tn < -60) {
+      out.legOff = Math.max(out.legOff, off);
+      out.legHeading = Math.max(out.legHeading, angleDiff(p.heading, 0));
+    } else if (te > 60) {
+      out.legOff = Math.max(out.legOff, off);
+      out.legHeading = Math.max(out.legHeading, angleDiff(p.heading, 90));
+    }
+    if (prev) {
+      out.maxStep = Math.max(out.maxStep, metres(prev, p));
+      out.maxTurn = Math.max(out.maxTurn, angleDiff(p.heading, prev.heading));
+    }
+    prev = p;
+  }
+  return out;
+}
+
+test("a taxiing aircraft is drawn on the taxiway centreline, turning with it", () => {
+  // drawn from the reports alone, the noise shows: metres off the line, the nose wandering
+  const free = taxiL(null, 8);
+  expect(free.legOff).toBeGreaterThan(2);
+  // on the network: on the line along the legs, pointing along them, and smooth through the corner
+  const lines = [taxiLine([[0, -500], [0, -200], [0, 0]]), taxiLine([[0, 0], [250, 0], [500, 0]]), taxiLine([[0, 0], [-300, 0]])];
+  const snapped = taxiL(lines, 8);
+  expect(snapped.legOff).toBeLessThan(0.5);
+  expect(snapped.legHeading).toBeLessThan(1);
+  expect(snapped.maxOff).toBeLessThan(8);
+  // 15 kt is 0.12 m a frame: through the corner a little more, but no jumps, and turns of at most ~45 deg/s
+  expect(snapped.maxStep).toBeLessThan(0.25);
+  expect(snapped.maxTurn).toBeLessThan(0.75);
+});
+
+test("taxiway snapping leaves alone what isn't taxiing along a line", () => {
+  const lines = [taxiLine([[0, -1000], [0, 1000]]), taxiLine([[-1000, 0], [1000, 0]], "runway")];
+  const cases: Partial<LiveFlight>[] = [
+    // parked on an apron 80 m from the taxiway, pointing along it
+    { id: 1, onGround: true, speed: 0, alt: 0, track: 0, ...pos(80, 300) },
+    // taxiing 80 m from it, along it
+    { id: 2, onGround: true, speed: 12, alt: 0, track: 0, ...pos(80, -300) },
+    // taxiing across it, 10 m away
+    { id: 3, onGround: true, speed: 12, alt: 0, track: 90, ...pos(-10, 500) },
+    // a takeoff roll at 100 kt, 10 m off the runway's centreline
+    { id: 4, onGround: true, speed: 100, alt: 0, track: 90, ...pos(-500, 10) },
+  ];
+  function pos(e: number, n: number) {
+    const [lat, lon] = offset(45, 10, e, n);
+    return { lat, lon };
+  }
+  for (const c of cases) {
+    const plain = new Motion();
+    const net = new Motion();
+    net.setTaxiways("XTST", lines);
+    const f = flight({ ...c, timestampMs: T0 });
+    for (let t = T0; t <= T0 + 8_000; t += 16) {
+      const a = plain.pose(f, t);
+      const b = net.pose(f, t);
+      expect(metres(a, b)).toBeLessThan(0.001);
+      expect(angleDiff(a.heading, b.heading)).toBeLessThan(0.001);
+    }
+  }
+  // the speeding roll is a takeoff roll; the first two are parked and taxiing
+  const roll = new Motion();
+  expect(roll.pose(flight({ ...cases[3], timestampMs: T0 }), T0 + 4_000).phase).toBe("takeoffRoll");
+});
+
+test("a taxiing aircraft near a taxiway is pulled onto it smoothly, and forgetting the network lets it go smoothly", () => {
+  const lines = [taxiLine([[0, -2000], [0, 2000]])];
+  const m = new Motion();
+  m.setTaxiways("XTST", lines);
+  // 8 m east of the line, taxiing north at 12 kt
+  const v = 12 * KT;
+  const f = pathFlight((s) => [8, v * s], { onGround: true, speed: 12, alt: 0, track: 0 });
+  let prev = m.pose(f, T0);
+  let off = 0;
+  for (let t = T0 + 16; t <= T0 + 6_000; t += 16) {
+    const p = m.pose(f, t);
+    expect(metres(prev, p)).toBeLessThan(v * 0.016 + 0.15);
+    off = Math.abs(toLocal(p)[0]);
+    prev = p;
+  }
+  expect(off).toBeLessThan(0.1);
+  expect(prev.heading).toBeCloseTo(0, 1);
+  expect(m.hasTaxiways("XTST")).toBe(true);
+  m.setTaxiways("XTST", null);
+  expect(m.hasTaxiways("XTST")).toBe(false);
+  for (let t = T0 + 6_016; t <= T0 + 10_000; t += 16) {
+    const p = m.pose(f, t);
+    expect(metres(prev, p)).toBeLessThan(v * 0.016 + 0.15);
+    prev = p;
+  }
+  expect(Math.abs(toLocal(prev)[0] - 8)).toBeLessThan(0.5);
 });

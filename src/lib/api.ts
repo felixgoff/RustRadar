@@ -342,6 +342,23 @@ export interface Runway {
 export const airportRunways = (airports: string[]) =>
   invoke<Record<string, Runway[]>>("airport_runways", { airports });
 
+/** A taxiway, taxilane or runway centreline from OpenStreetMap (one OSM way). */
+export interface TaxiLine {
+  kind: "taxiway" | "taxilane" | "runway";
+  /** Designator where tagged, e.g. `A3` or `04L/22R`. */
+  ref?: string;
+  /** `[lon, lat]` pairs. */
+  points: [number, number][];
+}
+
+/**
+ * The taxiway, taxilane and runway centrelines within 4 km of an airport (ICAO
+ * code and reference point), from OpenStreetMap via Overpass; cached for a
+ * month. Empty when they can't be had.
+ */
+export const airportTaxiways = (icao: string, lat: number, lon: number) =>
+  invoke<TaxiLine[]>("airport_taxiways", { icao, lat, lon });
+
 export const airportBoard = (code: string, mode: BoardMode, page = 1) =>
   invoke<Board>("airport_board", { code, mode, page });
 

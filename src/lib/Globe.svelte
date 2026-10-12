@@ -74,6 +74,7 @@
   } from "./geo";
   import { MODEL_KINDS, MODEL_SIZE, modelFor, models, sizeOf, type ModelKind } from "./models";
   import { motion, type Pose } from "./motion";
+  import { TAXIWAY_ZOOM, taxiwaysFor } from "./taxiways";
   import { screenAngle } from "./screen";
   import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection, sunlight } from "./shadow";
   import { BuildingLayer, buildingHeight } from "./building-layer";
@@ -1152,10 +1153,14 @@
     const iconSizes: number[] = [];
     const iconIndex = new Map<number, number>();
 
+    // close in, the airports aircraft are on the ground at get their taxiways (OpenStreetMap),
+    // which taxiing aircraft are then drawn on
+    const taxiways = zoom >= TAXIWAY_ZOOM;
     for (const f of flights) {
       if (f.id !== lockedOn && cosAngle(f.lon, f.lat, cLon, cLat) <= minCos) continue;
       const real = aircraftModels.forFlight(f.typecode, f.icon);
       const pose = motion.pose(f, now);
+      if (taxiways) taxiwaysFor(f.id, pose.phase);
       if (useIcons && real) {
         iconIndex.set(f.id, icons.length);
         icons.push(f);

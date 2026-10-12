@@ -32,6 +32,8 @@
   import { verticalRate } from "./adsb";
   import { aircraftReadings, degrees, listing, type Reading } from "./aircraft-readings";
   import AltitudeChart from "./AltitudeChart.svelte";
+  import ExportMenu from "./ExportMenu.svelte";
+  import type { ExportMeta } from "./export";
   import Clock from "./Clock.svelte";
   import { ALTITUDE_STOPS } from "./geo";
   import { airlineIcao, reference } from "./reference.svelte";
@@ -133,6 +135,15 @@
   const logoId = $derived(schedule?.painted_as_id || schedule?.operated_by_id || 0);
   const origin = $derived(route?.origin);
   const destination = $derived(route?.destination);
+  /** What an exported path file says about the flight. */
+  const exportMeta = $derived<ExportMeta>({
+    callsign: details?.flight?.callsign || flight.callsign || "",
+    flightNumber: flight.flight || schedule?.flight_number || "",
+    registration: details?.aircraft?.reg || flight.reg || "",
+    aircraftType: details?.aircraft?.typecode || flight.typecode || "",
+    origin: origin?.iata || flight.origin || "",
+    destination: destination?.iata || flight.destination || "",
+  });
 
   const km = (m: number) => `${Math.round(m / 1000).toLocaleString()} km`;
   // squawk codes are four octal digits, transmitted in base 10
@@ -410,7 +421,11 @@
         timeZone={origin?.timezone}
         place={origin?.timezone ? origin.iata || flight.origin || undefined : undefined}
         {ended}
-      />
+      >
+        {#snippet tools()}
+          <ExportMenu trail={details?.trail ?? []} meta={exportMeta} />
+        {/snippet}
+      </AltitudeChart>
       {#if readings}
         <section class="measured" aria-labelledby="measured-heading">
           <header>

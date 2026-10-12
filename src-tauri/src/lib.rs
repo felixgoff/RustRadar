@@ -1,6 +1,7 @@
 mod adsblol;
 mod board;
 mod dwd;
+mod export;
 mod geocode;
 mod liveries;
 mod mrms;
@@ -671,6 +672,7 @@ pub fn run() {
             session::sign_in,
             session::sign_out,
             taxiways::airport_taxiways,
+            export::save_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

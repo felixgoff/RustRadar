@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import type { TrailPoint } from "./api";
   import Clock from "./Clock.svelte";
   import { clockAt, clockWithZone, minutesOfDay, zoneName } from "./time";
@@ -15,9 +16,11 @@
     place?: string;
     /** No longer reporting: the end of the line is the last report, not the aircraft now. */
     ended?: boolean;
+    /** Extra header controls, before the table toggle (the path export). */
+    tools?: Snippet;
   }
 
-  let { trail, timeZone, place, ended = false }: Props = $props();
+  let { trail, timeZone, place, ended = false, tools }: Props = $props();
 
   // room for the y tick labels on the left, the end dot on the right, an end
   // label above the ceiling and the time labels below the baseline
@@ -154,6 +157,7 @@
         >
           {place ? `${place} time` : `Your time, ${zone}`}
         </span>
+        {@render tools?.()}
         <button class="toggle" aria-pressed={table} onclick={() => (table = !table)}>
           {table ? "Chart" : "Table"}
         </button>

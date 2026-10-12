@@ -28,9 +28,11 @@ const BACKOFF_BASE: Duration = Duration::from_secs(10);
 const BACKOFF_MAX: Duration = Duration::from_secs(600);
 /// Coordinates in the feed are degrees times this.
 const SCALE: f64 = 600_000.0;
-/// The map's zoom range (OpenLayers zooms, 256 px tiles).
+/// The zooms asked for (OpenLayers zooms, 256 px tiles). The feed answers
+/// with no ships at all from 17 up, while 16 already has every ship in view
+/// with its dimensions, so closer views ask at 16.
 const MIN_ZOOM: u8 = 2;
-const MAX_ZOOM: u8 = 18;
+const MAX_ZOOM: u8 = 16;
 /// At and below this zoom the site asks for the whole width of the world.
 const WORLD_ZOOM: u8 = 3;
 /// Above this zoom each ship carries its dimensions and true heading.
@@ -496,7 +498,9 @@ mod tests {
         assert_eq!(feed_zoom(0.5), 2);
         assert_eq!(feed_zoom(2.9), 3);
         assert_eq!(feed_zoom(13.2), 14);
-        assert_eq!(feed_zoom(25.0), 18);
+        assert_eq!(feed_zoom(25.0), 16);
+        // the feed is empty from 17 up
+        assert_eq!(feed_zoom(16.4), 16);
         assert_eq!(feed_zoom(f64::NAN), 2);
 
         // zoomed out: the site's full-width form, no nonce

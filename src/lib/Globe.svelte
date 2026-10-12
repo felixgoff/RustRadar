@@ -174,10 +174,12 @@
     // GlobeController shifts its zoom limits by latitude (its zoomAdjust); undo
     // that so the aircraft's limit is the zoom actually reached
     const shift = Math.log2(Math.max(0.05, Math.cos(selected.lat * DEGREES)));
-    return { minZoom: LIMITS.minZoom, maxZoom: followMaxZoom(selected) - shift, maxPitch: FOLLOW_MAX_PITCH };
+    return { minZoom: LIMITS.minZoom, maxZoom: followMaxZoom(selected) - shift, maxPitch: lockedMaxPitch };
   }
   /** The closest zoom reachable now, in the view's own terms. */
   const maxZoomNow = () => (follow && selected ? followMaxZoom(selected) : LIMITS.maxZoom);
+  /** How far the locked camera may tilt right now; see `lockedView`. */
+  let lockedMaxPitch = FOLLOW_MAX_PITCH;
   /** Whether the last render was locked on an aircraft, to notice the lock ending. */
   let wasLocked = false;
   /** TileJSON for OpenFreeMap's vector tiles; the tile URL changes with each planet build. */
@@ -209,10 +211,9 @@
   const SURFACE_NO_CULL = { ...NO_CULL, ...SURFACE } as const;
 
   // Aircraft are drawn true to scale, but never smaller than a floor (which
-  // rises from the whole globe to city level) or bigger than a ceiling.
+  // rises from the whole globe to city level).
   const MIN_PX_GLOBE = 8;
   const MIN_PX_CITY = 24;
-  const MAX_PX = 72;
   const minPxAt = (zoom: number) => MIN_PX_GLOBE + (MIN_PX_CITY - MIN_PX_GLOBE) * clamp01((zoom - 3) / 7);
 
   // Zoomed out, aircraft are flat, unshaded silhouettes; they gain depth and
@@ -1112,8 +1113,8 @@
       // zoomed out everything sits at the floor, so the floor itself has to say
       // big from small: an A380 reads about 1.8x an A320, a Cessna about 0.6x
       const floor = minPx * Math.min(2, Math.max(0.6, (meters / MODEL_SIZE.narrow) ** 0.8));
-      // following an aircraft lifts the ceiling: everything at true scale, however close
-      return Math.min(follow && selected ? Infinity : MAX_PX, Math.max(floor, meters / mpp));
+      // no ceiling: close in, an aircraft is never drawn smaller than it really is
+      return Math.max(floor, meters / mpp);
     };
     const depth = depthAt(zoom);
     const material = meshMaterial(depth);
@@ -1522,6 +1523,8 @@
   const METRES_PER_DEGREE = 111_320;
   /** deck.gl parks the camera this many viewport heights back from its target. */
   const CAMERA_HEIGHTS = 1.5;
+  /** Locked on the globe, the aircraft's height may reach this much of the camera's. */
+  const LOCK_CAMERA_ABOVE = 0.9;
   /** Whether the wheel zooms about the cursor or the centre of the screen. */
   let zoomAround: "center" | "pointer" = "pointer";
   /** Locked to an aircraft, a plain drag orbits it instead of panning away. */
@@ -1542,21 +1545,32 @@
     // aircraft's own height, which centres it at any tilt, bearing and zoom. A
     // ground point aimed along the bearing can't: the camera sits only a few
     // hundred metres out by street level, below a real cruise altitude.
-    if (v.zoom > FLAT_ABOVE_ZOOM) return { ...v, longitude: lon, latitude: lat, position: [0, 0, altitude] };
+    if (v.zoom > FLAT_ABOVE_ZOOM) {
+      lockedMaxPitch = FOLLOW_MAX_PITCH;
+      return { ...v, longitude: lon, latitude: lat, position: [0, 0, altitude] };
+    }
     // The globe has no such offset, and the camera aims at a point on the
     // ground, so once the view is tilted an aircraft drawn at altitude rides
     // above the centre of the screen. Aiming further along the bearing puts
     // the aircraft itself on the camera's axis.
-    const pitch = v.pitch * DEGREES;
     const camera = CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(v.zoom, lat);
-    // Only so far, though: aim past the camera itself and the aircraft ends
-    // up behind it, leaving the view staring at empty ground ahead.
-    const height = Math.min(altitude, 0.6 * camera * Math.cos(pitch));
+    // That only works while the camera is above the aircraft. Tilted further,
+    // the camera would sink below it and look at the ground under it, and the
+    // aircraft would slide up off the screen as the camera seemed to drop. So
+    // the tilt stops there instead; zoomed in past the switch to the flat
+    // projection it opens up again.
+    lockedMaxPitch = Math.min(
+      FOLLOW_MAX_PITCH,
+      Math.acos(Math.min(1, altitude / (LOCK_CAMERA_ABOVE * camera))) / DEGREES,
+    );
+    const tilt = Math.min(v.pitch, lockedMaxPitch);
+    const pitch = tilt * DEGREES;
+    const height = Math.min(altitude, LOCK_CAMERA_ABOVE * camera * Math.cos(pitch));
     const lift = height * Math.tan(pitch);
     const latitude = Math.max(-85, Math.min(85, lat + (lift * Math.cos(v.bearing * DEGREES)) / METRES_PER_DEGREE));
     const longitude =
       lon + (lift * Math.sin(v.bearing * DEGREES)) / (METRES_PER_DEGREE * Math.max(0.05, Math.cos(lat * DEGREES)));
-    return { ...v, longitude, latitude, position: undefined };
+    return { ...v, longitude, latitude, pitch: tilt, position: undefined };
   }
 
   function render() {

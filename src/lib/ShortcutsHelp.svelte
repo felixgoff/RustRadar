@@ -22,6 +22,7 @@
     [["P"], "Airline liveries"],
     [["D"], "Day and night"],
     [["W"], "Weather radar"],
+    [["S"], "Ships"],
     [["?"], "This list"],
   ];
 

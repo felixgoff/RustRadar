@@ -90,9 +90,10 @@
       <span class="value" title={airport?.name}>{airport?.name ?? "Airport"}</span>
       <span class="sub">{[airport?.city, airport?.country].filter(Boolean).join(", ")}</span>
     </div>
-    <div class="cell">
+    <!-- the board's zone, named once here rather than on every row -->
+    <div class="cell" title={timeZone ? `Local time at ${code}` : "Your time: the airport's time zone isn't known yet"}>
       <span class="data value">{clockAt(now / 1000, timeZone)}</span>
-      <span class="data sub">{timeZone ? zoneName(now / 1000, timeZone) : "local"}</span>
+      <span class="data sub">{zoneName(now / 1000, timeZone)}</span>
     </div>
     <button class="icon-button close" aria-label="Close airport" title="Close (Esc)" onclick={onclose}>
       <X size={18} strokeWidth={1.75} />
@@ -183,7 +184,7 @@
 
   <footer>
     <span class="updated">
-      {#if updatedAt}Updated {clockAt(updatedAt / 1000, timeZone)} · times at {code}{/if}
+      {#if updatedAt}Updated {clockAt(updatedAt / 1000, timeZone)} · {timeZone ? `times at ${code}` : "your time"}{/if}
     </span>
     <button class="button" onclick={onlocate} disabled={!airport}>
       <LocateFixed size={14} strokeWidth={1.75} /> Show on map

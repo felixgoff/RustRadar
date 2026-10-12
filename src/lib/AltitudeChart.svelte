@@ -1,6 +1,8 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import type { TrailPoint } from "./api";
-  import { clockAt, minutesOfDay, zoneName } from "./time";
+  import Clock from "./Clock.svelte";
+  import { clockAt, clockWithZone, minutesOfDay, zoneName } from "./time";
 
   interface Props {
     /** The flight's recorded track, oldest first. */
@@ -10,11 +12,15 @@
      * agrees with the departure time shown above it.
      */
     timeZone?: string;
-    /** Whose time that is, e.g. `LHR`. */
+    /** Whose time that is, e.g. `LHR`; only with `timeZone`, or the label would claim a zone the axis isn't in. */
     place?: string;
+    /** No longer reporting: the end of the line is the last report, not the aircraft now. */
+    ended?: boolean;
+    /** Extra header controls, before the table toggle (the path export). */
+    tools?: Snippet;
   }
 
-  let { trail, timeZone, place }: Props = $props();
+  let { trail, timeZone, place, ended = false, tools }: Props = $props();
 
   // room for the y tick labels on the left, the end dot on the right, an end
   // label above the ceiling and the time labels below the baseline
@@ -129,7 +135,7 @@
   const highest = $derived(points.reduce((best, p) => (p.altitude > best.altitude ? p : best), points[0]));
   const summary = $derived(
     drawable && last && highest
-      ? `Altitude since ${clock(t0)}: highest ${feet(highest.altitude)} at ${clock(highest.timestamp)}, now ${feet(last.altitude)}.`
+      ? `Altitude since ${clock(t0)} ${zone}: highest ${feet(highest.altitude)} at ${clock(highest.timestamp)}, ${ended ? "last reported" : "now"} ${feet(last.altitude)}.`
       : "",
   );
   const rows = $derived.by(() => {
@@ -145,7 +151,13 @@
     <h3 id="altitude-heading">Altitude <span>feet</span></h3>
     {#if drawable}
       <span class="tools">
-        <span class="zone" title="Times are given in {place ?? 'this'} time ({zone})">{place ? `${place} time` : zone}</span>
+        <span
+          class="zone"
+          title={place ? `Times are local to ${place} (${zone})` : `Times are in your time zone (${zone}); the departure airport's isn't known`}
+        >
+          {place ? `${place} time` : `Your time, ${zone}`}
+        </span>
+        {@render tools?.()}
         <button class="toggle" aria-pressed={table} onclick={() => (table = !table)}>
           {table ? "Chart" : "Table"}
         </button>
@@ -181,7 +193,7 @@
       aria-valuemin={0}
       aria-valuemax={points.length - 1}
       aria-valuenow={active ?? points.length - 1}
-      aria-valuetext={reading ? `${clock(reading.timestamp)}, ${feet(reading.altitude)}` : undefined}
+      aria-valuetext={reading ? `${clockWithZone(reading.timestamp, timeZone)}, ${feet(reading.altitude)}` : undefined}
       onpointermove={onpointermove}
       onpointerleave={() => (active = null)}
       onfocus={() => (active = points.length - 1)}
@@ -205,9 +217,9 @@
             <line class="crosshair" x1={x(hovered.timestamp)} x2={x(hovered.timestamp)} y1={TOP} y2={TOP + PLOT} />
             <circle class="dot" cx={x(hovered.timestamp)} cy={y(hovered.altitude)} r="5" />
           {:else if last}
-            <circle class="dot" cx={x(last.timestamp)} cy={y(last.altitude)} r="5" />
+            <circle class="dot" class:ended cx={x(last.timestamp)} cy={y(last.altitude)} r="5" />
             {#if endLabel}
-              <text class="end" x={endLabel.x} y={endLabel.y} text-anchor="end">{feet(last.altitude)}</text>
+              <text class="end" class:ended x={endLabel.x} y={endLabel.y} text-anchor="end">{feet(last.altitude)}</text>
             {/if}
           {/if}
         </svg>
@@ -220,7 +232,7 @@
             aria-hidden="true"
           >
             <span class="value"><span class="key"></span>{feet(hovered.altitude)}</span>
-            <span class="label data">{clock(hovered.timestamp)} {zone} · {hovered.ground_speed} kt</span>
+            <span class="label"><Clock unix={hovered.timestamp} {timeZone} /> · <span class="data">{hovered.ground_speed} kt</span></span>
           </div>
         {/if}
       {/if}
@@ -296,6 +308,10 @@
   .end {
     fill: var(--text-2);
   }
+  /* the last report of a flight no longer live: there, but not now */
+  .end.ended {
+    fill: var(--text-3);
+  }
   .line {
     fill: none;
     stroke: var(--series-1);
@@ -316,6 +332,9 @@
     fill: var(--series-1);
     stroke: var(--surface);
     stroke-width: 2;
+  }
+  .dot.ended {
+    fill: var(--text-3);
   }
 
   .tooltip {

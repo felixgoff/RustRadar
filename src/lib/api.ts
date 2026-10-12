@@ -392,6 +392,40 @@ export const radarFrame = (area: BoundingBox | null) => invoke<RadarVolume[]>("r
 export const radarImage = (source: string, name: string) =>
   invoke<ArrayBuffer>("radar_image", { source, name });
 
+/**
+ * A ship as VesselFinder's public map shows it (AIS). The server thins ships
+ * out by zoom: zoomed out only some of them come back.
+ */
+export interface Ship {
+  mmsi: number;
+  lat: number;
+  lon: number;
+  /** Its name, or its MMSI when it hasn't broadcast one. */
+  name: string;
+  /**
+   * VesselFinder's type colour: 2 tug/special, 3 passenger, 4 cargo,
+   * 5 fishing, 6 tanker, 7 SAR/law enforcement, 8 pleasure/sailing, 0 unknown;
+   * anything else is "other".
+   */
+  kind: number;
+  /** 0 small, 1 medium, 2 large (always medium when zoomed out). */
+  size: 0 | 1 | 2;
+  /** Degrees clockwise from north; null when moored or not reported. */
+  heading: number | null;
+  /** The position is old. */
+  old: boolean;
+  /** Metres from the AIS reference point to bow, stern, port and starboard; close in only. */
+  dims: [number, number, number, number] | null;
+}
+
+/**
+ * Ships in an area (`west > east` crosses the antimeridian) at a deck.gl zoom.
+ * Throttled in Rust (one request at a time, an area fetched in the last 10 s
+ * comes from memory); rejects while VesselFinder rests after a failure.
+ */
+export const shipsInView = (area: BoundingBox, zoom: number) =>
+  invoke<Ship[]>("ships_in_view", { ...area, zoom });
+
 /** One position of a flight tracked by the OpenSky Network. */
 export interface OpenSkyPoint {
   /** Unix seconds */

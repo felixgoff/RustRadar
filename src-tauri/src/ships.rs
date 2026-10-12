@@ -28,9 +28,11 @@ const BACKOFF_BASE: Duration = Duration::from_secs(10);
 const BACKOFF_MAX: Duration = Duration::from_secs(600);
 /// Coordinates in the feed are degrees times this.
 const SCALE: f64 = 600_000.0;
-/// The map's zoom range (OpenLayers zooms, 256 px tiles).
+/// The zooms asked for (OpenLayers zooms, 256 px tiles). The feed answers
+/// with no ships at all from 17 up, while 16 already has every ship in view
+/// with its dimensions, so closer views ask at 16.
 const MIN_ZOOM: u8 = 2;
-const MAX_ZOOM: u8 = 18;
+const MAX_ZOOM: u8 = 16;
 /// At and below this zoom the site asks for the whole width of the world.
 const WORLD_ZOOM: u8 = 3;
 /// Above this zoom each ship carries its dimensions and true heading.
@@ -42,6 +44,12 @@ const NORTH_LIMIT: f64 = 89.0;
 const WORLD_LON: i64 = 107_994_000;
 /// Each side of the view is widened by this share, so small pans reuse the answer.
 const PAD: f64 = 0.1;
+/// The feed answers an area more than about 30 map tiles (256 px) a side at
+/// the zoom asked with next to nothing: a tilted or ultrawide view can be
+/// that big. Areas are kept within this many tiles a side.
+const MAX_SPAN_TILES: f64 = 26.0;
+/// From this zoom up the feed carries ships' dimensions (for hulls and models).
+const DETAIL_ZOOM: u8 = 14;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -184,6 +192,30 @@ pub fn parse(buf: &[u8], zoom: u8) -> Vec<Ship> {
         }
     }
     ships
+}
+
+/// The zoom and area to ask for, within what the feed answers (see
+/// `MAX_SPAN_TILES`), padding included: a view too big for its zoom is asked at
+/// a lower one (fewer ships, but all of the view), except that close in, where
+/// ships come with their dimensions, the area is cut down around its centre.
+pub fn fit_view(west: f64, south: f64, east: f64, north: f64, zoom: u8) -> (u8, [f64; 4]) {
+    let width = if east >= west { east - west } else { east + 360.0 - west };
+    let height = (north - south).abs();
+    let max = |z: u8| MAX_SPAN_TILES * 360.0 / 2f64.powi(i32::from(z)) / (1.0 + 2.0 * PAD);
+    let mut zoom = zoom;
+    while zoom > WORLD_ZOOM && (width > max(zoom) || height > max(zoom)) {
+        if zoom != DETAIL_ZOOM {
+            zoom -= 1;
+            continue;
+        }
+        let limit = max(zoom);
+        let centre_lon = west + width / 2.0;
+        let centre_lat = (south + north) / 2.0;
+        let (w, h) = (width.min(limit) / 2.0, height.min(limit) / 2.0);
+        let wrap = |lon: f64| (lon + 540.0).rem_euclid(360.0) - 180.0;
+        return (zoom, [wrap(centre_lon - w), centre_lat - h, wrap(centre_lon + w), centre_lat + h]);
+    }
+    (zoom, [west, south, east, north])
 }
 
 /// The feed's zoom for a deck.gl zoom: deck.gl's tiles are 512 px, the map's 256.
@@ -367,7 +399,7 @@ async fn request(url: &str) -> Result<Vec<u8>, (String, Option<Duration>)> {
 /// deck.gl zoom, as many as VesselFinder shows at that zoom.
 #[tauri::command]
 pub async fn ships_in_view(west: f64, south: f64, east: f64, north: f64, zoom: f64) -> CmdResult<Vec<Ship>> {
-    let zoom = feed_zoom(zoom);
+    let (zoom, [west, south, east, north]) = fit_view(west, south, east, north, feed_zoom(zoom));
     let areas = areas(west, south, east, north, zoom)?;
     let _gate = in_flight().lock().await;
     let mut ships: Vec<Ship> = Vec::new();
@@ -496,7 +528,9 @@ mod tests {
         assert_eq!(feed_zoom(0.5), 2);
         assert_eq!(feed_zoom(2.9), 3);
         assert_eq!(feed_zoom(13.2), 14);
-        assert_eq!(feed_zoom(25.0), 18);
+        assert_eq!(feed_zoom(25.0), 16);
+        // the feed is empty from 17 up
+        assert_eq!(feed_zoom(16.4), 16);
         assert_eq!(feed_zoom(f64::NAN), 2);
 
         // zoomed out: the site's full-width form, no nonce
@@ -555,5 +589,30 @@ mod tests {
     async fn live_vesselfinder() {
         let ships = ships_in_view(3.9, 51.8, 4.6, 52.1, 10.0).await.unwrap();
         assert!(!ships.is_empty());
+    }
+
+    #[test]
+    fn views_too_big_for_their_zoom_are_asked_within_the_feed_limit() {
+        let fits = |zoom: u8, [w, s, e, n]: [f64; 4]| {
+            let max = MAX_SPAN_TILES * 360.0 / 2f64.powi(i32::from(zoom));
+            let width = if e >= w { e - w } else { e + 360.0 - w };
+            width * (1.0 + 2.0 * PAD) <= max + 1e-9 && (n - s) * (1.0 + 2.0 * PAD) <= max + 1e-9
+        };
+        // a 1x1 degree view at zoom 12 is fine as it is
+        assert_eq!(fit_view(3.5, 51.5, 4.5, 52.5, 12), (12, [3.5, 51.5, 4.5, 52.5]));
+        // a tilted view reaching 8 degrees to the horizon: asked lower down, all of it
+        let (zoom, area) = fit_view(0.0, 50.0, 8.0, 58.0, 12);
+        assert!(zoom < 12 && fits(zoom, area));
+        assert_eq!(area, [0.0, 50.0, 8.0, 58.0]);
+        // close in, the zoom with dimensions is kept and the area cut around its centre
+        let (zoom, area) = fit_view(3.0, 51.0, 5.0, 53.0, 16);
+        assert_eq!(zoom, DETAIL_ZOOM);
+        assert!(fits(zoom, area));
+        assert!(((area[0] + area[2]) / 2.0 - 4.0).abs() < 1e-9 && ((area[1] + area[3]) / 2.0 - 52.0).abs() < 1e-9);
+        // across the antimeridian
+        let (zoom, area) = fit_view(170.0, -20.0, -170.0, 0.0, 9);
+        assert!(fits(zoom, area));
+        // the whole world at low zoom is the feed's own full-width request
+        assert_eq!(fit_view(-180.0, -80.0, 180.0, 80.0, 3).0, 3);
     }
 }

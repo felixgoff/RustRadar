@@ -278,7 +278,8 @@
   /** The next refresh; kept apart, so a camera that never settles (following an aircraft) still gets one. */
   let shipsRefresh: ReturnType<typeof setTimeout> | undefined;
   /** The feed's zoom steps: an answer at another one has the wrong density. */
-  const shipZoom = (zoom: number) => Math.floor(zoom + 1);
+  // the feed's zoom step (see ships.rs `feed_zoom`): 2..16, as it is empty from 17 up
+  const shipZoom = (zoom: number) => Math.min(16, Math.max(2, Math.floor(zoom + 1)));
   function stopShips() {
     clearTimeout(shipsSettle);
     clearTimeout(shipsRefresh);

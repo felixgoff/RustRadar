@@ -410,7 +410,7 @@
       case "transportation":
         return p.class === "motorway" || p.class === "trunk" ? 1.4 : p.class === "primary" ? 1 : 0.6;
       case "aeroway":
-        return p.class === "runway" ? 4 : 1.5;
+        return p.class === "runway" ? RUNWAY_PX : 1.5;
       default:
         return 0;
     }
@@ -419,28 +419,26 @@
     mvt: { layers: ["water", "boundary", "transportation", "aeroway"], workerUrl: mvtWorkerUrl },
   };
 
-  // Close in, runways and taxiways drawn as centrelines a few pixels wide end
-  // up far thinner than they are; from here on they get their real width
-  // instead (the tiles don't carry it: typical airliner widths), which is
-  // already wider than the pixel lines at this zoom.
-  const AEROWAY_TRUE_ZOOM = 14;
+  // Close in, a runway drawn as a centreline a few pixels wide ends up far
+  // thinner than it is. It switches to its real width (the tiles don't carry
+  // it: a typical one) once that is as wide as the pixel line, so nothing
+  // jumps. Taxiways stay thin centre lines at every zoom.
   const RUNWAY_WIDTH_M = 45;
-  const TAXIWAY_WIDTH_M = 23;
+  const RUNWAY_PX = 4;
   const AEROWAY_LOAD_OPTIONS = { mvt: { layers: ["aeroway"], workerUrl: mvtWorkerUrl } };
-  /** Runway and taxiway centrelines at true width, over the map layer, for close in. */
-  const aerowayLayer = (url: string) =>
+  /** Runways at true width, over the map layer, for close in. */
+  const aerowayLayer = (url: string, flat: boolean) =>
     new MVTLayer({
-      id: "aeroway-true",
+      id: flat ? "aeroway-true-flat" : "aeroway-true-globe",
       data: url,
       minZoom: 0,
       maxZoom: 14,
       loadOptions: AEROWAY_LOAD_OPTIONS,
       filled: false,
       stroked: false,
-      getLineColor: vectorLine,
-      getLineWidth: ({ properties: p }: MapFeature) => (p.class === "runway" ? RUNWAY_WIDTH_M : TAXIWAY_WIDTH_M),
+      getLineColor: ({ properties: p }: MapFeature) => (p.class === "runway" ? RUNWAY : NONE),
+      getLineWidth: ({ properties: p }: MapFeature) => (p.class === "runway" ? RUNWAY_WIDTH_M : 0),
       lineWidthUnits: "meters",
-      lineWidthMinPixels: 1,
       getPointRadius: 0,
       parameters: SURFACE_NO_CULL,
     });
@@ -477,9 +475,10 @@
       stroked: false,
       getFillColor: vectorFill,
       getLineColor: vectorLine,
-      // the aeroway layer draws runway and taxiway lines once they are at true width
+      // the aeroway layer draws runways once they are at true width
       getLineWidth: trueAeroways
-        ? (f: MapFeature) => (f.properties.layerName === "aeroway" ? 0 : vectorLineWidth(f))
+        ? (f: MapFeature) =>
+            f.properties.layerName === "aeroway" && f.properties.class === "runway" ? 0 : vectorLineWidth(f)
         : vectorLineWidth,
       updateTriggers: { getLineWidth: trueAeroways },
       lineWidthUnits: "pixels",
@@ -1232,9 +1231,9 @@
     else {
       layers.push(landLayer());
       if (tileUrl) {
-        const trueAeroways = zoom >= AEROWAY_TRUE_ZOOM;
+        const trueAeroways = RUNWAY_WIDTH_M / mpp >= RUNWAY_PX;
         layers.push(vectorMapLayer(tileUrl, flat, trueAeroways));
-        if (trueAeroways) layers.push(aerowayLayer(tileUrl));
+        if (trueAeroways) layers.push(aerowayLayer(tileUrl, flat));
       }
     }
     if (weather) {

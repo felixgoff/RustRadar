@@ -247,6 +247,8 @@ const MEAS_FRESH_MS = 15_000;
 const MEAS_FADE_MS = 5_000;
 /** Samples from the two sources closer in time than this are the same moment: the better one is kept. */
 const COINCIDENT_MS = 1_000;
+/** The crab is kicked out over the last this many feet above the runway. */
+const DECRAB_AGL_FT = 60;
 /** Largest crab angle believed, degrees. */
 const MAX_CRAB = 30;
 /** A turn onto a selected heading rolls out over this long. */
@@ -1854,10 +1856,8 @@ export class Motion {
       S.phase === "parked"
         ? S.trackDeg
         : wrap360((speed > HEADING_MIN_SPEED_MS ? Math.atan2(vx, vy) : pathHeading) / DEG);
-    // measured values count while fresh (the nose's crab, the bank, the airspeed), then ease out;
-    // the crab and bank as they were at T
+    // measured values count while fresh (the nose's crab, the bank, the airspeed), then ease out
     const mw = measWeight(tr, T);
-    out.heading = mw > 0 ? wrap360(out.track + seriesAt(tr.crabTs, tr.crabs, T, tr.crab) * mw) : out.track;
 
     // --- vertical, phase and attitude
     let phase = S.phase;
@@ -1945,6 +1945,13 @@ export class Motion {
         out.bank = clamp(out.modelBank + bias, -MAX_BANK, MAX_BANK);
       }
     }
+    // the nose's crab into a crosswind, as it was at T: kicked out in the flare
+    // so the wheels touch down along the runway, and none on the ground, where
+    // the aircraft points where it rolls. (The last crab measured in the air
+    // would otherwise hold all the way down the runway.)
+    const decrab = out.ground ? 0 : Number.isFinite(out.agl) ? smoothstep(out.agl / DECRAB_AGL_FT) : 1;
+    const crab = mw > 0 && decrab > 0 ? seriesAt(tr.crabTs, tr.crabs, T, tr.crab) * mw * decrab : 0;
+    out.heading = wrap360(out.track + crab);
     out.phase = phase;
     if (out.ground) out.drawAlt = 0;
     else if (Number.isFinite(S.liftoffMs) && !field) out.drawAlt = out.agl; // predicted climb off an unknown field

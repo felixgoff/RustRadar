@@ -1485,3 +1485,29 @@ test("the selected aircraft's altimeter setting (adsb.lol nav_qnh) corrects it a
   const q = poseAt(m, f, f.timestampMs + 8_000);
   expect(Math.abs(q.altFt - (truth - 8 * 140 * KT * Math.tan(3 * DEG) / 0.3048))).toBeLessThan(60);
 });
+
+test("a measured crab is kicked out in the flare and gone on the runway", () => {
+  const f = fixture("KLM76F");
+  const m = new Motion();
+  m.setAirports(fixtureAirports);
+  const reports = fixtureReports(f);
+  let k = -1;
+  const crabs: { altFt: number; crab: number }[] = [];
+  const end = reports[reports.length - 1].timestampMs + 13_000;
+  for (let now = reports[0].timestampMs + 3_000; now <= end; now += 16) {
+    while (k + 1 < reports.length && reports[k + 1].timestampMs + 3_000 <= now) {
+      const r = reports[++k];
+      // a crosswind from the right all the way down, as adsb.lol reports it
+      m.measure(f.id, { positionMs: r.timestampMs, seenMs: r.timestampMs, lat: r.lat, lon: r.lon, onGround: r.onGround, gs: r.speed, track: r.track, trueHeading: r.track + 6, altBaro: r.alt }, now);
+    }
+    const p = m.pose(reports[Math.max(0, k)], now);
+    // (the first measurement comes before the track exists and is dropped)
+    if (k >= 2) crabs.push({ altFt: p.altFt, crab: ((p.heading - p.track + 540) % 360) - 180 });
+  }
+  const high = crabs.filter((c) => c.altFt > 300);
+  expect(high.length).toBeGreaterThan(0);
+  for (const c of high) expect(Math.abs(c.crab - 6)).toBeLessThan(1);
+  const down = crabs.filter((c) => c.altFt < 1);
+  expect(down.length).toBeGreaterThan(100);
+  for (const c of down) expect(Math.abs(c.crab)).toBeLessThan(0.01);
+});

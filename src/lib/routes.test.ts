@@ -313,3 +313,19 @@ test("a whole estimate names its runways and stays an estimate", () => {
   expect(distanceM(ll(bare.ahead[bare.ahead.length - 1]), CPH)).toBeLessThan(1);
   expect(maxKink(bare.ahead)).toBeLessThan(6);
 });
+
+test("an aircraft already over the runway rolls out along it rather than going round to land again", () => {
+  const e = end("22L");
+  // past the threshold in the flare, then on the landing roll: Flightradar24 still says airborne
+  for (const [pastM, altFt, speedKt] of [[150, 40, 140], [900, 17, 120], [1_500, 17, 60]] as const) {
+    const at = destination(e.threshold, e.heading, pastM);
+    const ac = aircraft(at, e.heading, altFt, speedKt);
+    const choice = chooseArrivalRunway(ENDS, ac);
+    expect(choice?.end.ident).toBe("22L");
+    expect(choice?.reason).toBe("aligned");
+    const path = arrivalPath(ac, e);
+    // straight ahead down the runway, never back towards the approach
+    for (const p of path.slice(1)) expect(Math.abs(wrap180(bearing(at, ll(p)) - e.heading))).toBeLessThan(1);
+    expect(distanceM(at, ll(path[path.length - 1]))).toBeLessThan(2_000);
+  }
+});

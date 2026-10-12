@@ -67,9 +67,26 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --locked
 
+  # The version a release publishes, worked out once for every platform: the
+  # files' version, or the next patch after the latest release if that one is
+  # already out (installed apps only update to a newer version).
+  version:
+    name: Release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pick
+        run: |
+          version="$(bash scripts/release-version.sh)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Release version: $version (files say $(node -p 'require("./package.json").version'))" >> "$GITHUB_STEP_SUMMARY"
+
   # Installers for every platform via tauri-action.
   bundle:
     name: Bundle (${{ matrix.name }})
+    needs: version
     permissions:
       contents: write # needed to create the draft release on tags
     strategy:
@@ -127,6 +144,14 @@ jobs:
           KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: bash scripts/check-signing-key.sh
 
+      # A main build whose version was already released gets the next patch, so
+      # installed copies see it as an update. Only this build's files change;
+      # nothing is committed. (A v* tag publishes the version it names.)
+      - name: Set release version
+        if: env.RELEASE == 'true' && !startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: node scripts/version.mjs "${{ needs.version.outputs.version }}"
+
       # Note: crates/fr24 compiles its protos with protox (pure Rust), so no protoc is needed.
       - uses: tauri-apps/tauri-action@v1
         id: tauri
@@ -153,9 +178,9 @@ jobs:
           # Installers as workflow artifacts on every run (push, PR, tag).
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: "[name]_[version]_[platform]_[arch]_[bundle]"
-          # Every push to main publishes a release named after the version in
-          # tauri.conf.json (bump it to ship), with a latest.json that installed
-          # apps read at launch. A v* tag publishes under its own name instead.
+          # Every push to main publishes a release named after the version set
+          # above, with a latest.json that installed apps read at launch. A v*
+          # tag publishes under its own name instead.
           tagName: ${{ env.RELEASE == 'true' && (startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v__VERSION__') || '' }}
           releaseName: "RustRadar v__VERSION__"
           releaseBody: "Installed copies update to this version automatically the next time they open."

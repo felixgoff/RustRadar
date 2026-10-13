@@ -1,0 +1,195 @@
+{
+ "data": {
+  "vehicles": [
+   {
+    "vehicleId": "61-2026-10-13",
+    "lastUpdated": "2026-10-13T06:11:44.962Z",
+    "location": {
+     "latitude": 60.206916,
+     "longitude": 10.079299
+    },
+    "bearing": 270.4502177814602,
+    "speed": null,
+    "delay": 191.0,
+    "mode": "RAIL",
+    "operator": {
+     "operatorRef": "",
+     "name": null
+    },
+    "line": {
+     "lineRef": "VYG:Line:F4",
+     "publicCode": "F4",
+     "lineName": "Oslo S-Bergen"
+    },
+    "destinationName": "Bergen",
+    "originName": null,
+    "serviceJourney": {
+     "id": "VYG:ServiceJourney:61-LOD_617015-R"
+    },
+    "monitored": true
+   },
+   {
+    "vehicleId": "2172-2026-10-12",
+    "lastUpdated": "2026-10-13T06:11:39.302Z",
+    "location": {
+     "latitude": 59.833702,
+     "longitude": 10.435383
+    },
+    "bearing": 210.42571855422466,
+    "speed": null,
+    "delay": 29.0,
+    "mode": "RAIL",
+    "operator": {
+     "operatorRef": "",
+     "name": null
+    },
+    "line": {
+     "lineRef": "VYG:Line:L1",
+     "publicCode": "L1",
+     "lineName": "Spikkestad-Oslo S-Lillestrøm"
+    },
+    "destinationName": "Lillestrøm",
+    "originName": null,
+    "serviceJourney": {
+     "id": "VYG:ServiceJourney:2172_443583-R"
+    },
+    "monitored": true
+   },
+   {
+    "vehicleId": "1109-2026-10-13",
+    "lastUpdated": "2026-10-13T06:10:08.483Z",
+    "location": {
+     "latitude": 59.43167,
+     "longitude": 10.657235
+    },
+    "bearing": 143.22803057762258,
+    "speed": null,
+    "delay": 124.0,
+    "mode": "RAIL",
+    "operator": {
+     "operatorRef": "",
+     "name": null
+    },
+    "line": {
+     "lineRef": "VYG:Line:R21",
+     "publicCode": "R21",
+     "lineName": "Stabekk-Oslo S-Moss"
+    },
+    "destinationName": "Moss",
+    "originName": null,
+    "serviceJourney": {
+     "id": "VYG:ServiceJourney:1109-HVK_442980-R"
+    },
+    "monitored": true
+   },
+   {
+    "vehicleId": "71-13",
+    "lastUpdated": "2026-10-13T06:01:01.585246Z",
+    "location": {
+     "latitude": 59.91020833333333,
+     "longitude": 10.754555
+    },
+    "bearing": 294.8713684082031,
+    "speed": null,
+    "delay": 0.0,
+    "mode": "RAIL",
+    "operator": {
+     "operatorRef": "FLT:Operator:507",
+     "name": "Flytoget"
+    },
+    "line": {
+     "lineRef": "FLT:Line:FLY2",
+     "publicCode": "FLY2",
+     "lineName": "FLY2"
+    },
+    "destinationName": "Oslo S",
+    "originName": null,
+    "serviceJourney": {
+     "id": "FLT:ServiceJourney:1-2614-3892-20261013"
+    },
+    "monitored": true
+   },
+   {
+    "vehicleId": "73-05",
+    "lastUpdated": "2026-10-13T06:11:30.166558Z",
+    "location": {
+     "latitude": 58.473713,
+     "longitude": 6.419588
+    },
+    "bearing": 72.50849683308229,
+    "speed": null,
+    "delay": 0.0,
+    "mode": "RAIL",
+    "operator": {
+     "operatorRef": "",
+     "name": null
+    },
+    "line": {
+     "lineRef": "GOA:Line:50",
+     "publicCode": "F5",
+     "lineName": "Sørtoget region"
+    },
+    "destinationName": "Oslo S",
+    "originName": null,
+    "serviceJourney": {
+     "id": "GOA:ServiceJourney:706-KVB_63227-R"
+    },
+    "monitored": true
+   },
+   {
+    "vehicleId": "957605930131",
+    "lastUpdated": "2026-10-13T06:11:38Z",
+    "location": {
+     "latitude": 61.575446666666664,
+     "longitude": 11.040283333333333
+    },
+    "bearing": 153.27487797632773,
+    "speed": null,
+    "delay": 0.0,
+    "mode": "RAIL",
+    "operator": {
+     "operatorRef": "",
+     "name": null
+    },
+    "line": {
+     "lineRef": "SJN:Line:25",
+     "publicCode": "R60",
+     "lineName": "Rørosbanen"
+    },
+    "destinationName": "Hamar",
+    "originName": null,
+    "serviceJourney": {
+     "id": "SJN:ServiceJourney:2380_37659-R"
+    },
+    "monitored": true
+   },
+   {
+    "vehicleId": "270-2026-10-13",
+    "lastUpdated": "2026-10-13T05:55:40.484Z",
+    "location": {
+     "latitude": 59.910687,
+     "longitude": 10.755516
+    },
+    "bearing": null,
+    "speed": null,
+    "delay": 76.0,
+    "mode": "RAIL",
+    "operator": {
+     "operatorRef": "",
+     "name": null
+    },
+    "line": {
+     "lineRef": "VYG:Line:R31",
+     "publicCode": "R31",
+     "lineName": "Skøyen-Jaren-Gjøvik"
+    },
+    "destinationName": "Oslo S",
+    "originName": null,
+    "serviceJourney": {
+     "id": "VYG:ServiceJourney:270-JAH_488362-R"
+    },
+    "monitored": true
+   }
+  ]
+ }
+}

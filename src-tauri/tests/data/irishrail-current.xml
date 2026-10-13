@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ArrayOfObjTrainPositions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns="http://api.irishrail.ie/realtime/">
+  <objTrainPositions>
+    <TrainStatus>R</TrainStatus>
+    <TrainLatitude>0</TrainLatitude>
+    <TrainLongitude>0</TrainLongitude>
+    <TrainCode>A201</TrainCode>
+    <TrainDate>13 Oct 2026</TrainDate>
+    <PublicMessage>A201\n06:15 - Cork to Dublin Heuston (0 mins late)\nDeparted LJ461 next stop Dublin Heuston</PublicMessage>
+    <Direction>To Dublin Heuston</Direction>
+  </objTrainPositions>
+  <objTrainPositions>
+    <TrainStatus>R</TrainStatus>
+    <TrainLatitude>53.2043</TrainLatitude>
+    <TrainLongitude>-6.10046</TrainLongitude>
+    <TrainCode>E133</TrainCode>
+    <TrainDate>12 Oct 2026</TrainDate>
+    <PublicMessage>E133\n22:33 - Malahide to Greystones (1440 mins late)\nDeparted Bray next stop Greystones</PublicMessage>
+    <Direction>Southbound</Direction>
+  </objTrainPositions>
+  <objTrainPositions>
+    <TrainStatus>R</TrainStatus>
+    <TrainLatitude>0</TrainLatitude>
+    <TrainLongitude>0</TrainLongitude>
+    <TrainCode>P742</TrainCode>
+    <TrainDate>13 Oct 2026</TrainDate>
+    <PublicMessage>P742\n06:29 - Maynooth to Dublin Connolly (-1 mins late)\nDeparted North Strand Junction next stop Dublin Connolly</PublicMessage>
+    <Direction>Southbound</Direction>
+  </objTrainPositions>
+  <objTrainPositions>
+    <TrainStatus>R</TrainStatus>
+    <TrainLatitude>0</TrainLatitude>
+    <TrainLongitude>0</TrainLongitude>
+    <TrainCode>D553</TrainCode>
+    <TrainDate>13 Oct 2026</TrainDate>
+    <PublicMessage>D553\n06:48 - Mallow to Midleton (0 mins late)\nDeparted Killarney Junction next stop Cork</PublicMessage>
+    <Direction>To Midleton</Direction>
+  </objTrainPositions>
+  <objTrainPositions>
+    <TrainStatus>N</TrainStatus>
+    <TrainLatitude>51.9018</TrainLatitude>
+    <TrainLongitude>-8.4582</TrainLongitude>
+    <TrainCode>P503</TrainCode>
+    <TrainDate>13 Oct 2026</TrainDate>
+    <PublicMessage>P503\nCork to Mallow\nExpected Departure 07:20</PublicMessage>
+    <Direction>To Mallow</Direction>
+  </objTrainPositions>
+  <objTrainPositions>
+    <TrainStatus>T</TrainStatus>
+    <TrainLatitude>53.3531</TrainLatitude>
+    <TrainLongitude>-6.24591</TrainLongitude>
+    <TrainCode>P731</TrainCode>
+    <TrainDate>13 Oct 2026</TrainDate>
+    <PublicMessage>P731\n06:05 - Drogheda to Dublin Connolly(0 mins late)\nTERMINATED Dublin Connolly at 07:08</PublicMessage>
+    <Direction>Southbound</Direction>
+  </objTrainPositions>
+</ArrayOfObjTrainPositions>

@@ -589,3 +589,45 @@ export const unfollowFlight = () => invoke<void>("unfollow_flight");
 /** Flightradar24's logo for an airline id, such as a schedule's `painted_as_id`. */
 export const airlineLogoUrl = (airlineId: number) =>
   `https://cdn.flightradar24.com/assets/airlines/logotypes/${airlineId}.png`;
+
+/** Where a train comes from: one regional public feed each. */
+export type TrainSource = "digitraffic" | "amtrak" | "entur" | "irishrail" | "vbb";
+
+export type TrainKind = "highSpeed" | "intercity" | "regional" | "suburban" | "metro" | "freight" | "other";
+
+/** A train on the move, merged from regional public feeds (no global one exists). */
+export interface Train {
+  /** Source-prefixed and stable while the train runs, e.g. `digitraffic:2026-10-13:2`. */
+  id: string;
+  source: TrainSource;
+  /** e.g. "IC 1", "H train 1608", "Amtrak 5 California Zephyr", "F4 Oslo S-Bergen". */
+  name: string;
+  kind: TrainKind;
+  lat: number;
+  lon: number;
+  /** Degrees clockwise from north; null when the source has none (or it stands still). */
+  heading: number | null;
+  speedKmh: number | null;
+  destination: string | null;
+  operator: string | null;
+  /** Minutes late at the last or next stop (negative: early). */
+  delayMinutes: number | null;
+  /** When the position was reported, Unix seconds. */
+  positionUnix: number;
+  /**
+   * Expected positions ahead as `[lat, lon, unixMs]`, in time order, the first
+   * at the report; only from HAFAS radar sources (vbb), else empty. See
+   * `positionAt` in trains.ts.
+   */
+  frames: [number, number, number][];
+}
+
+/**
+ * Trains in an area (`west > east` crosses the antimeridian) at a deck.gl
+ * zoom, from every regional source covering it (Finland, Norway, Ireland,
+ * the USA and Canada at any zoom; Berlin–Brandenburg from zoom 6). Cached
+ * 20–30 s per source in Rust, with backoff; a failing source is left out,
+ * and it rejects only when every source in view failed.
+ */
+export const trainsInView = (area: BoundingBox, zoom: number) =>
+  invoke<Train[]>("trains_in_view", { ...area, zoom });

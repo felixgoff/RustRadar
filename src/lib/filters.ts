@@ -108,6 +108,12 @@ export interface Settings {
   adsb: boolean;
   /** Live ship positions from VesselFinder. */
   ships: boolean;
+  /** Live train positions. */
+  trains: boolean;
+  /** Railway lines from OpenRailwayMap. */
+  railMap: boolean;
+  /** Relief from the AWS Terrain Tiles (Mapzen). */
+  terrain: boolean;
   exaggeration: number;
 }
 
@@ -121,8 +127,26 @@ export const DEFAULT_SETTINGS: Settings = {
   weather: false,
   adsb: true,
   ships: true,
+  trains: true,
+  railMap: false,
+  terrain: false,
   exaggeration: 10,
 };
+
+/**
+ * Stored settings over the defaults. A setting added since they were saved
+ * takes its default, and one stored with the wrong type (an older format,
+ * a hand edit) falls back to it too.
+ */
+export function mergeSettings(saved: unknown): Settings {
+  const merged: Settings = { ...DEFAULT_SETTINGS };
+  if (!saved || typeof saved !== "object") return merged;
+  const values = merged as unknown as Record<string, unknown>;
+  for (const [key, value] of Object.entries(saved)) {
+    if (key in DEFAULT_SETTINGS && typeof value === typeof values[key]) values[key] = value;
+  }
+  return merged;
+}
 
 const STORAGE_KEY = "rustradar.v1";
 
@@ -130,7 +154,7 @@ export function loadPersisted(): { settings: Settings; filters: Filters } {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}");
     return {
-      settings: { ...DEFAULT_SETTINGS, ...saved.settings },
+      settings: mergeSettings(saved.settings),
       filters: { ...DEFAULT_FILTERS, ...saved.filters },
     };
   } catch {

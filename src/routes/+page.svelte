@@ -611,6 +611,9 @@
     d: () => (settings.daylight = !settings.daylight),
     w: () => (settings.weather = !settings.weather),
     s: () => (settings.ships = !settings.ships),
+    i: () => (settings.trains = !settings.trains),
+    r: () => (settings.railMap = !settings.railMap),
+    e: () => (settings.terrain = !settings.terrain),
   };
 
   function onkeydown(e: KeyboardEvent) {
@@ -645,6 +648,9 @@
       // ODbL asks for attribution wherever the data is shown
       measured && "Aircraft data: © adsb.lol contributors, ODbL",
       settings.ships && "Ships © VesselFinder",
+      // trains: their source's credit goes here, behind settings.trains, once trains are drawn
+      settings.railMap && "Rail data © OpenRailwayMap",
+      settings.terrain && "Terrain: AWS Terrain Tiles (Mapzen)",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]
       .filter(Boolean)
@@ -869,6 +875,9 @@
     bind:weather={settings.weather}
     bind:adsb={settings.adsb}
     bind:ships={settings.ships}
+    bind:trains={settings.trains}
+    bind:railMap={settings.railMap}
+    bind:terrain={settings.terrain}
     bind:exaggeration={settings.exaggeration}
     {session}
     inset={selected || boardCode || selectedShip ? PANEL_INSET : 0}

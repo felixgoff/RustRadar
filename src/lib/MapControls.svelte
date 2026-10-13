@@ -1,6 +1,18 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { CircleUserRound, Keyboard, Layers, LoaderCircle, Minus, Navigation2, Plus, Rotate3d } from "@lucide/svelte";
+  import {
+    CircleUserRound,
+    Keyboard,
+    Layers,
+    LoaderCircle,
+    Minus,
+    Navigation2,
+    Plus,
+    Rotate3d,
+    Settings,
+  } from "@lucide/svelte";
+  import LayersMenu from "./LayersMenu.svelte";
+  import SettingsMenu from "./SettingsMenu.svelte";
   import type { SessionInfo } from "./api";
   import type { Basemap } from "./geo";
 
@@ -17,6 +29,9 @@
     weather: boolean;
     adsb: boolean;
     ships: boolean;
+    trains: boolean;
+    railMap: boolean;
+    terrain: boolean;
     exaggeration: number;
     session: SessionInfo | null;
     /** Extra space on the right, e.g. for an open side panel. */
@@ -42,6 +57,9 @@
     weather = $bindable(),
     adsb = $bindable(),
     ships = $bindable(),
+    trains = $bindable(),
+    railMap = $bindable(),
+    terrain = $bindable(),
     exaggeration = $bindable(),
     session,
     inset = 0,
@@ -53,19 +71,16 @@
     onhelp,
   }: Props = $props();
 
-  /** Place-name sizes on offer, as multiples of the default. */
-  const LABEL_SIZES: [number, string][] = [
-    [0.85, "Small"],
-    [1, "Medium"],
-    [1.25, "Large"],
-    [1.5, "Extra large"],
-  ];
+  type Popover = "layers" | "settings" | "account";
 
   const TILT = 55;
-  let open = $state<"layers" | "account" | null>(null);
+  /** One popover at a time. */
+  let open = $state<Popover | null>(null);
   let root: HTMLDivElement;
   let firstField = $state<HTMLInputElement>();
   let signedInState = $state<HTMLElement>();
+  /** The buttons that open each popover, where Escape sends the keyboard back to. */
+  const triggers: Partial<Record<Popover, HTMLButtonElement>> = {};
   /** Where the keyboard goes back to when the account popover closes, if it was opened from elsewhere. */
   let returnFocus: (() => HTMLElement | null) | null = null;
 
@@ -93,13 +108,22 @@
     }
   }
 
-  /** Closes whichever popover is open. Focus left inside it would fall to the page: it goes back where it came from. */
-  function close() {
+  /**
+   * Closes whichever popover is open. Focus left inside it would fall to the
+   * page: it goes back where it came from. With `toTrigger` (Escape), the
+   * keyboard goes back to the button that opened it.
+   */
+  function close(toTrigger = false) {
     if (!open) return;
+    const trigger = triggers[open];
     open = null;
-    const back = returnFocus;
+    const back = returnFocus ?? (toTrigger ? () => trigger ?? null : null);
     returnFocus = null;
     if (!back) return;
+    if (toTrigger) {
+      back()?.focus();
+      return;
+    }
     // after the click or key has moved focus on its own, e.g. to the control clicked
     requestAnimationFrame(() => {
       const active = document.activeElement;
@@ -108,11 +132,12 @@
     });
   }
 
-  function toggleLayers() {
-    if (open === "layers") return close();
+  function toggle(which: Popover) {
+    if (open === which) return close();
     // moving on to another popover: nothing to go back to
     returnFocus = null;
-    open = "layers";
+    if (which === "account") error = null;
+    open = which;
   }
 
   function onpointerdown(e: PointerEvent) {
@@ -123,7 +148,7 @@
   function onkeydowncapture(e: KeyboardEvent) {
     if (e.key !== "Escape" || !open) return;
     e.stopPropagation();
-    close();
+    close(true);
   }
 
   async function submit(e: SubmitEvent) {
@@ -159,143 +184,111 @@
 <svelte:window {onpointerdown} {onkeydowncapture} />
 
 <div class="controls" bind:this={root} style:--inset="{inset}px">
-  {#if open === "layers"}
-    <section class="popover surface" aria-label="Map layer settings">
-      <fieldset class="segmented">
-        <legend>Map</legend>
-        {#each [["dark", "Dark"], ["satellite", "Satellite"]] as const as [value, label]}
-          <label>
-            <input type="radio" name="basemap" {value} bind:group={basemap} />
-            <span>{label}</span>
-          </label>
-        {/each}
-      </fieldset>
-
-      <div class="group">
-        <label class="switch">
-          <span>Place names</span>
-          <input type="checkbox" role="switch" bind:checked={labels} />
-        </label>
-        <fieldset class="segmented" disabled={!labels}>
-          <legend>Place name size</legend>
-          {#each LABEL_SIZES as [value, label] (value)}
-            <label>
-              <input type="radio" name="label-size" {value} bind:group={labelSize} />
-              <span>{label}</span>
-            </label>
-          {/each}
-        </fieldset>
-        <label class="switch">
-          <span>
-            3D buildings
-            <small>Appear when you zoom in to street level</small>
-          </span>
-          <input type="checkbox" role="switch" bind:checked={buildings} />
-        </label>
-        <label class="switch">
-          <span>
-            Airline liveries
-            <small>Aircraft take their airline's colours up close</small>
-          </span>
-          <input type="checkbox" role="switch" bind:checked={liveries} />
-        </label>
-        <label class="switch">
-          <span>
-            Day and night
-            <small>Shades where the sun has set, with twilight</small>
-          </span>
-          <input type="checkbox" role="switch" bind:checked={daylight} />
-        </label>
-        <label class="switch">
-          <span>
-            Weather radar
-            <small>Rain and snow from RainViewer, updated every 10 min</small>
-          </span>
-          <input type="checkbox" role="switch" bind:checked={weather} />
-        </label>
-        <label class="switch">
-          <span>
-            Ships
-            <small>Live positions from VesselFinder; more appear as you zoom in</small>
-          </span>
-          <input type="checkbox" role="switch" bind:checked={ships} />
-        </label>
-        <label class="switch">
-          <span>
-            Aircraft-reported data
-            <small>Heading, bank, airspeeds and autopilot settings of the selected aircraft, from adsb.lol</small>
-          </span>
-          <input type="checkbox" role="switch" bind:checked={adsb} />
-        </label>
-      </div>
-
-      <label class="range">
-        <span>Altitude exaggeration <output class="data">×{exaggeration}</output></span>
-        <input type="range" min="1" max="40" step="1" bind:value={exaggeration} />
-        <small>Applies when zoomed out; true scale up close</small>
-      </label>
-    </section>
-  {:else if open === "account"}
-    <section class="popover surface account" aria-labelledby="account-heading">
-      <h2 id="account-heading">Flightradar24 account</h2>
-      {#if signedIn}
-        <p class="state" tabindex="-1" bind:this={signedInState}><span class="badge good">Signed in</span></p>
-        <p class="note">
-          Data your subscription includes, such as filed flight plans, now shows up.{session?.expires
-            ? ` The session lasts until ${until(session.expires)}.`
-            : ""}
-        </p>
-        <button class="button" onclick={signOut} disabled={busy}>Sign out</button>
-      {:else}
-        <p class="note">
-          Optional. A subscription unlocks filed flight plans (the real route), vertical speed, squawk and airspace,
-          depending on your plan.
-        </p>
-        <form onsubmit={submit}>
-          <label class="field">
-            <span>Email</span>
-            <input type="email" autocomplete="username" required bind:value={email} disabled={busy} bind:this={firstField} />
-          </label>
-          <label class="field">
-            <span>Password</span>
-            <input type="password" autocomplete="current-password" required bind:value={password} disabled={busy} />
-          </label>
-          {#if error}<p class="error" role="alert">{error}</p>{/if}
-          <button class="button primary" type="submit" disabled={busy || !email || !password}>
-            {#if busy}<span class="spin"><LoaderCircle size={14} strokeWidth={2} /></span>{/if}
-            Sign in
-          </button>
-        </form>
-        <p class="fine">
-          Sent only to Flightradar24. RustRadar keeps the session in memory and forgets it when you quit.
-        </p>
-      {/if}
-    </section>
-  {/if}
-
   <div class="stack surface">
     <button
       class="icon-button"
       aria-label="Map layers"
       aria-expanded={open === "layers"}
+      aria-controls="layers-popover"
       aria-pressed={open === "layers"}
       title="Map layers"
-      onclick={toggleLayers}
+      bind:this={triggers.layers}
+      onclick={() => toggle("layers")}
     >
       <Layers size={18} strokeWidth={1.75} />
     </button>
+    {#if open === "layers"}
+      <section id="layers-popover" class="popover surface menu" aria-label="Map layers">
+        <LayersMenu
+          bind:basemap
+          bind:terrain
+          bind:buildings
+          bind:labels
+          bind:railMap
+          bind:liveries
+          bind:ships
+          bind:trains
+          bind:weather
+          bind:daylight
+        />
+      </section>
+    {/if}
+    <button
+      class="icon-button"
+      aria-label="Settings"
+      aria-expanded={open === "settings"}
+      aria-controls="settings-popover"
+      aria-pressed={open === "settings"}
+      title="Settings"
+      bind:this={triggers.settings}
+      onclick={() => toggle("settings")}
+    >
+      <Settings size={18} strokeWidth={1.75} />
+    </button>
+    {#if open === "settings"}
+      <section id="settings-popover" class="popover surface menu" aria-label="Settings">
+        <SettingsMenu {labels} bind:labelSize bind:exaggeration bind:adsb />
+      </section>
+    {/if}
     <button
       class="icon-button"
       class:signed-in={signedIn}
       aria-label="Flightradar24 account"
       aria-expanded={open === "account"}
+      aria-controls="account-popover"
       aria-pressed={open === "account"}
       title={signedIn ? "Signed in to Flightradar24" : "Sign in to Flightradar24"}
-      onclick={() => (open === "account" ? close() : openAccount())}
+      bind:this={triggers.account}
+      onclick={() => toggle("account")}
     >
       <CircleUserRound size={18} strokeWidth={1.75} />
     </button>
-    <button class="icon-button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onclick={onhelp}>
+    {#if open === "account"}
+      <section id="account-popover" class="popover surface account" aria-labelledby="account-heading">
+        <h2 id="account-heading">Flightradar24 account</h2>
+        {#if signedIn}
+          <p class="state" tabindex="-1" bind:this={signedInState}><span class="badge good">Signed in</span></p>
+          <p class="note">
+            Data your subscription includes, such as filed flight plans, now shows up.{session?.expires
+              ? ` The session lasts until ${until(session.expires)}.`
+              : ""}
+          </p>
+          <button class="button" onclick={signOut} disabled={busy}>Sign out</button>
+        {:else}
+          <p class="note">
+            Optional. A subscription unlocks filed flight plans (the real route), vertical speed, squawk and airspace,
+            depending on your plan.
+          </p>
+          <form onsubmit={submit}>
+            <label class="field">
+              <span>Email</span>
+              <input type="email" autocomplete="username" required bind:value={email} disabled={busy} bind:this={firstField} />
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input type="password" autocomplete="current-password" required bind:value={password} disabled={busy} />
+            </label>
+            {#if error}<p class="error" role="alert">{error}</p>{/if}
+            <button class="button primary" type="submit" disabled={busy || !email || !password}>
+              {#if busy}<span class="spin"><LoaderCircle size={14} strokeWidth={2} /></span>{/if}
+              Sign in
+            </button>
+          </form>
+          <p class="fine">
+            Sent only to Flightradar24. RustRadar keeps the session in memory and forgets it when you quit.
+          </p>
+        {/if}
+      </section>
+    {/if}
+    <button
+      class="icon-button"
+      aria-label="Keyboard shortcuts"
+      title="Keyboard shortcuts (?)"
+      onclick={() => {
+        close();
+        onhelp();
+      }}
+    >
       <Keyboard size={18} strokeWidth={1.75} />
     </button>
   </div>
@@ -380,134 +373,10 @@
       transform: translateX(6px);
     }
   }
-  .group {
-    display: flex;
-    flex-direction: column;
+  .menu {
+    width: 300px;
     gap: var(--space-3);
   }
-
-  .segmented {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 2px;
-    margin: 0;
-    padding: 2px;
-    border: 1px solid var(--line-control);
-    border-radius: var(--radius-sm);
-  }
-  .segmented legend {
-    margin-bottom: var(--space-2);
-    padding: 0;
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--text-2);
-  }
-  .segmented label {
-    position: relative;
-  }
-  .segmented input {
-    position: absolute;
-    opacity: 0;
-  }
-  .segmented span {
-    display: block;
-    padding: 5px 0;
-    border-radius: 4px;
-    font-size: var(--text-md);
-    text-align: center;
-    color: var(--text-2);
-    cursor: pointer;
-    transition: background-color 150ms var(--ease-out);
-  }
-  .segmented label:hover span {
-    background: var(--surface-hover);
-  }
-  /* e.g. the place-name size while place names are off */
-  .segmented:disabled {
-    opacity: 0.4;
-  }
-  .segmented:disabled span {
-    cursor: default;
-  }
-  .segmented:disabled label:hover span {
-    background: none;
-  }
-  .segmented input:checked + span {
-    background: var(--amber);
-    color: var(--amber-ink);
-    font-weight: 650;
-  }
-  .segmented input:focus-visible + span {
-    outline: 2px solid var(--amber);
-    outline-offset: 1px;
-  }
-
-  .switch {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    font-size: var(--text-md);
-    cursor: pointer;
-  }
-  .switch > span,
-  .range > span {
-    display: flex;
-    flex-direction: column;
-  }
-  small {
-    color: var(--text-3);
-    font-size: var(--text-sm);
-  }
-  .switch input {
-    appearance: none;
-    flex: none;
-    position: relative;
-    width: 34px;
-    height: 20px;
-    margin: 0;
-    border-radius: 10px;
-    background: var(--line-control);
-    cursor: pointer;
-    transition: background-color 150ms var(--ease-out);
-  }
-  .switch input::after {
-    content: "";
-    position: absolute;
-    top: 3px;
-    left: 3px;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--text-1);
-    transition: transform 150ms var(--ease-out);
-  }
-  .switch input:checked {
-    background: var(--amber);
-  }
-  .switch input:checked::after {
-    transform: translateX(14px);
-    background: var(--amber-ink);
-  }
-
-  .range {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    font-size: var(--text-md);
-  }
-  .range > span {
-    flex-direction: row;
-    justify-content: space-between;
-  }
-  .range output {
-    color: var(--amber);
-  }
-  .range input {
-    width: 100%;
-    margin: 0;
-  }
-
   .account {
     gap: var(--space-3);
   }

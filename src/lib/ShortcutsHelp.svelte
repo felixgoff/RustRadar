@@ -17,12 +17,15 @@
     [["T"], "Tilt to 3D, or look straight down"],
     [["N"], "North up"],
     [["1", "2"], "Dark map or satellite imagery"],
-    [["L"], "Place names"],
+    [["E"], "Terrain"],
     [["B"], "3D buildings"],
+    [["L"], "Place names"],
+    [["R"], "Rail map"],
     [["P"], "Airline liveries"],
-    [["D"], "Day and night"],
-    [["W"], "Weather radar"],
     [["S"], "Ships"],
+    [["I"], "Trains"],
+    [["W"], "Weather radar"],
+    [["D"], "Day and night"],
     [["?"], "This list"],
   ];
 

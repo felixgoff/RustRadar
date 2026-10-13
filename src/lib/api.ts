@@ -426,6 +426,62 @@ export interface Ship {
 export const shipsInView = (area: BoundingBox, zoom: number) =>
   invoke<Ship[]>("ships_in_view", { ...area, zoom });
 
+/** An AIS navigational status: the standard code (0..14) and its wording. */
+export interface NavStatus {
+  code: number;
+  label: string;
+}
+
+/**
+ * One ship's particulars and last report, from VesselFinder's ship card.
+ * Values it leaves out, or gives as 0 meaning "not known", are null.
+ */
+export interface ShipDetails {
+  name: string | null;
+  imo: number | null;
+  mmsi: number;
+  /** VesselFinder's own type wording, e.g. "Container Ship". */
+  typeLabel: string | null;
+  /** The flag state's name. */
+  flag: string | null;
+  /** ISO 3166 code, upper case. */
+  flagCode: string | null;
+  lengthM: number | null;
+  beamM: number | null;
+  /** As last entered by the crew. */
+  draughtM: number | null;
+  maxDraughtM: number | null;
+  grossTonnage: number | null;
+  deadweight: number | null;
+  yearBuilt: number | null;
+  /** As entered by the crew: often a UN/LOCODE such as `UKSOU`, sometimes free text. */
+  destination: string | null;
+  /** As entered by the crew, Unix seconds. */
+  etaUnix: number | null;
+  /** Speed over ground, knots. */
+  speedKn: number | null;
+  /** Course over ground, degrees. */
+  courseDeg: number | null;
+  navStatus: NavStatus | null;
+  /** When the position was reported, Unix seconds. */
+  positionUnix: number | null;
+  /** The position came by satellite AIS. */
+  satellite: boolean;
+  photoId: string | null;
+  /** A search-and-rescue aircraft. */
+  sar: boolean;
+}
+
+/** Throttled with the map feed, and answered from memory for a minute per ship. */
+export const shipDetails = (mmsi: number) => invoke<ShipDetails>("ship_details", { mmsi });
+
+/** VesselFinder's photo of a ship: 768x512, or the 180x120 thumbnail. */
+export const shipPhotoUrl = (photoId: string, thumbnail = false) =>
+  `https://static.vesselfinder.net/ship-photo/${encodeURIComponent(photoId)}/${thumbnail ? 0 : 1}`;
+
+/** The ship's page on VesselFinder. */
+export const shipPageUrl = (mmsi: number) => `https://www.vesselfinder.com/vessels/details/${mmsi}`;
+
 /** One position of a flight tracked by the OpenSky Network. */
 export interface OpenSkyPoint {
   /** Unix seconds */
@@ -533,3 +589,45 @@ export const unfollowFlight = () => invoke<void>("unfollow_flight");
 /** Flightradar24's logo for an airline id, such as a schedule's `painted_as_id`. */
 export const airlineLogoUrl = (airlineId: number) =>
   `https://cdn.flightradar24.com/assets/airlines/logotypes/${airlineId}.png`;
+
+/** Where a train comes from: one regional public feed each. */
+export type TrainSource = "digitraffic" | "amtrak" | "entur" | "irishrail" | "vbb";
+
+export type TrainKind = "highSpeed" | "intercity" | "regional" | "suburban" | "metro" | "freight" | "other";
+
+/** A train on the move, merged from regional public feeds (no global one exists). */
+export interface Train {
+  /** Source-prefixed and stable while the train runs, e.g. `digitraffic:2026-10-13:2`. */
+  id: string;
+  source: TrainSource;
+  /** e.g. "IC 1", "H train 1608", "Amtrak 5 California Zephyr", "F4 Oslo S-Bergen". */
+  name: string;
+  kind: TrainKind;
+  lat: number;
+  lon: number;
+  /** Degrees clockwise from north; null when the source has none (or it stands still). */
+  heading: number | null;
+  speedKmh: number | null;
+  destination: string | null;
+  operator: string | null;
+  /** Minutes late at the last or next stop (negative: early). */
+  delayMinutes: number | null;
+  /** When the position was reported, Unix seconds. */
+  positionUnix: number;
+  /**
+   * Expected positions ahead as `[lat, lon, unixMs]`, in time order, the first
+   * at the report; only from HAFAS radar sources (vbb), else empty. See
+   * `positionAt` in trains.ts.
+   */
+  frames: [number, number, number][];
+}
+
+/**
+ * Trains in an area (`west > east` crosses the antimeridian) at a deck.gl
+ * zoom, from every regional source covering it (Finland, Norway, Ireland,
+ * the USA and Canada at any zoom; Berlin–Brandenburg from zoom 6). Cached
+ * 20–30 s per source in Rust, with backoff; a failing source is left out,
+ * and it rejects only when every source in view failed.
+ */
+export const trainsInView = (area: BoundingBox, zoom: number) =>
+  invoke<Train[]>("trains_in_view", { ...area, zoom });

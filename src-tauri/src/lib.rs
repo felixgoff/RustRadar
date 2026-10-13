@@ -12,6 +12,7 @@ mod runways;
 mod session;
 mod ships;
 mod taxiways;
+mod trains;
 mod updater;
 
 use std::collections::{HashMap, HashSet};
@@ -675,6 +676,8 @@ pub fn run() {
             taxiways::airport_taxiways,
             export::save_export,
             ships::ships_in_view,
+            ships::ship_details,
+            trains::trains_in_view,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

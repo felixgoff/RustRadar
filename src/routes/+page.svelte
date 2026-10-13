@@ -15,6 +15,7 @@
     shipsInView,
     signOut,
     topFlights,
+    trainsInView,
     unfollowFlight,
     type AdsbAircraft,
     type BoundingBox,
@@ -29,6 +30,7 @@
     type Ship,
     type ShipDetails,
     type TopFlight,
+    type Train,
   } from "$lib/api";
   import AirportPanel from "$lib/AirportPanel.svelte";
   import FilterPanel from "$lib/FilterPanel.svelte";
@@ -38,6 +40,7 @@
   import SearchBox from "$lib/SearchBox.svelte";
   import ShipPanel from "$lib/ShipPanel.svelte";
   import ShortcutsHelp from "$lib/ShortcutsHelp.svelte";
+  import TrainPanel from "$lib/TrainPanel.svelte";
   import TopFlights from "$lib/TopFlights.svelte";
   import { activeCount, loadPersisted, matcher, persist, serverCategories, type Filters } from "$lib/filters";
   import { cosAngle, viewArea, visibleRadius } from "$lib/geo";
@@ -48,6 +51,9 @@
   import { placeView } from "$lib/places";
   import { afterRound, feedFreshness, type FeedClock } from "$lib/freshness";
   import { clockAt } from "$lib/time";
+  import { trainCredits } from "$lib/trains";
+  import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
+  import { openUrl } from "@tauri-apps/plugin-opener";
 
   // A world refresh costs ~20 requests, a regional one a handful: poll the
   // world less often, and back off when Flightradar24 says to slow down.
@@ -372,6 +378,79 @@
     shipCard = null;
     if (ship) {
       if (selectedId !== null) select(null);
+      selectTrain(null);
+      boardCode = null;
+    }
+  }
+
+  // Trains from regional public feeds (trains.rs): the backend keeps each
+  // feed whole and answers for the area in view, so the view is asked for
+  // once the camera settles and then every 30 s while the window is visible.
+  // An answer for a view since left behind is dropped.
+  const TRAINS_SETTLE_MS = 600;
+  const TRAINS_REFRESH_MS = 30_000;
+  let trains = $state.raw<Train[]>([]);
+  let trainsRequest = 0;
+  let trainsSettle: ReturnType<typeof setTimeout> | undefined;
+  let trainsRefresh: ReturnType<typeof setTimeout> | undefined;
+  function stopTrains() {
+    clearTimeout(trainsSettle);
+    clearTimeout(trainsRefresh);
+  }
+  async function loadTrains() {
+    stopTrains();
+    if (!settings.trains || !isTauri()) return;
+    trainsRefresh = setTimeout(loadTrains, TRAINS_REFRESH_MS);
+    if (document.visibilityState === "hidden") return;
+    const asked = { ...view };
+    const area = viewArea(asked, window.innerWidth, window.innerHeight) ?? { west: -180, south: -90, east: 180, north: 90 };
+    const request = ++trainsRequest;
+    try {
+      const list = await trainsInView(area, asked.zoom);
+      const v = view;
+      const radius = visibleRadius(v.zoom, v.pitch, window.innerWidth, window.innerHeight);
+      const away = cosAngle(v.longitude, v.latitude, asked.longitude, asked.latitude) < Math.cos((radius * Math.PI) / 360);
+      if (request !== trainsRequest || !settings.trains || away) return;
+      trains = list;
+    } catch {
+      // every source failed or is resting: the trains on show stay
+    }
+  }
+  $effect(() => {
+    void view;
+    if (!settings.trains) {
+      stopTrains();
+      trainsRequest++;
+      trains = [];
+      return;
+    }
+    clearTimeout(trainsSettle);
+    trainsSettle = setTimeout(loadTrains, TRAINS_SETTLE_MS);
+  });
+
+  // The selected train: its position and report follow the list as the map
+  // refreshes, and stay where they were last seen if the list drops it.
+  let pickedTrain = $state.raw<Train | null>(null);
+  const selectedTrain = $derived.by<Train | null>(() => {
+    if (!pickedTrain) return null;
+    const id = pickedTrain.id;
+    return trains.find((t) => t.id === id) ?? pickedTrain;
+  });
+  $effect(() => {
+    const live = selectedTrain;
+    if (live && live !== untrack(() => pickedTrain)) pickedTrain = live;
+  });
+  $effect(() => {
+    if (!settings.trains) untrack(() => selectTrain(null));
+  });
+
+  /** Opens a train's panel; any flight, ship or airport board closes. */
+  function selectTrain(train: Train | null) {
+    if (train && train.id === pickedTrain?.id) return;
+    pickedTrain = train;
+    if (train) {
+      if (selectedId !== null) select(null);
+      selectShip(null);
       boardCode = null;
     }
   }
@@ -520,7 +599,10 @@
       return;
     }
     selectedId = id;
-    if (id !== null) selectShip(null);
+    if (id !== null) {
+      selectShip(null);
+      selectTrain(null);
+    }
     details = null;
     hint = opts.hint ?? null;
     flyPending = false;
@@ -546,6 +628,7 @@
     boardCode = code.toUpperCase();
     if (selectedId !== null) select(null);
     selectShip(null);
+    selectTrain(null);
   }
 
   function pickSearch(entry: FindEntry) {
@@ -625,6 +708,7 @@
       else if (place) place = null;
       else if (selectedId !== null) select(null);
       else if (pickedShip) selectShip(null);
+      else if (pickedTrain) selectTrain(null);
       else if (boardCode) boardCode = null;
       else if (filtersOpen) filtersOpen = false;
       return;
@@ -638,6 +722,8 @@
 
   // quiet while the feed keeps its schedule; past about two refreshes, a warning with the data's age
   const freshness = $derived(shownFeed ? feedFreshness(Math.max(0, now - shownFeed.at), shownFeed.interval) : null);
+  /** The credits for the trains on show; the sources whose licences ask for a link get one. */
+  const trainCredit = $derived(settings.trains ? trainCredits(trains) : []);
   const attribution = $derived(
     [
       `Flight data: Flightradar24 (unofficial API${authenticated ? ", signed in" : ""})`,
@@ -648,13 +734,11 @@
       // ODbL asks for attribution wherever the data is shown
       measured && "Aircraft data: © adsb.lol contributors, ODbL",
       settings.ships && "Ships © VesselFinder",
-      // trains: their source's credit goes here, behind settings.trains, once trains are drawn
-      settings.railMap && "Rail data © OpenRailwayMap",
-      settings.terrain && "Terrain: AWS Terrain Tiles (Mapzen)",
+      // the rail map is drawn from the OpenStreetMap data the map credit below covers
+      settings.terrain && TERRAIN_ATTRIBUTION,
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]
-      .filter(Boolean)
-      .join(" · "),
+      .filter((c): c is string => Boolean(c)),
   );
   const partial = $derived(snapshot?.errors.length ?? 0);
   const retryIn = $derived(Math.max(0, Math.ceil((nextRefreshAt - now) / 1000)));
@@ -680,6 +764,7 @@
     clearTimeout(refreshTimer);
     clearTimeout(viewTimer);
     stopShips();
+    stopTrains();
   });
 </script>
 
@@ -703,17 +788,28 @@
     liveries={settings.liveries}
     daylight={settings.daylight}
     weather={settings.weather}
+    trains={settings.trains ? trains : []}
+    railMap={settings.railMap}
+    terrain={settings.terrain}
     follow={following}
     {selectedShip}
+    {selectedTrain}
     onselect={(f) => {
       place = null;
-      // a click on empty map lets go of a ship too
-      if (!f) selectShip(null);
+      // a click on empty map lets go of a ship or a train too
+      if (!f) {
+        selectShip(null);
+        selectTrain(null);
+      }
       select(f?.id ?? null);
     }}
     onshipselect={(s) => {
       place = null;
       selectShip(s);
+    }}
+    ontrainselect={(t) => {
+      place = null;
+      selectTrain(t);
     }}
     onairport={openAirport}
     onviewchange={(v) => (view = v)}
@@ -861,6 +957,18 @@
     />
   {/if}
 
+  {#if selectedTrain}
+    <TrainPanel
+      train={selectedTrain}
+      {now}
+      oncentre={() => {
+        following = false;
+        globe.flyTo(selectedTrain.lon, selectedTrain.lat, Math.max(view.zoom, 12));
+      }}
+      onclose={() => selectTrain(null)}
+    />
+  {/if}
+
   <MapControls
     bind:this={controls}
     zoom={view.zoom}
@@ -880,7 +988,7 @@
     bind:terrain={settings.terrain}
     bind:exaggeration={settings.exaggeration}
     {session}
-    inset={selected || boardCode || selectedShip ? PANEL_INSET : 0}
+    inset={selected || boardCode || selectedShip || selectedTrain ? PANEL_INSET : 0}
     onzoom={(d) => globe.zoomBy(d)}
     onreset={() => globe.resetOrientation()}
     ontilt={(p) => globe.setPitch(p)}
@@ -891,7 +999,12 @@
 
   <ShortcutsHelp open={helpOpen} onclose={() => (helpOpen = false)} />
 
-  <p class="attribution">{attribution}</p>
+  <!-- the train credits come first, so the line's ellipsis can't hide them: Amtraker asks for a prominent link -->
+  <p class="attribution" title={[attribution[0], ...trainCredit.map((c) => c.text), ...attribution.slice(1)].join(" · ")}>
+    {attribution[0]}{#each trainCredit as c (c.url)}
+      {" · "}<a href={c.url} onclick={(e) => (e.preventDefault(), openUrl(c.url))}>{c.text}</a>
+    {/each}{#each attribution.slice(1) as text, i (i)}{" · "}{text}{/each}
+  </p>
 </main>
 
 <style>
@@ -1040,5 +1153,14 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .attribution a {
+    color: var(--text-2);
+    text-decoration: underline;
+    text-decoration-color: oklch(1 0 0 / 0.25);
+    text-underline-offset: 2px;
+  }
+  .attribution a:hover {
+    color: var(--text-1);
   }
 </style>

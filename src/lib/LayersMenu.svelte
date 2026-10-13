@@ -42,14 +42,14 @@
   <ToggleRow label="Terrain" hint="Mountains and valleys in relief" key="E" bind:checked={terrain} />
   <ToggleRow label="3D buildings" hint="Appear at street level" key="B" bind:checked={buildings} />
   <ToggleRow label="Place names" key="L" bind:checked={labels} />
-  <ToggleRow label="Rail map" hint="Railway lines from OpenRailwayMap" key="R" bind:checked={railMap} />
+  <ToggleRow label="Rail map" hint="Railway lines from OpenStreetMap" key="R" bind:checked={railMap} />
 </section>
 
 <section aria-labelledby="layers-traffic">
   <h3 id="layers-traffic">Traffic</h3>
   <ToggleRow label="Airline liveries" hint="Aircraft in their airline's colours" key="P" bind:checked={liveries} />
   <ToggleRow label="Ships" hint="Live from VesselFinder" key="S" bind:checked={ships} />
-  <ToggleRow label="Trains" hint="Live train positions" key="I" bind:checked={trains} />
+  <ToggleRow label="Trains" hint="Live in Finland, Norway, Ireland, USA and Canada" key="I" bind:checked={trains} />
 </section>
 
 <section aria-labelledby="layers-sky">

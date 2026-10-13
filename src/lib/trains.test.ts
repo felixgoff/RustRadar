@@ -2,7 +2,21 @@
 import { describe, expect, test } from "bun:test";
 import type { Train, TrainKind } from "./api";
 import { shipColor } from "./ships";
-import { delayText, headingAt, positionAt, TRAIN_CREDITS, TRAIN_KINDS, trainColor, trainCredits, trainLabel } from "./trains";
+import {
+  delayText,
+  delayTone,
+  headingAt,
+  positionAt,
+  TRAIN_CREDITS,
+  TRAIN_KINDS,
+  TRAIN_SOURCE_NAMES,
+  trainColor,
+  trainCredits,
+  trainIcon,
+  trainIconSize,
+  trainLabel,
+  trainPositionAge,
+} from "./trains";
 
 const train = (over: Partial<Train> = {}): Train => ({
   id: "vbb:1",
@@ -124,5 +138,50 @@ describe("credits and wording", () => {
     expect(delayText(-2)).toBe("2 min early");
     expect(delayText(0)).toBe("on time");
     expect(delayText(null)).toBe("");
+  });
+});
+
+describe("on the map", () => {
+  test("a carriage with a heading, a square without; unknown kinds as other", () => {
+    expect(trainIcon("intercity", 90)).toBe("car-intercity");
+    expect(trainIcon("metro", null)).toBe("box-metro");
+    expect(trainIcon("tram" as TrainKind, 0)).toBe("car-other");
+  });
+
+  test("sizes stay modest and grow with zoom", () => {
+    for (const kind of TRAIN_KINDS) {
+      const close = trainIconSize(kind, 0, 12);
+      expect(close).toBeGreaterThan(12);
+      expect(close).toBeLessThanOrEqual(24);
+      expect(trainIconSize(kind, 0, 2)).toBeLessThan(close);
+      expect(trainIconSize(kind, null, 12)).toBeLessThan(close);
+    }
+    expect(trainIconSize("highSpeed", 0, 12)).toBeGreaterThan(trainIconSize("metro", 0, 12));
+  });
+});
+
+describe("panel", () => {
+  test("positions go stale after five minutes", () => {
+    expect(trainPositionAge(1_000, 1_040_000)).toEqual({ stale: false, label: "Position 40 s ago" });
+    expect(trainPositionAge(1_000, (1_000 + 300) * 1000).stale).toBe(false);
+    expect(trainPositionAge(1_000, (1_000 + 720) * 1000)).toEqual({ stale: true, label: "Position 12 min old" });
+    // a report from a clock a little ahead reads as just now
+    expect(trainPositionAge(1_000, 990_000).label).toBe("Position 0 s ago");
+  });
+
+  test("delay tones", () => {
+    expect(delayTone(null)).toBeNull();
+    expect(delayTone(-2)).toBe("good");
+    expect(delayTone(4)).toBe("good");
+    expect(delayTone(5)).toBe("warn");
+    expect(delayTone(30)).toBe("bad");
+  });
+
+  test("every source has a name and a credit", () => {
+    for (const source of Object.keys(TRAIN_CREDITS)) {
+      expect(TRAIN_SOURCE_NAMES[source as keyof typeof TRAIN_SOURCE_NAMES]).toBeTruthy();
+    }
+    expect(TRAIN_CREDITS.amtrak.url).toBe("https://amtraker.com");
+    expect(TRAIN_CREDITS.amtrak.text).toContain("Amtraker");
   });
 });

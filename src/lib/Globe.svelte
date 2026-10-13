@@ -57,6 +57,7 @@
     type FlightDetails,
     type LiveFlight,
     type Ship,
+    type Train,
   } from "./api";
   import { NorthUpGlobeController } from "./controller";
   import { aircraftModels, type AircraftModel } from "./aircraft";
@@ -92,6 +93,20 @@
   import { reference } from "./reference.svelte";
   import { offsetEastNorth, shipMeshes, shipPlacement, type ShipClass } from "./ship-models";
   import { shipAtlas, shipColor, shipIcon, shipIconScale, shipIconSize, shipKindLabel } from "./ships";
+  import { terrainLayers } from "./terrain-layer";
+  import { railLayers } from "./rail-layer";
+  import {
+    delayText,
+    headingAt,
+    positionAt,
+    trainAtlas,
+    trainColor,
+    trainIcon,
+    trainIconScale,
+    trainIconSize,
+    trainLabel,
+    trainPositionAge,
+  } from "./trains";
 
   interface Props {
     flights: LiveFlight[];
@@ -118,6 +133,16 @@
     daylight: boolean;
     /** Precipitation radar overlay. */
     weather: boolean;
+    /** Shaded relief under the map. */
+    terrain?: boolean;
+    /** The railway network over the map. */
+    railMap?: boolean;
+    /** Trains to draw on land, over the ships and under the aircraft. */
+    trains?: Train[];
+    /** The selected train, ringed in the selection amber. */
+    selectedTrain?: Train | null;
+    /** A train was clicked. */
+    ontrainselect?: (train: Train) => void;
     /** Keep the camera centred on the selected aircraft. */
     follow: boolean;
     onselect: (flight: LiveFlight | null) => void;
@@ -146,6 +171,11 @@
     liveries: showLiveries,
     daylight,
     weather,
+    terrain = false,
+    railMap = false,
+    trains = [],
+    selectedTrain = null,
+    ontrainselect,
     follow,
     onselect,
     selectedShip = null,
@@ -1330,6 +1360,117 @@
     return layers;
   }
 
+  // Trains: icons on land, drawn like the ships' icons. Their data arrays are
+  // built once per train list; on each render only the trains with frames
+  // (expected positions ahead) move along them, and the icons' screen angles
+  // follow the camera and those moves.
+  const TRAIN_ALPHA = 240;
+  const TRAIN_PARAMETERS = { ...NO_CULL, depthWriteEnabled: false } as const;
+  type TrainData = {
+    list: Train[];
+    positions: [number, number, number][];
+    /** Direction of travel as drawn, degrees; null when unknown. */
+    headings: (number | null)[];
+    icons: string[];
+    colors: ShipColor[];
+    /** Indices of all trains. */
+    all: number[];
+    /** Indices of the trains with frames to move along. */
+    moving: number[];
+    byId: Map<string, number>;
+  };
+  let trainData: TrainData | null = null;
+  let trainAtlasData: ReturnType<typeof trainAtlas> | undefined;
+  /** Bumped whenever the drawn positions change: a new list, or the moving trains stepping on. */
+  let trainMoves = 0;
+  function trainsFor(list: Train[]): TrainData {
+    if (trainData?.list === list) return trainData;
+    const data: TrainData = { list, positions: [], headings: [], icons: [], colors: [], all: [], moving: [], byId: new Map() };
+    list.forEach((train, i) => {
+      data.positions.push([train.lon, train.lat, 0]);
+      data.headings.push(train.heading);
+      data.icons.push(trainIcon(train.kind, train.heading));
+      data.colors.push([...trainColor(train.kind), TRAIN_ALPHA]);
+      data.all.push(i);
+      data.byId.set(train.id, i);
+      if ((train.frames?.length ?? 0) > 1) data.moving.push(i);
+    });
+    trainData = data;
+    trainMoves++;
+    return data;
+  }
+  /** Steps the trains with frames on to `nowMs`; the rest stay at their reported positions. */
+  function moveTrains(data: TrainData, nowMs: number) {
+    if (!data.moving.length) return;
+    for (const i of data.moving) {
+      const train = data.list[i];
+      const { lat, lon } = positionAt(train, nowMs);
+      const heading = headingAt(train, nowMs);
+      data.positions[i] = [lon, lat, 0];
+      data.headings[i] = heading;
+      data.icons[i] = trainIcon(train.kind, heading);
+    }
+    trainMoves++;
+  }
+  /** The icons' angles on screen: all redone when the camera moves, only the moving trains' otherwise. */
+  let trainAngles: { key: string; list: Train[] | null; angles: Float32Array; version: number } = {
+    key: "",
+    list: null,
+    angles: new Float32Array(0),
+    version: 0,
+  };
+  function trainLayers(list: Train[], flat: boolean, mpp: number, nowMs: number): Layer[] {
+    const { zoom, bearing, pitch, longitude, latitude } = view;
+    const data = trainsFor(list);
+    if (!list.length) return [];
+    trainAtlasData ??= trainAtlas();
+    if (!trainAtlasData) return [];
+    moveTrains(data, nowMs);
+    const key = `${zoom},${bearing},${pitch},${longitude},${latitude}`;
+    const whole = trainAngles.key !== key || trainAngles.list !== list;
+    if (whole || data.moving.length) {
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      const viewport = flat
+        ? new WebMercatorViewport({ ...view, width, height })
+        : new GlobeViewport({ ...view, width, height });
+      const step = ICON_HEADING_STEP_PX * mpp;
+      const angles = whole ? new Float32Array(list.length) : trainAngles.angles;
+      const minCos = Math.cos((visibleRadius(zoom, pitch, width, height) * Math.PI) / 180);
+      for (const i of whole ? data.all : data.moving) {
+        const heading = data.headings[i];
+        const [lon, lat] = data.positions[i];
+        if (heading === null || cosAngle(lon, lat, longitude, latitude) <= minCos) continue;
+        angles[i] = screenAngle(viewport, data.positions[i], heading, step) ?? bearing - heading;
+      }
+      trainAngles = { key, list, angles, version: trainAngles.version + 1 };
+    }
+    const angles = trainAngles.angles;
+    return [
+      new IconLayer<number>({
+        id: "train-icons",
+        data: data.all,
+        getPosition: (i) => data.positions[i],
+        getIcon: (i) => data.icons[i],
+        iconAtlas: trainAtlasData.atlas as never,
+        iconMapping: trainAtlasData.mapping as never,
+        getSize: (i) => trainIconSize(list[i].kind, data.headings[i], zoom),
+        getAngle: (i) => angles[i],
+        getColor: (i) => data.colors[i],
+        sizeUnits: "pixels",
+        billboard: true,
+        pickable: true,
+        parameters: TRAIN_PARAMETERS,
+        updateTriggers: {
+          getPosition: trainMoves,
+          getIcon: trainMoves,
+          getAngle: trainAngles.version,
+          getSize: [trainIconScale(zoom), trainMoves],
+        },
+      }),
+    ];
+  }
+
   function buildLayers(): Layer[] {
     // the motion model's clock follows the feed's, not this machine's
     const now = motion.now();
@@ -1428,15 +1569,21 @@
     }
 
     const layers: Layer[] = [earthLayer(basemap)];
-    if (basemap === "satellite") layers.push(imageryLayer());
-    else {
+    // shaded relief goes on the ground, under the map's water, borders, roads and runways
+    if (basemap === "satellite") {
+      layers.push(imageryLayer());
+      if (terrain) layers.push(...terrainLayers({ flat, zoom, basemap }));
+    } else {
       layers.push(landLayer());
+      if (terrain) layers.push(...terrainLayers({ flat, zoom, basemap }));
       if (tileUrl) {
         const trueAeroways = RUNWAY_WIDTH_M / mpp >= RUNWAY_PX;
         layers.push(vectorMapLayer(tileUrl, flat, trueAeroways));
         if (trueAeroways) layers.push(aerowayLayer(tileUrl, flat));
       }
     }
+    // the railway network: over the map, under the weather, ships, trains and aircraft
+    if (railMap) layers.push(...railLayers({ tileUrl, flat, zoom, workerUrl: mvtWorkerUrl }));
     if (weather) {
       if (Date.now() - radarCheckedAt > 600_000) refreshRadar();
       const lift = liftFor(pitch);
@@ -1460,6 +1607,12 @@
     if (shipRing) layers.push(shipRing.halo);
     layers.push(...shipLayers(ships, flat, mpp));
     if (shipRing) layers.push(shipRing.ring);
+    // on land, like the ships under the labels and every aircraft; the
+    // trains' frames are timed on this machine's clock, not the flight feed's
+    const trainRing = selectedTrain ? trainSelectionLayers(selectedTrain, zoom, cLon, cLat) : null;
+    if (trainRing) layers.push(trainRing.halo);
+    layers.push(...trainLayers(trains, flat, mpp, Date.now()));
+    if (trainRing) layers.push(trainRing.ring);
     if (tileUrl && labels && fontsReady) {
       const marked = [airport, ...(selected && route ? [route.origin, route.destination] : [])]
         .map((a) => a?.iata)
@@ -1939,6 +2092,45 @@
     };
   }
 
+  /**
+   * The selected train: the ships' halo and ring, round the train where it
+   * is drawn now (it may be moving along its frames).
+   */
+  function trainSelectionLayers(train: Train, zoom: number, cLon: number, cLat: number) {
+    const i = trainData?.byId.get(train.id);
+    const [lon, lat] = i !== undefined && trainData ? trainData.positions[i] : [train.lon, train.lat];
+    if (zoom <= FLAT_ABOVE_ZOOM && cosAngle(lon, lat, cLon, cLat) <= 0) return null;
+    const heading = i !== undefined && trainData ? trainData.headings[i] : train.heading;
+    const radius = Math.round(trainIconSize(train.kind, heading, zoom) / 2 + 5);
+    const common = {
+      data: [[lon, lat, 0] as [number, number, number]],
+      getPosition: (d: [number, number, number]) => d,
+      getRadius: radius,
+      radiusUnits: "pixels" as const,
+      billboard: true,
+      parameters: { ...NO_CULL, depthWriteEnabled: false, depthCompare: "always" as const },
+      updateTriggers: { getRadius: radius },
+    };
+    return {
+      halo: new ScatterplotLayer({ ...common, id: "train-selection-halo", filled: true, stroked: false, getFillColor: [252, 180, 66, 56] }),
+      ring: new ScatterplotLayer({
+        ...common,
+        id: "train-selection-ring",
+        filled: false,
+        stroked: true,
+        getLineColor: [252, 180, 66, 235],
+        getLineWidth: 2,
+        lineWidthUnits: "pixels",
+      }),
+    };
+  }
+
+  /** The train a pick landed on. */
+  function pickedTrain(info: PickingInfo): Train | null {
+    if (info.layer?.id !== "train-icons" || typeof info.object !== "number") return null;
+    return (trainData?.list ?? trains)[info.object] ?? null;
+  }
+
   /** The ship a pick landed on, whichever of the ship layers drew it. */
   function pickedShip(info: PickingInfo): Ship | null {
     const o = info.object as unknown;
@@ -1954,7 +2146,7 @@
 
   const escape = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
-  /** Airport labels and ships get deck's tooltip; aircraft get the {@link HoverCard}. */
+  /** Airport labels, ships and trains get deck's tooltip; aircraft get the {@link HoverCard}. */
   function tooltip(info: PickingInfo) {
     // icons and models alike (the models carry their ship's index)
     const ship = pickedShip(info);
@@ -1962,6 +2154,16 @@
       const length = ship.dims ? ` · ${ship.dims[0] + ship.dims[1]} m` : "";
       return {
         html: `<div class="tt-head">${escape(ship.name)}</div><div class="tt-sub">${escape(shipKindLabel(ship.kind))}${length}</div><div class="tt-sub">MMSI ${ship.mmsi}${ship.old ? " · old position" : ""}</div>`,
+        className: "aircraft-tooltip",
+      };
+    }
+    const train = pickedTrain(info);
+    if (train) {
+      const kind = [trainLabel(train.kind), train.operator].filter(Boolean).join(" · ");
+      const where = [train.destination && `to ${train.destination}`, delayText(train.delayMinutes)].filter(Boolean).join(" · ");
+      const age = trainPositionAge(train.positionUnix, Date.now());
+      return {
+        html: `<div class="tt-head">${escape(train.name)}</div><div class="tt-sub">${escape(kind)}</div>${where ? `<div class="tt-sub">${escape(where)}</div>` : ""}<div class="tt-sub${age.stale ? " tt-warn" : ""}">${escape(age.label)}</div>`,
         className: "aircraft-tooltip",
       };
     }
@@ -2061,8 +2263,10 @@
       onDragStart: () => setHover(null),
       onClick: (info) => {
         const ship = pickedShip(info);
+        const train = pickedTrain(info);
         if (info.layer?.id.startsWith("aircraft-") && info.object) onselect(info.object as LiveFlight);
         else if (ship) onshipselect?.(ship);
+        else if (train) ontrainselect?.(train);
         else if (info.layer?.id === "labels") {
           const p = (info.object as LabelFeature | undefined)?.properties;
           if (p?.layerName === "aerodrome_label" && p.iata) onairport?.(String(p.iata));
@@ -2098,7 +2302,7 @@
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
     void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
-    void [showLiveries, daylight, weather, follow, selectedShip];
+    void [showLiveries, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain];
     render();
   });
 </script>
@@ -2129,5 +2333,8 @@
   }
   :global(.aircraft-tooltip .tt-sub) {
     color: var(--text-2);
+  }
+  :global(.aircraft-tooltip .tt-warn) {
+    color: var(--warn);
   }
 </style>

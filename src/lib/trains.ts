@@ -1,6 +1,7 @@
 // Trains on the map: colours and names per kind, motion between refreshes,
 // and the credits each source asks for.
 import type { Train, TrainKind, TrainSource } from "./api";
+import { ageLabel } from "./freshness";
 
 export type RGB = [number, number, number];
 
@@ -116,4 +117,115 @@ export function delayText(minutes: number | null): string {
   if (minutes === null || !Number.isFinite(minutes)) return "";
   if (minutes === 0) return "on time";
   return minutes > 0 ? `${minutes} min late` : `${-minutes} min early`;
+}
+
+/** A train's position counts as stale past this age (seconds): the feeds report every few seconds to a minute. */
+export const TRAIN_STALE_S = 5 * 60;
+
+/** `Position 40 s ago`, or past {@link TRAIN_STALE_S} `Position 12 min old`, in the warning tone. */
+export function trainPositionAge(positionUnix: number, nowMs: number): { stale: boolean; label: string } {
+  const age = Math.max(0, nowMs / 1000 - positionUnix);
+  return age > TRAIN_STALE_S
+    ? { stale: true, label: `Position ${ageLabel(age)} old` }
+    : { stale: false, label: `Position ${ageLabel(age)} ago` };
+}
+
+/** What a source is called in the panel. */
+export const TRAIN_SOURCE_NAMES: Record<TrainSource, string> = {
+  digitraffic: "Digitraffic (Fintraffic)",
+  amtrak: "Amtraker",
+  entur: "Entur",
+  irishrail: "Irish Rail",
+  vbb: "VBB (transport.rest)",
+};
+
+// --- On the map ---------------------------------------------------------------
+
+/** A train with a direction is a carriage with a nose; one without, a rounded square. */
+export const trainIcon = (kind: TrainKind, heading: number | null) =>
+  `${heading === null ? "box" : "car"}-${kind in KINDS ? kind : "other"}`;
+
+/** Base icon length in pixels per kind: long-distance trains a little longer, metros shorter. */
+const ICON_PX: Record<TrainKind, number> = {
+  highSpeed: 24,
+  intercity: 23,
+  regional: 21,
+  suburban: 20,
+  metro: 18,
+  freight: 22,
+  other: 19,
+};
+
+/** Smaller zoomed out; in steps, so sizes update rarely. */
+export const trainIconScale = (zoom: number) => (zoom < 4 ? 0.7 : zoom < 6 ? 0.82 : zoom < 9 ? 0.92 : 1);
+
+/** Icon size in pixels (IconLayer `getSize`: the cell's height). */
+export function trainIconSize(kind: TrainKind, heading: number | null, zoom: number): number {
+  return (ICON_PX[kind] ?? ICON_PX.other) * trainIconScale(zoom) * (heading === null ? 0.8 : 1);
+}
+
+/** Cell size of the atlas, pixels; glyphs are drawn at about three times their usual size for sharpness. */
+const CELL = 64;
+/** The app's navy ink, as the glyphs' border and the carriage joints. */
+const INK = "rgba(8, 12, 20, 0.9)";
+
+/**
+ * An atlas with a carriage and a square per kind colour, each with a dark
+ * border (IconLayer `mask: false`; its colour's alpha still fades them). The
+ * carriage points up (north): a rounded nose, a square tail, and two joints
+ * across it so it reads as a train and not as a ship's hull.
+ */
+export function trainAtlas(): { atlas: HTMLCanvasElement; mapping: Record<string, object> } | null {
+  if (typeof document === "undefined") return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = CELL * 2;
+  canvas.height = CELL * TRAIN_KINDS.length;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  const mapping: Record<string, object> = {};
+  ctx.lineJoin = "round";
+  TRAIN_KINDS.forEach((kind, row) => {
+    const [r, g, b] = trainColor(kind);
+    const y = row * CELL;
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.strokeStyle = INK;
+    // the carriage: 26 wide, 56 long, a pointed, rounded nose
+    const [left, right, top, bottom] = [19, 45, y + 4, y + 60];
+    ctx.beginPath();
+    ctx.moveTo(32, top);
+    ctx.bezierCurveTo(40, top + 2, right, top + 9, right, top + 18);
+    ctx.lineTo(right, bottom - 3);
+    ctx.quadraticCurveTo(right, bottom, right - 3, bottom);
+    ctx.lineTo(left + 3, bottom);
+    ctx.quadraticCurveTo(left, bottom, left, bottom - 3);
+    ctx.lineTo(left, top + 18);
+    ctx.bezierCurveTo(left, top + 9, 24, top + 2, 32, top);
+    ctx.closePath();
+    ctx.lineWidth = 5;
+    ctx.stroke();
+    ctx.fill();
+    // joints between the cars
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    for (const j of [top + 25, top + 41]) {
+      ctx.moveTo(left + 1, j);
+      ctx.lineTo(right - 1, j);
+    }
+    ctx.stroke();
+    mapping[`car-${kind}`] = { x: 0, y, width: CELL, height: CELL, mask: false };
+    // no heading: a rounded square
+    ctx.beginPath();
+    ctx.roundRect(CELL + 14, y + 14, 36, 36, 9);
+    ctx.lineWidth = 6;
+    ctx.stroke();
+    ctx.fill();
+    mapping[`box-${kind}`] = { x: CELL, y, width: CELL, height: CELL, mask: false };
+  });
+  return { atlas: canvas, mapping };
+}
+
+/** The delay's tone: a few minutes is ordinary for a train, past 5 worth noting, past 30 bad. */
+export function delayTone(minutes: number | null): "good" | "warn" | "bad" | null {
+  if (minutes === null || !Number.isFinite(minutes)) return null;
+  return minutes >= 30 ? "bad" : minutes >= 5 ? "warn" : "good";
 }

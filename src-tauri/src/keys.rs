@@ -15,8 +15,11 @@ const FILE: &str = "keys.json";
 pub struct Keys {
     pub fr24_email: String,
     pub fr24_password: String,
-    /// Trafiklab "GTFS Sverige 3" realtime: regional vehicle positions.
+    /// Trafiklab "GTFS Sverige 3" realtime: vehicle positions and delays.
     pub trafiklab_gtfs: String,
+    /// Trafiklab "GTFS Sverige 3" static: the timetable that names them
+    /// (operators, line colours, stops).
+    pub trafiklab_gtfs_static: String,
     /// Trafiklab Oxyfi: live positions from on-train wifi.
     pub trafiklab_oxyfi: String,
     /// Trafikverket's open API: every train in Sweden.
@@ -30,6 +33,7 @@ impl Keys {
             // a password may well start or end with a space
             fr24_password: self.fr24_password,
             trafiklab_gtfs: self.trafiklab_gtfs.trim().to_owned(),
+            trafiklab_gtfs_static: self.trafiklab_gtfs_static.trim().to_owned(),
             trafiklab_oxyfi: self.trafiklab_oxyfi.trim().to_owned(),
             trafikverket: self.trafikverket.trim().to_owned(),
         }

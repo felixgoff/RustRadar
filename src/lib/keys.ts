@@ -9,11 +9,12 @@ export interface Keys {
   fr24Email: string;
   fr24Password: string;
   trafiklabGtfs: string;
+  trafiklabGtfsStatic: string;
   trafiklabOxyfi: string;
   trafikverket: string;
 }
 
-export const EMPTY_KEYS: Keys = { fr24Email: "", fr24Password: "", trafiklabGtfs: "", trafiklabOxyfi: "", trafikverket: "" };
+export const EMPTY_KEYS: Keys = { fr24Email: "", fr24Password: "", trafiklabGtfs: "", trafiklabGtfsStatic: "", trafiklabOxyfi: "", trafikverket: "" };
 
 const FIELDS = Object.keys(EMPTY_KEYS) as (keyof Keys)[];
 const FORMAT = "rustradar-keys";

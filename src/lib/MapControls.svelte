@@ -1,10 +1,8 @@
 <script lang="ts">
-  import { tick } from "svelte";
   import {
-    CircleUserRound,
+    KeyRound,
     Keyboard,
     Layers,
-    LoaderCircle,
     Minus,
     Navigation2,
     Plus,
@@ -39,8 +37,7 @@
     onzoom: (delta: number) => void;
     onreset: () => void;
     ontilt: (pitch: number) => void;
-    onsignin: (email: string, password: string) => Promise<void>;
-    onsignout: () => Promise<void>;
+    onkeys: () => void;
     onhelp: () => void;
   }
 
@@ -65,77 +62,33 @@
     onzoom,
     onreset,
     ontilt,
-    onsignin,
-    onsignout,
+    onkeys,
     onhelp,
   }: Props = $props();
 
-  type Popover = "layers" | "settings" | "account";
+  type Popover = "layers" | "settings";
 
   const TILT = 55;
   /** One popover at a time. */
   let open = $state<Popover | null>(null);
   let root: HTMLDivElement;
-  let firstField = $state<HTMLInputElement>();
-  let signedInState = $state<HTMLElement>();
   /** The buttons that open each popover, where Escape sends the keyboard back to. */
   const triggers: Partial<Record<Popover, HTMLButtonElement>> = {};
-  /** Where the keyboard goes back to when the account popover closes, if it was opened from elsewhere. */
-  let returnFocus: (() => HTMLElement | null) | null = null;
-
-  let email = $state("");
-  let password = $state("");
-  let busy = $state(false);
-  let error = $state<string | null>(null);
 
   const tilted = $derived(pitch > 5);
   const rotated = $derived(Math.abs(bearing) > 0.5 || tilted);
   const signedIn = $derived(session?.authenticated ?? false);
 
-  /**
-   * Opens the account popover. From a "sign in" prompt elsewhere, `focusForm`
-   * puts the caret in its first field, and `returnFocus` names where the
-   * keyboard goes back to once it closes.
-   */
-  export async function openAccount(opts: { focusForm?: boolean; returnFocus?: () => HTMLElement | null } = {}) {
-    open = "account";
-    error = null;
-    returnFocus = opts.returnFocus ?? null;
-    if (opts.focusForm) {
-      await tick();
-      firstField?.focus();
-    }
-  }
-
-  /**
-   * Closes whichever popover is open. Focus left inside it would fall to the
-   * page: it goes back where it came from. With `toTrigger` (Escape), the
-   * keyboard goes back to the button that opened it.
-   */
+  /** Closes whichever popover is open. With `toTrigger` (Escape), the keyboard goes back to the button that opened it. */
   function close(toTrigger = false) {
     if (!open) return;
     const trigger = triggers[open];
     open = null;
-    const back = returnFocus ?? (toTrigger ? () => trigger ?? null : null);
-    returnFocus = null;
-    if (!back) return;
-    if (toTrigger) {
-      back()?.focus();
-      return;
-    }
-    // after the click or key has moved focus on its own, e.g. to the control clicked
-    requestAnimationFrame(() => {
-      const active = document.activeElement;
-      if (active && active !== document.body && active.isConnected) return;
-      back()?.focus();
-    });
+    if (toTrigger) trigger?.focus();
   }
 
   function toggle(which: Popover) {
     if (open === which) return close();
-    // moving on to another popover: nothing to go back to
-    returnFocus = null;
-    if (which === "account") error = null;
     open = which;
   }
 
@@ -150,34 +103,6 @@
     close(true);
   }
 
-  async function submit(e: SubmitEvent) {
-    e.preventDefault();
-    busy = true;
-    error = null;
-    try {
-      await onsignin(email, password);
-      password = "";
-      // the form is gone: say so where the keyboard was, rather than dropping it to the page
-      await tick();
-      signedInState?.focus();
-    } catch (err) {
-      error = String(err);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function signOut() {
-    busy = true;
-    try {
-      await onsignout();
-    } finally {
-      busy = false;
-    }
-  }
-
-  const until = (unix: number) =>
-    new Date(unix * 1000).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
 </script>
 
 <svelte:window {onpointerdown} {onkeydowncapture} />
@@ -231,55 +156,17 @@
     <button
       class="icon-button"
       class:signed-in={signedIn}
-      aria-label="Flightradar24 account"
-      aria-expanded={open === "account"}
-      aria-controls="account-popover"
-      aria-pressed={open === "account"}
-      title={signedIn ? "Signed in to Flightradar24" : "Sign in to Flightradar24"}
-      bind:this={triggers.account}
-      onclick={() => toggle("account")}
+      aria-label="API keys"
+      title={signedIn ? "API keys (signed in to Flightradar24)" : "API keys and Flightradar24 login"}
+      onclick={() => {
+        close();
+        onkeys();
+      }}
     >
-      <CircleUserRound size={18} strokeWidth={1.75} />
+      <KeyRound size={18} strokeWidth={1.75} />
     </button>
-    {#if open === "account"}
-      <section id="account-popover" class="popover surface account" aria-labelledby="account-heading">
-        <h2 id="account-heading">Flightradar24 account</h2>
-        {#if signedIn}
-          <p class="state" tabindex="-1" bind:this={signedInState}><span class="badge good">Signed in</span></p>
-          <p class="note">
-            Data your subscription includes, such as filed flight plans, now shows up.{session?.expires
-              ? ` The session lasts until ${until(session.expires)}.`
-              : ""}
-          </p>
-          <button class="button" onclick={signOut} disabled={busy}>Sign out</button>
-        {:else}
-          <p class="note">
-            Optional. A subscription unlocks filed flight plans (the real route), vertical speed, squawk and airspace,
-            depending on your plan.
-          </p>
-          <form onsubmit={submit}>
-            <label class="field">
-              <span>Email</span>
-              <input type="email" autocomplete="username" required bind:value={email} disabled={busy} bind:this={firstField} />
-            </label>
-            <label class="field">
-              <span>Password</span>
-              <input type="password" autocomplete="current-password" required bind:value={password} disabled={busy} />
-            </label>
-            {#if error}<p class="error" role="alert">{error}</p>{/if}
-            <button class="button primary" type="submit" disabled={busy || !email || !password}>
-              {#if busy}<span class="spin"><LoaderCircle size={14} strokeWidth={2} /></span>{/if}
-              Sign in
-            </button>
-          </form>
-          <p class="fine">
-            Sent only to Flightradar24. RustRadar keeps the session in memory and forgets it when you quit.
-          </p>
-        {/if}
-      </section>
-    {/if}
     <button
-      class="icon-button"
+      class="icon-button desktop-only"
       aria-label="Keyboard shortcuts"
       title="Keyboard shortcuts (?)"
       onclick={() => {
@@ -291,7 +178,7 @@
     </button>
   </div>
 
-  <div class="stack surface">
+  <div class="stack surface zoom">
     <button class="icon-button" aria-label="Zoom in" title="Zoom in (+)" disabled={zoom >= 18} onclick={() => onzoom(1)}>
       <Plus size={18} strokeWidth={1.75} />
     </button>
@@ -375,77 +262,43 @@
     width: 300px;
     gap: var(--space-3);
   }
-  .account {
-    gap: var(--space-3);
+  /* Phones (the query in phone.svelte.ts): a slim rail above the bottom sheet;
+     pinching zooms, and the menus open as sheets of their own. */
+  @media (max-width: 899px), (max-height: 500px) {
+    .controls {
+      right: max(var(--space-2), env(safe-area-inset-right, 0px));
+      bottom: calc(var(--sheet-h, 0px) + 24px);
+      transition: bottom 220ms var(--ease-out);
+    }
+    .zoom,
+    .desktop-only {
+      display: none;
+    }
+    .popover {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 6;
+      width: auto;
+      max-height: 70dvh;
+      border-radius: 12px 12px 0 0;
+      padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+      padding-left: max(var(--space-4), env(safe-area-inset-left, 0px));
+      padding-right: max(var(--space-4), env(safe-area-inset-right, 0px));
+      animation-name: rise;
+    }
+    @keyframes rise {
+      from {
+        transform: translateY(24px);
+        opacity: 0;
+      }
+    }
   }
-  /* where the keyboard lands after signing in: read out, not a control, so no ring */
-  .state:focus {
-    outline: none;
-  }
-  .account h2 {
-    font-size: var(--text-base);
-    font-weight: 650;
-  }
-  .note {
-    font-size: var(--text-md);
-    color: var(--text-2);
-  }
-  .fine {
-    font-size: var(--text-xs);
-    color: var(--text-3);
-  }
-  form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--text-2);
-  }
-  .field input {
-    height: 34px;
-    padding: 0 var(--space-3);
-    border: 1px solid var(--line-control);
-    border-radius: var(--radius-sm);
-    background: var(--ink);
-    font-size: var(--text-md);
-    font-weight: 400;
-    color: var(--text-1);
-    outline: none;
-  }
-  .field input:focus {
-    border-color: var(--amber);
-  }
-  .error {
-    font-size: var(--text-sm);
-    color: var(--danger);
-    overflow-wrap: anywhere;
-  }
-  .primary {
-    justify-content: center;
-    border-color: transparent;
-    background: var(--amber);
-    color: var(--amber-ink);
-  }
-  .primary:hover {
-    background: oklch(0.86 0.15 75);
-  }
-  .primary:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .spin {
-    display: inline-grid;
-    animation: spin 900ms linear infinite;
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
+  /* a phone on its side: the sheet is on the left, clear of the rail */
+  @media (max-height: 500px) and (orientation: landscape) {
+    .controls {
+      bottom: var(--space-2);
     }
   }
 </style>

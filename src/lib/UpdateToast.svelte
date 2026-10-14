@@ -12,6 +12,8 @@
   let dismissed = $state<string | null>(null);
   let restarting = $state(false);
   let error = $state<string | null>(null);
+  /** Android installs the new APK itself: the button opens its download rather than restarting. */
+  const android = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
 
   onMount(() => {
     if (!isTauri()) return;
@@ -21,7 +23,7 @@
   });
 
   async function restart() {
-    restarting = true;
+    restarting = !android;
     error = null;
     try {
       await invoke("restart_to_update");
@@ -37,12 +39,14 @@
     <span class="icon"><RefreshCw size={16} strokeWidth={1.75} /></span>
     <div class="text">
       <p class="title">RustRadar {version} is ready</p>
-      <p class="sub">{error ?? "Restart to start using it. It takes a few seconds."}</p>
+      <p class="sub">
+        {error ?? (android ? "Download it, then open the file to install." : "Restart to start using it. It takes a few seconds.")}
+      </p>
     </div>
     <button class="button primary" onclick={restart} disabled={restarting}>
-      {restarting ? "Restarting…" : "Restart"}
+      {#if android}Download{:else}{restarting ? "Restarting…" : "Restart"}{/if}
     </button>
-    <button class="icon-button" aria-label="Later" title="Later: it installs the next time RustRadar opens" onclick={() => (dismissed = version)}>
+    <button class="icon-button" aria-label="Later" title={android ? "Later" : "Later: it installs the next time RustRadar opens"} onclick={() => (dismissed = version)}>
       <X size={16} strokeWidth={1.75} />
     </button>
   </div>

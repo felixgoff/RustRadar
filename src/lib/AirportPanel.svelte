@@ -425,4 +425,40 @@
     font-size: var(--text-xs);
     color: var(--text-3);
   }
+  /* Phones (the query in phone.svelte.ts): a sheet along the bottom */
+  @media (max-width: 899px), (max-height: 500px) {
+    .panel {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 5;
+      width: auto;
+      max-height: 72dvh;
+      border-bottom: 0;
+      border-left: 0;
+      border-right: 0;
+      border-radius: 12px 12px 0 0;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      padding-left: env(safe-area-inset-left, 0px);
+      padding-right: env(safe-area-inset-right, 0px);
+      animation-name: rise;
+    }
+    @keyframes rise {
+      from {
+        transform: translateY(24px);
+        opacity: 0;
+      }
+    }
+  }
+  /* a phone on its side: down the right, beside the list */
+  @media (max-height: 500px) and (orientation: landscape) {
+    .panel {
+      top: 0;
+      left: auto;
+      width: min(360px, 50vw);
+      max-height: none;
+      border-radius: 12px 0 0 0;
+    }
+  }
 </style>

@@ -117,10 +117,52 @@ the selected aircraft, `Esc` close the open panel, `+` / `-` zoom, `T` tilt,
 
 Optional: a Flightradar24 account raises the per-request flight limit and,
 depending on the plan, unlocks filed flight plans, squawk, vertical speed and
-airspace. Sign in from the account button in the map controls; the session is
-kept in memory only and forgotten when the app quits. Alternatively set
+airspace. Enter the login on the API keys page (the key button in the map
+controls); it is kept in the app's config folder and signs in at launch. The
+same page holds the Trafiklab and Trafikverket keys, and exports or imports
+them as a file. Alternatively set
 `fr24_username` / `fr24_password` (or `fr24_subscription_key` / `fr24_token`)
 in the environment, or use fr24's config file (see `crates/fr24/README.md`).
+
+### Phones
+
+The same app builds for Android and iOS. Below 900px wide the layout switches
+to a full-screen map with a bottom sheet (`src/lib/phone.svelte.ts`,
+`src/lib/BottomSheet.svelte`).
+
+```sh
+bun tauri android dev          # needs the Android SDK and NDK (ANDROID_HOME, NDK_HOME)
+bun tauri android build --apk
+bun tauri ios dev              # on a Mac with Xcode
+```
+
+The Android project is checked in at `src-tauri/gen/android`. The iOS one is
+generated in CI by `tauri ios init`.
+
+CI (`.github/workflows/rust.yml`) builds an APK and an IPA on every run, and
+a release attaches them to the release page. These repository secrets make
+the APK a signed release build and send the iOS build to TestFlight. Without
+the Android secrets, a release has no APK and shows a warning. Without the
+Apple secrets, the IPA is unsigned, which works only with sideloading tools
+such as AltStore or Sideloadly; those sign it with your own Apple ID, and with
+a free one the install expires after 7 days.
+
+| Secret | What it is |
+| --- | --- |
+| `ANDROID_KEYSTORE` | The release keystore, base64: `keytool -genkeypair -v -keystore release.jks -keyalg RSA -keysize 4096 -validity 10000 -alias rustradar`, then `base64 -w0 release.jks`. Keep the file: every update must be signed with the same key. |
+| `ANDROID_KEYSTORE_PASSWORD` | Its password (used for the key too). |
+| `ANDROID_KEY_ALIAS` | The alias, e.g. `rustradar`. |
+| `APPLE_DEVELOPMENT_TEAM` | The 10-character Team ID (developer.apple.com, Membership). |
+| `APPLE_API_ISSUER` | App Store Connect, Users and Access, Integrations: the Issuer ID. |
+| `APPLE_API_KEY_ID` | The Key ID of an App Store Connect API key with the Admin role. |
+| `APPLE_API_KEY` | That key's `.p8` file contents. |
+
+On iOS, also create the app once in App Store Connect with the bundle ID
+`com.felix.rustradar`, so TestFlight has somewhere to put the builds.
+
+Android installs update through the app. When a newer release has an APK, the
+app shows the update toast, and its button downloads the APK
+(`src-tauri/src/mobile_update.rs`). iOS installs update through TestFlight.
 
 ## Design
 

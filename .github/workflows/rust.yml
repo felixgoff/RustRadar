@@ -188,3 +188,218 @@ jobs:
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
+
+  # Android: a debug APK on every run to try out, and on a release a signed
+  # APK for the release page (the app offers it as an update; see
+  # src-tauri/src/mobile_update.rs). Signing needs the ANDROID_KEYSTORE,
+  # ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS secrets; without them a
+  # release goes out with no APK and a warning.
+  android:
+    name: Android APK
+    needs: version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install the NDK
+        run: |
+          sdkmanager "ndk;27.0.12077973"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: android
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Set release version
+        if: env.RELEASE == 'true' && !startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/version.mjs "${{ needs.version.outputs.version }}"
+
+      - name: Signing keystore
+        id: keystore
+        if: env.RELEASE == 'true'
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE" ] || [ -z "$PASSWORD" ] || [ -z "$ALIAS" ]; then
+            echo "::warning::No Android signing secrets (ANDROID_KEYSTORE, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS): this release has no APK."
+            exit 0
+          fi
+          echo "$KEYSTORE" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          {
+            echo "storeFile=$RUNNER_TEMP/release.jks"
+            echo "password=$PASSWORD"
+            echo "keyAlias=$ALIAS"
+          } > src-tauri/gen/android/keystore.properties
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build the release APK
+        if: steps.keystore.outputs.ready == 'true'
+        run: bun tauri android build --apk
+
+      - name: Build a debug APK
+        if: steps.keystore.outputs.ready != 'true'
+        run: bun tauri android build --apk --debug --target aarch64
+
+      - name: Name the APK
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          kind=${{ steps.keystore.outputs.ready == 'true' && 'release' || 'debug' }}
+          apk="$(find src-tauri/gen/android/app/build/outputs/apk -name "*-$kind.apk" | head -n 1)"
+          suffix=$([ "$kind" = release ] && echo "" || echo "_debug")
+          mkdir -p dist && cp "$apk" "dist/RustRadar_${version}${suffix}.apk"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/*.apk
+
+  # iOS: an IPA on every run, attached to the release page on a release. With
+  # the APPLE_API_ISSUER, APPLE_API_KEY_ID, APPLE_API_KEY (the .p8 file's
+  # contents) and APPLE_DEVELOPMENT_TEAM secrets, a release's build is signed
+  # through App Store Connect and uploaded to TestFlight; without them the IPA
+  # is unsigned, for sideloading tools that sign it themselves.
+  ios:
+    name: iOS
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: ios
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: App Store Connect key
+        id: asc
+        if: env.RELEASE == 'true'
+        env:
+          ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          KEY: ${{ secrets.APPLE_API_KEY }}
+          TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+        run: |
+          if [ -z "$ISSUER" ] || [ -z "$KEY_ID" ] || [ -z "$KEY" ] || [ -z "$TEAM" ]; then
+            echo "::warning::No App Store Connect secrets (APPLE_API_ISSUER, APPLE_API_KEY_ID, APPLE_API_KEY, APPLE_DEVELOPMENT_TEAM): an unsigned IPA, and nothing for TestFlight."
+            exit 0
+          fi
+          mkdir -p ~/.appstoreconnect/private_keys
+          key="$HOME/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8"
+          printf '%s\n' "$KEY" > "$key"
+          {
+            echo "APPLE_API_ISSUER=$ISSUER"
+            echo "APPLE_API_KEY=$KEY_ID"
+            echo "APPLE_API_KEY_ID=$KEY_ID"
+            echo "APPLE_API_KEY_PATH=$key"
+            echo "APPLE_DEVELOPMENT_TEAM=$TEAM"
+          } >> "$GITHUB_ENV"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set release version
+        if: env.RELEASE == 'true' && !startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/version.mjs "${{ needs.version.outputs.version }}"
+
+      - name: Xcode project
+        run: |
+          # tauri ios init runs `pod install`; left to itself it tries `gem install`, which needs sudo
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          brew list cocoapods >/dev/null 2>&1 || brew install cocoapods
+          bun tauri ios init --ci
+          # the Xcode project starts with Tauri's logo: the app's own icon over it
+          bun tauri icon src-tauri/icons/icon.png
+
+      # Without the App Store Connect secrets: an unsigned IPA, for sideloading
+      # tools (AltStore, Sideloadly) that sign it with the user's own Apple ID.
+      - name: Build an unsigned IPA
+        if: steps.asc.outputs.ready != 'true'
+        run: |
+          bun tauri ios build --no-sign
+          ipa="$(find src-tauri/gen/apple/build -name '*.ipa' | head -n 1)"
+          version="$(node -p 'require("./package.json").version')"
+          mkdir -p dist && cp "$ipa" "dist/RustRadar_${version}_unsigned.ipa"
+          ls -l dist
+
+      - name: Build for the App Store
+        if: steps.asc.outputs.ready == 'true'
+        run: bun tauri ios build --export-method app-store-connect
+
+      - name: Upload to TestFlight
+        if: steps.asc.outputs.ready == 'true'
+        run: |
+          ipa="$(find src-tauri/gen/apple/build -name '*.ipa' | head -n 1)"
+          xcrun altool --upload-app --type ios --file "$ipa" --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER"
+          version="$(node -p 'require("./package.json").version')"
+          mkdir -p dist && cp "$ipa" "dist/RustRadar_${version}.ipa"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: dist/*.ipa
+
+  # The phone builds on the release the desktop bundles created.
+  mobile-release:
+    name: Attach phone builds
+    needs: [version, bundle, android, ios]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # either may be missing: a build without its signing secrets
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: android-apk
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ios-ipa
+          path: dist
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', needs.version.outputs.version) }}
+        run: |
+          shopt -s nullglob
+          files=(dist/*.ipa)
+          for apk in dist/*.apk; do
+            # a debug APK means the release had no signing key: not for users
+            [[ "$apk" == *_debug.apk ]] || files+=("$apk")
+          done
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::No signed phone builds to attach."
+            exit 0
+          fi
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "${{ github.repository }}"

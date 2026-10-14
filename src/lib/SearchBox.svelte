@@ -516,4 +516,10 @@
     font-size: var(--text-sm);
     color: var(--text-3);
   }
+  /* no keyboard on a phone to press it with (the query in phone.svelte.ts) */
+  @media (max-width: 899px), (max-height: 500px) {
+    kbd {
+      display: none;
+    }
+  }
 </style>

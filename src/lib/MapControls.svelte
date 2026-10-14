@@ -411,7 +411,7 @@
     height: 34px;
     padding: 0 var(--space-3);
     border: 1px solid var(--line-control);
-    border-radius: 0;
+    border-radius: var(--radius-sm);
     background: var(--ink);
     font-size: var(--text-md);
     font-weight: 400;

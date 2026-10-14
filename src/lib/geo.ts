@@ -15,7 +15,7 @@ const MAX_EXTRAPOLATION_S = 90;
 /** Every aircraft is white... */
 export const AIRCRAFT_COLOR: RGB = [255, 255, 255];
 /** ...except the selected one, in the selection amber (`--amber`). */
-export const SELECTED_COLOR: RGB = [255, 214, 10];
+export const SELECTED_COLOR: RGB = [55, 142, 240];
 
 /** Altitude (feet) → colour stops for the selected flight's trail, low to high. */
 export const ALTITUDE_STOPS: [number, RGB][] = [

@@ -1369,7 +1369,7 @@
     min-width: 18px;
     height: 18px;
     padding: 0 4px;
-    border-radius: 0;
+    border-radius: 9px;
     background: var(--amber);
     font-size: var(--text-xs);
     font-weight: 700;
@@ -1390,7 +1390,7 @@
     display: flex;
     gap: var(--space-2);
     padding: var(--space-3);
-    border-radius: 0;
+    border-radius: var(--radius-sm);
     background: var(--danger-soft);
     color: var(--danger);
     font-size: var(--text-md);

@@ -149,7 +149,7 @@
     width: 100%;
     padding: var(--space-2);
     border: 0;
-    border-radius: 0;
+    border-radius: var(--radius-sm);
     background: none;
     text-align: left;
     cursor: pointer;
@@ -182,7 +182,7 @@
     flex: none;
     width: 8px;
     height: 8px;
-    border-radius: 0;
+    border-radius: 2px;
   }
   .sub {
     display: flex;

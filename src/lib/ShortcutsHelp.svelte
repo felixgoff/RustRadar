@@ -115,7 +115,7 @@
     padding: 0 5px;
     border: 1px solid var(--line-control);
     border-bottom-width: 2px;
-    border-radius: 0;
+    border-radius: 4px;
     font: 600 var(--text-sm) var(--font-data);
     color: var(--text-1);
   }

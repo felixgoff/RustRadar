@@ -261,7 +261,7 @@
   .text-button {
     padding: 2px 4px;
     border: 0;
-    border-radius: 0;
+    border-radius: 4px;
     background: none;
     font-size: var(--text-sm);
     font-weight: 600;
@@ -298,7 +298,7 @@
     height: 34px;
     padding: 0 var(--space-3);
     border: 1px solid var(--line-control);
-    border-radius: 0;
+    border-radius: var(--radius-sm);
     background: var(--ink);
     font-size: var(--text-md);
     outline: none;
@@ -348,7 +348,7 @@
     height: 26px;
     padding: 0 var(--space-2);
     border: 1px solid var(--line-control);
-    border-radius: 0;
+    border-radius: 13px;
     background: none;
     font-size: var(--text-sm);
     color: var(--text-2);
@@ -383,7 +383,7 @@
     left: 8px;
     right: 8px;
     height: 2px;
-    border-radius: 0;
+    border-radius: 1px;
     background: var(--line-control);
   }
   .span {
@@ -414,7 +414,7 @@
     height: 16px;
     margin-top: 2px;
     border: 2px solid var(--amber);
-    border-radius: 0;
+    border-radius: 50%;
     background: var(--ink);
     pointer-events: auto;
     cursor: grab;

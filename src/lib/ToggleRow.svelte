@@ -50,7 +50,7 @@
     padding: 0 4px;
     border: 1px solid var(--line);
     border-bottom-width: 2px;
-    border-radius: 0;
+    border-radius: 4px;
     font: 600 var(--text-xs) var(--font-data);
     color: var(--text-3);
   }
@@ -64,7 +64,7 @@
     width: 34px;
     height: 20px;
     margin: 0;
-    border-radius: 0;
+    border-radius: 10px;
     background: var(--line-control);
     cursor: pointer;
     transition: background-color 150ms var(--ease-out);
@@ -76,7 +76,7 @@
     left: 3px;
     width: 14px;
     height: 14px;
-    border-radius: 0;
+    border-radius: 50%;
     background: var(--text-1);
     transition: transform 150ms var(--ease-out);
   }

@@ -85,7 +85,7 @@
   .text-button {
     padding: 2px 4px;
     border: 0;
-    border-radius: 0;
+    border-radius: 4px;
     background: none;
     font-size: var(--text-sm);
     font-weight: 600;

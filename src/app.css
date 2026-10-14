@@ -1,6 +1,7 @@
 /*
- * RustRadar: black and yellow. A black shell around the globe, square edges,
- * white aircraft, signal yellow for selection and primary actions; orange for delays; green only for "live", red
+ * RustRadar in the colours of Photoshop's dark UI (Adobe Spectrum): grey panels
+ * on a darker canvas, 4px corners, white aircraft, Spectrum blue for selection and
+ * primary actions; orange for delays; green only for "live", red
  * only for failures. Overpass (signage lineage) for UI, Overpass Mono for measured
  * values: altitudes, speeds, codes, times.
  */
@@ -15,30 +16,30 @@
 }
 
 :root {
-  --ink: oklch(0.09 0 0);
-  --surface: oklch(0.14 0 0);
-  --surface-raised: oklch(0.19 0 0);
-  --surface-hover: oklch(0.23 0 0);
-  --line: oklch(0.28 0 0);
-  --line-control: oklch(0.5 0 0);
+  --ink: #1e1e1e;
+  --surface: #323232;
+  --surface-raised: #3e3e3e;
+  --surface-hover: #4a4a4a;
+  --line: #444444;
+  --line-control: #6e6e6e;
 
-  --text-1: oklch(0.96 0 0);
-  --text-2: oklch(0.8 0 0);
-  --text-3: oklch(0.67 0 0);
+  --text-1: #e3e3e3;
+  --text-2: #c4c4c4;
+  --text-3: #a8a8a8;
 
-  --amber: oklch(0.88 0.18 98);
-  --amber-ink: oklch(0.12 0 0);
-  --amber-soft: oklch(0.88 0.18 98 / 0.14);
-  --live: oklch(0.8 0.15 152);
-  --danger: oklch(0.72 0.16 25);
-  --danger-soft: oklch(0.72 0.16 25 / 0.12);
+  --amber: #378ef0;
+  --amber-ink: #ffffff;
+  --amber-soft: rgb(55 142 240 / 0.18);
+  --live: #33ab84;
+  --danger: #ec5b62;
+  --danger-soft: rgb(236 91 98 / 0.14);
   /* chart series: the selection amber stepped into the dark data band
      (validated against --surface: in band, 3:1+ contrast) */
-  --series-1: oklch(0.72 0.15 98);
+  --series-1: #2680eb;
   /* status: delays (always with a text label, never colour alone) */
-  --warn: oklch(0.76 0.15 55);
-  --warn-soft: oklch(0.76 0.15 55 / 0.14);
-  --live-soft: oklch(0.8 0.15 152 / 0.14);
+  --warn: #e68619;
+  --warn-soft: rgb(230 134 25 / 0.16);
+  --live-soft: rgb(51 171 132 / 0.16);
 
   --font-ui: "Middle Dot", "Overpass Variable", "Segoe UI", system-ui, sans-serif;
   --font-data: "Overpass Mono Variable", ui-monospace, "Cascadia Mono", monospace;
@@ -59,8 +60,8 @@
   --space-5: 20px;
   --space-6: 24px;
 
-  --radius-sm: 0;
-  --radius: 0;
+  --radius-sm: 4px;
+  --radius: 4px;
   --shadow: none;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -139,7 +140,7 @@ ol {
 .surface {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 0;
+  border-radius: 4px;
   box-shadow: var(--shadow);
 }
 
@@ -151,7 +152,7 @@ ol {
   height: 32px;
   padding: 0;
   border: 0;
-  border-radius: 0;
+  border-radius: 4px;
   background: transparent;
   color: var(--text-2);
   cursor: pointer;
@@ -180,7 +181,7 @@ ol {
   height: 32px;
   padding: 0 var(--space-3);
   border: 1px solid var(--line-control);
-  border-radius: 0;
+  border-radius: 4px;
   background: transparent;
   font-size: var(--text-md);
   font-weight: 550;
@@ -203,7 +204,7 @@ ol {
   align-items: center;
   width: fit-content;
   padding: 1px 6px;
-  border-radius: 0;
+  border-radius: 4px;
   font-size: var(--text-xs);
   font-weight: 650;
   line-height: 1.5;
@@ -227,7 +228,7 @@ ol {
 }
 
 .skeleton {
-  border-radius: 0;
+  border-radius: 4px;
   background: linear-gradient(90deg, var(--surface-raised) 0%, var(--surface-hover) 50%, var(--surface-raised) 100%);
   background-size: 200% 100%;
   animation: skeleton 1.4s linear infinite;

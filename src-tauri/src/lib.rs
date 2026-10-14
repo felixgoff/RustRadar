@@ -5,6 +5,10 @@ mod export;
 mod geocode;
 mod keys;
 mod liveries;
+// the checks run in the desktop tests too; only phones use it
+#[cfg(any(mobile, test))]
+#[cfg_attr(not(mobile), allow(dead_code))]
+mod mobile_update;
 mod mrms;
 mod opensky;
 mod radar;
@@ -14,6 +18,7 @@ mod session;
 mod ships;
 mod taxiways;
 mod trains;
+#[cfg(desktop)]
 mod updater;
 
 use std::collections::{HashMap, HashSet};
@@ -620,18 +625,23 @@ async fn opensky_track(
     opensky::track(&http, &mut cache, &icao24).await
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// The web inspector, for bug reports (Cmd/Ctrl+Alt+I); the context menu stays off.
+/// Phones have their own: Safari's Develop menu, or chrome://inspect.
 #[tauri::command]
 fn open_devtools(window: tauri::WebviewWindow) {
+    #[cfg(desktop)]
     window.open_devtools();
+    #[cfg(mobile)]
+    let _ = window;
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let fr24 = Fr24::new().expect("failed to build http client");
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    builder
         .manage(AppState {
             fr24: RwLock::new(Arc::new(fr24)),
             follow: Mutex::new(None),
@@ -644,7 +654,10 @@ pub fn run() {
         })
         .setup(|app| {
             // the main window starts hidden: update first, then open it
+            #[cfg(desktop)]
             tauri::async_runtime::spawn(updater::run(app.handle().clone()));
+            #[cfg(mobile)]
+            tauri::async_runtime::spawn(mobile_update::run(app.handle().clone()));
             // log in with the login saved on the keys page, else with credentials
             // from the environment or the fr24 config file, if any; until then
             // (or without them) requests are anonymous
@@ -693,8 +706,14 @@ pub fn run() {
             taxiways::airport_taxiways,
             export::save_export,
             open_devtools,
+            #[cfg(desktop)]
             updater::pending_update,
+            #[cfg(desktop)]
             updater::restart_to_update,
+            #[cfg(mobile)]
+            mobile_update::pending_update,
+            #[cfg(mobile)]
+            mobile_update::restart_to_update,
             ships::ships_in_view,
             ships::ship_details,
             trains::trains_in_view,

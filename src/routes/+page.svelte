@@ -39,6 +39,8 @@
   import Globe, { type ViewState } from "$lib/Globe.svelte";
   import MapControls from "$lib/MapControls.svelte";
   import ModeBar from "$lib/ModeBar.svelte";
+  import BottomSheet, { type Detent } from "$lib/BottomSheet.svelte";
+  import { layout } from "$lib/phone.svelte";
   import SearchBox, { type LocalSearch } from "$lib/SearchBox.svelte";
   import ShipFilterPanel from "$lib/ShipFilterPanel.svelte";
   import ShipList from "$lib/ShipList.svelte";
@@ -142,6 +144,9 @@
   let filtersOpen = $state(false);
   let helpOpen = $state(false);
   let keysOpen = $state(false);
+  /** On a phone: how far up the list sheet is, and its height in px. */
+  let sheetDetent = $state<Detent>("peek");
+  let sheetHeight = $state(0);
   /** The keys page opened from a "sign in" prompt: the caret goes to the login, and back to the prompt after. */
   let keysPrompt = $state<(() => HTMLElement | null) | null>(null);
   let session = $state.raw<SessionInfo | null>(null);
@@ -996,7 +1001,7 @@
 
 <svelte:window {onkeydown} />
 
-<main>
+<main class:phone={layout.phone} style:--sheet-h={layout.phone ? `${sheetHeight}px` : null}>
   <Globe
     bind:this={globe}
     flights={shown}
@@ -1044,16 +1049,20 @@
     onviewchange={(v) => (view = v)}
   />
 
-  <ModeBar
-    bind:mode={settings.mode}
-    shown={kinds}
-    ontoggle={toggleShown}
-    counts={{
-      aircraft: aircraftOn && snapshot ? flights.length : null,
-      trains: trainsOn && trainsAt ? trains.length : null,
-      ships: shipsOn && shipsAt ? ships.length : null,
-    }}
-  />
+  {#snippet modeBar()}
+    <ModeBar
+      bind:mode={settings.mode}
+      shown={kinds}
+      ontoggle={toggleShown}
+      counts={{
+        aircraft: aircraftOn && snapshot ? flights.length : null,
+        trains: trainsOn && trainsAt ? trains.length : null,
+        ships: shipsOn && shipsAt ? ships.length : null,
+      }}
+    />
+  {/snippet}
+
+  {#if !layout.phone}{@render modeBar()}{/if}
 
   <div class="sidebar">
     <section class="surface primary">
@@ -1108,28 +1117,7 @@
         />
       {/if}
 
-      <div class="toolbar">
-        {@render filterToggle(focus === "aircraft" ? active : focus === "trains" ? trainFilterActive : shipFilterActive)}
-        {#if focus === "aircraft" && snapshot}
-          <p class="counts">
-            <span class="count">{count(filtered.length)}</span>
-            {#if filtered.length !== flights.length}of {count(flights.length)}{/if}
-            {regional ? "in view" : "worldwide"}
-          </p>
-        {:else if focus === "trains" && trainsAt}
-          <p class="counts">
-            <span class="count">{count(trainsListed.length)}</span>
-            {#if trainsListed.length !== trains.length}of {count(trains.length)}{/if}
-            in view
-          </p>
-        {:else if focus === "ships" && shipsAt}
-          <p class="counts">
-            <span class="count">{count(shipsListed.length)}</span>
-            {#if shipsListed.length !== ships.length}of {count(ships.length)}{/if}
-            in view
-          </p>
-        {/if}
-      </div>
+      {#if layout.phone}{@render modeBar()}{:else}{@render toolbar()}{/if}
 
       {#if !isTauri()}
         <div class="alert" role="alert">
@@ -1165,67 +1153,103 @@
       {/if}
     </section>
 
-    {#if filtersOpen}
-      {#if focus === "aircraft"}
-        <FilterPanel bind:filters {flights} shown={filtered.length} onclose={() => (filtersOpen = false)} />
-      {:else if focus === "trains"}
-        <TrainFilterPanel bind:filters={trainFilters} {trains} shown={trainsFiltered.length} onclose={() => (filtersOpen = false)} />
-      {:else}
-        <ShipFilterPanel
-          bind:filters={shipFilters}
-          {ships}
-          shown={shipsFiltered.length}
-          sizesKnown={shipSizesKnown}
-          onclose={() => (filtersOpen = false)}
-        />
-      {/if}
-    {/if}
-
-    <section class="surface list">
-      {#if focus === "aircraft"}
-        <TopFlights
-          flights={top}
-          failed={topFailed}
-          {selectedId}
-          onpick={(f) => select(f.flight_id, { fly: true })}
-          onretry={refreshTop}
-        />
-      {:else if focus === "trains"}
-        <TrainList
-          trains={trainsListed}
-          total={trains.length}
-          loaded={trainsAt > 0}
-          failed={trainsFailed || !isTauri()}
-          bind:sort={trainFilters.sort}
-          centre={listCentre}
-          selectedId={selectedTrain?.id ?? null}
-          onpick={pickTrain}
-          onhover={(id) => (hoveredTrainId = id)}
-          onshowall={() => {
-            trainQuery = "";
-            Object.assign(trainFilters, { ...structuredClone(DEFAULT_TRAIN_FILTERS), sort: trainFilters.sort });
-          }}
-        />
-      {:else}
-        <ShipList
-          ships={shipsListed}
-          total={ships.length}
-          loaded={shipsAt > 0}
-          failed={shipsFailed || !isTauri()}
-          bind:sort={shipFilters.sort}
-          centre={listCentre}
-          sizesKnown={shipSizesKnown}
-          selectedMmsi={selectedShip?.mmsi ?? null}
-          onpick={pickShip}
-          onhover={(mmsi) => (hoveredShipMmsi = mmsi)}
-          onshowall={() => {
-            shipQuery = "";
-            Object.assign(shipFilters, { ...structuredClone(DEFAULT_SHIP_FILTERS), sort: shipFilters.sort });
-          }}
-        />
-      {/if}
-    </section>
+    {#if !layout.phone}{@render sheetContent()}{/if}
   </div>
+
+  {#snippet toolbar()}
+    <div class="toolbar">
+      {@render filterToggle(focus === "aircraft" ? active : focus === "trains" ? trainFilterActive : shipFilterActive)}
+      {#if focus === "aircraft" && snapshot}
+        <p class="counts">
+          <span class="count">{count(filtered.length)}</span>
+          {#if filtered.length !== flights.length}of {count(flights.length)}{/if}
+          {regional ? "in view" : "worldwide"}
+        </p>
+      {:else if focus === "trains" && trainsAt}
+        <p class="counts">
+          <span class="count">{count(trainsListed.length)}</span>
+          {#if trainsListed.length !== trains.length}of {count(trains.length)}{/if}
+          in view
+        </p>
+      {:else if focus === "ships" && shipsAt}
+        <p class="counts">
+          <span class="count">{count(shipsListed.length)}</span>
+          {#if shipsListed.length !== ships.length}of {count(ships.length)}{/if}
+          in view
+        </p>
+      {/if}
+    </div>
+  {/snippet}
+
+  {#snippet sheetContent()}
+  {#if filtersOpen}
+    {#if focus === "aircraft"}
+      <FilterPanel bind:filters {flights} shown={filtered.length} onclose={() => (filtersOpen = false)} />
+    {:else if focus === "trains"}
+      <TrainFilterPanel bind:filters={trainFilters} {trains} shown={trainsFiltered.length} onclose={() => (filtersOpen = false)} />
+    {:else}
+      <ShipFilterPanel
+        bind:filters={shipFilters}
+        {ships}
+        shown={shipsFiltered.length}
+        sizesKnown={shipSizesKnown}
+        onclose={() => (filtersOpen = false)}
+      />
+    {/if}
+  {/if}
+
+  <section class="surface list">
+    {#if focus === "aircraft"}
+      <TopFlights
+        flights={top}
+        failed={topFailed}
+        {selectedId}
+        onpick={(f) => select(f.flight_id, { fly: true })}
+        onretry={refreshTop}
+      />
+    {:else if focus === "trains"}
+      <TrainList
+        trains={trainsListed}
+        total={trains.length}
+        loaded={trainsAt > 0}
+        failed={trainsFailed || !isTauri()}
+        bind:sort={trainFilters.sort}
+        centre={listCentre}
+        selectedId={selectedTrain?.id ?? null}
+        onpick={pickTrain}
+        onhover={(id) => (hoveredTrainId = id)}
+        onshowall={() => {
+          trainQuery = "";
+          Object.assign(trainFilters, { ...structuredClone(DEFAULT_TRAIN_FILTERS), sort: trainFilters.sort });
+        }}
+      />
+    {:else}
+      <ShipList
+        ships={shipsListed}
+        total={ships.length}
+        loaded={shipsAt > 0}
+        failed={shipsFailed || !isTauri()}
+        bind:sort={shipFilters.sort}
+        centre={listCentre}
+        sizesKnown={shipSizesKnown}
+        selectedMmsi={selectedShip?.mmsi ?? null}
+        onpick={pickShip}
+        onhover={(mmsi) => (hoveredShipMmsi = mmsi)}
+        onshowall={() => {
+          shipQuery = "";
+          Object.assign(shipFilters, { ...structuredClone(DEFAULT_SHIP_FILTERS), sort: shipFilters.sort });
+        }}
+      />
+    {/if}
+  </section>
+  {/snippet}
+
+  {#if layout.phone}
+    <BottomSheet bind:detent={sheetDetent} bind:height={sheetHeight} label={focus === "aircraft" ? "Flights" : focus === "trains" ? "Trains" : "Ships"}>
+      {#snippet head()}{@render toolbar()}{/snippet}
+      {@render sheetContent()}
+    </BottomSheet>
+  {/if}
 
   {#snippet filterToggle(n: number)}
     <button
@@ -1319,7 +1343,7 @@
     bind:terrain={settings.terrain}
     bind:exaggeration={settings.exaggeration}
     {session}
-    inset={selected || boardCode || selectedShip || selectedTrain ? PANEL_INSET : 0}
+    inset={!layout.phone && (selected || boardCode || selectedShip || selectedTrain) ? PANEL_INSET : 0}
     onzoom={(d) => globe.zoomBy(d)}
     onreset={() => globe.resetOrientation()}
     ontilt={(p) => globe.setPitch(p)}
@@ -1500,5 +1524,57 @@
   }
   .attribution a:hover {
     color: var(--text-1);
+  }
+  /* Phones (the query in phone.svelte.ts): the search and mode buttons along
+     the top, the lists and filters in the bottom sheet. */
+  @media (max-width: 899px), (max-height: 500px) {
+    .sidebar {
+      top: max(var(--space-2), env(safe-area-inset-top, 0px));
+      left: max(var(--space-2), env(safe-area-inset-left, 0px));
+      right: max(var(--space-2), env(safe-area-inset-right, 0px));
+      bottom: auto;
+      width: auto;
+      z-index: 3;
+    }
+    .primary {
+      padding: var(--space-2);
+      gap: var(--space-2);
+    }
+    .brand {
+      display: none;
+    }
+    .list {
+      flex: 1 1 auto;
+      border: 0;
+      border-radius: 0;
+      background: none;
+      box-shadow: none;
+      overflow: visible;
+    }
+    :global(.sheet) :global(.filters) {
+      flex: none;
+      margin: 0 var(--space-2) var(--space-2);
+      box-shadow: none;
+    }
+    .attribution {
+      bottom: var(--sheet-h, 0px);
+      left: 0;
+      max-width: none;
+      border-radius: 0;
+      font-size: 10px;
+      z-index: 2;
+    }
+  }
+  /* a phone on its side: the search and list down the left, the map beside them */
+  @media (max-height: 500px) and (orientation: landscape) {
+    .sidebar {
+      right: auto;
+      width: 320px;
+    }
+    .attribution {
+      bottom: 0;
+      left: auto;
+      max-width: calc(100% - 360px);
+    }
   }
 </style>

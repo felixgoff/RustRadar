@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">"RustRadar"</string>
+    <string name="main_activity_title">"RustRadar"</string>
+</resources>

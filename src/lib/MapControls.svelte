@@ -166,7 +166,7 @@
       <KeyRound size={18} strokeWidth={1.75} />
     </button>
     <button
-      class="icon-button"
+      class="icon-button desktop-only"
       aria-label="Keyboard shortcuts"
       title="Keyboard shortcuts (?)"
       onclick={() => {
@@ -178,7 +178,7 @@
     </button>
   </div>
 
-  <div class="stack surface">
+  <div class="stack surface zoom">
     <button class="icon-button" aria-label="Zoom in" title="Zoom in (+)" disabled={zoom >= 18} onclick={() => onzoom(1)}>
       <Plus size={18} strokeWidth={1.75} />
     </button>
@@ -261,5 +261,44 @@
   .menu {
     width: 300px;
     gap: var(--space-3);
+  }
+  /* Phones (the query in phone.svelte.ts): a slim rail above the bottom sheet;
+     pinching zooms, and the menus open as sheets of their own. */
+  @media (max-width: 899px), (max-height: 500px) {
+    .controls {
+      right: max(var(--space-2), env(safe-area-inset-right, 0px));
+      bottom: calc(var(--sheet-h, 0px) + 24px);
+      transition: bottom 220ms var(--ease-out);
+    }
+    .zoom,
+    .desktop-only {
+      display: none;
+    }
+    .popover {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 6;
+      width: auto;
+      max-height: 70dvh;
+      border-radius: 12px 12px 0 0;
+      padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+      padding-left: max(var(--space-4), env(safe-area-inset-left, 0px));
+      padding-right: max(var(--space-4), env(safe-area-inset-right, 0px));
+      animation-name: rise;
+    }
+    @keyframes rise {
+      from {
+        transform: translateY(24px);
+        opacity: 0;
+      }
+    }
+  }
+  /* a phone on its side: the sheet is on the left, clear of the rail */
+  @media (max-height: 500px) and (orientation: landscape) {
+    .controls {
+      bottom: var(--space-2);
+    }
   }
 </style>

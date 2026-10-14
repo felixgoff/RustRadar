@@ -61,6 +61,7 @@
   } from "./api";
   import { NorthUpGlobeController } from "./controller";
   import { aircraftModels, type AircraftModel } from "./aircraft";
+  import { aircraftLabel, altitudeLabel, labelPriority as aircraftLabelPriority, SELECTED_LABEL_PRIORITY } from "./aircraft-labels";
   import { nightPolygons } from "./daynight";
   import { RADAR_LEVELS_KM, type RadarTile } from "./radar";
   import type { PolygonData } from "./radar-mesh";
@@ -127,8 +128,10 @@
     /** Place-name size, as a multiple of the default (a setting). */
     labelScale: number;
     buildings: boolean;
-    /** Paint aircraft in airline colours when zoomed in. */
-    liveries: boolean;
+    /** Draw the aircraft at all; off, none of them nor anything of the selected one's. */
+    aircraft?: boolean;
+    /** Write each aircraft's callsign beside it. */
+    aircraftLabels?: boolean;
     /** Shade the night side of the planet. */
     daylight: boolean;
     /** Precipitation radar overlay. */
@@ -168,7 +171,8 @@
     labels,
     labelScale,
     buildings,
-    liveries: showLiveries,
+    aircraft: showAircraft = true,
+    aircraftLabels = false,
     daylight,
     weather,
     terrain = false,
@@ -678,6 +682,223 @@
       getCollisionPriority: labelPriority,
       collisionTestProps: LABEL_COLLISION_PROPS,
     });
+
+  // Aircraft labels: each aircraft's callsign beside it, and close in its
+  // height under that. The text is laid out once per set of labels (a new
+  // feed, aircraft coming into or leaving the view, the height line coming or
+  // going); each frame only moves them to where their aircraft are drawn.
+  /** Too far out even a thinned set of labels is a carpet of text: only the selected aircraft's. */
+  const AIRCRAFT_LABEL_MIN_ZOOM = 4;
+  /** From here a second, dimmer line gives the height. */
+  const AIRCRAFT_LABEL_HEIGHT_ZOOM = 7;
+  const AIRCRAFT_LABEL_SIZE = 11;
+  const AIRCRAFT_LABEL_HEIGHT_SIZE = 10;
+  const AIRCRAFT_LABEL_COLOR: RGBA = [241, 238, 231, 235];
+  const AIRCRAFT_LABEL_SELECTED: RGBA = [...SELECTED_COLOR, 255];
+  const AIRCRAFT_LABEL_HEIGHT_COLOR: RGBA = [162, 172, 183, 220];
+  const AIRCRAFT_LABEL_HEIGHT_SELECTED: RGBA = [...SELECTED_COLOR, 205];
+  /** Between the aircraft as drawn and its label, pixels. */
+  const AIRCRAFT_LABEL_GAP_PX = 5;
+  /** Half the distance between the two lines' middles, pixels at the default size. */
+  const AIRCRAFT_LABEL_LINE_PX = 6;
+  /**
+   * The collision filter only asks whether something more important covers
+   * the point an aircraft is drawn at, not its label. So each label claims an
+   * invisible box (its background) reaching this far left of its aircraft too,
+   * about one callsign wide, and its own height above and below: an aircraft
+   * whose label would run into this one's then loses its label.
+   */
+  const AIRCRAFT_LABEL_RESERVE_PX = 60;
+  const NO_BACKGROUND: RGBA = [0, 0, 0, 0];
+  const AIRCRAFT_LABEL_GROUP = "aircraft-labels";
+  /**
+   * The collision filter fades a label by how much of a small patch around
+   * its aircraft it holds, which leaves half-covered labels as faint ghosts
+   * in busy airspace. These snap to shown or hidden over a short range, so
+   * they still ease in and out as aircraft move but rarely linger half-seen.
+   */
+  const crispCollision = (() => {
+    // the stock shader module (its `getShaders` reads nothing off the layer)
+    const base = CollisionFilterExtension.prototype.getShaders.call(null as never).modules[0] as {
+      inject: Record<string, string>;
+    };
+    return {
+      ...base,
+      inject: { ...base.inject, "vs:DECKGL_FILTER_COLOR": "color.a *= smoothstep(0.3, 0.65, collision_fade);" },
+    };
+  })();
+  class CrispCollisionFilterExtension extends CollisionFilterExtension {
+    getShaders() {
+      return { modules: [crispCollision] };
+    }
+  }
+  const AIRCRAFT_LABEL_EXTENSIONS = [new CrispCollisionFilterExtension()];
+
+  /** What each aircraft is called on the map, worked out once per report. */
+  const labelTexts = new WeakMap<LiveFlight, string>();
+  function labelTextOf(f: LiveFlight): string {
+    let text = labelTexts.get(f);
+    if (text === undefined) labelTexts.set(f, (text = aircraftLabel(f)));
+    return text;
+  }
+
+  type LabelSet = {
+    /** The feed the labels were made from. */
+    feed: LiveFlight[] | null;
+    withHeight: boolean;
+    items: LiveFlight[];
+    index: Map<number, number>;
+    texts: string[];
+    heights: string[];
+    priorities: number[];
+    /** Each aircraft's size, metres, for the gap to its label. */
+    sizes: number[];
+    largest: number;
+    /** Bumped whenever the set is laid out again. */
+    version: number;
+  };
+  const emptyLabelSet = (version: number): LabelSet => ({
+    feed: null,
+    withHeight: false,
+    items: [],
+    index: new Map(),
+    texts: [],
+    heights: [],
+    priorities: [],
+    sizes: [],
+    largest: 0,
+    version,
+  });
+  let labelSet = emptyLabelSet(0);
+  /** Where each label's aircraft is drawn this frame, by the set's index. */
+  let labelPositions: [number, number, number][] = [];
+
+  /**
+   * Keeps the labelled set while the same aircraft are labelled, and points
+   * each label at its aircraft's drawn position for this frame.
+   */
+  function updateLabelSet(drawn: LiveFlight[], positions: [number, number, number][], sizes: number[], withHeight: boolean) {
+    let same = labelSet.feed === flights && labelSet.withHeight === withHeight && labelSet.items.length === drawn.length;
+    for (let i = 0; same && i < drawn.length; i++) same = labelSet.index.has(drawn[i].id);
+    if (same) {
+      const placed = new Array<[number, number, number]>(drawn.length);
+      for (let i = 0; i < drawn.length; i++) placed[labelSet.index.get(drawn[i].id)!] = positions[i];
+      labelPositions = placed;
+      return;
+    }
+    const set = emptyLabelSet(labelSet.version + 1);
+    set.feed = flights;
+    set.withHeight = withHeight;
+    set.items = drawn;
+    set.sizes = sizes;
+    drawn.forEach((f, i) => {
+      set.index.set(f.id, i);
+      set.texts.push(labelTextOf(f));
+      set.heights.push(withHeight ? altitudeLabel(f.alt, f.onGround) : "");
+      set.priorities.push(aircraftLabelPriority(sizes[i], f.alt, f.onGround));
+      set.largest = Math.max(set.largest, sizes[i]);
+    });
+    labelSet = set;
+    labelPositions = positions;
+  }
+
+  /** The collision pass's own props, kept while the size setting is. */
+  let labelTestProps = { scale: 0, props: {} as { sizeScale: number } };
+  const pixelOffsetOut: [number, number] = [0, 0];
+
+  /** `sizing` changes whenever the aircraft's size on screen does, which moves the labels out with them. */
+  function aircraftLabelLayers(
+    screenPx: (meters: number) => number,
+    sizing: number[],
+    selectedId: number | undefined,
+    scale: number,
+    zoom: number,
+  ): Layer[] {
+    const set = labelSet;
+    if (!set.items.length) return [];
+    const positions = labelPositions;
+    if (labelTestProps.scale !== scale) labelTestProps = { scale, props: { sizeScale: scale } };
+    const line = set.withHeight ? AIRCRAFT_LABEL_LINE_PX * scale : 0;
+    const gapFor = (meters: number) => screenPx(meters) / 2 + AIRCRAFT_LABEL_GAP_PX;
+    const gap = (i: number) => gapFor(set.sizes[i]);
+    // the claimed box: from left of the largest aircraft's gap, as tall again as the label above and below
+    const half = AIRCRAFT_LABEL_SIZE * scale * 0.5;
+    // zoomed out, where traffic is densest, labels keep further apart
+    const spread = 1 + 0.6 * clamp01((AIRCRAFT_LABEL_HEIGHT_ZOOM - zoom) / 3);
+    const padY = (half + 2 * line + 4 * scale) * spread;
+    const reserve = AIRCRAFT_LABEL_RESERVE_PX * scale * spread;
+    const padding: [number, number, number, number] = [gapFor(set.largest) + reserve, padY, 4 + reserve - AIRCRAFT_LABEL_RESERVE_PX * scale, padY];
+    const priority = (f: LiveFlight, { index }: { index: number }) =>
+      f.id === selectedId ? SELECTED_LABEL_PRIORITY : set.priorities[index];
+    const shared = {
+      data: set.items,
+      getPosition: (_: LiveFlight, { index }: { index: number }) => positions[index],
+      fontFamily: LABEL_FONT,
+      fontWeight: 600,
+      characterSet: "auto" as const,
+      fontSettings: LABEL_FONT_SETTINGS,
+      outlineWidth: 3,
+      outlineColor: LABEL_OUTLINE,
+      sizeUnits: "pixels" as const,
+      sizeScale: scale,
+      billboard: true,
+      getTextAnchor: "start" as const,
+      getAlignmentBaseline: "center" as const,
+      parameters: LABEL_PARAMETERS,
+      extensions: AIRCRAFT_LABEL_EXTENSIONS,
+      collisionGroup: AIRCRAFT_LABEL_GROUP,
+      getCollisionPriority: priority,
+      collisionTestProps: labelTestProps.props,
+    };
+    const offset = (dy: number) => (_: LiveFlight, { index }: { index: number }) => {
+      pixelOffsetOut[0] = gap(index);
+      pixelOffsetOut[1] = dy;
+      return pixelOffsetOut;
+    };
+    // Both lines share the data, so the same aircraft has the same picking
+    // colour in each, which is what the collision filter compares: the two
+    // lines show and hide together.
+    const layers: Layer[] = [
+      new TextLayer<LiveFlight, CollisionFilterExtensionProps<LiveFlight>>({
+        ...shared,
+        id: "aircraft-label-names",
+        getText: (_, { index }) => set.texts[index],
+        getSize: AIRCRAFT_LABEL_SIZE,
+        getColor: (f) => (f.id === selectedId ? AIRCRAFT_LABEL_SELECTED : AIRCRAFT_LABEL_COLOR),
+        getPixelOffset: offset(-line),
+        background: true,
+        getBackgroundColor: NO_BACKGROUND,
+        backgroundPadding: padding,
+        updateTriggers: {
+          getPosition: tick,
+          getText: set.version,
+          getColor: selectedId,
+          getPixelOffset: [...sizing, line],
+          getCollisionPriority: selectedId,
+        },
+      }),
+    ];
+    if (set.withHeight) {
+      layers.push(
+        new TextLayer<LiveFlight, CollisionFilterExtensionProps<LiveFlight>>({
+          ...shared,
+          id: "aircraft-label-heights",
+          getText: (_, { index }) => set.heights[index],
+          getSize: AIRCRAFT_LABEL_HEIGHT_SIZE,
+          getColor: (f) => (f.id === selectedId ? AIRCRAFT_LABEL_HEIGHT_SELECTED : AIRCRAFT_LABEL_HEIGHT_COLOR),
+          getPixelOffset: offset(line),
+          updateTriggers: {
+            getPosition: tick,
+            getText: set.version,
+            getColor: selectedId,
+            getPixelOffset: [...sizing, line],
+            getCollisionPriority: selectedId,
+          },
+        }),
+      );
+    }
+    return layers;
+  }
 
   const BUILDING_LOAD_OPTIONS = { mvt: { layers: ["building"], workerUrl: mvtWorkerUrl } };
   const BUILDING_MATERIAL = {
@@ -1497,7 +1718,7 @@
     const radius = visibleRadius(zoom, pitch, container.clientWidth, container.clientHeight);
     const minCos = Math.cos((radius * Math.PI) / 180);
     // airline colours fade in over zoom 6-8, as the models gain depth
-    const liveryAmount = showLiveries ? Math.round(clamp01((zoom - 6) / 2) * 10) / 10 : 0;
+    const liveryAmount = Math.round(clamp01((zoom - 6) / 2) * 10) / 10;
     // Straight down and wide: top-down silhouettes, the right idiom for a map
     // read from above. Tilted, or close in, the real shapes instead.
     const useIcons = pitch <= FLAT_PITCH && zoom < CLOSE_ZOOM && aircraftModels.loaded;
@@ -1527,16 +1748,35 @@
     // close in, the airports aircraft are on the ground at get their taxiways (OpenStreetMap),
     // which taxiing aircraft are then drawn on
     const taxiways = zoom >= TAXIWAY_ZOOM;
-    for (const f of flights) {
-      if (f.id !== lockedOn && cosAngle(f.lon, f.lat, cLon, cLat) <= minCos) continue;
+    // the aircraft to label, at the very positions they are drawn at; zoomed
+    // out, only those well short of the horizon, where the text would pile up
+    const labelling = aircraftLabels && fontsReady;
+    const labelAll = labelling && zoom >= AIRCRAFT_LABEL_MIN_ZOOM;
+    const labelled: LiveFlight[] = [];
+    const labelledAt: [number, number, number][] = [];
+    const labelledSizes: number[] = [];
+    for (const f of showAircraft ? flights : []) {
+      const facing = cosAngle(f.lon, f.lat, cLon, cLat);
+      if (f.id !== lockedOn && facing <= minCos) continue;
       const real = aircraftModels.forFlight(f.typecode, f.icon);
       const pose = motion.pose(f, now);
       if (taxiways) taxiwaysFor(f.id, pose.phase);
+      const position = at(pose, ex);
+      if (
+        labelling &&
+        (labelAll || f.id === selected?.id) &&
+        (zoom > 6 || facing > 0.42 || f.id === lockedOn) &&
+        labelTextOf(f)
+      ) {
+        labelled.push(f);
+        labelledAt.push(position);
+        labelledSizes.push(real?.size ?? sizeOf(f.icon));
+      }
       if (useIcons && real) {
         iconIndex.set(f.id, icons.length);
         icons.push(f);
         iconPoses.push(pose);
-        iconPositions.push(at(pose, ex));
+        iconPositions.push(position);
         iconNames.push(real.name);
         iconSizes.push(real.size);
         continue;
@@ -1549,7 +1789,8 @@
       group.index.set(f.id, group.flights.length);
       group.flights.push(f);
       group.poses.push(pose);
-      group.positions.push(at(pose, ex));
+      // the same array, raised onto its wheels below, so labels follow it there too
+      group.positions.push(position);
       if (liveryAmount > 0) group.liveries.push(liveries.forFlight(f));
     }
 
@@ -1626,7 +1867,8 @@
       );
     }
 
-    const selectedPose = selected ? motion.pose(selected, now) : null;
+    // with the aircraft off, nothing of the selected one either: no trail, route or ring
+    const selectedPose = selected && showAircraft ? motion.pose(selected, now) : null;
     if (selected && selectedPose) {
       const pos = at(selectedPose, ex);
       // the aircraft is drawn a few seconds in the past: trail points newer than that
@@ -1892,6 +2134,16 @@
           },
         }),
       );
+    }
+
+    // labels over every aircraft, so none is drawn across one
+    if (labelling) {
+      updateLabelSet(labelled, labelledAt, labelledSizes, zoom > AIRCRAFT_LABEL_HEIGHT_ZOOM);
+      layers.push(...aircraftLabelLayers(screenPx, [mpp, minPx], selectedId, labelScale, zoom));
+    } else if (labelSet.items.length) {
+      // let go of the last feed's labels
+      labelSet = emptyLabelSet(labelSet.version + 1);
+      labelPositions = [];
     }
 
     // ring the selection, drawn over neighbouring aircraft but not through the globe
@@ -2302,7 +2554,7 @@
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
     void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
-    void [showLiveries, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain];
+    void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain];
     render();
   });
 </script>

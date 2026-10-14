@@ -469,7 +469,7 @@
 
   /** Refresh soon, without crowding Flightradar24. */
   function refreshSoon() {
-    if (!isTauri() || backoff > 1) return;
+    if (!isTauri() || backoff > 1 || !settings.aircraft) return;
     if (loading) {
       refreshAgain = true;
       return;
@@ -478,7 +478,8 @@
   }
 
   async function refresh() {
-    if (loading) return;
+    // aircraft off: no live fetches at all, and none scheduled until they are back on
+    if (loading || !settings.aircraft) return;
     loading = true;
     refreshAgain = false;
     const area = viewArea(view, window.innerWidth, window.innerHeight);
@@ -487,7 +488,10 @@
     let limited = false;
     let arrived = false;
     try {
-      snapshot = await liveFlights(area, serverCategories($state.snapshot(filters) as Filters));
+      const next = await liveFlights(area, serverCategories($state.snapshot(filters) as Filters));
+      // turned off while the request was out: drop what it brought
+      if (!settings.aircraft) return;
+      snapshot = next;
       // aircraft are drawn on the feed's clock, so a wrong system clock can't misplace them
       motion.syncClock(snapshot.serverTimeMs);
       regional = area !== null;
@@ -522,6 +526,28 @@
       const wait = Math.max(0, lastRequestAt + MIN_GAP_MS - Date.now());
       if (Date.now() + wait < nextRefreshAt) scheduleRefresh(wait);
     }, 800);
+  });
+
+  // Aircraft off: the open flight closes (its follow stream and the camera's
+  // lock with it) and the feed stops. Back on, it fetches again at once, or
+  // as soon as the gap between requests allows.
+  let aircraftWere = settings.aircraft;
+  $effect(() => {
+    const on = settings.aircraft;
+    if (on === aircraftWere) return;
+    aircraftWere = on;
+    untrack(() => {
+      if (!on) {
+        clearTimeout(refreshTimer);
+        nextRefreshAt = 0;
+        if (selectedId !== null) select(null);
+        // what comes back on is a fresh feed, not aircraft extrapolated from minutes ago
+        snapshot = null;
+        shownFeed = null;
+      } else if (isTauri() && !loading) {
+        scheduleRefresh(Math.max(0, lastRequestAt + MIN_GAP_MS - Date.now()));
+      }
+    });
   });
 
   // categories are filtered by the server: changing them needs a new snapshot
@@ -600,6 +626,8 @@
     }
     selectedId = id;
     if (id !== null) {
+      // a flight picked from a list or the search shows the aircraft again
+      settings.aircraft = true;
       selectShip(null);
       selectTrain(null);
     }
@@ -690,7 +718,8 @@
     "2": () => (settings.basemap = "satellite"),
     l: () => (settings.labels = !settings.labels),
     b: () => (settings.buildings = !settings.buildings),
-    p: () => (settings.liveries = !settings.liveries),
+    p: () => (settings.aircraft = !settings.aircraft),
+    k: () => (settings.aircraftLabels = !settings.aircraftLabels),
     d: () => (settings.daylight = !settings.daylight),
     w: () => (settings.weather = !settings.weather),
     s: () => (settings.ships = !settings.ships),
@@ -721,7 +750,7 @@
   }
 
   // quiet while the feed keeps its schedule; past about two refreshes, a warning with the data's age
-  const freshness = $derived(shownFeed ? feedFreshness(Math.max(0, now - shownFeed.at), shownFeed.interval) : null);
+  const freshness = $derived(shownFeed && settings.aircraft ? feedFreshness(Math.max(0, now - shownFeed.at), shownFeed.interval) : null);
   /** The credits for the trains on show; the sources whose licences ask for a link get one. */
   const trainCredit = $derived(settings.trains ? trainCredits(trains) : []);
   const attribution = $derived(
@@ -785,7 +814,8 @@
     labels={settings.labels}
     labelScale={settings.labelSize}
     buildings={settings.buildings}
-    liveries={settings.liveries}
+    aircraft={settings.aircraft}
+    aircraftLabels={settings.aircraftLabels}
     daylight={settings.daylight}
     weather={settings.weather}
     trains={settings.trains ? trains : []}
@@ -819,7 +849,9 @@
     <section class="surface primary">
       <header class="brand">
         <h1><Radar size={20} strokeWidth={1.75} /> RustRadar</h1>
-        {#if snapshot && freshness?.stale}
+        {#if !settings.aircraft}
+          <p class="status">Aircraft off</p>
+        {:else if snapshot && freshness?.stale}
           <p class="status" title="Last update at {clockAt(Math.floor((shownFeed?.at ?? 0) / 1000))}{loading ? '; updating now' : ''}">
             <span class="badge warn">{freshness.label}</span>
           </p>
@@ -854,7 +886,7 @@
           Filters
           {#if active}<span class="active-count" aria-label="{active} active">{active}</span>{/if}
         </button>
-        {#if snapshot}
+        {#if snapshot && settings.aircraft}
           <p class="counts">
             <span class="count">{count(filtered.length)}</span>
             {#if filtered.length !== flights.length}of {count(flights.length)}{/if}
@@ -978,7 +1010,8 @@
     bind:labels={settings.labels}
     bind:labelSize={settings.labelSize}
     bind:buildings={settings.buildings}
-    bind:liveries={settings.liveries}
+    bind:aircraft={settings.aircraft}
+    bind:aircraftLabels={settings.aircraftLabels}
     bind:daylight={settings.daylight}
     bind:weather={settings.weather}
     bind:adsb={settings.adsb}

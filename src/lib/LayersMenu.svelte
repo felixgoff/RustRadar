@@ -10,7 +10,8 @@
     buildings: boolean;
     labels: boolean;
     railMap: boolean;
-    liveries: boolean;
+    aircraft: boolean;
+    aircraftLabels: boolean;
     ships: boolean;
     trains: boolean;
     weather: boolean;
@@ -23,7 +24,8 @@
     buildings = $bindable(),
     labels = $bindable(),
     railMap = $bindable(),
-    liveries = $bindable(),
+    aircraft = $bindable(),
+    aircraftLabels = $bindable(),
     ships = $bindable(),
     trains = $bindable(),
     weather = $bindable(),
@@ -47,7 +49,8 @@
 
 <section aria-labelledby="layers-traffic">
   <h3 id="layers-traffic">Traffic</h3>
-  <ToggleRow label="Airline liveries" hint="Aircraft in their airline's colours" key="P" bind:checked={liveries} />
+  <ToggleRow label="Aircraft" hint="Live flights worldwide" key="P" bind:checked={aircraft} />
+  <ToggleRow label="Aircraft labels" hint="Callsign next to each aircraft" key="K" bind:checked={aircraftLabels} />
   <ToggleRow label="Ships" hint="Live from VesselFinder" key="S" bind:checked={ships} />
   <ToggleRow label="Trains" hint="Live in Finland, Norway, Ireland, USA and Canada" key="I" bind:checked={trains} />
 </section>

@@ -31,6 +31,7 @@
   } from "./api";
   import { verticalRate } from "./adsb";
   import { aircraftReadings, degrees, listing, type Reading } from "./aircraft-readings";
+  import { altitudeLabel } from "./aircraft-labels";
   import AltitudeChart from "./AltitudeChart.svelte";
   import ExportMenu from "./ExportMenu.svelte";
   import type { ExportMeta } from "./export";
@@ -127,9 +128,7 @@
   const onGround = $derived(info?.on_ground ?? flight.onGround);
 
   /** Aviation's own notation: flight levels above the (US) transition altitude. */
-  const level = $derived(
-    onGround ? "GND" : altitude >= 18_000 ? `FL${String(Math.round(altitude / 100)).padStart(3, "0")}` : `${altitude.toLocaleString()} ft`,
-  );
+  const level = $derived(altitudeLabel(altitude, onGround));
 
   const airline = $derived(reference.airline(airlineIcao(flight.callsign)));
   const logoId = $derived(schedule?.painted_as_id || schedule?.operated_by_id || 0);

@@ -24,7 +24,8 @@
     labels: boolean;
     labelSize: number;
     buildings: boolean;
-    liveries: boolean;
+    aircraft: boolean;
+    aircraftLabels: boolean;
     daylight: boolean;
     weather: boolean;
     adsb: boolean;
@@ -52,7 +53,8 @@
     labels = $bindable(),
     labelSize = $bindable(),
     buildings = $bindable(),
-    liveries = $bindable(),
+    aircraft = $bindable(),
+    aircraftLabels = $bindable(),
     daylight = $bindable(),
     weather = $bindable(),
     adsb = $bindable(),
@@ -205,7 +207,8 @@
           bind:buildings
           bind:labels
           bind:railMap
-          bind:liveries
+          bind:aircraft
+          bind:aircraftLabels
           bind:ships
           bind:trains
           bind:weather

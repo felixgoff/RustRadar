@@ -35,6 +35,14 @@ describe("mergeSettings", () => {
     expect("legacy" in s).toBe(false);
   });
 
+  test("a setting since removed (airline liveries, now always on) is dropped", () => {
+    const s = mergeSettings({ liveries: false, labels: false });
+    expect("liveries" in s).toBe(false);
+    expect(s.labels).toBe(false);
+    expect(s.aircraft).toBe(true);
+    expect(s.aircraftLabels).toBe(false);
+  });
+
   test("the defaults are not shared with the result", () => {
     mergeSettings({}).trains = false;
     expect(DEFAULT_SETTINGS.trains).toBe(true);

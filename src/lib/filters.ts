@@ -101,7 +101,10 @@ export interface Settings {
   /** Place-name size on the map, as a multiple of the default. */
   labelSize: number;
   buildings: boolean;
-  liveries: boolean;
+  /** Live aircraft from Flightradar24; off, none are fetched or drawn. */
+  aircraft: boolean;
+  /** Callsigns written next to the aircraft on the map. */
+  aircraftLabels: boolean;
   daylight: boolean;
   weather: boolean;
   /** Measured data for the selected aircraft from adsb.lol. */
@@ -122,7 +125,8 @@ export const DEFAULT_SETTINGS: Settings = {
   labels: true,
   labelSize: 1,
   buildings: true,
-  liveries: true,
+  aircraft: true,
+  aircraftLabels: false,
   daylight: true,
   weather: false,
   adsb: true,

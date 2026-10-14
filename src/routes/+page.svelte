@@ -1543,6 +1543,14 @@
     .brand {
       display: none;
     }
+    /* in the sheet's head: the list's own heading gives the count, just below */
+    .toolbar .counts {
+      display: none;
+    }
+    .filter-toggle {
+      height: 30px;
+      padding: 0 var(--space-3);
+    }
     .list {
       flex: 1 1 auto;
       border: 0;

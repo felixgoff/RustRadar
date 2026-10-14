@@ -330,7 +330,9 @@ jobs:
 
       - name: Xcode project
         run: |
+          # tauri ios init runs `pod install`; left to itself it tries `gem install`, which needs sudo
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          brew list cocoapods >/dev/null 2>&1 || brew install cocoapods
           bun tauri ios init --ci
           # the Xcode project starts with Tauri's logo: the app's own icon over it
           bun tauri icon src-tauri/icons/icon.png

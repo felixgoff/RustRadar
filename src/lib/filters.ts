@@ -97,13 +97,15 @@ export function matcher(f: Filters): (flight: LiveFlight) => boolean {
   };
 }
 
-/** What the globe shows and the sidebar is for: one kind of traffic at a time. */
+/** The kind of traffic the sidebar is for; the globe shows it and any others in `alsoShow`. */
 export type Mode = "aircraft" | "trains" | "ships";
 export const MODES: readonly Mode[] = ["aircraft", "trains", "ships"];
 
 export interface Settings {
-  /** Aircraft, trains or ships: only that kind is fetched and drawn. */
+  /** The focus: aircraft, trains or ships. Its kind is always on the map, and the sidebar is for it. */
   mode: Mode;
+  /** Other kinds also fetched and drawn on the map; the focus is shown whether listed or not. */
+  alsoShow: Mode[];
   basemap: Basemap;
   labels: boolean;
   /** Place-name size on the map, as a multiple of the default. */
@@ -124,6 +126,7 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   mode: "aircraft",
+  alsoShow: [],
   basemap: "dark",
   labels: true,
   labelSize: 1,
@@ -145,23 +148,35 @@ export const DEFAULT_SETTINGS: Settings = {
  * Settings from before the modes had an on/off switch each for aircraft,
  * ships and trains: those are dropped, and the mode starts on aircraft
  * unless the aircraft were switched off, then on whichever of ships or
- * trains was still on.
+ * trains was still on. (`alsoShow` has a new name so that those switches
+ * can't come back through the copy by type below.)
  */
 export function mergeSettings(saved: unknown): Settings {
-  const merged: Settings = { ...DEFAULT_SETTINGS };
+  const merged: Settings = { ...DEFAULT_SETTINGS, alsoShow: [] };
   if (!saved || typeof saved !== "object") return merged;
   const values = merged as unknown as Record<string, unknown>;
   for (const [key, value] of Object.entries(saved)) {
     if (key in DEFAULT_SETTINGS && typeof value === typeof values[key]) values[key] = value;
   }
   const old = saved as Record<string, unknown>;
+  // an array is an object to typeof: anything but an array of known kinds is none
+  merged.alsoShow = Array.isArray(old.alsoShow)
+    ? MODES.filter((m) => (old.alsoShow as unknown[]).includes(m))
+    : [];
   if (!MODES.includes(old.mode as Mode)) {
+    merged.mode = DEFAULT_SETTINGS.mode;
     // the old switches defaulted to on: missing counts as on
     if (old.aircraft !== false) merged.mode = "aircraft";
     else if (old.ships !== false) merged.mode = "ships";
     else if (old.trains !== false) merged.mode = "trains";
   }
   return merged;
+}
+
+/** Which kinds are on the map: the focus, and whatever else is shown with it. */
+export function shownKinds(settings: Pick<Settings, "mode" | "alsoShow">): Record<Mode, boolean> {
+  const on = (m: Mode) => m === settings.mode || settings.alsoShow.includes(m);
+  return { aircraft: on("aircraft"), trains: on("trains"), ships: on("ships") };
 }
 
 const STORAGE_KEY = "rustradar.v1";

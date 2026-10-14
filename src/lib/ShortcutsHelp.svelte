@@ -12,6 +12,9 @@
     [["P"], "Aircraft mode"],
     [["I"], "Trains mode"],
     [["S"], "Ships mode"],
+    [["Shift+P"], "Also show aircraft on the map, or not"],
+    [["Shift+I"], "Also show trains on the map, or not"],
+    [["Shift+S"], "Also show ships on the map, or not"],
     [["/"], "Search the mode's traffic, or a place"],
     [["F"], "Show or hide filters"],
     [["C"], "Follow the selected aircraft with the camera"],
@@ -24,10 +27,11 @@
     [["B"], "3D buildings"],
     [["L"], "Place names"],
     [["R"], "Rail map"],
-    [["K"], "Aircraft labels (aircraft mode)"],
+    [["K"], "Aircraft labels (with the aircraft on the map)"],
     [["W"], "Weather radar"],
     [["D"], "Day and night"],
     [["?"], "This list"],
+    [["Ctrl", "Alt", "I"], "Developer tools, for bug reports (⌘⌥I on a Mac)"],
   ];
 
   let dialog: HTMLDialogElement;

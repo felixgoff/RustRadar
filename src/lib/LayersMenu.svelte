@@ -10,8 +10,8 @@
     buildings: boolean;
     labels: boolean;
     railMap: boolean;
-    /** Aircraft mode: the aircraft's own layers apply. */
-    aircraftMode: boolean;
+    /** The aircraft are on the map (the focus or shown with it): their own layers apply. */
+    aircraftShown: boolean;
     aircraftLabels: boolean;
     weather: boolean;
     daylight: boolean;
@@ -23,7 +23,7 @@
     buildings = $bindable(),
     labels = $bindable(),
     railMap = $bindable(),
-    aircraftMode,
+    aircraftShown,
     aircraftLabels = $bindable(),
     weather = $bindable(),
     daylight = $bindable(),
@@ -44,8 +44,8 @@
   <ToggleRow label="Rail map" hint="Railway lines from OpenStreetMap" key="R" bind:checked={railMap} />
 </section>
 
-<!-- which traffic is shown is the mode bar's: only the aircraft have a layer of their own -->
-{#if aircraftMode}
+<!-- which traffic is on the map is the mode bar's: only the aircraft have a layer of their own, offered while they are on it -->
+{#if aircraftShown}
   <section aria-labelledby="layers-traffic">
     <h3 id="layers-traffic">Aircraft</h3>
     <ToggleRow label="Aircraft labels" hint="Callsign next to each aircraft" key="K" bind:checked={aircraftLabels} />

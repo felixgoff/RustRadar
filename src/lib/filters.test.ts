@@ -3,7 +3,7 @@ import { describe, expect, mock, test } from "bun:test";
 
 // the airline lookup is Svelte state, which needs the compiler: not used here
 mock.module("./reference.svelte", () => ({ airlineIcao: () => null }));
-const { DEFAULT_SETTINGS, mergeSettings } = await import("./filters");
+const { DEFAULT_SETTINGS, mergeSettings, shownKinds } = await import("./filters");
 
 describe("mergeSettings", () => {
   test("settings saved before rail map and terrain existed take their defaults", () => {
@@ -74,5 +74,52 @@ describe("the old aircraft, ships and trains switches become the mode", () => {
 
   test("a stored mode wins over the old switches", () => {
     expect(mergeSettings({ mode: "trains", aircraft: false, ships: true }).mode).toBe("trains");
+  });
+});
+
+describe("alsoShow", () => {
+  test("defaults to nothing, also for saves from before it or before the modes", () => {
+    expect(mergeSettings({}).alsoShow).toEqual([]);
+    expect(mergeSettings({ aircraft: true, ships: true, trains: true }).alsoShow).toEqual([]);
+  });
+
+  test("a stored list of kinds is kept", () => {
+    expect(mergeSettings({ mode: "aircraft", alsoShow: ["ships"] }).alsoShow).toEqual(["ships"]);
+  });
+
+  test("unknown kinds and duplicates are dropped", () => {
+    expect(mergeSettings({ alsoShow: ["ships", "boats", "ships", 3, "trains"] }).alsoShow.sort()).toEqual([
+      "ships",
+      "trains",
+    ]);
+  });
+
+  test("anything but an array becomes none", () => {
+    for (const alsoShow of [{ ships: true }, "ships", null, 1, true]) {
+      expect(mergeSettings({ alsoShow }).alsoShow).toEqual([]);
+    }
+  });
+
+  test("the result doesn't share the default list", () => {
+    mergeSettings({}).alsoShow.push("ships");
+    expect(DEFAULT_SETTINGS.alsoShow).toEqual([]);
+  });
+
+  test("an unknown mode with every old switch off still lands on a valid mode", () => {
+    expect(mergeSettings({ mode: "boats", aircraft: false, ships: false, trains: false }).mode).toBe("aircraft");
+  });
+});
+
+describe("shownKinds", () => {
+  test("the focus alone", () => {
+    expect(shownKinds({ mode: "trains", alsoShow: [] })).toEqual({ aircraft: false, trains: true, ships: false });
+  });
+
+  test("the focus and the kinds shown with it", () => {
+    expect(shownKinds({ mode: "aircraft", alsoShow: ["ships"] })).toEqual({ aircraft: true, trains: false, ships: true });
+  });
+
+  test("the focus listed in alsoShow too changes nothing", () => {
+    expect(shownKinds({ mode: "ships", alsoShow: ["ships"] })).toEqual({ aircraft: false, trains: false, ships: true });
   });
 });

@@ -146,6 +146,10 @@
     selectedTrain?: Train | null;
     /** A train was clicked. */
     ontrainselect?: (train: Train) => void;
+    /** A train to highlight, e.g. the one under the pointer in the sidebar's list. */
+    hoveredTrainId?: string | null;
+    /** A ship to highlight, by MMSI. */
+    hoveredShipMmsi?: number | null;
     /** Keep the camera centred on the selected aircraft. */
     follow: boolean;
     onselect: (flight: LiveFlight | null) => void;
@@ -180,6 +184,8 @@
     trains = [],
     selectedTrain = null,
     ontrainselect,
+    hoveredTrainId = null,
+    hoveredShipMmsi = null,
     follow,
     onselect,
     selectedShip = null,
@@ -1500,6 +1506,7 @@
    */
   function shipMeshLayers(split: NonNullable<ShipData["split"]>, flat: boolean): Layer[] {
     const meshes = shipMeshes();
+    const hoveredShip = hoveredShipIndex();
     const yawOffset = flat ? 0 : 180;
     const sign = flat ? 1 : -1;
     const list = shipData?.list ?? [];
@@ -1520,6 +1527,8 @@
           pickable: true,
           autoHighlight: true,
           highlightColor: [252, 180, 66, 110],
+          // a ship hovered in the sidebar's list lights up as if under the pointer
+          ...(hoveredShip !== null ? { highlightedObjectIndex: group.findIndex((d) => d.index === hoveredShip) } : {}),
           parameters: NO_CULL,
           updateTriggers: { getOrientation: yawOffset, getTranslation: sign },
         }),
@@ -1534,6 +1543,12 @@
     angles: new Float32Array(0),
     version: 0,
   };
+  /** The hovered ship's index in the ship list, or null. */
+  function hoveredShipIndex(): number | null {
+    if (hoveredShipMmsi === null || !shipData) return null;
+    const i = shipData.list.findIndex((s) => s.mmsi === hoveredShipMmsi);
+    return i === -1 ? null : i;
+  }
   function shipLayers(list: Ship[], flat: boolean, mpp: number): Layer[] {
     const { zoom, bearing, pitch, longitude, latitude } = view;
     const data = shipsFor(list);
@@ -1560,10 +1575,14 @@
       shipAngles = { key, list, angles, version: shipAngles.version + 1 };
     }
     const angles = shipAngles.angles;
+    const iconData = split ? split.icons : data.all;
+    const hovered = hoveredShipIndex();
     layers.push(
       new IconLayer<number>({
         id: "ship-icons",
-        data: split ? split.icons : data.all,
+        data: iconData,
+        highlightedObjectIndex: hovered === null ? -1 : split ? iconData.indexOf(hovered) : hovered,
+        highlightColor: [252, 180, 66, 200],
         getPosition: (i) => data.positions[i],
         getIcon: (i) => data.icons[i],
         iconAtlas: shipAtlasData.atlas as never,
@@ -1671,6 +1690,9 @@
       new IconLayer<number>({
         id: "train-icons",
         data: data.all,
+        // a train hovered in the sidebar's list
+        highlightedObjectIndex: hoveredTrainId !== null ? (data.byId.get(hoveredTrainId) ?? -1) : -1,
+        highlightColor: [252, 180, 66, 200],
         getPosition: (i) => data.positions[i],
         getIcon: (i) => data.icons[i],
         iconAtlas: trainAtlasData.atlas as never,
@@ -2555,6 +2577,7 @@
   $effect(() => {
     void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
     void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain];
+    void [hoveredTrainId, hoveredShipMmsi];
     render();
   });
 </script>

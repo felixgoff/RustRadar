@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from "svelte";
-  import { Funnel, Radar, RefreshCw, TriangleAlert } from "@lucide/svelte";
+  import { Funnel, Radar, RefreshCw, Ship as ShipIcon, TrainFront, TriangleAlert } from "@lucide/svelte";
   import {
     adsbCallsign,
     adsbHex,
@@ -37,12 +37,20 @@
   import FlightPanel, { type FollowState } from "$lib/FlightPanel.svelte";
   import Globe, { type ViewState } from "$lib/Globe.svelte";
   import MapControls from "$lib/MapControls.svelte";
-  import SearchBox from "$lib/SearchBox.svelte";
+  import ModeBar from "$lib/ModeBar.svelte";
+  import SearchBox, { type LocalSearch } from "$lib/SearchBox.svelte";
+  import ShipFilterPanel from "$lib/ShipFilterPanel.svelte";
+  import ShipList from "$lib/ShipList.svelte";
   import ShipPanel from "$lib/ShipPanel.svelte";
   import ShortcutsHelp from "$lib/ShortcutsHelp.svelte";
+  import TrainFilterPanel from "$lib/TrainFilterPanel.svelte";
+  import TrainList from "$lib/TrainList.svelte";
   import TrainPanel from "$lib/TrainPanel.svelte";
   import TopFlights from "$lib/TopFlights.svelte";
-  import { activeCount, loadPersisted, matcher, persist, serverCategories, type Filters } from "$lib/filters";
+  import { activeCount, loadPersisted, matcher, persist, serverCategories, type Filters, type Mode } from "$lib/filters";
+  import { DEFAULT_TRAIN_FILTERS, sortTrains, trainFilter, trainFilterCount, trainMatches } from "$lib/train-list";
+  import { DEFAULT_SHIP_FILTERS, shipFilter, shipFilterCount, shipMatches, shipName, sortShips } from "$lib/ship-list";
+  import { shipColor, shipKindLabel } from "$lib/ships";
   import { cosAngle, viewArea, visibleRadius } from "$lib/geo";
   import { motion } from "$lib/motion";
   import { matchAdsb } from "$lib/adsb";
@@ -51,7 +59,7 @@
   import { placeView } from "$lib/places";
   import { afterRound, feedFreshness, type FeedClock } from "$lib/freshness";
   import { clockAt } from "$lib/time";
-  import { trainCredits } from "$lib/trains";
+  import { delayText, trainColor, trainCredits, trainLabel } from "$lib/trains";
   import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -67,7 +75,8 @@
   const PANEL_INSET = 360 + 12;
 
   let globe: Globe;
-  let searchBox: SearchBox;
+  /** One per mode: the one on show. */
+  let searchBox = $state<SearchBox>();
   let controls: MapControls;
   // large arrays are kept as raw state: deep proxies over ~20k flights are slow
   let snapshot = $state.raw<LiveSnapshot | null>(null);
@@ -104,6 +113,12 @@
   const persisted = loadPersisted();
   let settings = $state(persisted.settings);
   let filters = $state(persisted.filters);
+  let trainFilters = $state(persisted.trainFilters);
+  let shipFilters = $state(persisted.shipFilters);
+  /** One kind of traffic at a time: only the mode's own is fetched, drawn and listed. */
+  const aircraftOn = $derived(settings.mode === "aircraft");
+  const trainsOn = $derived(settings.mode === "trains");
+  const shipsOn = $derived(settings.mode === "ships");
   let filtersOpen = $state(false);
   let helpOpen = $state(false);
   let session = $state.raw<SessionInfo | null>(null);
@@ -122,7 +137,14 @@
   /** Places rank toward the view's centre once it is zoomed in past the whole planet. */
   const near = $derived(view.zoom >= 5 ? { lat: view.latitude, lon: view.longitude } : null);
 
-  $effect(() => persist($state.snapshot(settings), $state.snapshot(filters)));
+  $effect(() =>
+    persist({
+      settings: $state.snapshot(settings),
+      filters: $state.snapshot(filters) as Filters,
+      trainFilters: $state.snapshot(trainFilters),
+      shipFilters: $state.snapshot(shipFilters),
+    }),
+  );
 
   const flights = $derived(snapshot?.flights ?? []);
 
@@ -281,6 +303,9 @@
   const SHIPS_SETTLE_MS = 600;
   const SHIPS_REFRESH_MS = 60_000;
   let ships = $state.raw<Ship[]>([]);
+  /** The first answer since the ships came on has arrived; when the latest one did (ms). */
+  let shipsAt = $state(0);
+  let shipsFailed = $state(false);
   let shipsRequest = 0;
   /** Waits for the camera to settle; reset by every move. */
   let shipsSettle: ReturnType<typeof setTimeout> | undefined;
@@ -295,7 +320,7 @@
   }
   async function loadShips() {
     stopShips();
-    if (!settings.ships || !isTauri()) return;
+    if (!shipsOn || !isTauri()) return;
     shipsRefresh = setTimeout(loadShips, SHIPS_REFRESH_MS);
     if (document.visibilityState === "hidden") return;
     const asked = { ...view };
@@ -307,18 +332,23 @@
       const v = view;
       const radius = visibleRadius(v.zoom, v.pitch, window.innerWidth, window.innerHeight);
       const away = cosAngle(v.longitude, v.latitude, asked.longitude, asked.latitude) < Math.cos((radius * Math.PI) / 360);
-      if (request !== shipsRequest || !settings.ships || shipZoom(v.zoom) !== shipZoom(asked.zoom) || away) return;
+      if (request !== shipsRequest || !shipsOn || shipZoom(v.zoom) !== shipZoom(asked.zoom) || away) return;
       ships = list;
+      shipsAt = Date.now();
+      shipsFailed = false;
     } catch {
       // resting after a failure, or unreachable: the ships on show stay
+      if (request === shipsRequest) shipsFailed = true;
     }
   }
   $effect(() => {
     void view;
-    if (!settings.ships) {
+    if (!shipsOn) {
       stopShips();
       shipsRequest++;
       ships = [];
+      shipsAt = 0;
+      shipsFailed = false;
       return;
     }
     clearTimeout(shipsSettle);
@@ -365,9 +395,9 @@
     const timer = setInterval(() => document.visibilityState !== "hidden" && loadShipCard(mmsi), SHIP_DETAILS_REFRESH_MS);
     return () => clearInterval(timer);
   });
-  // ships switched off: nothing left to show
+  // out of ships mode: nothing left to show
   $effect(() => {
-    if (!settings.ships) untrack(() => selectShip(null));
+    if (!shipsOn) untrack(() => selectShip(null));
   });
 
   /** Opens a ship's card; any flight or airport board closes. */
@@ -377,6 +407,8 @@
     shipCardRequest++;
     shipCard = null;
     if (ship) {
+      // a ship picked from anywhere shows the ships
+      settings.mode = "ships";
       if (selectedId !== null) select(null);
       selectTrain(null);
       boardCode = null;
@@ -390,6 +422,9 @@
   const TRAINS_SETTLE_MS = 600;
   const TRAINS_REFRESH_MS = 30_000;
   let trains = $state.raw<Train[]>([]);
+  /** When the latest answer since the trains came on arrived (ms); 0 before the first. */
+  let trainsAt = $state(0);
+  let trainsFailed = $state(false);
   let trainsRequest = 0;
   let trainsSettle: ReturnType<typeof setTimeout> | undefined;
   let trainsRefresh: ReturnType<typeof setTimeout> | undefined;
@@ -399,7 +434,7 @@
   }
   async function loadTrains() {
     stopTrains();
-    if (!settings.trains || !isTauri()) return;
+    if (!trainsOn || !isTauri()) return;
     trainsRefresh = setTimeout(loadTrains, TRAINS_REFRESH_MS);
     if (document.visibilityState === "hidden") return;
     const asked = { ...view };
@@ -410,18 +445,23 @@
       const v = view;
       const radius = visibleRadius(v.zoom, v.pitch, window.innerWidth, window.innerHeight);
       const away = cosAngle(v.longitude, v.latitude, asked.longitude, asked.latitude) < Math.cos((radius * Math.PI) / 360);
-      if (request !== trainsRequest || !settings.trains || away) return;
+      if (request !== trainsRequest || !trainsOn || away) return;
       trains = list;
+      trainsAt = Date.now();
+      trainsFailed = false;
     } catch {
       // every source failed or is resting: the trains on show stay
+      if (request === trainsRequest) trainsFailed = true;
     }
   }
   $effect(() => {
     void view;
-    if (!settings.trains) {
+    if (!trainsOn) {
       stopTrains();
       trainsRequest++;
       trains = [];
+      trainsAt = 0;
+      trainsFailed = false;
       return;
     }
     clearTimeout(trainsSettle);
@@ -441,7 +481,7 @@
     if (live && live !== untrack(() => pickedTrain)) pickedTrain = live;
   });
   $effect(() => {
-    if (!settings.trains) untrack(() => selectTrain(null));
+    if (!trainsOn) untrack(() => selectTrain(null));
   });
 
   /** Opens a train's panel; any flight, ship or airport board closes. */
@@ -449,11 +489,105 @@
     if (train && train.id === pickedTrain?.id) return;
     pickedTrain = train;
     if (train) {
+      // a train picked from anywhere shows the trains
+      settings.mode = "trains";
       if (selectedId !== null) select(null);
       selectShip(null);
       boardCode = null;
     }
   }
+
+  // The trains and ships sidebars. The filters narrow what the map draws as
+  // well as the list; the search narrows the list only, as in aircraft mode.
+  // The selection stays drawn when the filters would leave it out.
+  let trainQuery = $state("");
+  let shipQuery = $state("");
+  let hoveredTrainId = $state<string | null>(null);
+  let hoveredShipMmsi = $state<number | null>(null);
+  /** The map's centre for the distance sorts, in steps, so a moving camera re-sorts now and then rather than every frame. */
+  const centreLat = $derived(Math.round(view.latitude * 20) / 20);
+  const centreLon = $derived(Math.round(view.longitude * 20) / 20);
+  const listCentre = $derived({ lat: centreLat, lon: centreLon });
+  const ORIGIN = { lat: 0, lon: 0 };
+
+  const trainsFiltered = $derived(trains.filter(trainFilter(trainFilters)));
+  const trainsListed = $derived.by(() => {
+    const q = trainQuery.trim();
+    const sort = trainFilters.sort;
+    return sortTrains(q ? trainsFiltered.filter((t) => trainMatches(t, q)) : trainsFiltered, sort, sort === "distance" ? listCentre : ORIGIN);
+  });
+  const trainsOnMap = $derived(
+    selectedTrain && !trainsFiltered.some((t) => t.id === selectedTrain.id) ? [...trainsFiltered, selectedTrain] : trainsFiltered,
+  );
+  const shipsFiltered = $derived(ships.filter(shipFilter(shipFilters)));
+  const shipsListed = $derived.by(() => {
+    const q = shipQuery.trim();
+    const sort = shipFilters.sort;
+    return sortShips(q ? shipsFiltered.filter((s) => shipMatches(s, q)) : shipsFiltered, sort, sort === "distance" ? listCentre : ORIGIN);
+  });
+  const shipsOnMap = $derived(
+    selectedShip && !shipsFiltered.some((s) => s.mmsi === selectedShip.mmsi) ? [...shipsFiltered, selectedShip] : shipsFiltered,
+  );
+  /** VesselFinder tells ship sizes apart above its zoom step 6 (ships.rs). */
+  const shipSizesKnown = $derived(shipZoom(view.zoom) > 6);
+  const trainFilterActive = $derived(trainFilterCount(trainFilters));
+  const shipFilterActive = $derived(shipFilterCount(shipFilters));
+
+  /** Picked from the list or the search: selected, and the camera flies there. */
+  function pickTrain(train: Train) {
+    place = null;
+    following = false;
+    selectTrain(train);
+    globe.flyTo(train.lon, train.lat, Math.max(view.zoom, 10));
+  }
+  function pickShip(ship: Ship) {
+    place = null;
+    following = false;
+    selectShip(ship);
+    globe.flyTo(ship.lon, ship.lat, Math.max(view.zoom, 11));
+  }
+  const rgb = (c: readonly number[]) => `rgb(${c.join(", ")})`;
+  const trainSearch: LocalSearch = {
+    heading: "Trains in view",
+    noun: "trains",
+    icon: TrainFront,
+    placeholder: "Train, destination or address",
+    search: () =>
+      trainsListed.slice(0, 6).map((t) => ({
+        key: t.id,
+        label: t.name,
+        detail: [t.destination && `To ${t.destination}`, delayText(t.delayMinutes) || trainLabel(t.kind)].filter(Boolean).join(" · "),
+        color: rgb(trainColor(t.kind)),
+      })),
+    onpick: (id) => {
+      const t = trains.find((t) => t.id === id);
+      if (t) pickTrain(t);
+    },
+  };
+  const shipSearch: LocalSearch = {
+    heading: "Ships in view",
+    noun: "ships",
+    icon: ShipIcon,
+    placeholder: "Ship name, MMSI or address",
+    search: () =>
+      shipsListed.slice(0, 6).map((s) => ({
+        key: String(s.mmsi),
+        label: shipName(s) || `MMSI ${s.mmsi}`,
+        detail: `${shipKindLabel(s.kind)} · MMSI ${s.mmsi}`,
+        color: rgb(shipColor(s.kind)),
+      })),
+    onpick: (key) => {
+      const s = ships.find((s) => String(s.mmsi) === key);
+      if (s) pickShip(s);
+    },
+  };
+
+  // the hover belongs to the list it came from
+  $effect(() => {
+    void settings.mode;
+    hoveredTrainId = null;
+    hoveredShipMmsi = null;
+  });
 
   const boardAirport = $derived.by(() => {
     void reference.ready;
@@ -469,7 +603,7 @@
 
   /** Refresh soon, without crowding Flightradar24. */
   function refreshSoon() {
-    if (!isTauri() || backoff > 1 || !settings.aircraft) return;
+    if (!isTauri() || backoff > 1 || !aircraftOn) return;
     if (loading) {
       refreshAgain = true;
       return;
@@ -478,8 +612,8 @@
   }
 
   async function refresh() {
-    // aircraft off: no live fetches at all, and none scheduled until they are back on
-    if (loading || !settings.aircraft) return;
+    // out of aircraft mode: no live fetches at all, and none scheduled until it is back
+    if (loading || !aircraftOn) return;
     loading = true;
     refreshAgain = false;
     const area = viewArea(view, window.innerWidth, window.innerHeight);
@@ -489,8 +623,8 @@
     let arrived = false;
     try {
       const next = await liveFlights(area, serverCategories($state.snapshot(filters) as Filters));
-      // turned off while the request was out: drop what it brought
-      if (!settings.aircraft) return;
+      // the mode changed while the request was out: drop what it brought
+      if (!aircraftOn) return;
       snapshot = next;
       // aircraft are drawn on the feed's clock, so a wrong system clock can't misplace them
       motion.syncClock(snapshot.serverTimeMs);
@@ -528,12 +662,13 @@
     }, 800);
   });
 
-  // Aircraft off: the open flight closes (its follow stream and the camera's
-  // lock with it) and the feed stops. Back on, it fetches again at once, or
-  // as soon as the gap between requests allows.
-  let aircraftWere = settings.aircraft;
+  // Out of aircraft mode: the open flight and airport board close (the
+  // follow stream and the camera's lock with them) and the feed stops. Back
+  // in it, it fetches again at once, or as soon as the gap between requests
+  // allows.
+  let aircraftWere = untrack(() => aircraftOn);
   $effect(() => {
-    const on = settings.aircraft;
+    const on = aircraftOn;
     if (on === aircraftWere) return;
     aircraftWere = on;
     untrack(() => {
@@ -541,11 +676,13 @@
         clearTimeout(refreshTimer);
         nextRefreshAt = 0;
         if (selectedId !== null) select(null);
+        boardCode = null;
         // what comes back on is a fresh feed, not aircraft extrapolated from minutes ago
         snapshot = null;
         shownFeed = null;
-      } else if (isTauri() && !loading) {
-        scheduleRefresh(Math.max(0, lastRequestAt + MIN_GAP_MS - Date.now()));
+      } else if (isTauri()) {
+        if (!loading) scheduleRefresh(Math.max(0, lastRequestAt + MIN_GAP_MS - Date.now()));
+        refreshTop();
       }
     });
   });
@@ -627,7 +764,7 @@
     selectedId = id;
     if (id !== null) {
       // a flight picked from a list or the search shows the aircraft again
-      settings.aircraft = true;
+      settings.mode = "aircraft";
       selectShip(null);
       selectTrain(null);
     }
@@ -653,6 +790,7 @@
   }
 
   function openAirport(code: string) {
+    settings.mode = "aircraft";
     boardCode = code.toUpperCase();
     if (selectedId !== null) select(null);
     selectShip(null);
@@ -705,7 +843,7 @@
   }
 
   const toggles: Record<string, () => void> = {
-    "/": () => searchBox.focus(),
+    "/": () => searchBox?.focus(),
     "?": () => (helpOpen = !helpOpen),
     f: () => (filtersOpen = !filtersOpen),
     c: () => selectedId !== null && toggleFollow(),
@@ -718,12 +856,13 @@
     "2": () => (settings.basemap = "satellite"),
     l: () => (settings.labels = !settings.labels),
     b: () => (settings.buildings = !settings.buildings),
-    p: () => (settings.aircraft = !settings.aircraft),
-    k: () => (settings.aircraftLabels = !settings.aircraftLabels),
+    // the mode: Planes, traIns (T tilts), Ships
+    p: () => (settings.mode = "aircraft"),
+    i: () => (settings.mode = "trains"),
+    s: () => (settings.mode = "ships"),
+    k: () => aircraftOn && (settings.aircraftLabels = !settings.aircraftLabels),
     d: () => (settings.daylight = !settings.daylight),
     w: () => (settings.weather = !settings.weather),
-    s: () => (settings.ships = !settings.ships),
-    i: () => (settings.trains = !settings.trains),
     r: () => (settings.railMap = !settings.railMap),
     e: () => (settings.terrain = !settings.terrain),
   };
@@ -750,24 +889,32 @@
   }
 
   // quiet while the feed keeps its schedule; past about two refreshes, a warning with the data's age
-  const freshness = $derived(shownFeed && settings.aircraft ? feedFreshness(Math.max(0, now - shownFeed.at), shownFeed.interval) : null);
+  const freshness = $derived(shownFeed && aircraftOn ? feedFreshness(Math.max(0, now - shownFeed.at), shownFeed.interval) : null);
   /** The credits for the trains on show; the sources whose licences ask for a link get one. */
-  const trainCredit = $derived(settings.trains ? trainCredits(trains) : []);
+  const trainCredit = $derived(trainsOn ? trainCredits(trainsOnMap) : []);
   const attribution = $derived(
     [
-      `Flight data: Flightradar24 (unofficial API${authenticated ? ", signed in" : ""})`,
+      aircraftOn && `Flight data: Flightradar24 (unofficial API${authenticated ? ", signed in" : ""})`,
       // DWD's open data licence asks to be named wherever its radar is shown
       settings.weather && "Radar: NOAA MRMS, Deutscher Wetterdienst, RainViewer",
       settings.basemap === "satellite" && "Imagery: Esri, Maxar, Earthstar Geographics",
       merged.added > 0 && "Track: OpenSky Network",
       // ODbL asks for attribution wherever the data is shown
       measured && "Aircraft data: © adsb.lol contributors, ODbL",
-      settings.ships && "Ships © VesselFinder",
+      shipsOn && "Ships © VesselFinder",
       // the rail map is drawn from the OpenStreetMap data the map credit below covers
       settings.terrain && TERRAIN_ATTRIBUTION,
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]
       .filter((c): c is string => Boolean(c)),
+  );
+  /** The trains' or ships' age, as the aircraft's: quiet while on schedule, a warning past about two refreshes. */
+  const listFreshness = $derived(
+    trainsOn && trainsAt
+      ? feedFreshness(Math.max(0, now - trainsAt), TRAINS_REFRESH_MS)
+      : shipsOn && shipsAt
+        ? feedFreshness(Math.max(0, now - shipsAt), SHIPS_REFRESH_MS)
+        : null,
   );
   const partial = $derived(snapshot?.errors.length ?? 0);
   const retryIn = $derived(Math.max(0, Math.ceil((nextRefreshAt - now) / 1000)));
@@ -785,8 +932,9 @@
       .then((s) => (session = s))
       .catch(() => {});
     refresh();
-    refreshTop();
-    timers = [setInterval(refreshTop, TOP_REFRESH_MS), setInterval(() => (now = Date.now()), 1000)];
+    // the most tracked list is the aircraft sidebar's: fetched in aircraft mode only
+    if (aircraftOn) refreshTop();
+    timers = [setInterval(() => aircraftOn && refreshTop(), TOP_REFRESH_MS), setInterval(() => (now = Date.now()), 1000)];
   });
   onDestroy(() => {
     timers.forEach(clearInterval);
@@ -803,7 +951,7 @@
   <Globe
     bind:this={globe}
     flights={shown}
-    {ships}
+    ships={shipsOnMap}
     {selected}
     details={shownDetails}
     {route}
@@ -814,11 +962,13 @@
     labels={settings.labels}
     labelScale={settings.labelSize}
     buildings={settings.buildings}
-    aircraft={settings.aircraft}
+    aircraft={aircraftOn}
     aircraftLabels={settings.aircraftLabels}
     daylight={settings.daylight}
     weather={settings.weather}
-    trains={settings.trains ? trains : []}
+    trains={trainsOnMap}
+    {hoveredTrainId}
+    {hoveredShipMmsi}
     railMap={settings.railMap}
     terrain={settings.terrain}
     follow={following}
@@ -845,57 +995,102 @@
     onviewchange={(v) => (view = v)}
   />
 
+  <ModeBar
+    bind:mode={settings.mode}
+    counts={{
+      aircraft: aircraftOn && snapshot ? flights.length : null,
+      trains: trainsOn && trainsAt ? trains.length : null,
+      ships: shipsOn && shipsAt ? ships.length : null,
+    }}
+  />
+
   <div class="sidebar">
     <section class="surface primary">
       <header class="brand">
         <h1><Radar size={20} strokeWidth={1.75} /> RustRadar</h1>
-        {#if !settings.aircraft}
-          <p class="status">Aircraft off</p>
-        {:else if snapshot && freshness?.stale}
-          <p class="status" title="Last update at {clockAt(Math.floor((shownFeed?.at ?? 0) / 1000))}{loading ? '; updating now' : ''}">
-            <span class="badge warn">{freshness.label}</span>
-          </p>
-        {:else if snapshot}
-          <p class="status" title="{snapshot.requests} requests in {snapshot.elapsedMs} ms">
-            {#if loading}Updating…{:else}{freshness?.label}{/if}
-          </p>
-        {:else if !feedError}
+        {#if aircraftOn}
+          {#if snapshot && freshness?.stale}
+            <p class="status" title="Last update at {clockAt(Math.floor((shownFeed?.at ?? 0) / 1000))}{loading ? '; updating now' : ''}">
+              <span class="badge warn">{freshness.label}</span>
+            </p>
+          {:else if snapshot}
+            <p class="status" title="{snapshot.requests} requests in {snapshot.elapsedMs} ms">
+              {#if loading}Updating…{:else}{freshness?.label}{/if}
+            </p>
+          {:else if !feedError}
+            <p class="status"><span class="skeleton" style="width: 90px; height: 12px"></span></p>
+          {/if}
+        {:else if listFreshness}
+          {#if listFreshness.stale}
+            <p class="status"><span class="badge warn">{listFreshness.label}</span></p>
+          {:else}
+            <p class="status">{listFreshness.label}</p>
+          {/if}
+        {:else if isTauri()}
           <p class="status"><span class="skeleton" style="width: 90px; height: 12px"></span></p>
         {/if}
         <!-- the age ticks every second: announce only the change to stale -->
         <span class="visually-hidden" role="status">{freshness?.stale ? "Flight data is out of date" : ""}</span>
       </header>
 
-      <SearchBox
-        bind:this={searchBox}
-        onpick={pickSearch}
-        onplace={pickPlace}
-        onquery={() => (place = null)}
-        {near}
-      />
+      {#if aircraftOn}
+        <SearchBox bind:this={searchBox} onpick={pickSearch} onplace={pickPlace} onquery={() => (place = null)} {near} />
+      {:else if trainsOn}
+        <SearchBox
+          bind:this={searchBox}
+          local={trainSearch}
+          bind:query={trainQuery}
+          onpick={pickSearch}
+          onplace={pickPlace}
+          onquery={() => (place = null)}
+          {near}
+        />
+      {:else}
+        <SearchBox
+          bind:this={searchBox}
+          local={shipSearch}
+          bind:query={shipQuery}
+          onpick={pickSearch}
+          onplace={pickPlace}
+          onquery={() => (place = null)}
+          {near}
+        />
+      {/if}
 
       <div class="toolbar">
-        <button
-          class="button filter-toggle"
-          aria-pressed={filtersOpen}
-          aria-expanded={filtersOpen}
-          title="Filters (F)"
-          onclick={() => (filtersOpen = !filtersOpen)}
-        >
-          <Funnel size={14} strokeWidth={1.75} />
-          Filters
-          {#if active}<span class="active-count" aria-label="{active} active">{active}</span>{/if}
-        </button>
-        {#if snapshot && settings.aircraft}
+        {@render filterToggle(aircraftOn ? active : trainsOn ? trainFilterActive : shipFilterActive)}
+        {#if aircraftOn && snapshot}
           <p class="counts">
             <span class="count">{count(filtered.length)}</span>
             {#if filtered.length !== flights.length}of {count(flights.length)}{/if}
             {regional ? "in view" : "worldwide"}
           </p>
+        {:else if trainsOn && trainsAt}
+          <p class="counts">
+            <span class="count">{count(trainsListed.length)}</span>
+            {#if trainsListed.length !== trains.length}of {count(trains.length)}{/if}
+            in view
+          </p>
+        {:else if shipsOn && shipsAt}
+          <p class="counts">
+            <span class="count">{count(shipsListed.length)}</span>
+            {#if shipsListed.length !== ships.length}of {count(ships.length)}{/if}
+            in view
+          </p>
         {/if}
       </div>
 
-      {#if rateLimited}
+      {#if !isTauri()}
+        <div class="alert" role="alert">
+          <TriangleAlert size={16} strokeWidth={1.75} />
+          <div>
+            <p>No live {settings.mode === "aircraft" ? "flight" : settings.mode === "trains" ? "train" : "ship"} data in a plain browser.</p>
+            <p class="detail">{feedError}</p>
+          </div>
+        </div>
+      {:else if !aircraftOn}
+        <!-- the trains' and ships' failures are told in their lists -->
+      {:else if rateLimited}
         <!-- expected throttling, not a failure: the warning tone, still in plain sight -->
         <div class="alert warn" role="status">
           <TriangleAlert size={16} strokeWidth={1.75} />
@@ -907,17 +1102,11 @@
         <div class="alert" role="alert">
           <TriangleAlert size={16} strokeWidth={1.75} />
           <div>
-            {#if isTauri()}
-              <p>Can't reach Flightradar24. Trying again in {retryIn} s.</p>
-            {:else}
-              <p>No flight data in a plain browser.</p>
-            {/if}
+            <p>Can't reach Flightradar24. Trying again in {retryIn} s.</p>
             <p class="detail">{feedError}</p>
-            {#if isTauri()}
-              <button class="button" onclick={refresh} disabled={loading}>
-                <RefreshCw size={14} strokeWidth={1.75} /> Retry now
-              </button>
-            {/if}
+            <button class="button" onclick={refresh} disabled={loading}>
+              <RefreshCw size={14} strokeWidth={1.75} /> Retry now
+            </button>
           </div>
         </div>
       {:else if partial}
@@ -926,19 +1115,80 @@
     </section>
 
     {#if filtersOpen}
-      <FilterPanel bind:filters {flights} shown={filtered.length} onclose={() => (filtersOpen = false)} />
+      {#if aircraftOn}
+        <FilterPanel bind:filters {flights} shown={filtered.length} onclose={() => (filtersOpen = false)} />
+      {:else if trainsOn}
+        <TrainFilterPanel bind:filters={trainFilters} {trains} shown={trainsFiltered.length} onclose={() => (filtersOpen = false)} />
+      {:else}
+        <ShipFilterPanel
+          bind:filters={shipFilters}
+          {ships}
+          shown={shipsFiltered.length}
+          sizesKnown={shipSizesKnown}
+          onclose={() => (filtersOpen = false)}
+        />
+      {/if}
     {/if}
 
     <section class="surface list">
-      <TopFlights
-        flights={top}
-        failed={topFailed}
-        {selectedId}
-        onpick={(f) => select(f.flight_id, { fly: true })}
-        onretry={refreshTop}
-      />
+      {#if aircraftOn}
+        <TopFlights
+          flights={top}
+          failed={topFailed}
+          {selectedId}
+          onpick={(f) => select(f.flight_id, { fly: true })}
+          onretry={refreshTop}
+        />
+      {:else if trainsOn}
+        <TrainList
+          trains={trainsListed}
+          total={trains.length}
+          loaded={trainsAt > 0}
+          failed={trainsFailed || !isTauri()}
+          bind:sort={trainFilters.sort}
+          centre={listCentre}
+          selectedId={selectedTrain?.id ?? null}
+          onpick={pickTrain}
+          onhover={(id) => (hoveredTrainId = id)}
+          onshowall={() => {
+            trainQuery = "";
+            Object.assign(trainFilters, { ...structuredClone(DEFAULT_TRAIN_FILTERS), sort: trainFilters.sort });
+          }}
+        />
+      {:else}
+        <ShipList
+          ships={shipsListed}
+          total={ships.length}
+          loaded={shipsAt > 0}
+          failed={shipsFailed || !isTauri()}
+          bind:sort={shipFilters.sort}
+          centre={listCentre}
+          sizesKnown={shipSizesKnown}
+          selectedMmsi={selectedShip?.mmsi ?? null}
+          onpick={pickShip}
+          onhover={(mmsi) => (hoveredShipMmsi = mmsi)}
+          onshowall={() => {
+            shipQuery = "";
+            Object.assign(shipFilters, { ...structuredClone(DEFAULT_SHIP_FILTERS), sort: shipFilters.sort });
+          }}
+        />
+      {/if}
     </section>
   </div>
+
+  {#snippet filterToggle(n: number)}
+    <button
+      class="button filter-toggle"
+      aria-pressed={filtersOpen}
+      aria-expanded={filtersOpen}
+      title="Filters (F)"
+      onclick={() => (filtersOpen = !filtersOpen)}
+    >
+      <Funnel size={14} strokeWidth={1.75} />
+      Filters
+      {#if n}<span class="active-count" aria-label="{n} active">{n}</span>{/if}
+    </button>
+  {/snippet}
 
   {#if boardCode}
     <!-- kept while a flight from the board is open, so going back keeps its tab and pages -->
@@ -1010,13 +1260,11 @@
     bind:labels={settings.labels}
     bind:labelSize={settings.labelSize}
     bind:buildings={settings.buildings}
-    bind:aircraft={settings.aircraft}
+    aircraftMode={aircraftOn}
     bind:aircraftLabels={settings.aircraftLabels}
     bind:daylight={settings.daylight}
     bind:weather={settings.weather}
     bind:adsb={settings.adsb}
-    bind:ships={settings.ships}
-    bind:trains={settings.trains}
     bind:railMap={settings.railMap}
     bind:terrain={settings.terrain}
     bind:exaggeration={settings.exaggeration}
@@ -1033,10 +1281,10 @@
   <ShortcutsHelp open={helpOpen} onclose={() => (helpOpen = false)} />
 
   <!-- the train credits come first, so the line's ellipsis can't hide them: Amtraker asks for a prominent link -->
-  <p class="attribution" title={[attribution[0], ...trainCredit.map((c) => c.text), ...attribution.slice(1)].join(" · ")}>
-    {attribution[0]}{#each trainCredit as c (c.url)}
-      {" · "}<a href={c.url} onclick={(e) => (e.preventDefault(), openUrl(c.url))}>{c.text}</a>
-    {/each}{#each attribution.slice(1) as text, i (i)}{" · "}{text}{/each}
+  <p class="attribution" title={[...trainCredit.map((c) => c.text), ...attribution].join(" · ")}>
+    {#each trainCredit as c, i (c.url)}
+      {i ? " · " : ""}<a href={c.url} onclick={(e) => (e.preventDefault(), openUrl(c.url))}>{c.text}</a>
+    {/each}{#each attribution as text, i (i)}{i || trainCredit.length ? " · " : ""}{text}{/each}
   </p>
 </main>
 

@@ -24,13 +24,12 @@
     labels: boolean;
     labelSize: number;
     buildings: boolean;
-    aircraft: boolean;
+    /** Aircraft mode: the aircraft's own layers apply. */
+    aircraftMode: boolean;
     aircraftLabels: boolean;
     daylight: boolean;
     weather: boolean;
     adsb: boolean;
-    ships: boolean;
-    trains: boolean;
     railMap: boolean;
     terrain: boolean;
     exaggeration: number;
@@ -53,13 +52,11 @@
     labels = $bindable(),
     labelSize = $bindable(),
     buildings = $bindable(),
-    aircraft = $bindable(),
+    aircraftMode,
     aircraftLabels = $bindable(),
     daylight = $bindable(),
     weather = $bindable(),
     adsb = $bindable(),
-    ships = $bindable(),
-    trains = $bindable(),
     railMap = $bindable(),
     terrain = $bindable(),
     exaggeration = $bindable(),
@@ -207,10 +204,8 @@
           bind:buildings
           bind:labels
           bind:railMap
-          bind:aircraft
+          {aircraftMode}
           bind:aircraftLabels
-          bind:ships
-          bind:trains
           bind:weather
           bind:daylight
         />

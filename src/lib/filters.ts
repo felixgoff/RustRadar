@@ -2,6 +2,8 @@
 import type { LiveFlight } from "./api";
 import type { Basemap } from "./geo";
 import { airlineIcao } from "./reference.svelte";
+import { mergeShipFilters, type ShipFilters } from "./ship-list";
+import { mergeTrainFilters, type TrainFilters } from "./train-list";
 
 /** Flightradar24's aircraft categories (`Service`), filtered server-side. */
 export const CATEGORIES: { id: number; label: string }[] = [
@@ -95,24 +97,24 @@ export function matcher(f: Filters): (flight: LiveFlight) => boolean {
   };
 }
 
+/** What the globe shows and the sidebar is for: one kind of traffic at a time. */
+export type Mode = "aircraft" | "trains" | "ships";
+export const MODES: readonly Mode[] = ["aircraft", "trains", "ships"];
+
 export interface Settings {
+  /** Aircraft, trains or ships: only that kind is fetched and drawn. */
+  mode: Mode;
   basemap: Basemap;
   labels: boolean;
   /** Place-name size on the map, as a multiple of the default. */
   labelSize: number;
   buildings: boolean;
-  /** Live aircraft from Flightradar24; off, none are fetched or drawn. */
-  aircraft: boolean;
   /** Callsigns written next to the aircraft on the map. */
   aircraftLabels: boolean;
   daylight: boolean;
   weather: boolean;
   /** Measured data for the selected aircraft from adsb.lol. */
   adsb: boolean;
-  /** Live ship positions from VesselFinder. */
-  ships: boolean;
-  /** Live train positions. */
-  trains: boolean;
   /** Railway lines from OpenRailwayMap. */
   railMap: boolean;
   /** Relief from the AWS Terrain Tiles (Mapzen). */
@@ -121,17 +123,15 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
+  mode: "aircraft",
   basemap: "dark",
   labels: true,
   labelSize: 1,
   buildings: true,
-  aircraft: true,
   aircraftLabels: false,
   daylight: true,
   weather: false,
   adsb: true,
-  ships: true,
-  trains: true,
   railMap: false,
   terrain: false,
   exaggeration: 10,
@@ -141,6 +141,11 @@ export const DEFAULT_SETTINGS: Settings = {
  * Stored settings over the defaults. A setting added since they were saved
  * takes its default, and one stored with the wrong type (an older format,
  * a hand edit) falls back to it too.
+ *
+ * Settings from before the modes had an on/off switch each for aircraft,
+ * ships and trains: those are dropped, and the mode starts on aircraft
+ * unless the aircraft were switched off, then on whichever of ships or
+ * trains was still on.
  */
 export function mergeSettings(saved: unknown): Settings {
   const merged: Settings = { ...DEFAULT_SETTINGS };
@@ -149,26 +154,43 @@ export function mergeSettings(saved: unknown): Settings {
   for (const [key, value] of Object.entries(saved)) {
     if (key in DEFAULT_SETTINGS && typeof value === typeof values[key]) values[key] = value;
   }
+  const old = saved as Record<string, unknown>;
+  if (!MODES.includes(old.mode as Mode)) {
+    // the old switches defaulted to on: missing counts as on
+    if (old.aircraft !== false) merged.mode = "aircraft";
+    else if (old.ships !== false) merged.mode = "ships";
+    else if (old.trains !== false) merged.mode = "trains";
+  }
   return merged;
 }
 
 const STORAGE_KEY = "rustradar.v1";
 
-export function loadPersisted(): { settings: Settings; filters: Filters } {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}");
-    return {
-      settings: mergeSettings(saved.settings),
-      filters: { ...DEFAULT_FILTERS, ...saved.filters },
-    };
-  } catch {
-    return { settings: { ...DEFAULT_SETTINGS }, filters: { ...DEFAULT_FILTERS } };
-  }
+export interface Persisted {
+  settings: Settings;
+  filters: Filters;
+  trainFilters: TrainFilters;
+  shipFilters: ShipFilters;
 }
 
-export function persist(settings: Settings, filters: Filters) {
+export function loadPersisted(): Persisted {
+  let saved: Record<string, unknown> = {};
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ settings, filters }));
+    saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") ?? {};
+  } catch {
+    // unreadable: the defaults
+  }
+  return {
+    settings: mergeSettings(saved.settings),
+    filters: { ...DEFAULT_FILTERS, ...(saved.filters as Partial<Filters> | undefined) },
+    trainFilters: mergeTrainFilters(saved.trainFilters),
+    shipFilters: mergeShipFilters(saved.shipFilters),
+  };
+}
+
+export function persist(state: Persisted) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
     // storage full or unavailable: settings just won't survive a restart
   }

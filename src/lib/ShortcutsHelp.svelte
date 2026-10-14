@@ -9,7 +9,10 @@
   let { open, onclose }: Props = $props();
 
   const SHORTCUTS: [string[], string][] = [
-    [["/"], "Search flights and airports"],
+    [["P"], "Aircraft mode"],
+    [["I"], "Trains mode"],
+    [["S"], "Ships mode"],
+    [["/"], "Search the mode's traffic, or a place"],
     [["F"], "Show or hide filters"],
     [["C"], "Follow the selected aircraft with the camera"],
     [["Esc"], "Close the open panel"],
@@ -21,10 +24,7 @@
     [["B"], "3D buildings"],
     [["L"], "Place names"],
     [["R"], "Rail map"],
-    [["P"], "Aircraft"],
-    [["K"], "Aircraft labels"],
-    [["S"], "Ships"],
-    [["I"], "Trains"],
+    [["K"], "Aircraft labels (aircraft mode)"],
     [["W"], "Weather radar"],
     [["D"], "Day and night"],
     [["?"], "This list"],

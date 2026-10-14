@@ -27,6 +27,8 @@ export const shipKindLabel = (kind: number) => (KINDS[kind] ?? OTHER).label;
 export const shipColor = (kind: number): RGB => (KINDS[kind] ?? OTHER).color;
 /** The atlas's colour key for a type: unlisted types share the unknown's grey. */
 const colorKey = (kind: number) => (kind in KINDS ? kind : 0);
+/** The type group a ship falls in, as the map colours it: unlisted types go with the unknown. */
+export const shipKindKey = colorKey;
 
 /** A pointed hull for a ship under way (heading known), a dot for one without. */
 export const shipIcon = (ship: Pick<Ship, "kind" | "heading">) =>

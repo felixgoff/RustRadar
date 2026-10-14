@@ -139,10 +139,13 @@ bun tauri ios dev              # on a Mac with Xcode
 The Android project is checked in at `src-tauri/gen/android`. The iOS one is
 generated in CI by `tauri ios init`.
 
-CI (`.github/workflows/rust.yml`) builds a debug APK and checks the iOS
-backend on every run. A release also attaches a signed APK and an IPA, and
-uploads the iOS build to TestFlight. These repository secrets turn that on.
-Without them, the release goes out without phone builds and shows a warning.
+CI (`.github/workflows/rust.yml`) builds an APK and an IPA on every run, and
+a release attaches them to the release page. These repository secrets make
+the APK a signed release build and send the iOS build to TestFlight. Without
+the Android secrets, a release has no APK and shows a warning. Without the
+Apple secrets, the IPA is unsigned, which works only with sideloading tools
+such as AltStore or Sideloadly; those sign it with your own Apple ID, and with
+a free one the install expires after 7 days.
 
 | Secret | What it is |
 | --- | --- |

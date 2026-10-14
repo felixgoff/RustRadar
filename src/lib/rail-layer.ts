@@ -311,12 +311,14 @@ export function railLayers({
   openRailwayMapUrl,
 }: RailOptions): Layer[] {
   const layers: Layer[] = [];
-  // zoomed out, where the tiles have no rail yet, the shipped overview
-  if (zoom < RAIL_MIN_ZOOM + 0.5) {
+  // zoomed out, where the tiles have no rail yet, the shipped overview; the
+  // two hand over at one zoom, as the overview is coarse and doubles the
+  // tiles' lines wherever both are drawn
+  if (zoom < RAIL_MIN_ZOOM) {
     const overview = railOverview();
     if (overview) layers.push(railOverviewLayer(overview, { main: RAIL_MAIN, minor: RAIL_MINOR }, flat));
   }
-  if (tileUrl && zoom >= RAIL_MIN_ZOOM - 0.5) layers.push(railNetworkLayer(tileUrl, flat, zoom, workerUrl));
+  if (tileUrl && zoom >= RAIL_MIN_ZOOM) layers.push(railNetworkLayer(tileUrl, flat, zoom, workerUrl));
   if (openRailwayMap && zoom >= OPENRAILWAYMAP_MIN_ZOOM) layers.push(openRailwayMapLayer(fetchImage, openRailwayMapUrl));
   if (tileUrl && stations && zoom >= STATION_MIN_ZOOM) layers.push(railStationLayer(tileUrl, flat, workerUrl));
   return layers;

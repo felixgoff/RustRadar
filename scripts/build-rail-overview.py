@@ -63,7 +63,8 @@ def main():
     paths = []
     for f in data["features"]:
         g = f["geometry"]
-        if not g:
+        # train ferries are drawn as straight lines across the sea: not rail on the map
+        if not g or "ferry" in str(f["properties"].get("featurecla", "")).lower():
             continue
         lines = [g["coordinates"]] if g["type"] == "LineString" else g["coordinates"]
         category = int(f["properties"].get("category") or 0)

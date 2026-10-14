@@ -9,7 +9,10 @@
   let { open, onclose }: Props = $props();
 
   const SHORTCUTS: [string[], string][] = [
-    [["/"], "Search flights and airports"],
+    [["P"], "Aircraft mode"],
+    [["I"], "Trains mode"],
+    [["S"], "Ships mode"],
+    [["/"], "Search the mode's traffic, or a place"],
     [["F"], "Show or hide filters"],
     [["C"], "Follow the selected aircraft with the camera"],
     [["Esc"], "Close the open panel"],
@@ -21,9 +24,7 @@
     [["B"], "3D buildings"],
     [["L"], "Place names"],
     [["R"], "Rail map"],
-    [["P"], "Airline liveries"],
-    [["S"], "Ships"],
-    [["I"], "Trains"],
+    [["K"], "Aircraft labels (aircraft mode)"],
     [["W"], "Weather radar"],
     [["D"], "Day and night"],
     [["?"], "This list"],
@@ -66,7 +67,7 @@
     color: var(--text-1);
   }
   dialog::backdrop {
-    background: oklch(0.1 0.02 255 / 0.5);
+    background: oklch(0.1 0 0 / 0.5);
   }
   dialog[open] {
     animation: pop 180ms var(--ease-out);
@@ -114,7 +115,7 @@
     padding: 0 5px;
     border: 1px solid var(--line-control);
     border-bottom-width: 2px;
-    border-radius: 4px;
+    border-radius: 0;
     font: 600 var(--text-sm) var(--font-data);
     color: var(--text-1);
   }

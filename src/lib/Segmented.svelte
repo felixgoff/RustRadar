@@ -1,4 +1,6 @@
 <script lang="ts" generics="T extends string | number">
+  import type { Snippet } from "svelte";
+
   interface Props {
     /** Names the group for assistive tech; shown unless `hideLegend`. */
     legend: string;
@@ -11,9 +13,11 @@
     disabled?: boolean;
     /** Two options a row; otherwise all on one row. */
     columns?: number;
+    /** What an option shows in place of its label (which still names it): an icon, a count. */
+    content?: Snippet<[T, string]>;
   }
 
-  let { legend, hideLegend = false, name, options, value = $bindable(), disabled = false, columns }: Props = $props();
+  let { legend, hideLegend = false, name, options, value = $bindable(), disabled = false, columns, content }: Props = $props();
 </script>
 
 <fieldset class="segmented" {disabled}>
@@ -21,10 +25,10 @@
   <!-- the border on a box of its own: a fieldset draws its legend into its border -->
   <div class="options" style:--columns={columns ?? options.length}>
     {#each options as [option, label, key] (option)}
-      <label>
+      <label title={key ? `${label} (${key})` : undefined}>
         <input type="radio" {name} value={option} aria-keyshortcuts={key} bind:group={value} />
         <span>
-          {label}
+          {#if content}{@render content(option, label)}{:else}{label}{/if}
           {#if key}<kbd aria-hidden="true">{key}</kbd>{/if}
         </span>
       </label>
@@ -45,7 +49,7 @@
     gap: 2px;
     padding: 2px;
     border: 1px solid var(--line-control);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
   }
   legend {
     margin-bottom: var(--space-2);
@@ -66,7 +70,7 @@
     justify-content: center;
     gap: 6px;
     padding: 5px 0;
-    border-radius: 4px;
+    border-radius: 0;
     font-size: var(--text-md);
     color: var(--text-2);
     cursor: pointer;

@@ -2,6 +2,7 @@
   import "@fontsource-variable/overpass";
   import "@fontsource-variable/overpass-mono";
   import "../app.css";
+  import UpdateToast from "$lib/UpdateToast.svelte";
 
   let { children } = $props();
 
@@ -17,3 +18,4 @@
 <svelte:window {oncontextmenu} />
 
 {@render children()}
+<UpdateToast />

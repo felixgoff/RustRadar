@@ -675,6 +675,8 @@ pub fn run() {
             session::sign_out,
             taxiways::airport_taxiways,
             export::save_export,
+            updater::pending_update,
+            updater::restart_to_update,
             ships::ships_in_view,
             ships::ship_details,
             trains::trains_in_view,

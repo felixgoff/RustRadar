@@ -10,9 +10,9 @@
     buildings: boolean;
     labels: boolean;
     railMap: boolean;
-    liveries: boolean;
-    ships: boolean;
-    trains: boolean;
+    /** Aircraft mode: the aircraft's own layers apply. */
+    aircraftMode: boolean;
+    aircraftLabels: boolean;
     weather: boolean;
     daylight: boolean;
   }
@@ -23,9 +23,8 @@
     buildings = $bindable(),
     labels = $bindable(),
     railMap = $bindable(),
-    liveries = $bindable(),
-    ships = $bindable(),
-    trains = $bindable(),
+    aircraftMode,
+    aircraftLabels = $bindable(),
     weather = $bindable(),
     daylight = $bindable(),
   }: Props = $props();
@@ -45,12 +44,13 @@
   <ToggleRow label="Rail map" hint="Railway lines from OpenStreetMap" key="R" bind:checked={railMap} />
 </section>
 
-<section aria-labelledby="layers-traffic">
-  <h3 id="layers-traffic">Traffic</h3>
-  <ToggleRow label="Airline liveries" hint="Aircraft in their airline's colours" key="P" bind:checked={liveries} />
-  <ToggleRow label="Ships" hint="Live from VesselFinder" key="S" bind:checked={ships} />
-  <ToggleRow label="Trains" hint="Live in Finland, Norway, Ireland, USA and Canada" key="I" bind:checked={trains} />
-</section>
+<!-- which traffic is shown is the mode bar's: only the aircraft have a layer of their own -->
+{#if aircraftMode}
+  <section aria-labelledby="layers-traffic">
+    <h3 id="layers-traffic">Aircraft</h3>
+    <ToggleRow label="Aircraft labels" hint="Callsign next to each aircraft" key="K" bind:checked={aircraftLabels} />
+  </section>
+{/if}
 
 <section aria-labelledby="layers-sky">
   <h3 id="layers-sky">Sky</h3>

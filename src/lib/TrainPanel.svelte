@@ -199,7 +199,7 @@
     width: 8px;
     height: 8px;
     margin-right: 6px;
-    border-radius: 2px;
+    border-radius: 0;
     vertical-align: 0;
   }
   .value {

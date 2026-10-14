@@ -31,6 +31,7 @@
   } from "./api";
   import { verticalRate } from "./adsb";
   import { aircraftReadings, degrees, listing, type Reading } from "./aircraft-readings";
+  import { altitudeLabel } from "./aircraft-labels";
   import AltitudeChart from "./AltitudeChart.svelte";
   import ExportMenu from "./ExportMenu.svelte";
   import type { ExportMeta } from "./export";
@@ -127,9 +128,7 @@
   const onGround = $derived(info?.on_ground ?? flight.onGround);
 
   /** Aviation's own notation: flight levels above the (US) transition altitude. */
-  const level = $derived(
-    onGround ? "GND" : altitude >= 18_000 ? `FL${String(Math.round(altitude / 100)).padStart(3, "0")}` : `${altitude.toLocaleString()} ft`,
-  );
+  const level = $derived(altitudeLabel(altitude, onGround));
 
   const airline = $derived(reference.airline(airlineIcao(flight.callsign)));
   const logoId = $derived(schedule?.painted_as_id || schedule?.operated_by_id || 0);
@@ -823,8 +822,8 @@
     height: 28px;
     padding: 0;
     border: 0;
-    border-radius: 50%;
-    background: oklch(0.15 0.02 255 / 0.7);
+    border-radius: 0;
+    background: oklch(0.15 0 0 / 0.7);
     color: var(--text-1);
     transform: translateY(-50%);
     opacity: 0;
@@ -856,7 +855,7 @@
     place-items: center;
     height: 26px;
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: 0;
     background: var(--text-1);
   }
   .logo img {
@@ -1003,7 +1002,7 @@
     right: var(--space-2);
     bottom: -1px;
     height: 2px;
-    border-radius: 1px;
+    border-radius: 0;
     background: var(--amber);
   }
 
@@ -1168,7 +1167,7 @@
     max-height: 132px;
     overflow-y: auto;
     padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: var(--ink);
     font-size: var(--text-sm);
     line-height: 1.5;
@@ -1198,7 +1197,7 @@
     flex: none;
     width: 28px;
     height: 3px;
-    border-radius: 2px;
+    border-radius: 0;
   }
   .swatch.solid {
     background: oklch(0.95 0.01 85 / 0.6);
@@ -1233,7 +1232,7 @@
     width: 100%;
     padding: var(--space-2);
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: none;
     font-size: var(--text-sm);
     text-align: left;
@@ -1336,7 +1335,7 @@
   .dot {
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: 0;
     background: var(--live);
     animation: pulse 2s ease-out infinite;
   }

@@ -12,12 +12,13 @@
 
 use std::error::Error;
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
 use tauri::window::Color;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use tauri_plugin_updater::UpdaterExt;
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// How long to wait for the update check before opening the current version.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(8);
@@ -35,6 +36,69 @@ struct Progress<'a> {
     fraction: Option<f64>,
 }
 
+/// While the app is open, how often to look for a newer release.
+const WATCH_EVERY: Duration = Duration::from_secs(60 * 60);
+/// The event the window hears once a newer version is downloaded and ready.
+const READY_EVENT: &str = "update-ready";
+
+/// A newer version found while the app was open, downloaded and waiting for
+/// a restart to install it.
+struct Ready {
+    update: Update,
+    bytes: Vec<u8>,
+}
+
+fn ready() -> &'static Mutex<Option<Ready>> {
+    static READY: Mutex<Option<Ready>> = Mutex::new(None);
+    &READY
+}
+
+/// While the app is open: look for a newer release every hour, download it
+/// quietly, and tell the window it's ready (it offers a restart). Installing
+/// waits for the user; a failed check or download just waits for the next.
+async fn watch(app: AppHandle) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    loop {
+        tokio::time::sleep(WATCH_EVERY).await;
+        let Ok(updater) = app.updater() else { return };
+        let Ok(Ok(Some(update))) = tokio::time::timeout(CHECK_TIMEOUT, updater.check()).await else { continue };
+        let known = ready().lock().ok().and_then(|r| r.as_ref().map(|r| r.update.version.clone()));
+        if known.as_deref() == Some(update.version.as_str()) {
+            continue;
+        }
+        match update.download(|_, _| {}, || {}).await {
+            Ok(bytes) => {
+                let version = update.version.clone();
+                if let Ok(mut r) = ready().lock() {
+                    *r = Some(Ready { update, bytes });
+                }
+                let _ = app.emit(READY_EVENT, version);
+            }
+            Err(e) => eprintln!("update download failed: {e}"),
+        }
+    }
+}
+
+/// The version downloaded and waiting for a restart, if any (for a window
+/// that missed the event).
+#[tauri::command]
+pub fn pending_update() -> Option<String> {
+    ready().lock().ok()?.as_ref().map(|r| r.update.version.clone())
+}
+
+/// Installs the waiting version and starts it. On Windows the installer takes
+/// over and relaunches the app itself.
+#[tauri::command]
+pub fn restart_to_update(app: AppHandle) -> Result<(), String> {
+    let Some(Ready { update, bytes }) = ready().lock().map_err(|e| e.to_string())?.take() else {
+        return Err("No update is waiting".into());
+    };
+    update.install(bytes).map_err(|e| format!("Couldn't install the update: {e}"))?;
+    relaunch(&app).map_err(|e| e.to_string())
+}
+
 /// Update if there is something newer, then open the main window.
 pub async fn run(app: AppHandle) {
     if let Err(e) = update(&app).await {
@@ -47,6 +111,7 @@ pub async fn run(app: AppHandle) {
         let _ = main.show();
         let _ = main.set_focus();
     }
+    watch(app).await;
 }
 
 async fn update(app: &AppHandle) -> Result<(), BoxError> {

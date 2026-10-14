@@ -20,19 +20,22 @@ import { COORDINATE_SYSTEM, type Layer } from "@deck.gl/core";
 import { PathStyleExtension } from "@deck.gl/extensions";
 import { MVTLayer, TileLayer } from "@deck.gl/geo-layers";
 import { BitmapLayer } from "@deck.gl/layers";
+import { railOverview, railOverviewLayer } from "./rail-overview";
 
 type RGBA = [number, number, number, number];
 type Feature = { properties: Record<string, unknown> };
 
 const NONE: RGBA = [0, 0, 0, 0];
-/** Mainline track: a light steel grey, above the roads (65-83) but well under the labels. */
-export const RAIL_MAIN: RGBA = [148, 156, 174, 235];
+// Coral, the colour railway maps reach for: it stands apart from the grey
+// roads and borders, the amber runways and aircraft, and the blue water.
+/** Mainline track. */
+export const RAIL_MAIN: RGBA = [240, 112, 96, 245];
 /** Narrow gauge, heritage lines and funiculars. */
-export const RAIL_MINOR: RGBA = [120, 128, 146, 220];
+export const RAIL_MINOR: RGBA = [214, 128, 112, 225];
 /** Yards, sidings, spurs and crossovers. */
-export const RAIL_SERVICE: RGBA = [90, 98, 114, 200];
-/** Light rail, trams, subways and monorails. */
-export const RAIL_TRANSIT: RGBA = [134, 118, 170, 215];
+export const RAIL_SERVICE: RGBA = [168, 102, 94, 200];
+/** Light rail, trams, subways and monorails: violet, apart from the railways. */
+export const RAIL_TRANSIT: RGBA = [178, 146, 240, 225];
 /** Tunnels are drawn at this fraction of their colour's alpha (and dashed). */
 const TUNNEL_ALPHA = 0.55;
 
@@ -61,7 +64,7 @@ const KIND_COLOR: Record<Exclude<RailKind, null>, RGBA> = {
   service: RAIL_SERVICE,
   transit: RAIL_TRANSIT,
 };
-const KIND_WIDTH: Record<Exclude<RailKind, null>, number> = { main: 1.6, minor: 1.1, service: 0.7, transit: 1 };
+const KIND_WIDTH: Record<Exclude<RailKind, null>, number> = { main: 1.9, minor: 1.3, service: 0.8, transit: 1.2 };
 const tunnelColors = new Map<RGBA, RGBA>();
 const tunnelOf = (c: RGBA): RGBA => {
   let t = tunnelColors.get(c);
@@ -308,7 +311,14 @@ export function railLayers({
   openRailwayMapUrl,
 }: RailOptions): Layer[] {
   const layers: Layer[] = [];
-  if (tileUrl && zoom >= RAIL_MIN_ZOOM - 0.5) layers.push(railNetworkLayer(tileUrl, flat, zoom, workerUrl));
+  // zoomed out, where the tiles have no rail yet, the shipped overview; the
+  // two hand over at one zoom, as the overview is coarse and doubles the
+  // tiles' lines wherever both are drawn
+  if (zoom < RAIL_MIN_ZOOM) {
+    const overview = railOverview();
+    if (overview) layers.push(railOverviewLayer(overview, { main: RAIL_MAIN, minor: RAIL_MINOR }, flat));
+  }
+  if (tileUrl && zoom >= RAIL_MIN_ZOOM) layers.push(railNetworkLayer(tileUrl, flat, zoom, workerUrl));
   if (openRailwayMap && zoom >= OPENRAILWAYMAP_MIN_ZOOM) layers.push(openRailwayMapLayer(fetchImage, openRailwayMapUrl));
   if (tileUrl && stations && zoom >= STATION_MIN_ZOOM) layers.push(railStationLayer(tileUrl, flat, workerUrl));
   return layers;

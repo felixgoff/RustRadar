@@ -1,5 +1,30 @@
+<script lang="ts" module>
+  import type { Component } from "svelte";
+
+  /** A row for something loaded on the map, found without asking a server. */
+  export interface LocalItem {
+    key: string;
+    label: string;
+    detail: string;
+    /** Its colour on the map, as a key. */
+    color?: string;
+  }
+
+  /** Searching the mode's own loaded traffic (trains, ships) in place of Flightradar24's flights and airports. */
+  export interface LocalSearch {
+    /** The group's heading: "Trains in view". */
+    heading: string;
+    /** For the empty message: "trains". */
+    noun: string;
+    icon: Component<{ size?: number; strokeWidth?: number }>;
+    placeholder: string;
+    search: (query: string) => LocalItem[];
+    onpick: (key: string) => void;
+  }
+</script>
+
 <script lang="ts">
-  import { tick, type Component } from "svelte";
+  import { tick } from "svelte";
   import {
     Building,
     Flag,
@@ -13,6 +38,7 @@
     PlaneLanding,
     Search,
     Signpost,
+    X,
   } from "@lucide/svelte";
   import { geocode, search, type FindEntry, type Place, type PlaceKind } from "./api";
   import { placeDetail, placeLanguage } from "./places";
@@ -28,12 +54,31 @@
     /** The lookups, replaceable for a harness without Tauri. */
     find?: (query: string) => Promise<FindEntry[]>;
     lookup?: (query: string, near?: { lat: number; lon: number } | null, lang?: string) => Promise<Place[]>;
+    /** Search the loaded trains or ships instead of flights and airports; places stay. */
+    local?: LocalSearch | null;
+    /** What is typed: in a local search it narrows the sidebar's list too. */
+    query?: string;
   }
 
-  let { onpick, onplace, onquery, near = null, find = search, lookup = geocode }: Props = $props();
+  let {
+    onpick,
+    onplace,
+    onquery,
+    near = null,
+    find = search,
+    lookup = geocode,
+    local = null,
+    query = $bindable(""),
+  }: Props = $props();
+
+  /** The most rows a local search lists: the sidebar's list has the rest. */
+  const LOCAL_MAX = 6;
 
   type Phase<T> = { kind: "idle" } | { kind: "searching" } | { kind: "done"; results: T[] } | { kind: "error" };
-  type Item = { key: string; flight: FindEntry; place?: never } | { key: string; place: Place; flight?: never };
+  type Item =
+    | { key: string; flight: FindEntry; place?: never; local?: never }
+    | { key: string; place: Place; flight?: never; local?: never }
+    | { key: string; local: LocalItem; flight?: never; place?: never };
 
   /** FR24 answers fast: a short pause is enough. */
   const FLIGHT_DEBOUNCE_MS = 250;
@@ -43,7 +88,6 @@
 
   let input: HTMLInputElement;
   let list = $state<HTMLDivElement>();
-  let query = $state("");
   let flights = $state.raw<Phase<FindEntry>>({ kind: "idle" });
   let places = $state.raw<Phase<Place>>({ kind: "idle" });
   let open = $state(false);
@@ -64,11 +108,15 @@
   const placeItems = $derived<Item[]>(
     places.kind === "done" ? places.results.map((p) => ({ key: `p:${p.kind}:${p.label}:${p.lat},${p.lon}`, place: p })) : [],
   );
-  const items = $derived([...flightItems, ...placeItems]);
+  const localItems = $derived<Item[]>(
+    local && query.trim() ? local.search(query.trim()).slice(0, LOCAL_MAX).map((l) => ({ key: `l:${l.key}`, local: l })) : [],
+  );
+  const firstItems = $derived(local ? localItems : flightItems);
+  const items = $derived([...firstItems, ...placeItems]);
   const active = $derived(Math.max(0, items.findIndex((i) => i.key === activeKey)));
   const showPlaces = $derived(places.kind !== "idle");
   const searching = $derived(flights.kind === "searching" || places.kind === "searching");
-  const visible = $derived(open && (settled(flights) || settled(places)));
+  const visible = $derived(open && (local ? query.trim().length > 0 : settled(flights) || settled(places)));
 
   export function focus() {
     input.focus();
@@ -82,7 +130,7 @@
     activeKey = null;
     onquery?.();
     const q = query.trim();
-    if (q.length < 2) {
+    if (local || q.length < 2) {
       flightLatest++;
       flights = { kind: "idle" };
     } else {
@@ -135,7 +183,14 @@
   function pick(item: Item) {
     reset();
     if (item.flight) onpick(item.flight);
+    else if (item.local) local?.onpick(item.local.key);
     else onplace?.(item.place);
+  }
+
+  /** Empties the field, which also lets go of the list it narrowed. */
+  function clear() {
+    reset();
+    onquery?.();
   }
 
   async function move(step: number) {
@@ -187,7 +242,14 @@
     onmousedown={(e) => e.preventDefault()}
     onclick={() => pick(item)}
   >
-    {#if item.flight}
+    {#if item.local}
+      {@const Icon = local?.icon ?? MapPin}
+      <span class="kind local" style:--swatch={item.local.color}><Icon size={14} strokeWidth={1.75} /></span>
+      <span class="text">
+        <span class="label">{item.local.label}</span>
+        {#if item.local.detail}<span class="detail">{item.local.detail}</span>{/if}
+      </span>
+    {:else if item.flight}
       <span class="kind {item.flight.type}">
         {#if item.flight.type === "live"}<Plane size={14} strokeWidth={1.75} />{:else}<MapPin size={14} strokeWidth={1.75} />{/if}
       </span>
@@ -208,12 +270,12 @@
 
 <div class="search">
   <label class="field">
-    <span class="visually-hidden">Search flights, airports and places</span>
+    <span class="visually-hidden">{local ? `Search ${local.noun} and places` : "Search flights, airports and places"}</span>
     <Search size={16} strokeWidth={1.75} />
     <input
       bind:this={input}
       type="search"
-      placeholder="Flight, airport or address"
+      placeholder={local?.placeholder ?? "Flight, airport or address"}
       bind:value={query}
       {oninput}
       {onkeydown}
@@ -230,21 +292,35 @@
       <span class="spin" aria-label="Searching"><LoaderCircle size={14} strokeWidth={2} /></span>
     {:else if !query}
       <kbd title="Press / to search">/</kbd>
+    {:else if local}
+      <!-- the typed words narrow the list below: clearing them is one click -->
+      <button class="clear" aria-label="Clear the search" title="Clear the search" onmousedown={(e) => e.preventDefault()} onclick={clear}>
+        <X size={14} strokeWidth={1.75} />
+      </button>
     {/if}
   </label>
 
   {#if visible}
     <div class="results surface" id="search-results" role="listbox" bind:this={list}>
-      <div role="group" aria-labelledby={showPlaces ? "flights-heading" : undefined}>
-        {#if showPlaces}<h3 class="group" id="flights-heading">Flights and airports</h3>{/if}
-        {#if flights.kind === "searching"}
-          <p class="message quiet"><span class="spin"><LoaderCircle size={12} strokeWidth={2} /></span> Searching flights…</p>
-        {:else if flights.kind === "error"}
-          <p class="message">Flight search failed. Check your connection and try again.</p>
-        {:else if flightItems.length === 0}
-          <p class="message">No live flights or airports match “{query.trim()}”.</p>
+      <div role="group" aria-labelledby={showPlaces || local ? "flights-heading" : undefined}>
+        {#if local}
+          <h3 class="group" id="flights-heading">{local.heading}</h3>
+          {#if localItems.length === 0}
+            <p class="message">No {local.noun} in view match “{query.trim()}”.</p>
+          {:else}
+            {#each localItems as item, i (item.key)}{@render row(item, i)}{/each}
+          {/if}
         {:else}
-          {#each flightItems as item, i (item.key)}{@render row(item, i)}{/each}
+          {#if showPlaces}<h3 class="group" id="flights-heading">Flights and airports</h3>{/if}
+          {#if flights.kind === "searching"}
+            <p class="message quiet"><span class="spin"><LoaderCircle size={12} strokeWidth={2} /></span> Searching flights…</p>
+          {:else if flights.kind === "error"}
+            <p class="message">Flight search failed. Check your connection and try again.</p>
+          {:else if flightItems.length === 0}
+            <p class="message">No live flights or airports match “{query.trim()}”.</p>
+          {:else}
+            {#each flightItems as item, i (item.key)}{@render row(item, i)}{/each}
+          {/if}
         {/if}
       </div>
 
@@ -262,7 +338,7 @@
           {:else if placeItems.length === 0}
             <p class="message">No places match “{query.trim()}”.</p>
           {:else}
-            {#each placeItems as item, i (item.key)}{@render row(item, flightItems.length + i)}{/each}
+            {#each placeItems as item, i (item.key)}{@render row(item, firstItems.length + i)}{/each}
           {/if}
         </div>
       {/if}
@@ -281,7 +357,7 @@
     height: 36px;
     padding: 0 var(--space-3);
     border: 1px solid var(--line-control);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: var(--ink);
     color: var(--text-3);
     transition: border-color 150ms var(--ease-out);
@@ -312,7 +388,7 @@
     min-width: 18px;
     height: 18px;
     border: 1px solid var(--line-control);
-    border-radius: 4px;
+    border-radius: 0;
     font: 600 var(--text-xs) var(--font-data);
     color: var(--text-3);
   }
@@ -377,7 +453,7 @@
     width: 100%;
     padding: var(--space-2);
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: none;
     text-align: left;
     cursor: pointer;
@@ -391,7 +467,7 @@
     place-items: center;
     width: 26px;
     height: 26px;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: var(--surface);
   }
   .kind.live {
@@ -400,6 +476,27 @@
   .kind.airport,
   .kind.place {
     color: var(--text-2);
+  }
+  /* a train or ship: its colour on the map */
+  .kind.local {
+    color: var(--swatch, var(--text-2));
+  }
+  .clear {
+    display: inline-grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    margin-right: -4px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    color: var(--text-3);
+    cursor: pointer;
+  }
+  .clear:hover {
+    background: var(--surface-hover);
+    color: var(--text-1);
   }
   .text {
     display: flex;

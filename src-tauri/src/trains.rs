@@ -1,5 +1,8 @@
-//! Live train positions, combined from regional public feeds that need no key:
+//! Live train positions, combined from regional public feeds. All but one
+//! need no key:
 //!
+//! - **trafikverket**: Sweden, every train on the national network, with the
+//!   Trafikverket key from the keys page (see trafikverket.rs). CC0.
 //! - **digitraffic**: Finland, Fintraffic's open rail API (GraphQL), every
 //!   running train with its type, operator, destination and delay. CC BY 4.0.
 //! - **amtrak**: the USA and Canada (Amtrak and VIA Rail), via the community
@@ -187,6 +190,7 @@ impl Area {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Source {
+    Trafikverket,
     Digitraffic,
     Amtrak,
     Entur,
@@ -194,11 +198,12 @@ pub enum Source {
     Vbb,
 }
 
-pub const SOURCES: [Source; 5] = [Source::Digitraffic, Source::Amtrak, Source::Entur, Source::IrishRail, Source::Vbb];
+pub const SOURCES: [Source; 6] = [Source::Trafikverket, Source::Digitraffic, Source::Amtrak, Source::Entur, Source::IrishRail, Source::Vbb];
 
 impl Source {
     pub fn id(self) -> &'static str {
         match self {
+            Source::Trafikverket => "trafikverket",
             Source::Digitraffic => "digitraffic",
             Source::Amtrak => "amtrak",
             Source::Entur => "entur",
@@ -211,6 +216,8 @@ impl Source {
     /// `(west, south, east, north)` boxes.
     fn coverage(self) -> &'static [(f64, f64, f64, f64)] {
         match self {
+            // Sweden, and its lines to Oslo, Copenhagen and Narvik
+            Source::Trafikverket => &[(10.5, 55.0, 24.5, 69.5)],
             // Finland, with the lines to the Russian border
             Source::Digitraffic => &[(19.0, 59.5, 32.0, 70.2)],
             // Amtrak's network, and VIA Rail's from Vancouver to Halifax and Churchill
@@ -246,6 +253,7 @@ impl Source {
     /// Display name in errors.
     fn label(self) -> &'static str {
         match self {
+            Source::Trafikverket => "Trafikverket",
             Source::Digitraffic => "Digitraffic",
             Source::Amtrak => "Amtraker",
             Source::Entur => "Entur",
@@ -899,6 +907,10 @@ fn graphql_body(query: &str) -> String {
 pub async fn fetch(source: Source, area: &Area) -> Result<Vec<Train>, Failure> {
     let http = client().map_err(|e| (e, None))?;
     let parsed = match source {
+        Source::Trafikverket => {
+            let key = crate::keys::current().trafikverket;
+            return crate::trafikverket::trains(http, &key, now_ms()).await.map_err(|e| (e, None));
+        }
         Source::Digitraffic => {
             let request = http
                 .post(DIGITRAFFIC_URL)
@@ -994,7 +1006,21 @@ async fn from_source(source: Source, view: Area) -> Result<Vec<Train>, String> {
 
 /// The sources worth asking for a view at a deck.gl zoom.
 pub fn sources_for(view: &Area, zoom: f64) -> Vec<Source> {
-    SOURCES.into_iter().filter(|s| zoom >= s.min_zoom() && s.covers(view)).collect()
+    let keyed = !crate::keys::current().trafikverket.is_empty();
+    SOURCES
+        .into_iter()
+        .filter(|s| zoom >= s.min_zoom() && s.covers(view) && (*s != Source::Trafikverket || keyed))
+        .collect()
+}
+
+/// Every stop of a train, for the sources that have its timetable; none for the others.
+#[tauri::command]
+pub async fn train_stops(id: String) -> CmdResult<Vec<crate::trafikverket::Stop>> {
+    if id.starts_with("trafikverket:") {
+        let key = crate::keys::current().trafikverket;
+        return crate::trafikverket::stops(client()?, &key, &id).await;
+    }
+    Ok(Vec::new())
 }
 
 /// Trains in an area (degrees; `west > east` crosses the antimeridian) at a

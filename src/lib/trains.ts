@@ -1,6 +1,6 @@
 // Trains on the map: colours and names per kind, motion between refreshes,
 // and the credits each source asks for.
-import type { Train, TrainKind, TrainSource } from "./api";
+import type { Train, TrainKind, TrainSource, TrainStop } from "./api";
 import { ageLabel } from "./freshness";
 
 export type RGB = [number, number, number];
@@ -25,8 +25,44 @@ export const TRAIN_KINDS = Object.keys(KINDS) as TrainKind[];
 export const trainColor = (kind: TrainKind): RGB => (KINDS[kind] ?? KINDS.other).color;
 export const trainLabel = (kind: TrainKind): string => (KINDS[kind] ?? KINDS.other).label;
 
+/**
+ * Operators with a colour of their own (Sweden's, as Trafikverket names them),
+ * so a train is recognised by who runs it. Others take their kind's colour.
+ */
+const OPERATORS: { match: RegExp; color: RGB }[] = [
+  { match: /^sj\b/i, color: [232, 232, 236] }, // silver
+  { match: /^sl\b|storstockholms/i, color: [70, 146, 236] }, // blue
+  { match: /mälartåg/i, color: [236, 84, 84] }, // red
+  { match: /västtrafik|västtåg/i, color: [62, 200, 236] }, // sky
+  { match: /skånetrafiken|pågatåg/i, color: [196, 92, 222] }, // purple
+  { match: /öresundståg/i, color: [150, 132, 246] }, // lavender
+  { match: /arlanda express/i, color: [250, 212, 64] }, // yellow
+  { match: /snälltåget/i, color: [120, 214, 92] }, // green
+  { match: /norrtåg/i, color: [58, 204, 176] }, // teal
+  { match: /^vy\b/i, color: [240, 92, 150] }, // pink
+  { match: /bergslagen/i, color: [244, 152, 56] }, // orange
+  { match: /upptåget|^ul\b/i, color: [250, 120, 40] }, // tangerine
+  { match: /östgöta/i, color: [214, 70, 130] }, // raspberry
+  { match: /x-trafik|x-tåget/i, color: [150, 220, 60] }, // lime
+  { match: /krösatåg|kronoberg|jönköping|kalmar|blekinge/i, color: [236, 120, 110] }, // coral
+  { match: /värmland/i, color: [110, 180, 255] }, // cornflower
+];
+
+const operatorIndex = (operator: string | null | undefined) =>
+  operator ? OPERATORS.findIndex((o) => o.match.test(operator.trim())) : -1;
+
+/** The train's colour: its operator's, else its kind's. */
+export function trainColorOf(train: Pick<Train, "kind" | "operator">): RGB {
+  const i = operatorIndex(train.operator);
+  return i >= 0 ? OPERATORS[i].color : trainColor(train.kind);
+}
+
 /** The attribution each source asks for, and where it links. */
 export const TRAIN_CREDITS: Record<TrainSource, { text: string; url: string }> = {
+  trafikverket: {
+    text: "Trains in Sweden: Trafikverket, CC0",
+    url: "https://data.trafikverket.se/",
+  },
   digitraffic: {
     text: "Trains in Finland: Fintraffic / digitraffic.fi, CC BY 4.0",
     url: "https://www.digitraffic.fi/en/railway-traffic/",
@@ -132,6 +168,7 @@ export function trainPositionAge(positionUnix: number, nowMs: number): { stale: 
 
 /** What a source is called in the panel. */
 export const TRAIN_SOURCE_NAMES: Record<TrainSource, string> = {
+  trafikverket: "Trafikverket",
   digitraffic: "Digitraffic (Fintraffic)",
   amtrak: "Amtraker",
   entur: "Entur",
@@ -141,9 +178,11 @@ export const TRAIN_SOURCE_NAMES: Record<TrainSource, string> = {
 
 // --- On the map ---------------------------------------------------------------
 
-/** A train with a direction is a carriage with a nose; one without, a rounded square. */
-export const trainIcon = (kind: TrainKind, heading: number | null) =>
-  `${heading === null ? "box" : "car"}-${kind in KINDS ? kind : "other"}`;
+/** A train with a direction is a carriage with a nose; one without, a rounded square. Coloured by operator when it has a colour. */
+export function trainIcon(kind: TrainKind, heading: number | null, operator?: string | null): string {
+  const i = operatorIndex(operator);
+  return `${heading === null ? "box" : "car"}-${i >= 0 ? `op${i}` : kind in KINDS ? kind : "other"}`;
+}
 
 /** Base icon length in pixels per kind: long-distance trains a little longer, metros shorter. */
 const ICON_PX: Record<TrainKind, number> = {
@@ -179,13 +218,17 @@ export function trainAtlas(): { atlas: HTMLCanvasElement; mapping: Record<string
   if (typeof document === "undefined") return null;
   const canvas = document.createElement("canvas");
   canvas.width = CELL * 2;
-  canvas.height = CELL * TRAIN_KINDS.length;
+  // a row per kind's colour, then one per operator's
+  const rows: [string, RGB][] = [
+    ...TRAIN_KINDS.map((kind): [string, RGB] => [kind, trainColor(kind)]),
+    ...OPERATORS.map((o, i): [string, RGB] => [`op${i}`, o.color]),
+  ];
+  canvas.height = CELL * rows.length;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
   const mapping: Record<string, object> = {};
   ctx.lineJoin = "round";
-  TRAIN_KINDS.forEach((kind, row) => {
-    const [r, g, b] = trainColor(kind);
+  rows.forEach(([kind, [r, g, b]], row) => {
     const y = row * CELL;
     ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
     ctx.strokeStyle = INK;
@@ -228,4 +271,32 @@ export function trainAtlas(): { atlas: HTMLCanvasElement; mapping: Record<string
 export function delayTone(minutes: number | null): "good" | "warn" | "bad" | null {
   if (minutes === null || !Number.isFinite(minutes)) return null;
   return minutes >= 30 ? "bad" : minutes >= 5 ? "warn" : "good";
+}
+
+// --- Stops ---------------------------------------------------------------------
+
+/** What a stop shows: its time (departure, or arrival at the last), as it now stands, and whether the train is past it. */
+export interface StopView {
+  /** Unix seconds: the actual time, else the estimate, else the plan. */
+  time: number | null;
+  planned: number | null;
+  /** Minutes off the plan, when there's something to compare. */
+  late: number | null;
+  passed: boolean;
+}
+
+export function stopView(stop: Pick<TrainStop, "arrival" | "departure">): StopView {
+  const t = stop.departure ?? stop.arrival;
+  const planned = t?.planned ?? null;
+  const time = t?.actual ?? t?.estimated ?? planned;
+  const late = planned !== null && time !== null && time !== planned ? Math.round((time - planned) / 60) : null;
+  const passed = Boolean(stop.departure ? stop.departure.actual : stop.arrival?.actual);
+  return { time, planned, late, passed };
+}
+
+/** The first stop not yet passed, or -1 when the run is over (or nothing has happened yet). */
+export function nextStop(stops: readonly Pick<TrainStop, "arrival" | "departure">[]): number {
+  const views = stops.map(stopView);
+  const lastPassed = views.findLastIndex((v) => v.passed);
+  return lastPassed + 1 < stops.length ? lastPassed + 1 : -1;
 }

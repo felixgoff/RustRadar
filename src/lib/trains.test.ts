@@ -6,11 +6,14 @@ import {
   delayText,
   delayTone,
   headingAt,
+  nextStop,
   positionAt,
+  stopView,
   TRAIN_CREDITS,
   TRAIN_KINDS,
   TRAIN_SOURCE_NAMES,
   trainColor,
+  trainColorOf,
   trainCredits,
   trainIcon,
   trainIconSize,
@@ -183,5 +186,38 @@ describe("panel", () => {
     }
     expect(TRAIN_CREDITS.amtrak.url).toBe("https://amtraker.com");
     expect(TRAIN_CREDITS.amtrak.text).toContain("Amtraker");
+  });
+});
+
+describe("stops", () => {
+  const at = (planned: number, actual?: number, estimated?: number) => ({
+    planned,
+    actual: actual ?? null,
+    estimated: estimated ?? null,
+  });
+  const stops = [
+    { arrival: null, departure: at(1000, 1120) },
+    { arrival: at(2000, 2060), departure: at(2100, 2160) },
+    { arrival: at(3000, null as never, 3300), departure: at(3060) },
+    { arrival: at(4000), departure: null },
+  ];
+
+  test("a stop shows its departure as it now stands", () => {
+    expect(stopView(stops[0])).toEqual({ time: 1120, planned: 1000, late: 2, passed: true });
+    expect(stopView(stops[2])).toEqual({ time: 3060, planned: 3060, late: null, passed: false });
+    expect(stopView(stops[3]).time).toBe(4000);
+  });
+
+  test("the next stop follows the last one passed", () => {
+    expect(nextStop(stops)).toBe(2);
+    expect(nextStop([{ arrival: null, departure: at(1) }])).toBe(0);
+    expect(nextStop([{ arrival: at(1, 2), departure: null }])).toBe(-1);
+  });
+
+  test("operators have colours of their own; others their kind's", () => {
+    expect(trainColorOf({ kind: "regional", operator: "SJ" })).not.toEqual(trainColor("regional"));
+    expect(trainColorOf({ kind: "regional", operator: "Someone else" })).toEqual(trainColor("regional"));
+    expect(trainIcon("regional", 90, "Mälartåg")).toMatch(/^car-op\d+$/);
+    expect(trainIcon("regional", null, null)).toBe("box-regional");
   });
 });

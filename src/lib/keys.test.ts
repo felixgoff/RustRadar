@@ -6,6 +6,7 @@ const ALL = {
   fr24Email: "me@example.com",
   fr24Password: "pw",
   trafiklabGtfs: "gtfs",
+  trafiklabGtfsStatic: "",
   trafiklabOxyfi: "",
   trafikverket: "tv",
 };

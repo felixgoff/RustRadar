@@ -208,6 +208,7 @@ jobs:
 
       - uses: android-actions/setup-android@v3
         with:
+          # its default also asks for `tools`, which newer command-line tools no longer have
           packages: platform-tools
 
       - name: Install the NDK

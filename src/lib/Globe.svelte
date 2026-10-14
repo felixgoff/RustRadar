@@ -1095,6 +1095,28 @@
   let arenasVersion = -1;
   /** deck.gl's GPU device, for the arenas' buffers; set once it has one. */
   let device: Device | null = null;
+  /** The first thing that stopped the map drawing, shown with a way to report it. */
+  let mapError = $state<{ message: string; stack: string } | null>(null);
+  function reportMapError(e: unknown) {
+    if (mapError) return;
+    const err = e instanceof Error ? e : new Error(String(e));
+    console.error("map error", err);
+    mapError = { message: err.message || String(e), stack: err.stack ?? "" };
+  }
+  function mapErrorDetails(): string {
+    const info = device?.info as Record<string, unknown> | undefined;
+    return [
+      `RustRadar map error: ${mapError?.message}`,
+      `Renderer: ${info ? [info.vendor, info.renderer, info.version, info.shadingLanguageVersion].filter(Boolean).join(" | ") : "no WebGL device"}`,
+      `Browser: ${navigator.userAgent}`,
+      "",
+      mapError?.stack ?? "",
+    ].join("\n");
+  }
+  function retryMap() {
+    mapError = null;
+    render();
+  }
   function liftedArenas(gpu: Device) {
     arenas ??= RADAR_LEVELS_KM.map(() => ({ slices: new MeshArena(gpu, 2), walls: new MeshArena(gpu, 3) }));
     if (arenasVersion !== radarVersion) {
@@ -2244,7 +2266,17 @@
     return { ...v, longitude, latitude, pitch: tilt, position: undefined };
   }
 
+  /** Draws a frame; a failure is reported once and drawing pauses until Retry. */
   function render() {
+    if (mapError) return;
+    try {
+      renderFrame();
+    } catch (e) {
+      reportMapError(e);
+    }
+  }
+
+  function renderFrame() {
     tick++;
     // locked to an aircraft, the wheel has to zoom about the centre, or every
     // notch shoves the aircraft aside and the lock drags it straight back; a
@@ -2503,6 +2535,35 @@
   });
 
   onMount(() => {
+    try {
+      createDeck();
+    } catch (e) {
+      reportMapError(e);
+      return;
+    }
+    // a lost WebGL context draws nothing until it's restored
+    container.querySelector("canvas")?.addEventListener("webglcontextlost", () =>
+      reportMapError(new Error("The graphics context was lost (WebGL context lost)")),
+    );
+    onviewchange?.(view);
+    frame = requestAnimationFrame(loop);
+    // the label font must be loaded before deck.gl rasterises its glyph atlas
+    document.fonts.load(`600 16px "${LABEL_FONT}"`).finally(() => {
+      fontsReady = true;
+      render();
+    });
+    // the published aircraft shapes; the built-in ones draw until they land
+    aircraftModels.load().then(render);
+    fetch(OPENFREEMAP)
+      .then((r) => r.json())
+      .then((tilejson: { tiles: string[] }) => {
+        tileUrl = tilejson.tiles[0];
+        render();
+      })
+      .catch(() => {}); // labels and buildings are optional extras
+  });
+
+  function createDeck() {
     deck = new Deck<GlobeView>({
       parent: container,
       views: new GlobeView({ resolution: 5 }),
@@ -2513,6 +2574,8 @@
       deviceProps: { webgl: { stencil: true } },
       pickingRadius: 6,
       onDeviceInitialized: (d) => (device = d),
+      // a layer that fails (a shader the GPU driver rejects, say) is reported, not just logged
+      onError: (error) => reportMapError(error),
       onViewStateChange: ({ viewState }) => {
         const { longitude, latitude, zoom, bearing = 0, pitch = 0 } = viewState as Partial<ViewState>;
         view = { longitude: longitude!, latitude: latitude!, zoom: zoom!, bearing, pitch };
@@ -2548,23 +2611,7 @@
       },
       layers: [earthLayer(basemap)],
     });
-    onviewchange?.(view);
-    frame = requestAnimationFrame(loop);
-    // the label font must be loaded before deck.gl rasterises its glyph atlas
-    document.fonts.load(`600 16px "${LABEL_FONT}"`).finally(() => {
-      fontsReady = true;
-      render();
-    });
-    // the published aircraft shapes; the built-in ones draw until they land
-    aircraftModels.load().then(render);
-    fetch(OPENFREEMAP)
-      .then((r) => r.json())
-      .then((tilejson: { tiles: string[] }) => {
-        tileUrl = tilejson.tiles[0];
-        render();
-      })
-      .catch(() => {}); // labels and buildings are optional extras
-  });
+  }
 
   onDestroy(() => {
     cancelAnimationFrame(frame);
@@ -2586,12 +2633,47 @@
   {#if hoverCard}
     <HoverCard {...hoverCard} x={pointer.x} y={pointer.y} width={areaWidth} height={areaHeight} />
   {/if}
+  {#if mapError}
+    <div class="map-error surface" role="alert">
+      <p class="title">The map couldn't draw</p>
+      <p class="message">{mapError.message}</p>
+      <div class="actions">
+        <button class="button" onclick={() => navigator.clipboard.writeText(mapErrorDetails())}>Copy details</button>
+        <button class="button" onclick={retryMap}>Retry</button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
   .globe {
     position: absolute;
     inset: 0;
+  }
+  .map-error {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 5;
+    transform: translate(-50%, -50%);
+    width: min(420px, calc(100% - 2 * var(--space-4)));
+    padding: var(--space-4);
+    border-radius: var(--radius);
+  }
+  .map-error .title {
+    font-weight: 600;
+    color: var(--text-1);
+  }
+  .map-error .message {
+    margin: var(--space-2) 0 var(--space-3);
+    font-family: var(--font-data);
+    font-size: var(--text-sm);
+    color: var(--text-2);
+    overflow-wrap: anywhere;
+  }
+  .map-error .actions {
+    display: flex;
+    gap: var(--space-2);
   }
   :global(.aircraft-tooltip) {
     background: var(--surface-raised) !important;

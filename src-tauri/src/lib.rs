@@ -620,6 +620,12 @@ async fn opensky_track(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// The web inspector, for bug reports (Cmd/Ctrl+Alt+I); the context menu stays off.
+#[tauri::command]
+fn open_devtools(window: tauri::WebviewWindow) {
+    window.open_devtools();
+}
+
 pub fn run() {
     let fr24 = Fr24::new().expect("failed to build http client");
     tauri::Builder::default()
@@ -675,6 +681,7 @@ pub fn run() {
             session::sign_out,
             taxiways::airport_taxiways,
             export::save_export,
+            open_devtools,
             updater::pending_update,
             updater::restart_to_update,
             ships::ships_in_view,

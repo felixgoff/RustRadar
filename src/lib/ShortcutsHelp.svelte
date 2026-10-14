@@ -31,6 +31,7 @@
     [["W"], "Weather radar"],
     [["D"], "Day and night"],
     [["?"], "This list"],
+    [["Ctrl", "Alt", "I"], "Developer tools, for bug reports (⌘⌥I on a Mac)"],
   ];
 
   let dialog: HTMLDialogElement;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import { Funnel, Radar, RefreshCw, Ship as ShipIcon, TrainFront, TriangleAlert } from "@lucide/svelte";
   import {
     adsbCallsign,
@@ -899,6 +900,12 @@
   function onkeydown(e: KeyboardEvent) {
     const t = e.target as HTMLElement | null;
     const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || !!t?.isContentEditable;
+    // Cmd/Ctrl+Alt+I: the web inspector, for bug reports
+    if ((e.ctrlKey || e.metaKey) && e.altKey && e.code === "KeyI" && isTauri()) {
+      e.preventDefault();
+      invoke("open_devtools").catch(() => {});
+      return;
+    }
     if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === "Escape") {
       if (helpOpen) helpOpen = false;

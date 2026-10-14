@@ -90,7 +90,7 @@
     width: 100%;
     padding: var(--space-2);
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: none;
     text-align: left;
     cursor: pointer;

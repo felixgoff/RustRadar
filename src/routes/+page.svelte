@@ -1292,7 +1292,7 @@
   main {
     position: fixed;
     inset: 0;
-    background: radial-gradient(ellipse at 50% 45%, oklch(0.2 0.03 255) 0%, var(--ink) 60%);
+    background: var(--ink);
   }
   .sidebar {
     position: absolute;
@@ -1369,7 +1369,7 @@
     min-width: 18px;
     height: 18px;
     padding: 0 4px;
-    border-radius: 9px;
+    border-radius: 0;
     background: var(--amber);
     font-size: var(--text-xs);
     font-weight: 700;
@@ -1390,7 +1390,7 @@
     display: flex;
     gap: var(--space-2);
     padding: var(--space-3);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: var(--danger-soft);
     color: var(--danger);
     font-size: var(--text-md);
@@ -1428,7 +1428,7 @@
     max-width: calc(100% - 352px);
     padding: 3px var(--space-2);
     border-top-left-radius: var(--radius-sm);
-    background: oklch(0.15 0.02 255 / 0.85);
+    background: oklch(0.15 0 0 / 0.85);
     font-size: var(--text-xs);
     color: var(--text-3);
     white-space: nowrap;

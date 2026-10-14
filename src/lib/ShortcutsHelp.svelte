@@ -67,7 +67,7 @@
     color: var(--text-1);
   }
   dialog::backdrop {
-    background: oklch(0.1 0.02 255 / 0.5);
+    background: oklch(0.1 0 0 / 0.5);
   }
   dialog[open] {
     animation: pop 180ms var(--ease-out);
@@ -115,7 +115,7 @@
     padding: 0 5px;
     border: 1px solid var(--line-control);
     border-bottom-width: 2px;
-    border-radius: 4px;
+    border-radius: 0;
     font: 600 var(--text-sm) var(--font-data);
     color: var(--text-1);
   }

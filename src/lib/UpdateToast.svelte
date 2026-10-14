@@ -59,7 +59,7 @@
     gap: var(--space-3);
     max-width: min(440px, calc(100vw - 2 * var(--space-4)));
     padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
-    border-radius: var(--radius);
+    border-radius: 0;
   }
   .icon {
     display: flex;

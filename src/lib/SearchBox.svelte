@@ -357,7 +357,7 @@
     height: 36px;
     padding: 0 var(--space-3);
     border: 1px solid var(--line-control);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: var(--ink);
     color: var(--text-3);
     transition: border-color 150ms var(--ease-out);
@@ -388,7 +388,7 @@
     min-width: 18px;
     height: 18px;
     border: 1px solid var(--line-control);
-    border-radius: 4px;
+    border-radius: 0;
     font: 600 var(--text-xs) var(--font-data);
     color: var(--text-3);
   }
@@ -453,7 +453,7 @@
     width: 100%;
     padding: var(--space-2);
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: none;
     text-align: left;
     cursor: pointer;
@@ -467,7 +467,7 @@
     place-items: center;
     width: 26px;
     height: 26px;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: var(--surface);
   }
   .kind.live {
@@ -489,7 +489,7 @@
     margin-right: -4px;
     padding: 0;
     border: 0;
-    border-radius: 4px;
+    border-radius: 0;
     background: none;
     color: var(--text-3);
     cursor: pointer;

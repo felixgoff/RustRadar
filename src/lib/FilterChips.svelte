@@ -74,7 +74,7 @@
   .text-button {
     padding: 2px 4px;
     border: 0;
-    border-radius: 4px;
+    border-radius: 0;
     background: none;
     font-size: var(--text-sm);
     font-weight: 600;
@@ -101,7 +101,7 @@
     height: 26px;
     padding: 0 var(--space-2);
     border: 1px solid var(--line-control);
-    border-radius: 13px;
+    border-radius: 0;
     background: none;
     font-size: var(--text-sm);
     color: var(--text-2);
@@ -132,7 +132,7 @@
     flex: none;
     width: 8px;
     height: 8px;
-    border-radius: 2px;
+    border-radius: 0;
   }
   .count {
     font-size: var(--text-xs);

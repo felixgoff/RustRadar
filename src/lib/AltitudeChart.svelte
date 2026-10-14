@@ -287,7 +287,7 @@
 
   .plot {
     position: relative;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     touch-action: pan-y;
   }
   svg {
@@ -345,7 +345,7 @@
     gap: 1px;
     padding: var(--space-1) var(--space-2);
     border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     background: var(--surface-raised);
     box-shadow: var(--shadow);
     transform: translateX(10px);
@@ -367,7 +367,7 @@
   .key {
     width: 10px;
     height: 2px;
-    border-radius: 1px;
+    border-radius: 0;
     background: var(--series-1);
   }
   .label {

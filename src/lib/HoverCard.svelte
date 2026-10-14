@@ -138,7 +138,7 @@
     position: relative;
     aspect-ratio: 16 / 9;
     margin-bottom: 6px;
-    border-radius: var(--radius);
+    border-radius: 0;
     overflow: hidden;
     background: var(--surface-raised);
     box-shadow: var(--shadow);
@@ -191,7 +191,7 @@
     flex: none;
     padding: 0 5px;
     border: 1px solid var(--line-control);
-    border-radius: 4px;
+    border-radius: 0;
     font-size: var(--text-xs);
     font-weight: 600;
     line-height: 16px;
@@ -210,7 +210,7 @@
     height: 22px;
     margin-left: auto;
     padding: 2px 5px;
-    border-radius: 4px;
+    border-radius: 0;
     background: var(--text-1);
   }
   .logo img {
@@ -227,7 +227,7 @@
   .track {
     height: 2px;
     margin: var(--space-2) 0 var(--space-1);
-    border-radius: 1px;
+    border-radius: 0;
     background: var(--line);
     overflow: hidden;
   }

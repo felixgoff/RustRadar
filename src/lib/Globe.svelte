@@ -388,7 +388,7 @@
   // compare equal between renders.
   const EARTH_MESH = new SphereGeometry({ radius: 6.3e6, nlat: 36, nlong: 72 });
   // the dark map's land is the globe itself; under imagery it only shows at the poles
-  const GROUND: Record<Basemap, [number, number, number]> = { dark: [34, 39, 48], satellite: [6, 16, 34] };
+  const GROUND: Record<Basemap, [number, number, number]> = { dark: [24, 24, 24], satellite: [6, 16, 34] };
   const earthLayer = (kind: Basemap) =>
     new SimpleMeshLayer({
       id: "earth",
@@ -433,15 +433,15 @@
   type MapFeature = { properties: Record<string, unknown> };
   type RGBA = [number, number, number, number];
   const NONE: RGBA = [0, 0, 0, 0];
-  const LAND: RGBA = [34, 39, 48, 255];
-  const WATER: RGBA = [14, 24, 37, 255];
-  const BORDER: RGBA = [90, 100, 114, 255];
-  const BORDER_STATE: RGBA = [59, 67, 77, 255];
-  const ROAD_MAJOR: RGBA = [65, 72, 83, 255];
-  const ROAD_MINOR: RGBA = [47, 54, 63, 255];
+  const LAND: RGBA = [24, 24, 24, 255];
+  const WATER: RGBA = [6, 6, 6, 255];
+  const BORDER: RGBA = [96, 96, 96, 255];
+  const BORDER_STATE: RGBA = [62, 62, 62, 255];
+  const ROAD_MAJOR: RGBA = [68, 68, 68, 255];
+  const ROAD_MINOR: RGBA = [46, 46, 46, 255];
   const RUNWAY: RGBA = [163, 119, 52, 255];
   const TAXIWAY: RGBA = [105, 80, 46, 255];
-  const APRON: RGBA = [39, 46, 56, 255];
+  const APRON: RGBA = [38, 38, 38, 255];
   const MAJOR_ROADS = new Set(["motorway", "trunk", "primary"]);
   const MINOR_ROADS = new Set(["secondary", "tertiary", "minor", "service"]);
 
@@ -582,7 +582,7 @@
 
   function labelColor(f: LabelFeature): [number, number, number, number] {
     const p = f.properties;
-    if (p.layerName === "aerodrome_label") return [252, 180, 66, 255];
+    if (p.layerName === "aerodrome_label") return [255, 214, 10, 255];
     if (p.class === "country") return [162, 172, 183, 255];
     if (p.class === "city") return [241, 238, 231, 245];
     return [179, 191, 204, 235];
@@ -1208,7 +1208,7 @@
   // squeeze into a solid line wherever the segments are short on screen
   const dashed = new PathStyleExtension({ dash: true, highPrecisionDash: true });
   const DASHED = [dashed];
-  const ROUTE_AHEAD: [number, number, number, number] = [252, 180, 66, 210];
+  const ROUTE_AHEAD: [number, number, number, number] = [255, 214, 10, 210];
   const ROUTE_BEFORE: [number, number, number, number] = [241, 238, 231, 110];
   const ROUTE_FILED: [number, number, number, number] = [241, 238, 231, 150];
 
@@ -1297,7 +1297,7 @@
     return layers;
   }
 
-  const MARKER_FILL: [number, number, number, number] = [252, 180, 66, 255];
+  const MARKER_FILL: [number, number, number, number] = [255, 214, 10, 255];
   const MARKER_LINE: [number, number, number, number] = [6, 12, 19, 230];
   const airportPosition = (a: Airport): LonLat => [a.lon, a.lat];
   const airportCode = (a: Airport) => a.iata || a.icao;
@@ -1526,7 +1526,7 @@
           material: SHIP_MESH_MATERIAL,
           pickable: true,
           autoHighlight: true,
-          highlightColor: [252, 180, 66, 110],
+          highlightColor: [255, 214, 10, 110],
           // a ship hovered in the sidebar's list lights up as if under the pointer
           ...(hoveredShip !== null ? { highlightedObjectIndex: group.findIndex((d) => d.index === hoveredShip) } : {}),
           parameters: NO_CULL,
@@ -1582,7 +1582,7 @@
         id: "ship-icons",
         data: iconData,
         highlightedObjectIndex: hovered === null ? -1 : split ? iconData.indexOf(hovered) : hovered,
-        highlightColor: [252, 180, 66, 200],
+        highlightColor: [255, 214, 10, 200],
         getPosition: (i) => data.positions[i],
         getIcon: (i) => data.icons[i],
         iconAtlas: shipAtlasData.atlas as never,
@@ -1692,7 +1692,7 @@
         data: data.all,
         // a train hovered in the sidebar's list
         highlightedObjectIndex: hoveredTrainId !== null ? (data.byId.get(hoveredTrainId) ?? -1) : -1,
-        highlightColor: [252, 180, 66, 200],
+        highlightColor: [255, 214, 10, 200],
         getPosition: (i) => data.positions[i],
         getIcon: (i) => data.icons[i],
         iconAtlas: trainAtlasData.atlas as never,
@@ -2023,7 +2023,7 @@
         pickable: true,
         // one highlight across all of an aircraft's parts
         highlightedObjectIndex: hoveredId !== null ? (group.index.get(hoveredId) ?? -1) : -1,
-        highlightColor: [252, 180, 66, 150] as [number, number, number, number],
+        highlightColor: [255, 214, 10, 150] as [number, number, number, number],
         parameters: NO_CULL,
       };
       const triggers = { getPosition: tick, getOrientation: [tick, yawOffset], getScale: [mpp, minPx, depth] };
@@ -2146,7 +2146,7 @@
           billboard: true,
           pickable: true,
           highlightedObjectIndex: hoveredId !== null ? (iconIndex.get(hoveredId) ?? -1) : -1,
-          highlightColor: [252, 180, 66, 150],
+          highlightColor: [255, 214, 10, 150],
           parameters: NO_CULL,
           updateTriggers: {
             getPosition: tick,
@@ -2179,7 +2179,7 @@
           radiusUnits: "pixels",
           stroked: true,
           filled: false,
-          getLineColor: [252, 180, 66, 230],
+          getLineColor: [255, 214, 10, 230],
           getLineWidth: 1.5,
           lineWidthUnits: "pixels",
           billboard: true,
@@ -2353,13 +2353,13 @@
       updateTriggers: { getRadius: radius },
     };
     return {
-      halo: new ScatterplotLayer({ ...common, id: "ship-selection-halo", filled: true, stroked: false, getFillColor: [252, 180, 66, 56] }),
+      halo: new ScatterplotLayer({ ...common, id: "ship-selection-halo", filled: true, stroked: false, getFillColor: [255, 214, 10, 56] }),
       ring: new ScatterplotLayer({
         ...common,
         id: "ship-selection-ring",
         filled: false,
         stroked: true,
-        getLineColor: [252, 180, 66, 235],
+        getLineColor: [255, 214, 10, 235],
         getLineWidth: 2,
         lineWidthUnits: "pixels",
       }),
@@ -2386,13 +2386,13 @@
       updateTriggers: { getRadius: radius },
     };
     return {
-      halo: new ScatterplotLayer({ ...common, id: "train-selection-halo", filled: true, stroked: false, getFillColor: [252, 180, 66, 56] }),
+      halo: new ScatterplotLayer({ ...common, id: "train-selection-halo", filled: true, stroked: false, getFillColor: [255, 214, 10, 56] }),
       ring: new ScatterplotLayer({
         ...common,
         id: "train-selection-ring",
         filled: false,
         stroked: true,
-        getLineColor: [252, 180, 66, 235],
+        getLineColor: [255, 214, 10, 235],
         getLineWidth: 2,
         lineWidthUnits: "pixels",
       }),
@@ -2597,7 +2597,7 @@
     background: var(--surface-raised) !important;
     color: var(--text-1) !important;
     border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     padding: var(--space-2) var(--space-3) !important;
     font: var(--text-sm) / 1.45 var(--font-ui) !important;
     box-shadow: var(--shadow);

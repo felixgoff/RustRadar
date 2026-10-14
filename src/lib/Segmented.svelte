@@ -49,7 +49,7 @@
     gap: 2px;
     padding: 2px;
     border: 1px solid var(--line-control);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
   }
   legend {
     margin-bottom: var(--space-2);
@@ -70,7 +70,7 @@
     justify-content: center;
     gap: 6px;
     padding: 5px 0;
-    border-radius: 4px;
+    border-radius: 0;
     font-size: var(--text-md);
     color: var(--text-2);
     cursor: pointer;

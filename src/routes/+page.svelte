@@ -47,7 +47,16 @@
   import TrainList from "$lib/TrainList.svelte";
   import TrainPanel from "$lib/TrainPanel.svelte";
   import TopFlights from "$lib/TopFlights.svelte";
-  import { activeCount, loadPersisted, matcher, persist, serverCategories, type Filters, type Mode } from "$lib/filters";
+  import {
+    activeCount,
+    loadPersisted,
+    matcher,
+    persist,
+    serverCategories,
+    shownKinds,
+    type Filters,
+    type Mode,
+  } from "$lib/filters";
   import { DEFAULT_TRAIN_FILTERS, sortTrains, trainFilter, trainFilterCount, trainMatches } from "$lib/train-list";
   import { DEFAULT_SHIP_FILTERS, shipFilter, shipFilterCount, shipMatches, shipName, sortShips } from "$lib/ship-list";
   import { shipColor, shipKindLabel } from "$lib/ships";
@@ -115,10 +124,20 @@
   let filters = $state(persisted.filters);
   let trainFilters = $state(persisted.trainFilters);
   let shipFilters = $state(persisted.shipFilters);
-  /** One kind of traffic at a time: only the mode's own is fetched, drawn and listed. */
-  const aircraftOn = $derived(settings.mode === "aircraft");
-  const trainsOn = $derived(settings.mode === "trains");
-  const shipsOn = $derived(settings.mode === "ships");
+  /** What is on the map, so fetched and drawn: the focus, and any kinds shown with it. */
+  const kinds = $derived(shownKinds(settings));
+  const aircraftOn = $derived(kinds.aircraft);
+  const trainsOn = $derived(kinds.trains);
+  const shipsOn = $derived(kinds.ships);
+  /** The kind the sidebar is for: its search, filters and list. */
+  const focus = $derived(settings.mode);
+
+  /** Shift+P, I or S, or the mode bar's eye: another kind on or off the map. The focus is always on. */
+  function toggleShown(kind: Mode) {
+    if (kind === settings.mode) return;
+    const list = settings.alsoShow;
+    settings.alsoShow = list.includes(kind) ? list.filter((k) => k !== kind) : [...list, kind];
+  }
   let filtersOpen = $state(false);
   let helpOpen = $state(false);
   let session = $state.raw<SessionInfo | null>(null);
@@ -346,9 +365,13 @@
     if (!shipsOn) {
       stopShips();
       shipsRequest++;
-      ships = [];
-      shipsAt = 0;
-      shipsFailed = false;
+      // only when there is something to clear: a fresh empty list on every view change would
+      // redraw the map, which moves the view again while it follows an aircraft
+      untrack(() => {
+        if (ships.length) ships = [];
+        if (shipsAt) shipsAt = 0;
+        if (shipsFailed) shipsFailed = false;
+      });
       return;
     }
     clearTimeout(shipsSettle);
@@ -395,7 +418,7 @@
     const timer = setInterval(() => document.visibilityState !== "hidden" && loadShipCard(mmsi), SHIP_DETAILS_REFRESH_MS);
     return () => clearInterval(timer);
   });
-  // out of ships mode: nothing left to show
+  // the ships off the map: nothing left to show
   $effect(() => {
     if (!shipsOn) untrack(() => selectShip(null));
   });
@@ -407,8 +430,7 @@
     shipCardRequest++;
     shipCard = null;
     if (ship) {
-      // a ship picked from anywhere shows the ships
-      settings.mode = "ships";
+      // one panel at a time; the focus (and the sidebar) stays where it is
       if (selectedId !== null) select(null);
       selectTrain(null);
       boardCode = null;
@@ -459,9 +481,12 @@
     if (!trainsOn) {
       stopTrains();
       trainsRequest++;
-      trains = [];
-      trainsAt = 0;
-      trainsFailed = false;
+      // as for the ships: nothing written when already clear
+      untrack(() => {
+        if (trains.length) trains = [];
+        if (trainsAt) trainsAt = 0;
+        if (trainsFailed) trainsFailed = false;
+      });
       return;
     }
     clearTimeout(trainsSettle);
@@ -489,8 +514,7 @@
     if (train && train.id === pickedTrain?.id) return;
     pickedTrain = train;
     if (train) {
-      // a train picked from anywhere shows the trains
-      settings.mode = "trains";
+      // one panel at a time; the focus (and the sidebar) stays where it is
       if (selectedId !== null) select(null);
       selectShip(null);
       boardCode = null;
@@ -584,7 +608,7 @@
 
   // the hover belongs to the list it came from
   $effect(() => {
-    void settings.mode;
+    void focus;
     hoveredTrainId = null;
     hoveredShipMmsi = null;
   });
@@ -612,7 +636,7 @@
   }
 
   async function refresh() {
-    // out of aircraft mode: no live fetches at all, and none scheduled until it is back
+    // the aircraft off the map: no live fetches at all, and none scheduled until it is back
     if (loading || !aircraftOn) return;
     loading = true;
     refreshAgain = false;
@@ -623,7 +647,7 @@
     let arrived = false;
     try {
       const next = await liveFlights(area, serverCategories($state.snapshot(filters) as Filters));
-      // the mode changed while the request was out: drop what it brought
+      // the aircraft left the map while the request was out: drop what it brought
       if (!aircraftOn) return;
       snapshot = next;
       // aircraft are drawn on the feed's clock, so a wrong system clock can't misplace them
@@ -662,7 +686,7 @@
     }, 800);
   });
 
-  // Out of aircraft mode: the open flight and airport board close (the
+  // The aircraft off the map: the open flight and airport board close (the
   // follow stream and the camera's lock with them) and the feed stops. Back
   // in it, it fetches again at once, or as soon as the gap between requests
   // allows.
@@ -682,7 +706,6 @@
         shownFeed = null;
       } else if (isTauri()) {
         if (!loading) scheduleRefresh(Math.max(0, lastRequestAt + MIN_GAP_MS - Date.now()));
-        refreshTop();
       }
     });
   });
@@ -695,6 +718,11 @@
     if (key === fetchedCategories) return;
     fetchedCategories = key;
     untrack(refreshSoon);
+  });
+
+  // the most tracked list is the aircraft sidebar's: fetched while the aircraft are the focus
+  $effect(() => {
+    if (focus === "aircraft" && isTauri()) untrack(refreshTop);
   });
 
   async function refreshTop() {
@@ -763,8 +791,7 @@
     }
     selectedId = id;
     if (id !== null) {
-      // a flight picked from a list or the search shows the aircraft again
-      settings.mode = "aircraft";
+      // one panel at a time; the focus (and the sidebar) stays where it is
       selectShip(null);
       selectTrain(null);
     }
@@ -790,7 +817,6 @@
   }
 
   function openAirport(code: string) {
-    settings.mode = "aircraft";
     boardCode = code.toUpperCase();
     if (selectedId !== null) select(null);
     selectShip(null);
@@ -856,10 +882,13 @@
     "2": () => (settings.basemap = "satellite"),
     l: () => (settings.labels = !settings.labels),
     b: () => (settings.buildings = !settings.buildings),
-    // the mode: Planes, traIns (T tilts), Ships
+    // the focus: Planes, traIns (T tilts), Ships; with Shift, that kind also shown on the map or not
     p: () => (settings.mode = "aircraft"),
     i: () => (settings.mode = "trains"),
     s: () => (settings.mode = "ships"),
+    P: () => toggleShown("aircraft"),
+    I: () => toggleShown("trains"),
+    S: () => toggleShown("ships"),
     k: () => aircraftOn && (settings.aircraftLabels = !settings.aircraftLabels),
     d: () => (settings.daylight = !settings.daylight),
     w: () => (settings.weather = !settings.weather),
@@ -882,14 +911,17 @@
       return;
     }
     if (helpOpen && e.key !== "?") return;
-    const action = toggles[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+    // a letter with Shift is its own shortcut (Shift+P, I, S), never the plain one; Caps Lock alone counts as plain
+    let key = e.key;
+    if (key.length === 1 && key.toLowerCase() !== key.toUpperCase()) key = e.shiftKey ? key.toUpperCase() : key.toLowerCase();
+    const action = toggles[key];
     if (!action) return;
     e.preventDefault();
     action();
   }
 
   // quiet while the feed keeps its schedule; past about two refreshes, a warning with the data's age
-  const freshness = $derived(shownFeed && aircraftOn ? feedFreshness(Math.max(0, now - shownFeed.at), shownFeed.interval) : null);
+  const freshness = $derived(shownFeed && focus === "aircraft" ? feedFreshness(Math.max(0, now - shownFeed.at), shownFeed.interval) : null);
   /** The credits for the trains on show; the sources whose licences ask for a link get one. */
   const trainCredit = $derived(trainsOn ? trainCredits(trainsOnMap) : []);
   const attribution = $derived(
@@ -910,9 +942,9 @@
   );
   /** The trains' or ships' age, as the aircraft's: quiet while on schedule, a warning past about two refreshes. */
   const listFreshness = $derived(
-    trainsOn && trainsAt
+    focus === "trains" && trainsAt
       ? feedFreshness(Math.max(0, now - trainsAt), TRAINS_REFRESH_MS)
-      : shipsOn && shipsAt
+      : focus === "ships" && shipsAt
         ? feedFreshness(Math.max(0, now - shipsAt), SHIPS_REFRESH_MS)
         : null,
   );
@@ -932,9 +964,7 @@
       .then((s) => (session = s))
       .catch(() => {});
     refresh();
-    // the most tracked list is the aircraft sidebar's: fetched in aircraft mode only
-    if (aircraftOn) refreshTop();
-    timers = [setInterval(() => aircraftOn && refreshTop(), TOP_REFRESH_MS), setInterval(() => (now = Date.now()), 1000)];
+    timers = [setInterval(() => focus === "aircraft" && refreshTop(), TOP_REFRESH_MS), setInterval(() => (now = Date.now()), 1000)];
   });
   onDestroy(() => {
     timers.forEach(clearInterval);
@@ -997,6 +1027,8 @@
 
   <ModeBar
     bind:mode={settings.mode}
+    shown={kinds}
+    ontoggle={toggleShown}
     counts={{
       aircraft: aircraftOn && snapshot ? flights.length : null,
       trains: trainsOn && trainsAt ? trains.length : null,
@@ -1008,7 +1040,7 @@
     <section class="surface primary">
       <header class="brand">
         <h1><Radar size={20} strokeWidth={1.75} /> RustRadar</h1>
-        {#if aircraftOn}
+        {#if focus === "aircraft"}
           {#if snapshot && freshness?.stale}
             <p class="status" title="Last update at {clockAt(Math.floor((shownFeed?.at ?? 0) / 1000))}{loading ? '; updating now' : ''}">
               <span class="badge warn">{freshness.label}</span>
@@ -1033,9 +1065,9 @@
         <span class="visually-hidden" role="status">{freshness?.stale ? "Flight data is out of date" : ""}</span>
       </header>
 
-      {#if aircraftOn}
+      {#if focus === "aircraft"}
         <SearchBox bind:this={searchBox} onpick={pickSearch} onplace={pickPlace} onquery={() => (place = null)} {near} />
-      {:else if trainsOn}
+      {:else if focus === "trains"}
         <SearchBox
           bind:this={searchBox}
           local={trainSearch}
@@ -1058,20 +1090,20 @@
       {/if}
 
       <div class="toolbar">
-        {@render filterToggle(aircraftOn ? active : trainsOn ? trainFilterActive : shipFilterActive)}
-        {#if aircraftOn && snapshot}
+        {@render filterToggle(focus === "aircraft" ? active : focus === "trains" ? trainFilterActive : shipFilterActive)}
+        {#if focus === "aircraft" && snapshot}
           <p class="counts">
             <span class="count">{count(filtered.length)}</span>
             {#if filtered.length !== flights.length}of {count(flights.length)}{/if}
             {regional ? "in view" : "worldwide"}
           </p>
-        {:else if trainsOn && trainsAt}
+        {:else if focus === "trains" && trainsAt}
           <p class="counts">
             <span class="count">{count(trainsListed.length)}</span>
             {#if trainsListed.length !== trains.length}of {count(trains.length)}{/if}
             in view
           </p>
-        {:else if shipsOn && shipsAt}
+        {:else if focus === "ships" && shipsAt}
           <p class="counts">
             <span class="count">{count(shipsListed.length)}</span>
             {#if shipsListed.length !== ships.length}of {count(ships.length)}{/if}
@@ -1084,11 +1116,11 @@
         <div class="alert" role="alert">
           <TriangleAlert size={16} strokeWidth={1.75} />
           <div>
-            <p>No live {settings.mode === "aircraft" ? "flight" : settings.mode === "trains" ? "train" : "ship"} data in a plain browser.</p>
+            <p>No live {focus === "aircraft" ? "flight" : focus === "trains" ? "train" : "ship"} data in a plain browser.</p>
             <p class="detail">{feedError}</p>
           </div>
         </div>
-      {:else if !aircraftOn}
+      {:else if focus !== "aircraft"}
         <!-- the trains' and ships' failures are told in their lists -->
       {:else if rateLimited}
         <!-- expected throttling, not a failure: the warning tone, still in plain sight -->
@@ -1115,9 +1147,9 @@
     </section>
 
     {#if filtersOpen}
-      {#if aircraftOn}
+      {#if focus === "aircraft"}
         <FilterPanel bind:filters {flights} shown={filtered.length} onclose={() => (filtersOpen = false)} />
-      {:else if trainsOn}
+      {:else if focus === "trains"}
         <TrainFilterPanel bind:filters={trainFilters} {trains} shown={trainsFiltered.length} onclose={() => (filtersOpen = false)} />
       {:else}
         <ShipFilterPanel
@@ -1131,7 +1163,7 @@
     {/if}
 
     <section class="surface list">
-      {#if aircraftOn}
+      {#if focus === "aircraft"}
         <TopFlights
           flights={top}
           failed={topFailed}
@@ -1139,7 +1171,7 @@
           onpick={(f) => select(f.flight_id, { fly: true })}
           onretry={refreshTop}
         />
-      {:else if trainsOn}
+      {:else if focus === "trains"}
         <TrainList
           trains={trainsListed}
           total={trains.length}
@@ -1260,7 +1292,7 @@
     bind:labels={settings.labels}
     bind:labelSize={settings.labelSize}
     bind:buildings={settings.buildings}
-    aircraftMode={aircraftOn}
+    aircraftShown={aircraftOn}
     bind:aircraftLabels={settings.aircraftLabels}
     bind:daylight={settings.daylight}
     bind:weather={settings.weather}

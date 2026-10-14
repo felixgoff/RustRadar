@@ -24,8 +24,8 @@
     labels: boolean;
     labelSize: number;
     buildings: boolean;
-    /** Aircraft mode: the aircraft's own layers apply. */
-    aircraftMode: boolean;
+    /** The aircraft are on the map (the focus or shown with it): their own layers apply. */
+    aircraftShown: boolean;
     aircraftLabels: boolean;
     daylight: boolean;
     weather: boolean;
@@ -52,7 +52,7 @@
     labels = $bindable(),
     labelSize = $bindable(),
     buildings = $bindable(),
-    aircraftMode,
+    aircraftShown,
     aircraftLabels = $bindable(),
     daylight = $bindable(),
     weather = $bindable(),
@@ -204,7 +204,7 @@
           bind:buildings
           bind:labels
           bind:railMap
-          {aircraftMode}
+          {aircraftShown}
           bind:aircraftLabels
           bind:weather
           bind:daylight

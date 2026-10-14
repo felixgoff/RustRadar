@@ -15,9 +15,11 @@
     columns?: number;
     /** What an option shows in place of its label (which still names it): an icon, a count. */
     content?: Snippet<[T, string]>;
+    /** Drawn after an option, outside its label and radio: a control of its own (the mode bar's show toggles). */
+    trailing?: Snippet<[T, string]>;
   }
 
-  let { legend, hideLegend = false, name, options, value = $bindable(), disabled = false, columns, content }: Props = $props();
+  let { legend, hideLegend = false, name, options, value = $bindable(), disabled = false, columns, content, trailing }: Props = $props();
 </script>
 
 <fieldset class="segmented" {disabled}>
@@ -32,6 +34,7 @@
           {#if key}<kbd aria-hidden="true">{key}</kbd>{/if}
         </span>
       </label>
+      {@render trailing?.(option, label)}
     {/each}
   </div>
 </fieldset>

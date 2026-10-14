@@ -822,7 +822,7 @@
     height: 28px;
     padding: 0;
     border: 0;
-    border-radius: 0;
+    border-radius: 50%;
     background: oklch(0.15 0 0 / 0.7);
     color: var(--text-1);
     transform: translateY(-50%);
@@ -855,7 +855,7 @@
     place-items: center;
     height: 26px;
     padding: 2px 6px;
-    border-radius: 0;
+    border-radius: 4px;
     background: var(--text-1);
   }
   .logo img {
@@ -1002,7 +1002,7 @@
     right: var(--space-2);
     bottom: -1px;
     height: 2px;
-    border-radius: 0;
+    border-radius: 1px;
     background: var(--amber);
   }
 
@@ -1167,7 +1167,7 @@
     max-height: 132px;
     overflow-y: auto;
     padding: var(--space-2) var(--space-3);
-    border-radius: 0;
+    border-radius: var(--radius-sm);
     background: var(--ink);
     font-size: var(--text-sm);
     line-height: 1.5;
@@ -1197,7 +1197,7 @@
     flex: none;
     width: 28px;
     height: 3px;
-    border-radius: 0;
+    border-radius: 2px;
   }
   .swatch.solid {
     background: oklch(0.95 0.01 85 / 0.6);
@@ -1232,7 +1232,7 @@
     width: 100%;
     padding: var(--space-2);
     border: 0;
-    border-radius: 0;
+    border-radius: var(--radius-sm);
     background: none;
     font-size: var(--text-sm);
     text-align: left;
@@ -1335,7 +1335,7 @@
   .dot {
     width: 8px;
     height: 8px;
-    border-radius: 0;
+    border-radius: 50%;
     background: var(--live);
     animation: pulse 2s ease-out infinite;
   }

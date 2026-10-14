@@ -284,7 +284,7 @@
     right: var(--space-2);
     bottom: -1px;
     height: 2px;
-    border-radius: 0;
+    border-radius: 1px;
     background: var(--amber);
   }
 
@@ -316,7 +316,7 @@
     width: 100%;
     padding: var(--space-2);
     border: 0;
-    border-radius: 0;
+    border-radius: var(--radius-sm);
     background: none;
     font-size: var(--text-sm);
     text-align: left;
@@ -374,7 +374,7 @@
   .live-dot {
     width: 6px;
     height: 6px;
-    border-radius: 0;
+    border-radius: 50%;
     background: var(--live);
   }
   .place {

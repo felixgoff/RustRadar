@@ -130,7 +130,7 @@
     flex-direction: column;
     width: 240px;
     padding: var(--space-1);
-    border-radius: 0;
+    border-radius: var(--radius-sm);
     background: var(--surface-raised);
   }
   [role="menuitem"] {
@@ -139,7 +139,7 @@
     gap: 2px;
     padding: var(--space-2);
     border: 0;
-    border-radius: 0;
+    border-radius: calc(var(--radius-sm) - 2px);
     background: none;
     color: var(--text-1);
     text-align: left;

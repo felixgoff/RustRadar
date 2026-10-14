@@ -44,6 +44,7 @@
   import ShipList from "$lib/ShipList.svelte";
   import ShipPanel from "$lib/ShipPanel.svelte";
   import ShortcutsHelp from "$lib/ShortcutsHelp.svelte";
+  import KeysDialog from "$lib/KeysDialog.svelte";
   import TrainFilterPanel from "$lib/TrainFilterPanel.svelte";
   import TrainList from "$lib/TrainList.svelte";
   import TrainPanel from "$lib/TrainPanel.svelte";
@@ -87,7 +88,6 @@
   let globe: Globe;
   /** One per mode: the one on show. */
   let searchBox = $state<SearchBox>();
-  let controls: MapControls;
   // large arrays are kept as raw state: deep proxies over ~20k flights are slow
   let snapshot = $state.raw<LiveSnapshot | null>(null);
   let top = $state.raw<TopFlight[] | null>(null);
@@ -141,6 +141,9 @@
   }
   let filtersOpen = $state(false);
   let helpOpen = $state(false);
+  let keysOpen = $state(false);
+  /** The keys page opened from a "sign in" prompt: the caret goes to the login, and back to the prompt after. */
+  let keysPrompt = $state<(() => HTMLElement | null) | null>(null);
   let session = $state.raw<SessionInfo | null>(null);
   /** The camera follows the selected aircraft. */
   let following = $state(false);
@@ -860,7 +863,15 @@
 
   /** From a sign-in prompt in a panel: the keyboard lands in the form, and goes back to the panel when it closes. */
   function promptSignIn(returnFocus: () => HTMLElement | null) {
-    controls.openAccount({ focusForm: true, returnFocus });
+    keysPrompt = returnFocus;
+    keysOpen = true;
+  }
+
+  function closeKeys() {
+    keysOpen = false;
+    const back = keysPrompt;
+    keysPrompt = null;
+    if (back) requestAnimationFrame(() => back()?.focus());
   }
 
   async function handleSignOut() {
@@ -906,7 +917,8 @@
       invoke("open_devtools").catch(() => {});
       return;
     }
-    if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+    // the keys page is modal: it handles its own keys, Escape included
+    if (typing || keysOpen || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === "Escape") {
       if (helpOpen) helpOpen = false;
       else if (place) place = null;
@@ -1291,7 +1303,6 @@
   {/if}
 
   <MapControls
-    bind:this={controls}
     zoom={view.zoom}
     bearing={view.bearing}
     pitch={view.pitch}
@@ -1312,12 +1323,19 @@
     onzoom={(d) => globe.zoomBy(d)}
     onreset={() => globe.resetOrientation()}
     ontilt={(p) => globe.setPitch(p)}
-    onsignin={handleSignIn}
-    onsignout={handleSignOut}
+    onkeys={() => (keysOpen = true)}
     onhelp={() => (helpOpen = true)}
   />
 
   <ShortcutsHelp open={helpOpen} onclose={() => (helpOpen = false)} />
+  <KeysDialog
+    open={keysOpen}
+    {session}
+    focusLogin={keysPrompt !== null}
+    onclose={closeKeys}
+    onsignin={handleSignIn}
+    onsignout={handleSignOut}
+  />
 
   <!-- the train credits come first, so the line's ellipsis can't hide them: Amtraker asks for a prominent link -->
   <p class="attribution" title={[...trainCredit.map((c) => c.text), ...attribution].join(" · ")}>

@@ -3,6 +3,7 @@ mod board;
 mod dwd;
 mod export;
 mod geocode;
+mod keys;
 mod liveries;
 mod mrms;
 mod opensky;
@@ -644,13 +645,21 @@ pub fn run() {
         .setup(|app| {
             // the main window starts hidden: update first, then open it
             tauri::async_runtime::spawn(updater::run(app.handle().clone()));
-            // log in with credentials from the environment or the fr24 config
-            // file, if any; until then (or without them) requests are anonymous
+            // log in with the login saved on the keys page, else with credentials
+            // from the environment or the fr24 config file, if any; until then
+            // (or without them) requests are anonymous
+            let saved = keys::load(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
                 let mut fr24 = Fr24::clone(&state.client());
-                match fr24.login(None).await {
+                let creds = (!saved.fr24_email.is_empty() && !saved.fr24_password.is_empty()).then(|| {
+                    fr24::auth::Credentials::UsernamePassword {
+                        username: saved.fr24_email,
+                        password: saved.fr24_password,
+                    }
+                });
+                match fr24.login(creds).await {
                     Ok(Some(_)) => *state.fr24.write().unwrap() = Arc::new(fr24),
                     Ok(None) => {}
                     Err(e) => eprintln!("fr24 login failed, continuing anonymously: {e}"),
@@ -679,6 +688,8 @@ pub fn run() {
             session::session_info,
             session::sign_in,
             session::sign_out,
+            keys::get_keys,
+            keys::save_keys,
             taxiways::airport_taxiways,
             export::save_export,
             open_devtools,

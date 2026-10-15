@@ -431,8 +431,9 @@ fn plans() -> &'static Plans {
 const REWORK_MS: i64 = 60_000;
 /// Drawn longer ago than this, a train starts anew, ms.
 const CONTINUE_MS: i64 = 5 * 60_000;
-/// Reported at the same place (without a speed) this much later, a train is standing, ms.
-const STOOD_MS: i64 = 5_000;
+/// Reported at the same place (without a speed) this much later, a train is standing, ms:
+/// a moving train's reports repeat its place for up to most of a minute.
+const STOOD_MS: i64 = 60_000;
 
 /// A train's frames (`motion::simulate`): from where it is drawn, following
 /// where the real train most likely is by its newest report. The same
@@ -446,14 +447,27 @@ fn frames_for(
     now_ms: i64,
     rail: &crate::rail::Rail,
 ) -> motion::Sim {
-    let mut latest = report.fix();
-    let prev = prev.map(Report::fix);
     // tests share no state between them
     if cfg!(test) {
-        return motion::simulate(None, &latest, prev.as_ref(), stops, now_ms, Some(rail));
+        let prev = prev.map(Report::fix);
+        return motion::simulate(None, &report.fix(), prev.as_ref(), stops, now_ms, Some(rail));
     }
+    frames_in(plans(), report, prev, stops, now_ms, rail)
+}
+
+/// `frames_for`, with how the trains are drawn kept in `plans`.
+fn frames_in(
+    plans: &Plans,
+    report: &Report,
+    prev: Option<&Report>,
+    stops: &[motion::Stop],
+    now_ms: i64,
+    rail: &crate::rail::Rail,
+) -> motion::Sim {
+    let mut latest = report.fix();
+    let prev = prev.map(Report::fix);
     let key = report.lookup().to_owned();
-    let old = plans().lock().unwrap().get(&key).cloned().filter(|d| now_ms - d.made_ms < CONTINUE_MS);
+    let old = plans.lock().unwrap().get(&key).cloned().filter(|d| now_ms - d.made_ms < CONTINUE_MS);
     // an older report than it is drawn from (one source lagging another) changes nothing
     if let Some(d) = &old
         && latest.t_ms < d.fix.t_ms
@@ -487,13 +501,13 @@ fn frames_for(
             if let Some(last) = sim.frames.last_mut() {
                 last.2 = now_ms + motion::HORIZON_MS;
             }
-            plans().lock().unwrap().insert(key, Drawn { fix: latest, made_ms: now_ms, sim: sim.clone() });
+            plans.lock().unwrap().insert(key, Drawn { fix: latest, made_ms: now_ms, sim: sim.clone() });
             return sim;
         }
     }
     let drawn = old.as_ref().map(|d| d.sim.frames.as_slice());
     let sim = motion::simulate(drawn, &latest, prev.as_ref(), stops, now_ms, Some(rail));
-    let mut plans = plans().lock().unwrap();
+    let mut plans = plans.lock().unwrap();
     plans.retain(|_, d| now_ms - d.made_ms < CONTINUE_MS);
     plans.insert(key, Drawn { fix: latest, made_ms: now_ms, sim: sim.clone() });
     sim
@@ -737,7 +751,7 @@ fn calls_ahead<'a>(
     at_ms: i64,
 ) -> Vec<CallAhead<'a>> {
     let late = i64::from(delay.unwrap_or(0)) * 60_000;
-    let placed: Vec<(&Call, &Station, (f64, f64))> = run
+    let mut placed: Vec<(&Call, &Station, (f64, f64))> = run
         .calls
         .iter()
         .filter_map(|c| {
@@ -745,6 +759,14 @@ fn calls_ahead<'a>(
             Some((c, station, (station.lat?, station.lon?)))
         })
         .collect();
+    // places due the same minute come in any order: the nearer the one before first
+    let time = |c: &Call| c.arrive.or(c.depart);
+    for i in 1..placed.len().saturating_sub(1) {
+        let (before, a, b) = (placed[i - 1].2, &placed[i], &placed[i + 1]);
+        if time(a.0) == time(b.0) && motion::distance(before, b.2) < motion::distance(before, a.2) {
+            placed.swap(i, i + 1);
+        }
+    }
     placed
         .iter()
         .enumerate()
@@ -1612,8 +1634,14 @@ fn same_place(a: &Report, b: &Report) -> bool {
 fn previous(report: &Report) -> Option<Report> {
     let mut h = history().lock().unwrap();
     let key = report.lookup().to_owned();
-    match h.get(&key) {
-        Some((latest, prev)) if latest.at_ms == report.at_ms || same_place(latest, report) => prev.clone(),
+    match h.get_mut(&key) {
+        Some((latest, prev)) if latest.at_ms == report.at_ms || same_place(latest, report) => {
+            // there a while, not saying how fast: it stands there (and moving on from it, leaves)
+            if latest.speed.is_none() && report.speed.is_none() && report.at_ms - latest.at_ms >= STOOD_MS {
+                latest.speed = Some(0.0);
+            }
+            prev.clone()
+        }
         Some((latest, _)) if latest.at_ms < report.at_ms => {
             let prev = latest.clone();
             h.insert(key, (report.clone(), Some(prev.clone())));
@@ -2013,5 +2041,75 @@ mod tests {
         assert!(operator_trains().lock().unwrap()["SJ"].contains("2"));
         assert!(!operator_trains().lock().unwrap()["SL"].contains("2"));
         assert!(trains_query(&["1".into()]).contains(r#"<EQ name="Train.OperationalTrainNumber" value="1"/>"#));
+    }
+
+    /// Replays recorded live positions (`LIVE_DIR`: `stations.json`,
+    /// `services.json`, `stream.jsonl` of `{at, data}` stream events) through
+    /// the app's own pipeline on real tiles (`RAIL_TILES`), writing each
+    /// report and how it was drawn to `LIVE_DIR/replay.csv`.
+    #[test]
+    #[ignore]
+    fn replay_live() {
+        let dir = std::env::var("LIVE_DIR").unwrap();
+        crate::rail::load_tiles_for_tests(&std::env::var("RAIL_TILES").unwrap());
+        let stations = parse_stations(&std::fs::read_to_string(format!("{dir}/stations.json")).unwrap()).unwrap();
+        let services = parse_services(&std::fs::read_to_string(format!("{dir}/services.json")).unwrap()).unwrap();
+        let mut events: Vec<(i64, Vec<Report>)> = std::fs::read_to_string(format!("{dir}/stream.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| {
+                let v: Value = serde_json::from_str(l).ok()?;
+                Some((v["at"].as_i64()?, parse_positions(v["data"].as_str()?).ok()?))
+            })
+            .collect();
+        events.sort_by_key(|e| e.0);
+        let plans: Plans = Default::default();
+        let mut out = String::from("now,train,t,lat,lon,speed,next,next_name,next_m,drawn_lat,drawn_lon,pred_end_lat,pred_end_lon,pred_end_to_next_m\n");
+        for (now, reports) in events {
+            let only = std::env::var("REPLAY_ONLY").ok();
+            // (`REPLAY_ONLY`: one train's number, to look at it alone)
+            for r in reports
+                .iter()
+                .filter(|r| now - r.at_ms < STALE_REPORT_MS)
+                .filter(|r| only.as_deref().is_none_or(|o| o == r.lookup()))
+            {
+                let prev = previous(r);
+                let runs = services.get(r.lookup());
+                let service = runs.and_then(|runs| run_of(runs, r.date.as_deref()));
+                let stops = service.map(|s| stops_ahead(s, None, &stations, r.at_ms)).unwrap_or_default();
+                let names: Vec<String> = service
+                    .map(|s| calls_ahead(s, None, &stations, r.at_ms).iter().map(|c| c.1.name.clone()).collect())
+                    .unwrap_or_default();
+                let class = service.map(|s| crate::train_class::class_of(s.product_code.as_deref(), s.product.as_deref()));
+                let rail = crate::rail::Rail { class };
+                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
+                let fix = r.fix();
+                let next = match motion::plan((fix.lat, fix.lon), fix.speed, fix.heading, &stops, fix.t_ms) {
+                    motion::Plan::Standing { at } | motion::Plan::Moving { next: at } => at,
+                };
+                let (next_name, next_m, next_at) = match stops.get(next) {
+                    Some(st) => (
+                        names.get(next).cloned().unwrap_or_default(),
+                        motion::distance((r.lat, r.lon), (st.lat, st.lon)),
+                        Some((st.lat, st.lon)),
+                    ),
+                    None => (String::new(), f64::NAN, None),
+                };
+                let drawn = motion::sample(&sim.frames, now).map(|s| s.0).or(sim.frames.first().map(|f| (f.0, f.1)));
+                let end = sim.predicted.last().map(|f| (f.0, f.1));
+                let end_to_next = end.zip(next_at).map_or(f64::NAN, |(a, b)| motion::distance(a, b));
+                let (dl, dn) = drawn.unwrap_or((f64::NAN, f64::NAN));
+                let (el, en) = end.unwrap_or((f64::NAN, f64::NAN));
+                out += &format!(
+                    "{now},{},{},{:.6},{:.6},{},{next},{next_name},{next_m:.0},{dl:.6},{dn:.6},{el:.6},{en:.6},{end_to_next:.0}\n",
+                    r.lookup(),
+                    r.at_ms,
+                    r.lat,
+                    r.lon,
+                    r.speed.map_or(String::new(), |v| v.to_string()),
+                );
+            }
+        }
+        std::fs::write(format!("{dir}/replay.csv"), out).unwrap();
     }
 }

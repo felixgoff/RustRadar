@@ -1303,6 +1303,19 @@ pub fn route_for(
     route_in_dir(&g, start, heading, &targets, onwards_m, SNAP_SPREAD_M, class, only_onwards)
 }
 
+/// Tests: every `{x}_{y}.pbf` tile in `dir` (zoom `ZOOM`) as if fetched.
+#[cfg(test)]
+pub fn load_tiles_for_tests(dir: &str) {
+    let mut st = store().lock().unwrap();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let name = e.unwrap().file_name().into_string().unwrap();
+        let Some((x, y)) = name.strip_suffix(".pbf").and_then(|n| n.split_once('_')) else { continue };
+        let (x, y) = (x.parse().unwrap(), y.parse().unwrap());
+        let tracks = decode(&std::fs::read(format!("{dir}/{name}")).unwrap_or_default(), ZOOM, x, y);
+        st.tracks.insert((x, y), (Instant::now(), Arc::new(tracks)));
+    }
+}
+
 /// The nearest point on the track, if it is loaded and near.
 pub fn snap(p: (f64, f64)) -> Option<(f64, f64)> {
     let g = graph_for(tiles_for(&[p], 0.005))?;

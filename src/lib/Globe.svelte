@@ -110,6 +110,7 @@
     trainLabel,
     trainPositionAge,
   } from "./trains";
+  import { type RouteCursor, routeAhead } from "./train-route";
 
   interface Props {
     flights: LiveFlight[];
@@ -148,6 +149,8 @@
     selectedTrain?: Train | null;
     /** The selected train's whole way along the track. */
     trainRoute?: TrainRoute | null;
+    /** The selected train isn't on its route (it is out of date): ask for it again. */
+    ontrainrouteoff?: () => void;
     /** A train was clicked. */
     ontrainselect?: (train: Train) => void;
     /** A train to highlight, e.g. the one under the pointer in the sidebar's list. */
@@ -188,6 +191,7 @@
     trains = [],
     selectedTrain = null,
     trainRoute = null,
+    ontrainrouteoff,
     ontrainselect,
     hoveredTrainId = null,
     hoveredShipMmsi = null,
@@ -1860,48 +1864,26 @@
   const TRAIN_ROUTE_DASH: [number, number, number, number] = [0, 0, 0, 255];
   const TRAIN_ROUTE_CASING: [number, number, number, number] = [236, 238, 244, 215];
   const TRAIN_ROUTE_DASHES: [number, number] = [2.2, 1.6];
-  /** How far along the route's first stretch the selected train was last found (searching on from there). */
-  let routeCursor: { route: TrainRoute; at: number; rest: [number, number][][] } | null = null;
-  /** A train further than this from its route's start (degrees, about 300 m) isn't on it yet: the route is drawn whole. */
-  const ON_ROUTE = 0.003;
-
-  /** The nearest point to `p` on the segment `a`-`b`, flat (fine over a few hundred metres), and its squared distance. */
-  function nearestOn(p: [number, number], a: [number, number], b: [number, number], k: number) {
-    const [dx, dy] = [(b[0] - a[0]) * k, b[1] - a[1]];
-    const len2 = dx * dx + dy * dy;
-    const t = len2 > 0 ? Math.max(0, Math.min(1, (((p[0] - a[0]) * k) * dx + (p[1] - a[1]) * dy) / len2)) : 0;
-    const q: [number, number] = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-    return { q, d2: ((p[0] - q[0]) * k) ** 2 + (p[1] - q[1]) ** 2 };
-  }
+  /** Where along its route the selected train was last found (searching on from there). */
+  let routeCursor: RouteCursor | null = null;
 
   /**
    * The selected train's way ahead as black dashes on a light casing, from
-   * where the train is drawn now along the track, and its stations. The
-   * part behind the train is trimmed off as it goes.
+   * exactly where the train is drawn now along the track, and its stations.
+   * The part behind the train is trimmed off as it goes.
    */
   function trainRouteLayers(r: TrainRoute, train: Train): Layer[] {
     const i = trainData?.byId.get(train.id);
-    const drawn: [number, number] = i !== undefined ? [trainData!.positions[i][0], trainData!.positions[i][1]] : [train.lon, train.lat];
-    const first = r.segments[0] ?? [];
-    if (routeCursor?.route !== r) routeCursor = { route: r, at: -1, rest: r.segments };
-    let head: [number, number][] = [];
-    if (first.length >= 2) {
-      // the segment of the first stretch the train is on: from where it was found last, a little way on
-      const k = Math.cos((drawn[1] * Math.PI) / 180);
-      const from = Math.max(0, routeCursor.at);
-      let best = { j: -1, d2: Infinity };
-      for (let j = from; j < Math.min(first.length - 1, from + 400); j++) {
-        const { d2 } = nearestOn(drawn, first[j], first[j + 1], k);
-        if (d2 < best.d2) best = { j, d2 };
-      }
-      if (best.j >= 0 && best.d2 < ON_ROUTE * ON_ROUTE) {
-        if (best.j !== routeCursor.at) {
-          routeCursor = { route: r, at: best.j, rest: [first.slice(best.j + 1), ...r.segments.slice(1)] };
-        }
-        head = [drawn, first[best.j + 1]];
-      }
-    }
-    const paths = routeCursor.rest.filter((p) => p.length >= 2);
+    const drawn: LonLat = i !== undefined ? [trainData!.positions[i][0], trainData!.positions[i][1]] : [train.lon, train.lat];
+    // where it is drawn going next, along the track
+    const nowMs = Date.now();
+    const frames = (i !== undefined ? trainData!.list[i] : train).frames ?? [];
+    const ahead = frames.filter((f) => f[2] > nowMs).map((f): LonLat => [f[1], f[0]]);
+    const way = routeAhead(r, drawn, routeCursor, ahead);
+    routeCursor = way.cursor;
+    if (!way.on) ontrainrouteoff?.();
+    const head = way.head;
+    const paths = way.rest;
     const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
     const stretch = (id: string, data: [number, number][][]) => [
       new PathLayer<[number, number][]>({

@@ -599,25 +599,43 @@
   /** Asked again this soon while the track is still loading, else this often (the train moves along it). */
   const ROUTE_LOADING_MS = 2_500;
   const ROUTE_REFRESH_MS = 30_000;
+  /** A train drawn off its route has it asked for again, at most this often. */
+  const ROUTE_OFF_MS = 3_000;
+  /** Asks for the selected train's route again now (the train isn't on the one shown); set while one is followed. */
+  let reloadRoute: (() => void) | null = null;
   $effect(() => {
     const id = followedId;
     shownRoute = null;
     if (!id || !id.startsWith("trafikverket:") || !isTauri()) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const load = () =>
+    let asking = false;
+    let askedAt = 0;
+    const load = () => {
+      clearTimeout(timer);
+      asking = true;
+      askedAt = Date.now();
       trainRoute(id).then(
         (r) => {
+          asking = false;
           if (!live) return;
           shownRoute = r;
           timer = setTimeout(load, r.complete ? ROUTE_REFRESH_MS : ROUTE_LOADING_MS);
         },
         // no timetable yet (it is learned with the next refresh): ask again
-        () => live && (timer = setTimeout(load, ROUTE_REFRESH_MS / 3)),
+        () => {
+          asking = false;
+          if (live) timer = setTimeout(load, ROUTE_REFRESH_MS / 3);
+        },
       );
+    };
+    reloadRoute = () => {
+      if (live && !asking && Date.now() - askedAt >= ROUTE_OFF_MS) load();
+    };
     load();
     return () => {
       live = false;
+      reloadRoute = null;
       clearTimeout(timer);
     };
   });
@@ -1210,6 +1228,7 @@
     {selectedShip}
     {selectedTrain}
     trainRoute={shownRoute}
+    ontrainrouteoff={() => reloadRoute?.()}
     onselect={(f) => {
       place = null;
       // a click on empty map lets go of a ship or a train too

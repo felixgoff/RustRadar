@@ -1706,24 +1706,34 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
     let delay = delay_cache().lock().unwrap().clone().and_then(|(_, _, d)| d.get(ident).copied());
     let seen = last_places().lock().unwrap().get(id).copied();
     let now = crate::trains::now_ms();
-    let at_ms = seen.map_or(now, |s| s.latest.t_ms);
-    let calls = calls_ahead(&run, delay, &stations, at_ms);
+    let lookup = operational_numbers().lock().unwrap().get(id).cloned();
+    let drawn = lookup.and_then(|n| drawn_now(&n, now));
+    Ok(route_from(&run, delay, &stations, seen.map(|s| s.latest), drawn, now))
+}
+
+/// `route`: the way on for a run from where the train is `drawn` at `now`
+/// (else where it was last `seen`).
+fn route_from(
+    run: &Service,
+    delay: Option<i32>,
+    stations: &HashMap<String, Station>,
+    seen: Option<motion::Fix>,
+    drawn: Option<motion::Drawn>,
+    now: i64,
+) -> TrainRoute {
+    let at_ms = seen.map_or(now, |s| s.t_ms);
+    let calls = calls_ahead(run, delay, stations, at_ms);
     let stops: Vec<motion::Stop> = calls.iter().map(|c| c.2).collect();
 
     // from where the train is drawn now (else where it was last seen): its
     // place, speed and the way it goes
-    let lookup = operational_numbers().lock().unwrap().get(id).cloned();
-    let start = lookup
-        .and_then(|n| drawn_now(&n, now))
-        .map(|d| (d.at, Some(d.v), d.heading))
-        .or_else(|| seen.map(|s| ((s.latest.lat, s.latest.lon), s.latest.speed, s.latest.heading)));
+    let start = drawn.map(|d| (d.at, Some(d.v), d.heading)).or_else(|| seen.map(|s| ((s.lat, s.lon), s.speed, s.heading)));
     // the station it stands at (it goes on from there), else the next on its way
     let (first, onwards) = match start.map(|(at, v, h)| motion::plan(at, v, h, &stops, now)) {
         Some(motion::Plan::Standing { at }) => (at, at + 1),
         Some(motion::Plan::Moving { next }) => (next, next),
         None => (0, 0),
     };
-    let ahead_calls = &calls[first.min(calls.len())..];
     // each place's possible spots, the one its motion heads for first
     let mut places: Vec<Vec<(f64, f64)>> = start.iter().map(|s| vec![s.0]).collect();
     places.extend(calls[onwards.min(calls.len())..].iter().map(|(call, station, stop, heading)| {
@@ -1737,8 +1747,10 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
     }));
     // on its way: on the way it is going, never back the way it came
     let heading = start.filter(|s| s.1.is_some_and(|v| v >= 0.5)).and_then(|s| s.2);
-    let (segments, complete) = crate::rail::way_through(&places, heading);
-    Ok(TrainRoute {
+    let (segments, complete, passed) = crate::rail::way_through(&places, heading);
+    // (and not the places it has passed)
+    let ahead_calls = &calls[(first + passed).min(calls.len())..];
+    TrainRoute {
         segments: segments
             .into_iter()
             .filter(|s| s.len() >= 2)
@@ -1755,7 +1767,7 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
             })
             .collect(),
         complete,
-    })
+    }
 }
 
 /// The runs known so far, by number.
@@ -2111,5 +2123,152 @@ mod tests {
             }
         }
         std::fs::write(format!("{dir}/replay.csv"), out).unwrap();
+    }
+
+    /// As `replay_live`, the route of each train at each report, from where
+    /// it is drawn: how far its start is from the train, and how far the train
+    /// drawn over the next 30 s (until the route is asked for again) is from
+    /// it, to `LIVE_DIR/routes.csv`.
+    #[test]
+    #[ignore]
+    fn replay_routes() {
+        let dir = std::env::var("LIVE_DIR").unwrap();
+        crate::rail::load_tiles_for_tests(&std::env::var("RAIL_TILES").unwrap());
+        let stations = parse_stations(&std::fs::read_to_string(format!("{dir}/stations.json")).unwrap()).unwrap();
+        let services = parse_services(&std::fs::read_to_string(format!("{dir}/services.json")).unwrap()).unwrap();
+        let mut events: Vec<(i64, Vec<Report>)> = std::fs::read_to_string(format!("{dir}/stream.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| {
+                let v: Value = serde_json::from_str(l).ok()?;
+                Some((v["at"].as_i64()?, parse_positions(v["data"].as_str()?).ok()?))
+            })
+            .collect();
+        events.sort_by_key(|e| e.0);
+        let plans: Plans = Default::default();
+        let only = std::env::var("REPLAY_ONLY").ok();
+        // the nearest a point is to a line of `[lon, lat]` points, metres, and how far along it
+        let off = |p: (f64, f64), line: &[[f64; 2]]| -> (f64, usize) {
+            line.windows(2)
+                .enumerate()
+                .map(|(j, w)| {
+                    let (q, _) = motion::project(p, (w[0][1], w[0][0]), (w[1][1], w[1][0]));
+                    (motion::distance(p, q), j)
+                })
+                .fold((f64::INFINITY, 0), |a, b| if b.0 < a.0 { b } else { a })
+        };
+        let mut out = String::from("now,train,v,drawn_lat,drawn_lon,segments,start_lat,start_lon,start_gap,max_off,back,first_m,stops\n");
+        for (now, reports) in events {
+            for r in reports
+                .iter()
+                .filter(|r| now - r.at_ms < STALE_REPORT_MS)
+                .filter(|r| only.as_deref().is_none_or(|o| o.split(',').any(|o| o == r.lookup())))
+            {
+                let prev = previous(r);
+                let Some(service) = services.get(r.lookup()).and_then(|runs| run_of(runs, r.date.as_deref())) else {
+                    continue;
+                };
+                let stops = stops_ahead(service, None, &stations, r.at_ms);
+                let class = crate::train_class::class_of(service.product_code.as_deref(), service.product.as_deref());
+                let rail = crate::rail::Rail { class: Some(class) };
+                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
+                let Some(drawn) = motion::drawn_at(&sim.frames, now) else { continue };
+                let route = route_from(service, None, &stations, Some(r.fix()), Some(drawn), now);
+                let first: &[[f64; 2]] = route.segments.first().map_or(&[], |s| s.as_slice());
+                let start = first.first().map_or((f64::NAN, f64::NAN), |p| (p[1], p[0]));
+                let gap = motion::distance(drawn.at, start);
+                // the train drawn on over the next 30 s: how far off the route, and whether it
+                // is found further back along it than before
+                let (mut max_off, mut back, mut was) = (0.0f64, false, 0);
+                for dt in (0..=30_000).step_by(2_000) {
+                    let Some(d) = motion::drawn_at(&sim.frames, now + dt) else { break };
+                    let (o, j) = off(d.at, first);
+                    max_off = max_off.max(o);
+                    back |= j < was;
+                    was = j;
+                }
+                let first_m: f64 = first.windows(2).map(|w| motion::distance((w[0][1], w[0][0]), (w[1][1], w[1][0]))).sum();
+                let names: Vec<&str> = route.stops.iter().map(|s| s.name.as_str()).take(2).collect();
+                out += &format!(
+                    "{now},{},{:.1},{:.6},{:.6},{},{:.6},{:.6},{gap:.0},{max_off:.0},{back},{first_m:.0},{}\n",
+                    r.lookup(),
+                    drawn.v,
+                    drawn.at.0,
+                    drawn.at.1,
+                    route.segments.len(),
+                    start.0,
+                    start.1,
+                    names.join("|"),
+                );
+            }
+        }
+        std::fs::write(format!("{dir}/routes.csv"), out).unwrap();
+    }
+
+    /// As `replay_routes`, as the app goes: each train drawn every half
+    /// second from its latest frames, its route asked for every 30 s, to
+    /// `LIVE_DIR/timeline.jsonl` (`{train, t, at: [lon, lat]}` and `{train, t,
+    /// route: [[lon, lat]…]…}`), for the page's way of drawing it to be tried on.
+    #[test]
+    #[ignore]
+    fn replay_route_timeline() {
+        let dir = std::env::var("LIVE_DIR").unwrap();
+        crate::rail::load_tiles_for_tests(&std::env::var("RAIL_TILES").unwrap());
+        let stations = parse_stations(&std::fs::read_to_string(format!("{dir}/stations.json")).unwrap()).unwrap();
+        let services = parse_services(&std::fs::read_to_string(format!("{dir}/services.json")).unwrap()).unwrap();
+        let mut events: Vec<(i64, Vec<Report>)> = std::fs::read_to_string(format!("{dir}/stream.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| {
+                let v: Value = serde_json::from_str(l).ok()?;
+                Some((v["at"].as_i64()?, parse_positions(v["data"].as_str()?).ok()?))
+            })
+            .collect();
+        events.sort_by_key(|e| e.0);
+        let plans: Plans = Default::default();
+        let only = std::env::var("REPLAY_ONLY").ok();
+        // each train's frames, and when its route was last asked for
+        let mut drawn: HashMap<String, (Vec<motion::Frame>, i64)> = HashMap::new();
+        let mut out = String::new();
+        let mut last = events.first().map_or(0, |e| e.0);
+        for (now, reports) in events {
+            for (train, (frames, _)) in &drawn {
+                for t in (last..now).step_by(500) {
+                    if let Some(d) = motion::drawn_at(frames, t) {
+                        out += &format!("{{\"train\":\"{train}\",\"t\":{t},\"at\":[{},{}]}}\n", d.at.1, d.at.0);
+                    }
+                }
+            }
+            last = now;
+            for r in reports
+                .iter()
+                .filter(|r| now - r.at_ms < STALE_REPORT_MS)
+                .filter(|r| only.as_deref().is_none_or(|o| o.split(',').any(|o| o == r.lookup())))
+            {
+                let prev = previous(r);
+                let Some(service) = services.get(r.lookup()).and_then(|runs| run_of(runs, r.date.as_deref())) else {
+                    continue;
+                };
+                let stops = stops_ahead(service, None, &stations, r.at_ms);
+                let class = crate::train_class::class_of(service.product_code.as_deref(), service.product.as_deref());
+                let rail = crate::rail::Rail { class: Some(class) };
+                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
+                let asked = drawn.get(r.lookup()).map_or(i64::MIN / 2, |d| d.1);
+                let asked = if now - asked >= 30_000 {
+                    let at = motion::drawn_at(&sim.frames, now);
+                    let route = route_from(service, None, &stations, Some(r.fix()), at, now);
+                    out += &format!(
+                        "{{\"train\":\"{}\",\"t\":{now},\"route\":{}}}\n",
+                        r.lookup(),
+                        serde_json::to_string(&route.segments).unwrap()
+                    );
+                    now
+                } else {
+                    asked
+                };
+                drawn.insert(r.lookup().to_owned(), (sim.frames, asked));
+            }
+        }
+        std::fs::write(format!("{dir}/timeline.jsonl"), out).unwrap();
     }
 }

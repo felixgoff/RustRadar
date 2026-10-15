@@ -42,6 +42,8 @@ const DISK_FRESH: Duration = Duration::from_secs(14 * 24 * 3600);
 const MAX_ROUTE_TILES: usize = 64;
 /// One leg of a whole run, station to station.
 const MAX_LEG_TILES: usize = 160;
+/// A train on its way has passed at most this many places it can't reach going on.
+const MAX_PASSED: usize = 3;
 /// Fetches at once in the background.
 const MAX_LOADING: usize = 16;
 /// A tile that failed is asked again after this.
@@ -1443,8 +1445,10 @@ fn end_heading(points: &[(f64, f64)]) -> Option<f64> {
 /// leg whose track isn't loaded yet (that and the next few are sent for):
 /// then it is incomplete.
 /// `heading`: the way it is going at the first place, when it is on its way
-/// (it never turns back there).
-pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Line>, bool) {
+/// (it never turns back there): then a place next it can't reach going on
+/// is one it has passed, and it goes on to the one after (up to
+/// `MAX_PASSED` of them). Also how many it passed.
+pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Line>, bool, usize) {
     let places: Vec<&[(f64, f64)]> = places.iter().map(|p| &p[..p.len().min(MAX_PLATFORMS)]).filter(|p| !p.is_empty()).collect();
     let keys_between = |a: &[(f64, f64)], b: &[(f64, f64)]| {
         let mut points = a.to_vec();
@@ -1454,9 +1458,14 @@ pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Lin
     let mut stretches = Vec::new();
     let mut cur: Line = Vec::new();
     let mut complete = true;
-    let Some(first) = places.first() else { return (stretches, complete) };
+    let mut passed = 0;
+    let Some(first) = places.first() else { return (stretches, complete, passed) };
     let mut at = first[0];
-    for i in 1..places.len() {
+    let mut i = 0;
+    while i + 1 < places.len() {
+        i += 1;
+        // the first leg, from where it is
+        let from_start = i == passed + 1;
         let keys = keys_between(&[at], places[i]);
         let found = if keys.len() > MAX_LEG_TILES {
             None
@@ -1476,7 +1485,7 @@ pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Lin
             let mut through = None;
             for &spot in places[i] {
                 // a train on its way never turns back to start with
-                let r = match heading.filter(|_| i == 1) {
+                let r = match heading.filter(|_| from_start) {
                     Some(h) => route_in_onwards(&g, at, Some(h), &[spot], 0.0, 1.0).filter(|r| r.reached.len() == 1),
                     None => leg(&g, at, end_heading(&cur), spot),
                 };
@@ -1497,6 +1506,15 @@ pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Lin
             }
             through.or(first_reached)
         };
+        if found.is_none() && from_start && heading.is_some() {
+            if passed < MAX_PASSED && i + 1 < places.len() {
+                passed += 1;
+                continue;
+            }
+            // none it can reach: not passed, but no way there known (a gap)
+            (i, passed, at) = (1, 0, places[1][0]);
+            continue;
+        }
         match found {
             Some((spot, r)) => {
                 if cur.is_empty() {
@@ -1518,7 +1536,7 @@ pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Lin
     if cur.len() >= 2 {
         stretches.push(cur);
     }
-    (stretches, complete)
+    (stretches, complete, passed)
 }
 
 /// The track, for the motion module, as a train of a class runs on it
@@ -1689,11 +1707,33 @@ mod tests {
             }
             st.tracks.insert(tile_of(a.0, a.1), (Instant::now(), Arc::new(vec![track(l)])));
         }
-        let (stretches, complete) = way_through(&places, None);
+        let (stretches, complete, _) = way_through(&places, None);
         assert!(complete);
         assert_eq!(stretches.len(), 1, "A to B only: {stretches:?}");
         assert!(stretches[0].iter().all(|p| (p.0 - a.0).abs() < 1e-4), "along the track, not off to C");
         assert!(distance(*stretches[0].last().unwrap(), b) < 1.0);
+    }
+
+    #[test]
+    fn a_train_on_its_way_goes_on_from_where_it_is_not_from_the_station_it_left() {
+        // track east 4 km; the train 800 m along, going east, 300 m past the station it left
+        let a = (62.0, 16.0);
+        let train = ahead(a, 90.0, 800.0);
+        let (left, next) = (ahead(a, 90.0, 500.0), ahead(a, 90.0, 3_000.0));
+        {
+            let mut st = store().lock().unwrap();
+            for key in tiles_for(&[a, ahead(a, 90.0, 4_000.0)], 0.05) {
+                st.tracks.insert(key, (Instant::now(), Arc::new(Vec::new())));
+            }
+            st.tracks.insert(tile_of(a.0, a.1), (Instant::now(), Arc::new(vec![track(line(a, 90.0, 4.0))])));
+        }
+        let (stretches, complete, passed) = way_through(&[vec![train], vec![left], vec![next]], Some(90.0));
+        assert!(complete);
+        assert_eq!(passed, 1, "the station it left is behind it");
+        assert_eq!(stretches.len(), 1);
+        assert!(distance(stretches[0][0], train) < 1.0, "from the train: {:?}", stretches[0][0]);
+        assert!(stretches[0].iter().all(|p| p.1 >= train.1 - 1e-6), "never back past the train");
+        assert!(distance(*stretches[0].last().unwrap(), next) < 1.0);
     }
 
     #[test]
@@ -1906,7 +1946,7 @@ mod tests {
         let malmo_spots = spots(malmo, "2b");
         let yard_2a = (55.6105, 13.0074);
         assert!(malmo_spots.iter().all(|p| distance(*p, yard_2a) > 150.0), "never the yard: {malmo_spots:?}");
-        let (stretches, complete) = way_through(&[spots(lund, "2"), malmo_spots, spots(triangeln, "1")], None);
+        let (stretches, complete, _) = way_through(&[spots(lund, "2"), malmo_spots, spots(triangeln, "1")], None);
         assert!(complete);
         eprintln!("{} stretches, {:?} points", stretches.len(), stretches.iter().map(|s| s.len()).collect::<Vec<_>>());
         assert_eq!(stretches.len(), 1, "no gap");

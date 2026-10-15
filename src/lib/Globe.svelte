@@ -1640,22 +1640,49 @@
     /** Indices of the trains with frames to move along. */
     moving: number[];
     byId: Map<string, number>;
+    /** Trains easing from where they were drawn onto their new report: the offset left, and since when. */
+    blends: Map<number, { dLat: number; dLon: number; from: number }>;
   };
+  /** How long a train takes to ease onto a new report. */
+  const TRAIN_BLEND_MS = 2000;
   let trainData: TrainData | null = null;
   let trainAtlasData: ReturnType<typeof trainAtlas> | undefined;
   /** Bumped whenever the drawn positions change: a new list, or the moving trains stepping on. */
   let trainMoves = 0;
-  function trainsFor(list: Train[]): TrainData {
+  function trainsFor(list: Train[], nowMs: number): TrainData {
     if (trainData?.list === list) return trainData;
-    const data: TrainData = { list, positions: [], headings: [], icons: [], colors: [], all: [], moving: [], byId: new Map() };
+    const old = trainData;
+    const data: TrainData = {
+      list,
+      positions: [],
+      headings: [],
+      icons: [],
+      colors: [],
+      all: [],
+      moving: [],
+      byId: new Map(),
+      blends: new Map(),
+    };
     list.forEach((train, i) => {
+      // a new report moves the train on from where it is drawn, not with a jump
+      const was = old?.byId.get(train.id);
+      if (was !== undefined) {
+        const [lon, lat] = old!.positions[was];
+        const to = positionAt(train, nowMs);
+        const dLat = lat - to.lat;
+        const dLon = ((lon - to.lon + 540) % 360) - 180;
+        // further than a train goes in a minute is a different place, not a correction
+        if ((dLat || dLon) && Math.abs(dLat) < 0.05 && Math.abs(dLon) < 0.1) {
+          data.blends.set(i, { dLat, dLon, from: nowMs });
+        }
+      }
       data.positions.push([train.lon, train.lat, 0]);
       data.headings.push(train.heading);
       data.icons.push(trainIcon(train.kind, train.heading, train.operator));
       data.colors.push([...trainColorOf(train), TRAIN_ALPHA]);
       data.all.push(i);
       data.byId.set(train.id, i);
-      if ((train.frames?.length ?? 0) > 1) data.moving.push(i);
+      if ((train.frames?.length ?? 0) > 1 || data.blends.has(i)) data.moving.push(i);
     });
     trainData = data;
     trainMoves++;
@@ -1666,7 +1693,16 @@
     if (!data.moving.length) return;
     for (const i of data.moving) {
       const train = data.list[i];
-      const { lat, lon } = positionAt(train, nowMs);
+      let { lat, lon } = positionAt(train, nowMs);
+      const blend = data.blends.get(i);
+      if (blend) {
+        // eased: quick at first, settling onto the new course
+        const left = 1 - Math.min(1, (nowMs - blend.from) / TRAIN_BLEND_MS);
+        const k = left * left * (3 - 2 * left);
+        lat += blend.dLat * k;
+        lon += blend.dLon * k;
+        if (left === 0) data.blends.delete(i);
+      }
       const heading = headingAt(train, nowMs);
       data.positions[i] = [lon, lat, 0];
       data.headings[i] = heading;
@@ -1683,7 +1719,7 @@
   };
   function trainLayers(list: Train[], flat: boolean, mpp: number, nowMs: number): Layer[] {
     const { zoom, bearing, pitch, longitude, latitude } = view;
-    const data = trainsFor(list);
+    const data = trainsFor(list, nowMs);
     if (!list.length) return [];
     trainAtlasData ??= trainAtlas();
     if (!trainAtlasData) return [];

@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::motion;
 use crate::trains::{Kind, Train, unix_ms};
 
 const URL: &str = "https://api.trafikinfo.trafikverket.se/v2/data.json";
@@ -81,18 +82,21 @@ const ANNOUNCEMENT_FIELDS: &[&str] = &[
     "Canceled",
 ];
 
-/// What runs as each of these numbers (a batch of them): their departures
-/// since yesterday, with the fields that don't change along the way.
+/// What runs as each of these numbers (a batch of them): every call since
+/// yesterday, with the fields that don't change along the way.
 fn services_query(idents: &[String]) -> String {
     let any: String =
         idents.iter().map(|i| format!("<EQ name=\"AdvertisedTrainIdent\" value=\"{}\"/>", xml_escape(i))).collect();
     format!(
-        "<QUERY objecttype=\"TrainAnnouncement\" schemaversion=\"1.9\">\
-         <FILTER><AND><OR>{any}</OR><EQ name=\"ActivityType\" value=\"Avgang\"/>\
+        "<QUERY objecttype=\"TrainAnnouncement\" schemaversion=\"1.9\" orderby=\"AdvertisedTimeAtLocation\">\
+         <FILTER><AND><OR>{any}</OR>\
          <GT name=\"ScheduledDepartureDateTime\" value=\"$dateadd(-1.12:00:00)\"/></AND></FILTER>{}</QUERY>",
         includes(&[
             "AdvertisedTrainIdent",
             "ScheduledDepartureDateTime",
+            "ActivityType",
+            "LocationSignature",
+            "AdvertisedTimeAtLocation",
             "ProductInformation",
             "InformationOwner",
             "Operator",
@@ -212,6 +216,16 @@ pub struct Service {
     pub to: Option<String>,
     /// The day of its first departure, `YYYY-MM-DD`: with the number, which run it is.
     pub date: String,
+    /// Where it stops, in order, with the timetable's times.
+    pub calls: Vec<Call>,
+}
+
+/// A stop in the timetable: the station and the planned times, Unix ms.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Call {
+    pub station: String,
+    pub arrive: Option<i64>,
+    pub depart: Option<i64>,
 }
 
 fn day(row: &Value) -> String {
@@ -228,15 +242,42 @@ pub fn parse_services(body: &str) -> Result<HashMap<String, Vec<Service>>, Strin
         };
         let date = day(row);
         let runs = services.entry(ident).or_default();
-        if runs.iter().any(|s| s.date == date) {
+        let at = match runs.iter().position(|s| s.date == date) {
+            Some(at) => at,
+            None => {
+                runs.push(Service {
+                    product: description(&row["ProductInformation"]),
+                    owner: text(&row["InformationOwner"]).or_else(|| text(&row["Operator"])),
+                    to: last_location(&row["ToLocation"]),
+                    date,
+                    calls: Vec::new(),
+                });
+                runs.len() - 1
+            }
+        };
+        let (Some(station), Some(time)) =
+            (text(&row["LocationSignature"]), row["AdvertisedTimeAtLocation"].as_str().and_then(unix_ms))
+        else {
             continue;
-        }
-        runs.push(Service {
-            product: description(&row["ProductInformation"]),
-            owner: text(&row["InformationOwner"]).or_else(|| text(&row["Operator"])),
-            to: last_location(&row["ToLocation"]),
-            date,
+        };
+        let departure = row["ActivityType"].as_str() == Some("Avgang");
+        let calls = &mut runs[at].calls;
+        // an arrival and a departure at the same station are one call, in either order
+        let merge = calls.last().is_some_and(|c: &Call| {
+            c.station == station && if departure { c.depart.is_none() } else { c.arrive.is_none() }
         });
+        if !merge {
+            calls.push(Call { station, ..Default::default() });
+        }
+        let call = calls.last_mut().expect("just pushed");
+        if departure {
+            call.depart = Some(time);
+        } else {
+            call.arrive = Some(time);
+        }
+    }
+    for run in services.values_mut().flatten() {
+        run.calls.sort_by_key(|c| c.arrive.or(c.depart).unwrap_or(0));
     }
     Ok(services)
 }
@@ -364,6 +405,7 @@ pub fn train(
     services: &HashMap<String, Vec<Service>>,
     delays: &HashMap<String, i32>,
     stations: &HashMap<String, Station>,
+    now_ms: i64,
 ) -> Train {
     let service = if report.advertised {
         services.get(&report.number).and_then(|r| run_of(r, report.date.as_deref()))
@@ -374,6 +416,17 @@ pub fn train(
     let owner = service.and_then(|s| s.owner.clone());
     let date = service.map(|s| s.date.clone()).or_else(|| report.date.clone()).unwrap_or_default();
     let number = &report.number;
+    let delay = if report.advertised { delays.get(number).copied() } else { None };
+    let stops = service.map(|s| stops_ahead(s, delay, stations, report.at_ms)).unwrap_or_default();
+    let frames = motion::frames(
+        report.lat,
+        report.lon,
+        report.at_ms,
+        report.speed.map(|s| f64::from(s) / 3.6),
+        report.bearing.map(f64::from),
+        &stops,
+        now_ms,
+    );
     Train {
         // the advertised number and its day are what the stops are looked up by
         id: format!("trafikverket:{date}:{}{number}", if report.advertised { "" } else { "~" }),
@@ -391,10 +444,35 @@ pub fn train(
             .and_then(|s| s.to.as_ref())
             .map(|sig| stations.get(sig).map_or_else(|| sig.clone(), |st| st.name.clone())),
         operator: owner,
-        delay_minutes: if report.advertised { delays.get(number).copied() } else { None },
+        delay_minutes: delay,
         position_unix: report.at_ms / 1000,
-        frames: Vec::new(),
+        frames,
     }
+}
+
+/// The run's stops still ahead at `at_ms`, with places, at the times now
+/// expected: the timetable's shifted by the delay (never leaving early).
+fn stops_ahead(
+    run: &Service,
+    delay: Option<i32>,
+    stations: &HashMap<String, Station>,
+    at_ms: i64,
+) -> Vec<motion::Stop> {
+    let late = i64::from(delay.unwrap_or(0)) * 60_000;
+    run.calls
+        .iter()
+        .filter_map(|c| {
+            let station = stations.get(&c.station)?;
+            Some(motion::Stop {
+                lat: station.lat?,
+                lon: station.lon?,
+                arrive_ms: c.arrive.map(|t| t + late),
+                depart_ms: c.depart.map(|t| t + late.max(0)),
+            })
+        })
+        // a couple of minutes' grace: the delay is the one at its last report
+        .skip_while(|s| s.depart_ms.or(s.arrive_ms).is_none_or(|t| t < at_ms - 120_000))
+        .collect()
 }
 
 // ------------------------------------------------------------------- stops
@@ -614,7 +692,7 @@ pub async fn trains(http: &reqwest::Client, key: &str, now_ms: i64) -> Result<Ve
         eprintln!("trafikverket: delays: {e}");
         Default::default()
     });
-    Ok(reports.iter().map(|r| train(r, &services, &delays, &stations)).collect())
+    Ok(reports.iter().map(|r| train(r, &services, &delays, &stations, now_ms)).collect())
 }
 
 /// Every stop of a train, by the id `trains` gave it.
@@ -685,7 +763,7 @@ mod tests {
         let services = parse_services(ANNOUNCEMENTS).unwrap();
         let delays = parse_delays(ANNOUNCEMENTS, now).unwrap();
         let reports = parse_positions(POSITIONS).unwrap();
-        let mut trains: Vec<Train> = reports.iter().map(|r| train(r, &services, &delays, &stations)).collect();
+        let mut trains: Vec<Train> = reports.iter().map(|r| train(r, &services, &delays, &stations, now)).collect();
         trains.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(trains.len(), 3, "the inactive one is left out, the repeat merged");
 

@@ -268,8 +268,8 @@ impl Source {
     }
 
     fn ttl(self) -> Duration {
-        // Trafikverket's trains come live from its stream; while that brings nothing, asked for often
-        if self == Source::Trafikverket && !crate::trafikverket::national_live() {
+        // Trafikverket's trains come live from its streams; while they bring nothing, asked for often
+        if self == Source::Trafikverket && !crate::trafikverket::streams_live() {
             return Duration::from_secs(10);
         }
         Duration::from_secs(if self.whole() { 30 } else { 20 })
@@ -1107,7 +1107,7 @@ pub fn patch(source: Source, moved: Vec<Train>) -> bool {
 
 /// When the map last asked for Trafikverket's trains, Unix ms.
 static TRAFIKVERKET_ASKED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-/// The country stream runs while the map asked for them this recently.
+/// The operators' live streams run while the map asked for them this recently.
 const WANTED_FOR_MS: i64 = 120_000;
 
 /// Whether the map shows Trafikverket's trains: their live stream is worth running.
@@ -1169,6 +1169,13 @@ pub async fn train_route(id: String) -> CmdResult<crate::trafikverket::TrainRout
 pub fn watch_trains(ids: Vec<String>) {
     let ids: Vec<String> = ids.into_iter().filter(|id| id.starts_with("trafikverket:")).collect();
     crate::trafikverket::watch(&ids);
+}
+
+/// The operators the map leaves out (as trains name them; "" for trains
+/// whose operator isn't known): their trains aren't streamed live.
+#[tauri::command]
+pub fn hide_train_operators(names: Vec<String>) {
+    crate::trafikverket::hide_operators(names);
 }
 
 /// Every stop of a train, for the sources that have its timetable; none for the others.

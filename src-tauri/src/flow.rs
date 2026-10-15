@@ -85,4 +85,3 @@ mod tests {
         assert!(covers(55.5, 12.9, 55.7, 13.2), "Skåne");
     }
 }
-

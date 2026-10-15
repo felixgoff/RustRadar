@@ -37,6 +37,7 @@
     type TrainRoute,
     trainRoute,
     watchTrains,
+    hideTrainOperators,
     followTrain,
     unfollowTrain,
   } from "$lib/api";
@@ -522,9 +523,9 @@
       if (request === trainsRequest) trainsFailed = true;
     }
   }
-  // Trafikverket's trains come live, the whole country in one stream: the
-  // backend moves them as reports come and says so; asked again for the view,
-  // at most this often
+  // Trafikverket's trains come live, a stream for each operator: the backend
+  // moves them as reports come and says so; asked again for the view, at
+  // most this often
   const TRAINS_LIVE_MS = 1_500;
   let trainsLiveAt = 0;
   let trainsLivePending: ReturnType<typeof setTimeout> | undefined;
@@ -654,6 +655,11 @@
   const ORIGIN = { lat: 0, lon: 0 };
 
   const trainsFiltered = $derived(trains.filter(trainFilter(trainFilters)));
+  // the operators left out aren't streamed live either
+  $effect(() => {
+    const hidden = [...trainFilters.hiddenOperators];
+    if (isTauri()) hideTrainOperators(hidden).catch(() => {});
+  });
   const trainsListed = $derived.by(() => {
     const q = trainQuery.trim();
     const sort = trainFilters.sort;

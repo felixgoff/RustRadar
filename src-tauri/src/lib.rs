@@ -671,7 +671,7 @@ pub fn run() {
                 rail::set_cache_dir(dir);
             }
             // every Swedish train's position as it comes, while the map shows them
-            trafikverket::start_national(app.handle().clone());
+            trafikverket::start_operator_streams(app.handle().clone());
             // and the trains in view, close up, as live as a followed one
             trafikverket::start_view_streams(app.handle().clone());
             // the main window starts hidden: update first, then open it
@@ -741,6 +741,7 @@ pub fn run() {
             trains::train_stops,
             trains::train_route,
             trains::watch_trains,
+            trains::hide_train_operators,
             devlog::dev_log,
             devlog::dev_log_clear,
             trafikverket::product_codes,

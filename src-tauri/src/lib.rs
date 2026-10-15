@@ -1,9 +1,12 @@
 mod adsblol;
 mod board;
+mod devlog;
 mod dwd;
 mod export;
+mod flow;
 mod geocode;
 mod keys;
+mod lines;
 mod liveries;
 // the checks run in the desktop tests too; only phones use it
 #[cfg(any(mobile, test))]
@@ -13,12 +16,17 @@ mod motion;
 mod mrms;
 mod opensky;
 mod radar;
+mod osm_platforms;
+mod rail;
 mod reference;
 mod runways;
 mod session;
 mod ships;
+mod sth;
 mod taxiways;
 mod trafikverket;
+mod train_class;
+mod train_media;
 mod trains;
 #[cfg(desktop)]
 mod updater;
@@ -654,7 +662,20 @@ pub fn run() {
             radar_fetching: Mutex::new(HashSet::new()),
             opensky: tokio::sync::Mutex::new(opensky::Cache::default()),
         })
+        // the rail network's tiles, for the map: fetched and kept by the backend
+        .register_asynchronous_uri_scheme_protocol("railtiles", |_ctx, request, responder| {
+            let path = request.uri().path().to_owned();
+            tauri::async_runtime::spawn(async move { responder.respond(rail::serve(&path).await) });
+        })
         .setup(|app| {
+            if let Ok(dir) = app.path().app_cache_dir() {
+                osm_platforms::set_cache_dir(dir.clone());
+                rail::set_cache_dir(dir);
+            }
+            // every Swedish train's position as it comes, while the map shows them
+            trafikverket::start_operator_streams(app.handle().clone());
+            // and the trains in view, close up, as live as a followed one
+            trafikverket::start_view_streams(app.handle().clone());
             // the main window starts hidden: update first, then open it
             #[cfg(desktop)]
             tauri::async_runtime::spawn(updater::run(app.handle().clone()));
@@ -720,6 +741,15 @@ pub fn run() {
             ships::ship_details,
             trains::trains_in_view,
             trains::train_stops,
+            trains::train_route,
+            trains::watch_trains,
+            trains::hide_train_operators,
+            devlog::dev_log,
+            devlog::dev_log_clear,
+            trafikverket::product_codes,
+            trains::follow_train,
+            trains::unfollow_train,
+            train_media::train_media,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

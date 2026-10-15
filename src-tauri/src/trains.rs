@@ -111,9 +111,30 @@ pub struct Train {
     pub delay_minutes: Option<i32>,
     /// When the position was reported, Unix seconds.
     pub position_unix: i64,
-    /// Expected positions ahead, `(lat, lon, unix_ms)` in time order, the
-    /// first at the report; empty when the source has none.
+    /// Where it is drawn, `(lat, lon, unix_ms)` in time order, from about
+    /// now on (from when it stopped, standing); empty when there is nothing
+    /// to move it by.
     pub frames: Vec<(f64, f64, i64)>,
+    /// Dev builds: its latest report and the one before, for the map to
+    /// mark. Empty in release builds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reports: Vec<Sighting>,
+    /// Dev builds: where the real train most likely is, as `frames`, for the
+    /// map to mark. Empty in release builds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub predicted: Vec<(f64, f64, i64)>,
+}
+
+/// A position report as the dev map marks it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sighting {
+    pub lat: f64,
+    pub lon: f64,
+    pub unix_ms: i64,
+    pub speed_kmh: Option<f32>,
+    /// The newest report; else the one before it, the train is drawn from.
+    pub latest: bool,
 }
 
 /// Degrees; `west > east` crosses the antimeridian.
@@ -247,6 +268,10 @@ impl Source {
     }
 
     fn ttl(self) -> Duration {
+        // Trafikverket's trains come live from its streams; while they bring nothing, asked for often
+        if self == Source::Trafikverket && !crate::trafikverket::streams_live() {
+            return Duration::from_secs(10);
+        }
         Duration::from_secs(if self.whole() { 30 } else { 20 })
     }
 
@@ -291,7 +316,7 @@ fn radar_area(view: &Area) -> Area {
 
 // ---------------------------------------------------------------- helpers
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
@@ -447,6 +472,8 @@ fn digitraffic_train(t: &Value) -> Option<Train> {
         delay_minutes: num(&t["done"][0]["differenceInMinutes"]).map(|d| d.round() as i32),
         position_unix: latest["timestamp"].as_str().and_then(unix_ms).map(|ms| ms / 1000)?,
         frames: Vec::new(),
+        reports: Vec::new(),
+        predicted: Vec::new(),
     })
 }
 
@@ -512,6 +539,8 @@ fn amtraker_train(t: &Value) -> Option<Train> {
         delay_minutes: delay,
         position_unix: position_ms / 1000,
         frames: Vec::new(),
+        reports: Vec::new(),
+        predicted: Vec::new(),
     })
 }
 
@@ -578,6 +607,8 @@ fn entur_train(v: &Value) -> Option<Train> {
         delay_minutes: num(&v["delay"]).map(|s| (s / 60.0).round() as i32),
         position_unix: v["lastUpdated"].as_str().and_then(unix_ms)? / 1000,
         frames: Vec::new(),
+        reports: Vec::new(),
+        predicted: Vec::new(),
     })
 }
 
@@ -648,6 +679,8 @@ fn irishrail_train(block: &str, now_ms: i64) -> Option<Train> {
         delay_minutes: delay,
         position_unix: now_ms / 1000,
         frames: Vec::new(),
+        reports: Vec::new(),
+        predicted: Vec::new(),
     })
 }
 
@@ -729,6 +762,8 @@ fn radar_train(m: &Value, source: &'static str, now_ms: i64) -> Option<Train> {
         delay_minutes: delay.map(|s| (s / 60.0).round() as i32),
         position_unix: now_ms / 1000,
         frames,
+        reports: Vec::new(),
+        predicted: Vec::new(),
     })
 }
 
@@ -880,7 +915,31 @@ type Failure = (String, Option<Duration>);
 
 async fn send(source: Source, request: reqwest::RequestBuilder) -> Result<String, Failure> {
     let name = source.label();
-    let response = request.send().await.map_err(|e| (format!("can't reach {name}: {e}"), None))?;
+    let (http, request) = request.build_split();
+    let request = request.map_err(|e| (format!("{name}: {e}"), None))?;
+    let sent = request.body().and_then(|b| b.as_bytes()).map(String::from_utf8_lossy);
+    let call = crate::devlog::start(name, request.method().as_str(), request.url().as_str(), sent.as_deref());
+    let response = match http.execute(request).await {
+        Ok(r) => r,
+        Err(e) => {
+            let e = format!("can't reach {name}: {e}");
+            if let Some(c) = call {
+                c.fail(&e);
+            }
+            return Err((e, None));
+        }
+    };
+    let status = response.status();
+    let Some(call) = call else { return read(name, response).await };
+    let text = read(name, response).await;
+    match &text {
+        Ok(body) => call.finish(status.as_u16(), body.as_bytes()),
+        Err((e, _)) => call.fail(e),
+    }
+    text
+}
+
+async fn read(name: &str, response: reqwest::Response) -> Result<String, Failure> {
     let status = response.status();
     if !status.is_success() {
         let retry_after = response
@@ -968,8 +1027,17 @@ async fn refresh(source: Source, key: String, area: Area) -> Result<Arc<Vec<Trai
     with_state(source, |s| {
         s.refreshing.remove(&key);
         match result {
-            Ok(trains) => {
+            Ok(mut trains) => {
                 s.succeeded();
+                // a train the stream moved on since keeps its newer report
+                if let Some((_, had)) = s.entries.get(&key) {
+                    let newer: HashMap<&str, &Train> = had.iter().map(|t| (t.id.as_str(), t)).collect();
+                    for t in &mut trains {
+                        if let Some(n) = newer.get(t.id.as_str()).filter(|n| n.position_unix > t.position_unix) {
+                            *t = (*n).clone();
+                        }
+                    }
+                }
                 let trains = Arc::new(trains);
                 s.store(key, trains.clone());
                 Ok(trains)
@@ -1004,6 +1072,49 @@ async fn from_source(source: Source, view: Area) -> Result<Vec<Train>, String> {
     Ok(trains.iter().filter(|t| within.contains(t.lat, t.lon)).cloned().collect())
 }
 
+/// Puts trains a live stream moved into the source's cached answer, in
+/// place of their older selves; trains not there yet are added. Whether
+/// anything changed. The cache's age is left alone: the regular refresh
+/// still comes, for the trains that stopped reporting.
+pub fn patch(source: Source, moved: Vec<Train>) -> bool {
+    let (key, _) = source.request(&Area::WORLD);
+    with_state(source, |s| {
+        let Some((at, had)) = s.entries.get(&key) else { return false };
+        let at = *at;
+        let mut trains: Vec<Train> = had.as_ref().clone();
+        let mut index: HashMap<String, usize> = trains.iter().enumerate().map(|(i, t)| (t.id.clone(), i)).collect();
+        let mut changed = false;
+        for t in moved {
+            match index.get(&t.id) {
+                Some(&i) if trains[i].position_unix >= t.position_unix => {}
+                Some(&i) => {
+                    trains[i] = t;
+                    changed = true;
+                }
+                None => {
+                    index.insert(t.id.clone(), trains.len());
+                    trains.push(t);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            s.entries.insert(key, (at, Arc::new(trains)));
+        }
+        changed
+    })
+}
+
+/// When the map last asked for Trafikverket's trains, Unix ms.
+static TRAFIKVERKET_ASKED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+/// The operators' live streams run while the map asked for them this recently.
+const WANTED_FOR_MS: i64 = 120_000;
+
+/// Whether the map shows Trafikverket's trains: their live stream is worth running.
+pub fn trafikverket_wanted() -> bool {
+    now_ms() - TRAFIKVERKET_ASKED.load(std::sync::atomic::Ordering::Relaxed) < WANTED_FOR_MS
+}
+
 /// The sources worth asking for a view at a deck.gl zoom.
 pub fn sources_for(view: &Area, zoom: f64) -> Vec<Source> {
     let keyed = !crate::keys::current().trafikverket.is_empty();
@@ -1011,6 +1122,60 @@ pub fn sources_for(view: &Area, zoom: f64) -> Vec<Source> {
         .into_iter()
         .filter(|s| zoom >= s.min_zoom() && s.covers(view) && (*s != Source::Trafikverket || keyed))
         .collect()
+}
+
+fn followed() -> &'static Mutex<Option<tauri::async_runtime::JoinHandle<()>>> {
+    static F: OnceLock<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> = OnceLock::new();
+    F.get_or_init(Default::default)
+}
+
+/// Streams live updates of a train (its position and its stops) until
+/// `unfollow_train` or another train is followed. Trafikverket's trains only:
+/// the other sources have no stream.
+#[tauri::command]
+pub fn follow_train(id: String, on_event: tauri::ipc::Channel<crate::trafikverket::TrainEvent>) -> CmdResult<()> {
+    let key = crate::keys::current().trafikverket;
+    let task = (id.starts_with("trafikverket:") && !key.is_empty())
+        .then(|| Ok::<_, String>(tauri::async_runtime::spawn(crate::trafikverket::follow(client()?.clone(), key, id, on_event))))
+        .transpose()?;
+    if let Some(previous) = std::mem::replace(&mut *followed().lock().unwrap_or_else(|e| e.into_inner()), task) {
+        previous.abort();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unfollow_train() {
+    if let Some(task) = followed().lock().unwrap_or_else(|e| e.into_inner()).take() {
+        task.abort();
+    }
+}
+
+/// The whole way of a train along the track, for the sources that have its
+/// timetable. Made from the track loaded so far: while `complete` is false,
+/// ask again in a moment.
+#[tauri::command]
+pub async fn train_route(id: String) -> CmdResult<crate::trafikverket::TrainRoute> {
+    let key = crate::keys::current().trafikverket;
+    // a whole run is a few hundred kilometres of track: off the async threads
+    tauri::async_runtime::spawn_blocking(move || crate::trafikverket::route(&id, &key))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The trains the map shows close up (by id): streamed live, every few
+/// seconds, like a followed one. Trafikverket's only; an empty list stops it.
+#[tauri::command]
+pub fn watch_trains(ids: Vec<String>) {
+    let ids: Vec<String> = ids.into_iter().filter(|id| id.starts_with("trafikverket:")).collect();
+    crate::trafikverket::watch(&ids);
+}
+
+/// The operators the map leaves out (as trains name them; "" for trains
+/// whose operator isn't known): their trains aren't streamed live.
+#[tauri::command]
+pub fn hide_train_operators(names: Vec<String>) {
+    crate::trafikverket::hide_operators(names);
 }
 
 /// Every stop of a train, for the sources that have its timetable; none for the others.
@@ -1030,6 +1195,9 @@ pub async fn train_stops(id: String) -> CmdResult<Vec<crate::trafikverket::Stop>
 pub async fn trains_in_view(west: f64, south: f64, east: f64, north: f64, zoom: f64) -> CmdResult<Vec<Train>> {
     let view = Area::view(west, south, east, north).ok_or("not an area")?;
     let sources = sources_for(&view, if zoom.is_finite() { zoom } else { 0.0 });
+    if sources.contains(&Source::Trafikverket) {
+        TRAFIKVERKET_ASKED.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
     let results = futures_util::future::join_all(sources.iter().map(|s| from_source(*s, view))).await;
     let mut trains = Vec::new();
     let mut errors = Vec::new();
@@ -1042,18 +1210,18 @@ pub async fn trains_in_view(west: f64, south: f64, east: f64, north: f64, zoom: 
     if trains.is_empty() && !errors.is_empty() && errors.len() == sources.len() {
         return Err(errors.join("; "));
     }
-    // the rest glide on along their heading between reports
+    // the rest glide on along the track ahead (or their heading) between reports
     let now = now_ms();
+    let rail = crate::rail::Rail { class: None };
     for t in trains.iter_mut().filter(|t| t.frames.is_empty()) {
-        t.frames = crate::motion::frames(
-            t.lat,
-            t.lon,
-            t.position_unix * 1000,
-            t.speed_kmh.map(|s| f64::from(s) / 3.6),
-            t.heading.map(f64::from),
-            &[],
-            now,
-        );
+        let report = crate::motion::Fix {
+            lat: t.lat,
+            lon: t.lon,
+            t_ms: t.position_unix * 1000,
+            speed: t.speed_kmh.map(|s| f64::from(s) / 3.6),
+            heading: t.heading.map(f64::from),
+        };
+        t.frames = crate::motion::simulate(None, &report, None, &[], now, Some(&rail)).frames;
     }
     Ok(trains)
 }
@@ -1286,6 +1454,38 @@ mod tests {
         let (k2, _) = Source::Vbb.request(&Area::view(13.31, 52.41, 13.51, 52.61).unwrap());
         assert_eq!(k1, k2);
         assert_eq!(Source::Amtrak.request(&big).0, "all");
+    }
+
+    #[test]
+    fn streamed_trains_are_patched_in_newest_first() {
+        let t = |id: &str, at: i64| Train {
+            id: id.into(),
+            source: "trafikverket",
+            name: id.into(),
+            kind: Kind::Regional,
+            lat: 59.0,
+            lon: 18.0,
+            heading: None,
+            speed_kmh: None,
+            destination: None,
+            operator: None,
+            delay_minutes: None,
+            position_unix: at,
+            frames: Vec::new(),
+            reports: Vec::new(),
+            predicted: Vec::new(),
+        };
+        let source = Source::Trafikverket;
+        let (key, _) = source.request(&Area::WORLD);
+        with_state(source, |s| s.entries.clear());
+        assert!(!patch(source, vec![t("a", 10)]), "nothing to patch before the first answer");
+        with_state(source, |s| s.store(key.clone(), Arc::new(vec![t("a", 10), t("b", 10)])));
+        assert!(!patch(source, vec![t("a", 5)]), "an older report changes nothing");
+        assert!(patch(source, vec![t("a", 20), t("c", 20)]));
+        let now = with_state(source, |s| s.entries.get(&key).unwrap().1.clone());
+        let at = |id: &str| now.iter().find(|x| x.id == id).map(|x| x.position_unix);
+        assert_eq!((at("a"), at("b"), at("c")), (Some(20), Some(10), Some(20)));
+        with_state(source, |s| s.entries.clear());
     }
 
     #[test]

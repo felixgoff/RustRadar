@@ -38,6 +38,8 @@
     onreset: () => void;
     ontilt: (pitch: number) => void;
     onkeys: () => void;
+    /** The menu open, if any (bound, so the page can close it on Android's back gesture). */
+    menu?: "layers" | "settings" | null;
     onhelp: () => void;
   }
 
@@ -64,13 +66,13 @@
     ontilt,
     onkeys,
     onhelp,
+    menu: open = $bindable(null),
   }: Props = $props();
 
   type Popover = "layers" | "settings";
 
   const TILT = 55;
-  /** One popover at a time. */
-  let open = $state<Popover | null>(null);
+  // one popover at a time: `open`, the bound `menu` prop
   let root: HTMLDivElement;
   /** The buttons that open each popover, where Escape sends the keyboard back to. */
   const triggers: Partial<Record<Popover, HTMLButtonElement>> = {};

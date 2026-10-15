@@ -371,6 +371,18 @@ fn nonce() -> u32 {
 }
 
 async fn request(url: &str) -> Result<Vec<u8>, (String, Option<Duration>)> {
+    let call = crate::devlog::start("VesselFinder", "GET", url, None);
+    let answer = fetch_bytes(url).await;
+    if let Some(c) = call {
+        match &answer {
+            Ok(body) => c.finish(200, body),
+            Err((e, _)) => c.fail(e),
+        }
+    }
+    answer
+}
+
+async fn fetch_bytes(url: &str) -> Result<Vec<u8>, (String, Option<Duration>)> {
     let response = client()
         .map_err(|e| (e, None))?
         .get(url)
@@ -452,7 +464,7 @@ fn track(ships: &mut [Ship], now: i64) {
         }
         ship.frames = match t.velocity {
             Some((speed, course)) if !ship.old && speed > 0.2 => {
-                crate::motion::frames(ship.lat, ship.lon, t.since, Some(speed), Some(course), &[], now)
+                crate::motion::frames(ship.lat, ship.lon, t.since, Some(speed), Some(course), now)
             }
             _ => Vec::new(),
         };

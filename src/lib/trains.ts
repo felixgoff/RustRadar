@@ -300,3 +300,10 @@ export function nextStop(stops: readonly Pick<TrainStop, "arrival" | "departure"
   const lastPassed = views.findLastIndex((v) => v.passed);
   return lastPassed + 1 < stops.length ? lastPassed + 1 : -1;
 }
+
+/** The product a train runs as ("Öresundståg"), when its name carries one: Trafikverket's are "<product> <number>". */
+export function trainProduct(train: Pick<Train, "source" | "name">): string | null {
+  if (train.source !== "trafikverket" || train.name.startsWith("Train ")) return null;
+  const product = train.name.replace(/\s+\S+$/, "").trim();
+  return product && product !== train.name ? product : null;
+}

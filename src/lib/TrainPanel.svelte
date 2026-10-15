@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ExternalLink, LocateFixed, X } from "@lucide/svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { isTauri, trainStops, type Train, type TrainStop } from "./api";
+  import { isTauri, trainMedia, trainStops, type Train, type TrainMedia, type TrainStop } from "./api";
   import { degrees } from "./aircraft-readings";
   import { latLon } from "./ship-details";
   import { clockAt, clockWithZone } from "./time";
@@ -12,6 +12,7 @@
     nextStop,
     positionAt,
     stopView,
+    trainProduct,
     TRAIN_CREDITS,
     TRAIN_SOURCE_NAMES,
     trainColorOf,
@@ -24,12 +25,16 @@
     train: Train;
     /** The clock the report's age is measured against (Unix ms), ticking. */
     now: number;
-    /** Fly the camera to the train. */
-    oncentre: () => void;
+    /** Whether the camera follows the train. */
+    following: boolean;
+    /** Follow it with the camera, or stop. */
+    onfollow: () => void;
     onclose: () => void;
+    /** The stops as the live stream last sent them; they win over the ones fetched here. */
+    liveStops?: TrainStop[] | null;
   }
 
-  let { train, now, oncentre, onclose }: Props = $props();
+  let { train, now, following, onfollow, onclose, liveStops = null }: Props = $props();
 
   const kind = $derived(trainLabel(train.kind));
   /** Names run long ("Amtrak 171 Northeast Regional"): those wrap to a second line instead of losing their end. */
@@ -49,7 +54,8 @@
   /** Refreshed with the stops' live times every minute while the panel is open. */
   const STOPS_REFRESH_MS = 60_000;
   /** The train's run, for the sources that have its timetable; null while loading or without one. */
-  let stops = $state.raw<TrainStop[] | null>(null);
+  let fetchedStops = $state.raw<TrainStop[] | null>(null);
+  const stops = $derived(liveStops ?? fetchedStops);
   let stopsFailed = $state(false);
   // the id alone, so the map's refreshes of the same train don't ask again
   const id = $derived(train.id);
@@ -57,14 +63,14 @@
 
   $effect(() => {
     const which = id;
-    stops = null;
+    fetchedStops = null;
     stopsFailed = false;
     if (!timetabled || !isTauri()) return;
     let live = true;
     const load = () =>
       trainStops(which).then(
-        (s) => live && ((stops = s), (stopsFailed = false)),
-        () => live && (stopsFailed = stops === null),
+        (s) => live && ((fetchedStops = s), (stopsFailed = false)),
+        () => live && (stopsFailed = fetchedStops === null),
       );
     load();
     const timer = setInterval(load, STOPS_REFRESH_MS);
@@ -75,6 +81,29 @@
   });
 
   const next = $derived(stops ? nextStop(stops) : -1);
+
+  /** A photo and the operator's logo from Wikimedia; looked up when the product or operator changes. */
+  let media = $state.raw<TrainMedia | null>(null);
+  let failedPhoto = $state<string | null>(null);
+  let failedLogo = $state<string | null>(null);
+  const product = $derived(trainProduct(train));
+  const operator = $derived(train.operator);
+  const source = $derived(train.source);
+  $effect(() => {
+    const ask = { source, product, operator };
+    media = null;
+    if (!isTauri() || (!ask.product && !ask.operator)) return;
+    let live = true;
+    trainMedia(ask.source, ask.product, ask.operator).then(
+      (m) => live && (media = m),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  });
+  const photo = $derived(media?.photo && media.photo.url !== failedPhoto ? media.photo : null);
+  const logo = $derived(media?.logo && media.logo !== failedLogo ? media.logo : null);
 </script>
 
 <aside class="panel surface" aria-label="Selected train">
@@ -93,6 +122,15 @@
       <X size={18} strokeWidth={1.75} />
     </button>
   </header>
+
+  {#if photo}
+    <div class="photo">
+      <button class="image" onclick={() => openUrl(photo.pageUrl)} title="{photo.title} on Wikipedia">
+        <img src={photo.url} alt={photo.title} onerror={() => (failedPhoto = photo.url)} />
+      </button>
+      <span class="credit">Photo: Wikipedia, {photo.title}</span>
+    </div>
+  {/if}
 
   {#if train.destination || delay}
     <section class="voyage" aria-label="Journey">
@@ -162,7 +200,10 @@
     <dl class="facts">
       <div>
         <dt>Operator</dt>
-        <dd>{train.operator ?? "Not given"}</dd>
+        <dd class="operator">
+          {#if logo}<img src={logo} alt="" class="logo" onerror={() => (failedLogo = logo)} />{/if}
+          {train.operator ?? "Not given"}
+        </dd>
       </div>
       <div>
         <dt>Source</dt>
@@ -189,8 +230,13 @@
       {/if}
     </div>
     <div class="actions">
-      <button class="button compact" aria-label="Centre on the train" title="Centre the map on this train" onclick={oncentre}>
-        <LocateFixed size={14} strokeWidth={1.75} />
+      <button
+        class="button"
+        aria-pressed={following}
+        title={following ? "Stop following (C)" : "Follow with the camera (C)"}
+        onclick={onfollow}
+      >
+        <LocateFixed size={14} strokeWidth={1.75} /> Follow
       </button>
       {#if credit}
         <button class="button" onclick={() => openUrl(credit.url)} title={credit.url}>
@@ -332,6 +378,52 @@
   .unknown {
     font-size: var(--text-sm);
     color: var(--text-2);
+  }
+
+  .photo {
+    position: relative;
+    flex: none;
+    aspect-ratio: 2 / 1;
+    background: var(--surface-raised);
+    overflow: hidden;
+  }
+  .image {
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+  }
+  .photo img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .credit {
+    position: absolute;
+    right: var(--space-2);
+    bottom: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--text-1);
+    text-shadow: 0 1px 2px oklch(0 0 0 / 0.9);
+    pointer-events: none;
+  }
+  .operator {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  /* logos are drawn for light backgrounds: a light tile keeps them legible */
+  .logo {
+    max-width: 56px;
+    max-height: 22px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    background: oklch(0.96 0 0);
+    object-fit: contain;
   }
 
   .stops {

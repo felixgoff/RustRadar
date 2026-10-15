@@ -602,6 +602,16 @@ export type TrainSource = "trafikverket" | "digitraffic" | "amtrak" | "entur" | 
 export type TrainKind = "highSpeed" | "intercity" | "regional" | "suburban" | "metro" | "freight" | "other";
 
 /** A train on the move, merged from regional public feeds (no global one exists). */
+/** A position report as the dev map marks it. */
+export interface Sighting {
+  lat: number;
+  lon: number;
+  unixMs: number;
+  speedKmh: number | null;
+  /** The newest report; else the one before it, the train is drawn from. */
+  latest: boolean;
+}
+
 export interface Train {
   /** Source-prefixed and stable while the train runs, e.g. `digitraffic:2026-10-13:2`. */
   id: string;
@@ -621,11 +631,15 @@ export interface Train {
   /** When the position was reported, Unix seconds. */
   positionUnix: number;
   /**
-   * Expected positions ahead as `[lat, lon, unixMs]`, in time order, the first
-   * at the report; only from HAFAS radar sources (vbb), else empty. See
-   * `positionAt` in trains.ts.
+   * Where it is drawn as `[lat, lon, unixMs]`, in time order, from about now
+   * on (along the track, for trains on one); empty when there is nothing to
+   * move it by. See `positionAt` in trains.ts.
    */
   frames: [number, number, number][];
+  /** Dev builds: its latest report and the one before. */
+  reports?: Sighting[];
+  /** Dev builds: where the real train most likely is, as `frames`. */
+  predicted?: [number, number, number][];
 }
 
 /**
@@ -660,6 +674,53 @@ export interface TrainStop {
   /** Notices at the stop: delay causes, replacement buses. */
   notes: string[];
 }
+
+/** A photo of a train, from the Wikipedia article on its product or operator. */
+export interface TrainPhoto {
+  url: string;
+  /** The article it comes from. */
+  title: string;
+  pageUrl: string;
+}
+
+/** Pictures for the train panel, from Wikimedia: a photo of the train and its operator's logo, when found. */
+export interface TrainMedia {
+  photo: TrainPhoto | null;
+  logo: string | null;
+}
+
+export const trainMedia = (source: string, product: string | null, operator: string | null) =>
+  invoke<TrainMedia>("train_media", { source, product, operator });
+
+/** Live news of the followed train: a new position (with the way ahead), or its stops as they now stand. */
+export type TrainEvent = { kind: "train"; train: Train } | { kind: "stops"; stops: TrainStop[] };
+
+/** Streams live updates of a train until {@link unfollowTrain} or another is followed (Trafikverket's trains). */
+export function followTrain(id: string, onEvent: (e: TrainEvent) => void) {
+  const channel = new Channel<TrainEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("follow_train", { id, onEvent: channel });
+}
+
+export const unfollowTrain = () => invoke<void>("unfollow_train");
+
+/** A place on a train's way ahead: a station it stops at, or one it passes; at its platform where the track is known. */
+export type RouteStop = { name: string; lat: number; lon: number; track: string | null; stops: boolean };
+/** A train's way ahead along the track, from where it is to its last station. */
+export type TrainRoute = {
+  /** Stretches of track, `[lon, lat]`; the first starts at the train. Gaps where the track isn't known yet, never straight lines. */
+  segments: [number, number][][];
+  /** The places still ahead. */
+  stops: RouteStop[];
+  /** False while some track is still loading: ask again shortly. */
+  complete: boolean;
+};
+export const trainRoute = (id: string) => invoke<TrainRoute>("train_route", { id });
+/** The trains the map shows close up, streamed live like a followed one (an empty list stops it). */
+export const watchTrains = (ids: string[]) => invoke<void>("watch_trains", { ids });
+
+/** The operators left out on the map ("" for trains whose operator isn't known): their trains aren't streamed live. */
+export const hideTrainOperators = (names: string[]) => invoke<void>("hide_train_operators", { names });
 
 /** Every stop of a train, in order, for sources with its timetable (Trafikverket); empty for the others. */
 export const trainStops = (id: string) => invoke<TrainStop[]>("train_stops", { id });

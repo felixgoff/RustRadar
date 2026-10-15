@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { Funnel, Radar, RefreshCw, Ship as ShipIcon, TrainFront, TriangleAlert } from "@lucide/svelte";
   import {
     adsbCallsign,
@@ -32,6 +33,13 @@
     type ShipDetails,
     type TopFlight,
     type Train,
+    type TrainStop,
+    type TrainRoute,
+    trainRoute,
+    watchTrains,
+    hideTrainOperators,
+    followTrain,
+    unfollowTrain,
   } from "$lib/api";
   import AirportPanel from "$lib/AirportPanel.svelte";
   import FilterPanel from "$lib/FilterPanel.svelte";
@@ -41,12 +49,15 @@
   import ModeBar from "$lib/ModeBar.svelte";
   import BottomSheet, { type Detent } from "$lib/BottomSheet.svelte";
   import { layout } from "$lib/phone.svelte";
+  import { pushState } from "$app/navigation";
+  import { page } from "$app/state";
   import SearchBox, { type LocalSearch } from "$lib/SearchBox.svelte";
   import ShipFilterPanel from "$lib/ShipFilterPanel.svelte";
   import ShipList from "$lib/ShipList.svelte";
   import ShipPanel from "$lib/ShipPanel.svelte";
   import ShortcutsHelp from "$lib/ShortcutsHelp.svelte";
   import KeysDialog from "$lib/KeysDialog.svelte";
+  import DevPanel from "$lib/DevPanel.svelte";
   import TrainFilterPanel from "$lib/TrainFilterPanel.svelte";
   import TrainList from "$lib/TrainList.svelte";
   import TrainPanel from "$lib/TrainPanel.svelte";
@@ -73,6 +84,7 @@
   import { afterRound, feedFreshness, type FeedClock } from "$lib/freshness";
   import { clockAt } from "$lib/time";
   import { delayText, trainColorOf, trainCredits, trainLabel } from "$lib/trains";
+  import { RAIL_SPEED_ATTRIBUTION } from "$lib/rail-layer";
   import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -144,6 +156,8 @@
   let filtersOpen = $state(false);
   let helpOpen = $state(false);
   let keysOpen = $state(false);
+  /** The map controls' open menu. */
+  let menu = $state<"layers" | "settings" | null>(null);
   /** On a phone: how far up the list sheet is, and its height in px. */
   let sheetDetent = $state<Detent>("peek");
   let sheetHeight = $state(0);
@@ -152,6 +166,8 @@
   let session = $state.raw<SessionInfo | null>(null);
   /** The camera follows the selected aircraft. */
   let following = $state(false);
+  /** The camera follows the selected train or ship. */
+  let followingVehicle = $state(false);
   /** IATA code of the airport whose board is open. */
   let boardCode = $state<string | null>(null);
   /** The open flight was picked from that board. */
@@ -451,7 +467,30 @@
   // once the camera settles and then every 30 s while the window is visible.
   // An answer for a view since left behind is dropped.
   const TRAINS_SETTLE_MS = 600;
-  const TRAINS_REFRESH_MS = 30_000;
+  const TRAINS_REFRESH_MS = 10_000;
+  /** Zoomed in this far, the trains in view come live, every few seconds, like a followed one. */
+  const LIVE_ZOOM = 9;
+  /** At most this many of them, nearest the centre first. */
+  const MAX_LIVE = 40;
+  /** The ids last sent, to send again only when they change. */
+  let watchedKey = "";
+  function watchInView(list: Train[], v: ViewState) {
+    if (!isTauri()) return;
+    const close = trainsOn && v.zoom >= LIVE_ZOOM;
+    const ids = close
+      ? list
+          .filter((t) => t.source === "trafikverket")
+          .map((t) => ({ id: t.id, d: cosAngle(v.longitude, v.latitude, t.lon, t.lat) }))
+          .sort((a, b) => b.d - a.d)
+          .slice(0, MAX_LIVE)
+          .map((t) => t.id)
+          .sort()
+      : [];
+    const key = ids.join(",");
+    if (key === watchedKey) return;
+    watchedKey = key;
+    watchTrains(ids).catch(() => {});
+  }
   let trains = $state.raw<Train[]>([]);
   /** When the latest answer since the trains came on arrived (ms); 0 before the first. */
   let trainsAt = $state(0);
@@ -480,11 +519,38 @@
       trains = list;
       trainsAt = Date.now();
       trainsFailed = false;
+      watchInView(list, v);
     } catch {
       // every source failed or is resting: the trains on show stay
       if (request === trainsRequest) trainsFailed = true;
     }
   }
+  // Trafikverket's trains come live, a stream for each operator: the backend
+  // moves them as reports come and says so; asked again for the view, at
+  // most this often
+  const TRAINS_LIVE_MS = 1_500;
+  let trainsLiveAt = 0;
+  let trainsLivePending: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    if (!isTauri()) return;
+    let stop: (() => void) | undefined;
+    let gone = false;
+    listen("trains-changed", () => {
+      if (!trainsOn || trainsLivePending) return;
+      const wait = Math.max(0, trainsLiveAt + TRAINS_LIVE_MS - Date.now());
+      trainsLivePending = setTimeout(() => {
+        trainsLivePending = undefined;
+        trainsLiveAt = Date.now();
+        loadTrains();
+      }, wait);
+    }).then((un) => (gone ? un() : (stop = un)));
+    return () => {
+      gone = true;
+      stop?.();
+      clearTimeout(trainsLivePending);
+      trainsLivePending = undefined;
+    };
+  });
   $effect(() => {
     void view;
     if (!trainsOn) {
@@ -495,6 +561,8 @@
         if (trains.length) trains = [];
         if (trainsAt) trainsAt = 0;
         if (trainsFailed) trainsFailed = false;
+        // no more live trains in view
+        watchInView([], view);
       });
       return;
     }
@@ -505,10 +573,79 @@
   // The selected train: its position and report follow the list as the map
   // refreshes, and stay where they were last seen if the list drops it.
   let pickedTrain = $state.raw<Train | null>(null);
+  /** The selected train as its live stream last reported it, and its stops (Trafikverket's trains). */
+  let liveTrain = $state.raw<Train | null>(null);
+  let liveStops = $state.raw<TrainStop[] | null>(null);
   const selectedTrain = $derived.by<Train | null>(() => {
     if (!pickedTrain) return null;
     const id = pickedTrain.id;
-    return trains.find((t) => t.id === id) ?? pickedTrain;
+    const listed = trains.find((t) => t.id === id) ?? pickedTrain;
+    // the stream's report is newer than the list's more often than not
+    return liveTrain?.id === id && liveTrain.positionUnix >= listed.positionUnix ? liveTrain : listed;
+  });
+  // follow the selected train live while its panel is open
+  const followedId = $derived(pickedTrain?.id ?? null);
+  // another train or ship (or none): the camera lets go (not on a refresh of the same one)
+  const followableKey = $derived(`${followedId ?? ""}|${selectedShip?.mmsi ?? ""}`);
+  $effect(() => {
+    void followableKey;
+    untrack(() => (followingVehicle = false));
+  });
+  $effect(() => {
+    const id = followedId;
+    liveTrain = null;
+    liveStops = null;
+    if (!id || !isTauri()) return;
+    followTrain(id, (e) => {
+      if (e.kind === "train" && e.train.id === id) liveTrain = e.train;
+      else if (e.kind === "stops") liveStops = e.stops;
+    }).catch(() => {});
+    return () => void unfollowTrain().catch(() => {});
+  });
+  /** The selected train's whole way along the track, as the backend works it out. */
+  let shownRoute = $state.raw<TrainRoute | null>(null);
+  /** Asked again this soon while the track is still loading, else this often (the train moves along it). */
+  const ROUTE_LOADING_MS = 2_500;
+  const ROUTE_REFRESH_MS = 30_000;
+  /** A train drawn off its route has it asked for again, at most this often. */
+  const ROUTE_OFF_MS = 3_000;
+  /** Asks for the selected train's route again now (the train isn't on the one shown); set while one is followed. */
+  let reloadRoute: (() => void) | null = null;
+  $effect(() => {
+    const id = followedId;
+    shownRoute = null;
+    if (!id || !id.startsWith("trafikverket:") || !isTauri()) return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let asking = false;
+    let askedAt = 0;
+    const load = () => {
+      clearTimeout(timer);
+      asking = true;
+      askedAt = Date.now();
+      trainRoute(id).then(
+        (r) => {
+          asking = false;
+          if (!live) return;
+          shownRoute = r;
+          timer = setTimeout(load, r.complete ? ROUTE_REFRESH_MS : ROUTE_LOADING_MS);
+        },
+        // no timetable yet (it is learned with the next refresh): ask again
+        () => {
+          asking = false;
+          if (live) timer = setTimeout(load, ROUTE_REFRESH_MS / 3);
+        },
+      );
+    };
+    reloadRoute = () => {
+      if (live && !asking && Date.now() - askedAt >= ROUTE_OFF_MS) load();
+    };
+    load();
+    return () => {
+      live = false;
+      reloadRoute = null;
+      clearTimeout(timer);
+    };
   });
   $effect(() => {
     const live = selectedTrain;
@@ -544,14 +681,26 @@
   const ORIGIN = { lat: 0, lon: 0 };
 
   const trainsFiltered = $derived(trains.filter(trainFilter(trainFilters)));
+  // the operators left out aren't streamed live either
+  $effect(() => {
+    const hidden = [...trainFilters.hiddenOperators];
+    if (isTauri()) hideTrainOperators(hidden).catch(() => {});
+  });
   const trainsListed = $derived.by(() => {
     const q = trainQuery.trim();
     const sort = trainFilters.sort;
     return sortTrains(q ? trainsFiltered.filter((t) => trainMatches(t, q)) : trainsFiltered, sort, sort === "distance" ? listCentre : ORIGIN);
   });
-  const trainsOnMap = $derived(
-    selectedTrain && !trainsFiltered.some((t) => t.id === selectedTrain.id) ? [...trainsFiltered, selectedTrain] : trainsFiltered,
-  );
+  const trainsOnMap = $derived.by(() => {
+    if (!selectedTrain) return trainsFiltered;
+    const at = trainsFiltered.findIndex((t) => t.id === selectedTrain.id);
+    if (at === -1) return [...trainsFiltered, selectedTrain];
+    // drawn from its live report rather than the list's
+    if (trainsFiltered[at] === selectedTrain) return trainsFiltered;
+    const list = trainsFiltered.slice();
+    list[at] = selectedTrain;
+    return list;
+  });
   const shipsFiltered = $derived(ships.filter(shipFilter(shipFilters)));
   const shipsListed = $derived.by(() => {
     const q = shipQuery.trim();
@@ -872,6 +1021,61 @@
     keysOpen = true;
   }
 
+  /** Closes whatever is on top (Escape, or Android's back gesture); false when nothing is open. */
+  function closeTop(): boolean {
+    if (keysOpen) closeKeys();
+    else if (helpOpen) helpOpen = false;
+    else if (menu) menu = null;
+    else if (place) place = null;
+    else if (selectedId !== null) select(null);
+    else if (pickedShip) selectShip(null);
+    else if (pickedTrain) selectTrain(null);
+    else if (boardCode) boardCode = null;
+    else if (filtersOpen) filtersOpen = false;
+    else if (layout.phone && sheetDetent !== "peek") sheetDetent = "peek";
+    else return false;
+    return true;
+  }
+
+  // Android's back gesture goes back in the page's history, and leaves the app
+  // when there is none. While something is open, a history entry is kept for
+  // it to take instead, which closes that thing.
+  const android = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+  const closable = $derived(
+    keysOpen ||
+      helpOpen ||
+      menu !== null ||
+      place !== null ||
+      selectedId !== null ||
+      pickedShip !== null ||
+      pickedTrain !== null ||
+      boardCode !== null ||
+      filtersOpen ||
+      (layout.phone && sheetDetent !== "peek"),
+  );
+  /** Whether the entry on top is ours, and whether we took it away ourselves. */
+  let backArmed = false;
+  let unarming = false;
+  $effect(() => {
+    if (!android) return;
+    const armed = Boolean(page.state.back);
+    // the gesture took our entry: close the top thing (the next effect arms again if more is open)
+    if (backArmed && !armed) {
+      if (unarming) unarming = false;
+      else closeTop();
+    }
+    backArmed = armed;
+  });
+  $effect(() => {
+    if (!android) return;
+    const armed = Boolean(page.state.back);
+    if (closable && !armed) pushState("", { back: true });
+    else if (!closable && armed) {
+      unarming = true;
+      history.back();
+    }
+  });
+
   function closeKeys() {
     keysOpen = false;
     const back = keysPrompt;
@@ -889,7 +1093,10 @@
     "/": () => searchBox?.focus(),
     "?": () => (helpOpen = !helpOpen),
     f: () => (filtersOpen = !filtersOpen),
-    c: () => selectedId !== null && toggleFollow(),
+    c: () => {
+      if (selectedId !== null) toggleFollow();
+      else if (selectedTrain || selectedShip) followingVehicle = !followingVehicle;
+    },
     t: () => globe.setPitch(view.pitch > 5 ? 0 : TILT),
     n: () => globe.resetOrientation(),
     "+": () => globe.zoomBy(1),
@@ -913,8 +1120,16 @@
     e: () => (settings.terrain = !settings.terrain),
   };
 
+  /** Dev builds: the API calls and the selected train's data (Ctrl/Cmd+Shift+D). */
+  let devOpen = $state(false);
+
   function onkeydown(e: KeyboardEvent) {
     const t = e.target as HTMLElement | null;
+    if (import.meta.env.DEV && (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyD") {
+      e.preventDefault();
+      devOpen = !devOpen;
+      return;
+    }
     const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || !!t?.isContentEditable;
     // Cmd/Ctrl+Alt+I: the web inspector, for bug reports
     if ((e.ctrlKey || e.metaKey) && e.altKey && e.code === "KeyI" && isTauri()) {
@@ -925,13 +1140,7 @@
     // the keys page is modal: it handles its own keys, Escape included
     if (typing || keysOpen || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === "Escape") {
-      if (helpOpen) helpOpen = false;
-      else if (place) place = null;
-      else if (selectedId !== null) select(null);
-      else if (pickedShip) selectShip(null);
-      else if (pickedTrain) selectTrain(null);
-      else if (boardCode) boardCode = null;
-      else if (filtersOpen) filtersOpen = false;
+      closeTop();
       return;
     }
     if (helpOpen && e.key !== "?") return;
@@ -958,7 +1167,8 @@
       // ODbL asks for attribution wherever the data is shown
       measured && "Aircraft data: © adsb.lol contributors, ODbL",
       shipsOn && "Ships © VesselFinder",
-      // the rail map is drawn from the OpenStreetMap data the map credit below covers
+      // the rail map in the app is OpenRailwayMap's; elsewhere the OpenStreetMap data the map credit below covers
+      settings.railMap && isTauri() && RAIL_SPEED_ATTRIBUTION,
       settings.terrain && TERRAIN_ATTRIBUTION,
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]
@@ -1026,8 +1236,11 @@
     railMap={settings.railMap}
     terrain={settings.terrain}
     follow={following}
+    followVehicle={followingVehicle}
     {selectedShip}
     {selectedTrain}
+    trainRoute={shownRoute}
+    ontrainrouteoff={() => reloadRoute?.()}
     onselect={(f) => {
       place = null;
       // a click on empty map lets go of a ship or a train too
@@ -1306,10 +1519,8 @@
       error={shipCard?.mmsi === selectedShip.mmsi ? shipCard.error : null}
       {now}
       onretry={() => loadShipCard(selectedShip.mmsi)}
-      oncentre={() => {
-        following = false;
-        globe.flyTo(selectedShip.lon, selectedShip.lat, Math.max(view.zoom, 12));
-      }}
+      following={followingVehicle}
+      onfollow={() => (followingVehicle = !followingVehicle)}
       onclose={() => selectShip(null)}
     />
   {/if}
@@ -1318,11 +1529,10 @@
     <TrainPanel
       train={selectedTrain}
       {now}
-      oncentre={() => {
-        following = false;
-        globe.flyTo(selectedTrain.lon, selectedTrain.lat, Math.max(view.zoom, 12));
-      }}
+      following={followingVehicle}
+      onfollow={() => (followingVehicle = !followingVehicle)}
       onclose={() => selectTrain(null)}
+      {liveStops}
     />
   {/if}
 
@@ -1347,11 +1557,15 @@
     onzoom={(d) => globe.zoomBy(d)}
     onreset={() => globe.resetOrientation()}
     ontilt={(p) => globe.setPitch(p)}
+    bind:menu
     onkeys={() => (keysOpen = true)}
     onhelp={() => (helpOpen = true)}
   />
 
   <ShortcutsHelp open={helpOpen} onclose={() => (helpOpen = false)} />
+  {#if import.meta.env.DEV}
+    <DevPanel bind:open={devOpen} train={selectedTrain} stops={liveStops} route={shownRoute} />
+  {/if}
   <KeysDialog
     open={keysOpen}
     {session}

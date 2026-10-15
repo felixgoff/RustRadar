@@ -11,7 +11,7 @@
 </script>
 
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import {
     _CameraLight as CameraLight,
     AmbientLight,
@@ -58,6 +58,8 @@
     type LiveFlight,
     type Ship,
     type Train,
+    type TrainRoute,
+    type Sighting,
   } from "./api";
   import { NorthUpGlobeController } from "./controller";
   import { aircraftModels, type AircraftModel } from "./aircraft";
@@ -95,7 +97,7 @@
   import { offsetEastNorth, shipMeshes, shipPlacement, type ShipClass } from "./ship-models";
   import { shipAtlas, shipColor, shipIcon, shipIconScale, shipIconSize, shipKindLabel } from "./ships";
   import { terrainLayers } from "./terrain-layer";
-  import { railLayers } from "./rail-layer";
+  import { RAIL_MIN_ZOOM, railLayers, SPEED_BANDS, SPEED_UNKNOWN } from "./rail-layer";
   import {
     delayText,
     headingAt,
@@ -108,6 +110,7 @@
     trainLabel,
     trainPositionAge,
   } from "./trains";
+  import { type RouteCursor, routeAhead, wayToStop } from "./train-route";
 
   interface Props {
     flights: LiveFlight[];
@@ -144,6 +147,10 @@
     trains?: Train[];
     /** The selected train, ringed in the selection amber. */
     selectedTrain?: Train | null;
+    /** The selected train's whole way along the track. */
+    trainRoute?: TrainRoute | null;
+    /** The selected train isn't on its route (it is out of date): ask for it again. */
+    ontrainrouteoff?: () => void;
     /** A train was clicked. */
     ontrainselect?: (train: Train) => void;
     /** A train to highlight, e.g. the one under the pointer in the sidebar's list. */
@@ -152,6 +159,8 @@
     hoveredShipMmsi?: number | null;
     /** Keep the camera centred on the selected aircraft. */
     follow: boolean;
+    /** Keep the camera centred on the selected train or ship. */
+    followVehicle?: boolean;
     onselect: (flight: LiveFlight | null) => void;
     /** The selected ship, ringed in the selection amber. */
     selectedShip?: Ship | null;
@@ -183,10 +192,13 @@
     railMap = false,
     trains = [],
     selectedTrain = null,
+    trainRoute = null,
+    ontrainrouteoff,
     ontrainselect,
     hoveredTrainId = null,
     hoveredShipMmsi = null,
     follow,
+    followVehicle = false,
     onselect,
     selectedShip = null,
     onshipselect,
@@ -1465,16 +1477,29 @@
   };
   /** How long a ship or train takes to ease onto a new report. */
   const EASE_MS = 2000;
-  type Ease = { dLat: number; dLon: number; from: number };
+  /**
+   * An offset to ease away; or, for a vehicle that would go back to get onto
+   * its new frames, the place it holds at (heading `heading`) until they pass it.
+   */
+  type Ease = { dLat: number; dLon: number; from: number; hold?: { lat: number; lon: number; heading: number } };
+  /** How far `p` is ahead of `from` going `heading` (degrees), metres. */
+  function aheadOf(p: { lat: number; lon: number }, from: { lat: number; lon: number }, heading: number): number {
+    const k = Math.cos((from.lat * Math.PI) / 180);
+    const east = (((p.lon - from.lon + 540) % 360) - 180) * k * 111_320;
+    const north = (p.lat - from.lat) * 111_320;
+    const h = (heading * Math.PI) / 180;
+    return east * Math.sin(h) + north * Math.cos(h);
+  }
   /**
    * The offset from where a vehicle is now expected to where it was drawn
    * (index `was` in the old positions), to ease away; none for a new one, one
    * that hasn't moved, or one that jumped further than it could have gone.
+   * Never back: drawn ahead of where its new frames have it, it holds there.
    */
   function easeFrom(
     was: number | undefined,
     positions: [number, number, number][] | undefined,
-    to: { lat: number; lon: number; frames: [number, number, number][] },
+    to: { lat: number; lon: number; heading: number | null; frames: [number, number, number][] },
     nowMs: number,
   ): Ease | null {
     if (was === undefined || !positions) return null;
@@ -1482,7 +1507,12 @@
     const target = positionAt(to, nowMs);
     const dLat = lat - target.lat;
     const dLon = ((lon - target.lon + 540) % 360) - 180;
-    return (dLat || dLon) && Math.abs(dLat) < 0.05 && Math.abs(dLon) < 0.1 ? { dLat, dLon, from: nowMs } : null;
+    if (!(dLat || dLon) || Math.abs(dLat) >= 0.05 || Math.abs(dLon) >= 0.1) return null;
+    const heading = headingAt(to, nowMs);
+    if (heading !== null && aheadOf({ lat, lon }, target, heading) > 0.05) {
+      return { dLat: 0, dLon: 0, from: nowMs, hold: { lat, lon, heading } };
+    }
+    return { dLat, dLon, from: nowMs };
   }
   /** Where a vehicle is drawn at `nowMs`: along its frames, plus what is left of its easing (smoothstep). */
   function eased(
@@ -1493,7 +1523,11 @@
   ): { lat: number; lon: number } {
     let { lat, lon } = positionAt(v, nowMs);
     const blend = blends.get(i);
-    if (blend) {
+    if (blend?.hold) {
+      // there until its frames come past
+      if (aheadOf({ lat, lon }, blend.hold, blend.hold.heading) < 0) return { lat: blend.hold.lat, lon: blend.hold.lon };
+      blends.delete(i);
+    } else if (blend) {
       const left = 1 - Math.min(1, (nowMs - blend.from) / EASE_MS);
       const k = left * left * (3 - 2 * left);
       lat += blend.dLat * k;
@@ -1825,6 +1859,202 @@
     ];
   }
 
+  /** The rail map is coloured by speed limit in the app (its tiles come through the backend). */
+  const railSpeeds = isTauri();
+  /** The zoom, for what the page shows over the map (the legend). */
+  let shownZoom = $state(0);
+
+  const TRAIN_ROUTE_DASH: [number, number, number, number] = [0, 0, 0, 255];
+  const TRAIN_ROUTE_CASING: [number, number, number, number] = [236, 238, 244, 215];
+  const TRAIN_ROUTE_DASHES: [number, number] = [2.2, 1.6];
+  /** The way to where the selected train stops next. */
+  const TRAIN_TO_STOP: [number, number, number, number] = [37, 99, 235, 255];
+  /** Where along its route the selected train was last found (searching on from there). */
+  let routeCursor: RouteCursor | null = null;
+
+  /**
+   * The selected train's way ahead as black dashes on a light casing, from
+   * exactly where the train is drawn now along the track, and its stations.
+   * The part behind the train is trimmed off as it goes.
+   */
+  function trainRouteLayers(r: TrainRoute, train: Train): Layer[] {
+    const i = trainData?.byId.get(train.id);
+    const drawn: LonLat = i !== undefined ? [trainData!.positions[i][0], trainData!.positions[i][1]] : [train.lon, train.lat];
+    // where it is drawn going next, along the track
+    const nowMs = Date.now();
+    const frames = (i !== undefined ? trainData!.list[i] : train).frames ?? [];
+    const ahead = frames.filter((f) => f[2] > nowMs).map((f): LonLat => [f[1], f[0]]);
+    const way = routeAhead(r, drawn, routeCursor, ahead);
+    routeCursor = way.cursor;
+    if (!way.on) ontrainrouteoff?.();
+    const head = way.head;
+    const paths = way.rest;
+    const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
+    const stretch = (id: string, data: [number, number][][]) => [
+      new PathLayer<[number, number][], PathStyleExtensionProps<[number, number][]>>({
+        id: `${id}-dashes`,
+        data,
+        getPath: (p) => p,
+        getColor: TRAIN_ROUTE_DASH,
+        getWidth: 3,
+        widthUnits: "pixels",
+        extensions: [dashed],
+        getDashArray: TRAIN_ROUTE_DASHES,
+        dashJustified: false,
+        parameters: ground,
+      }),
+    ];
+    const stations = r.stops.filter((s) => s.stops);
+    // where the drawn train is going to stop next: the way there, and the spot
+    const toStop = wayToStop(drawn, frames, nowMs);
+    return [
+      ...stretch("train-route", paths),
+      ...(head.length ? stretch("train-route-head", [head]) : []),
+      new PathLayer<LonLat[]>({
+        id: "train-route-to-stop",
+        data: toStop.length >= 2 ? [toStop] : [],
+        getPath: (p) => p,
+        getColor: TRAIN_TO_STOP,
+        getWidth: 4,
+        widthUnits: "pixels",
+        capRounded: true,
+        jointRounded: true,
+        parameters: ground,
+      }),
+      new ScatterplotLayer<LonLat>({
+        id: "train-route-stop-spot",
+        data: toStop.length >= 2 ? [toStop[toStop.length - 1]] : [],
+        getPosition: (p) => p,
+        getRadius: 5,
+        radiusUnits: "pixels",
+        stroked: true,
+        getFillColor: [255, 255, 255, 255],
+        getLineColor: TRAIN_TO_STOP,
+        getLineWidth: 2.5,
+        lineWidthUnits: "pixels",
+        parameters: ground,
+      }),
+      new ScatterplotLayer<(typeof stations)[number]>({
+        id: "train-route-stops",
+        data: stations,
+        getPosition: (s) => [s.lon, s.lat],
+        getRadius: 4.5,
+        radiusUnits: "pixels",
+        stroked: true,
+        getFillColor: TRAIN_ROUTE_CASING,
+        getLineColor: TRAIN_ROUTE_DASH,
+        getLineWidth: 2,
+        lineWidthUnits: "pixels",
+        parameters: ground,
+      }),
+    ];
+  }
+
+  /** Metres between two places (flat: fine over a few km). */
+  function metresBetween(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
+    const k = Math.cos((a.lat * Math.PI) / 180);
+    return Math.hypot((b.lat - a.lat) * 111_320, (b.lon - a.lon) * 111_320 * k);
+  }
+  const SIGHT_LATEST: [number, number, number, number] = [240, 60, 60, 255];
+  const SIGHT_LABEL_BG: [number, number, number, number] = [12, 14, 20, 225];
+  const SIGHT_PREDICTED: [number, number, number, number] = [80, 220, 120, 255];
+  /**
+   * Dev builds: each train's latest report (red), the selected train's with
+   * its age and speed, and where the real train most likely is now (green).
+   */
+  function sightingLayers(list: Train[], selected: Train | null, nowMs: number): Layer[] {
+    const sighted = list.filter((t) => t.reports?.length);
+    const sel = selected?.reports?.length ? selected : null;
+    if (sel && !sighted.some((t) => t.id === sel.id)) sighted.push(sel);
+    const points: Sighting[] = sighted.flatMap((t) => t.reports ?? []).filter((s) => s.latest);
+    const age = (s: Sighting) => `${Math.max(0, Math.round((nowMs - s.unixMs) / 1000))} s`;
+    const speed = (s: Sighting) => (s.speedKmh === null ? "no speed" : `${Math.round(s.speedKmh)} km/h`);
+    // the drawn train against the real one: how far ahead (+) or behind (−) where it most likely is now, and how much faster than reported
+    const versus = (() => {
+      const i = sel ? trainData?.byId.get(sel.id) : undefined;
+      if (!sel || i === undefined || !sel.predicted?.length) return "";
+      const [lon, lat] = trainData!.positions[i];
+      const drawnSpeed = metresBetween(positionAt(sel, nowMs), positionAt(sel, nowMs + 1000));
+      const real = positionAt({ lat: sel.lat, lon: sel.lon, frames: sel.predicted }, nowMs);
+      const heading = headingAt({ heading: sel.heading, frames: sel.predicted }, nowMs) ?? sel.heading;
+      const off = heading === null ? metresBetween({ lat, lon }, real) : aheadOf({ lat, lon }, real, heading);
+      const reported = sel.reports?.find((s) => s.latest)?.speedKmh ?? null;
+      const signed = (n: number, unit: string) => `${n >= 0 ? "+" : "−"}${Math.abs(Math.round(n))} ${unit}`;
+      const faster = reported === null ? "" : `, ${signed(drawnSpeed * 3.6 - reported, "km/h")}`;
+      return ` · drawn ${signed(off, "m")}${faster}`;
+    })();
+    const labels = (sel?.reports ?? []).filter((s) => s.latest).map((s) => ({ s, text: `live ${age(s)} · ${speed(s)}${versus}` }));
+    // where the real trains most likely are now, by their reports
+    const predicted = sighted
+      .filter((t) => (t.predicted?.length ?? 0) > 0)
+      .map((t) => ({ selected: t.id === sel?.id, at: positionAt({ lat: t.lat, lon: t.lon, frames: t.predicted! }, nowMs) }));
+    const top = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
+    return [
+      new ScatterplotLayer<(typeof predicted)[number]>({
+        id: "dev-predicted",
+        data: predicted,
+        getPosition: (p) => [p.at.lon, p.at.lat],
+        getRadius: 7,
+        radiusUnits: "pixels",
+        filled: false,
+        stroked: true,
+        getLineColor: SIGHT_PREDICTED,
+        getLineWidth: 2,
+        lineWidthUnits: "pixels",
+        parameters: top,
+        updateTriggers: { getPosition: nowMs },
+      }),
+      new TextLayer<(typeof predicted)[number]>({
+        id: "dev-predicted-label",
+        data: predicted.filter((p) => p.selected),
+        getPosition: (p) => [p.at.lon, p.at.lat],
+        getText: () => "predicted",
+        getColor: SIGHT_PREDICTED,
+        getSize: 11,
+        sizeUnits: "pixels",
+        getPixelOffset: [0, 16],
+        fontFamily: "ui-monospace, monospace",
+        background: true,
+        getBackgroundColor: SIGHT_LABEL_BG,
+        backgroundPadding: [4, 2],
+        billboard: true,
+        parameters: top,
+        updateTriggers: { getPosition: nowMs },
+      }),
+      new ScatterplotLayer<Sighting>({
+        id: "dev-sightings",
+        data: points,
+        getPosition: (s) => [s.lon, s.lat],
+        getRadius: 4,
+        radiusUnits: "pixels",
+        filled: true,
+        stroked: true,
+        getFillColor: SIGHT_LATEST,
+        getLineColor: [255, 255, 255, 255],
+        getLineWidth: 2,
+        lineWidthUnits: "pixels",
+        parameters: top,
+      }),
+      new TextLayer<(typeof labels)[number]>({
+        id: "dev-sighting-labels",
+        data: labels,
+        getPosition: (l) => [l.s.lon, l.s.lat],
+        getText: (l) => l.text,
+        getColor: SIGHT_LATEST,
+        getSize: 11,
+        sizeUnits: "pixels",
+        getPixelOffset: [0, -14],
+        fontFamily: "ui-monospace, monospace",
+        background: true,
+        getBackgroundColor: SIGHT_LABEL_BG,
+        backgroundPadding: [4, 2],
+        billboard: true,
+        parameters: top,
+        updateTriggers: { getText: Math.floor(nowMs / 1000) },
+      }),
+    ];
+  }
+
   function buildLayers(): Layer[] {
     // the motion model's clock follows the feed's, not this machine's
     const now = motion.now();
@@ -1957,7 +2187,7 @@
       }
     }
     // the railway network: over the map, under the weather, ships, trains and aircraft
-    if (railMap) layers.push(...railLayers({ tileUrl, flat, zoom, workerUrl: mvtWorkerUrl }));
+    if (railMap) layers.push(...railLayers({ tileUrl, flat, zoom, workerUrl: mvtWorkerUrl, speeds: railSpeeds }));
     if (weather) {
       if (Date.now() - radarCheckedAt > 600_000) refreshRadar();
       const lift = liftFor(pitch);
@@ -1984,8 +2214,13 @@
     // on land, like the ships under the labels and every aircraft; the
     // trains' frames are timed on this machine's clock, not the flight feed's
     const trainRing = selectedTrain ? trainSelectionLayers(selectedTrain, zoom, cLon, cLat) : null;
+    const trainsDrawn = trainLayers(trains, flat, mpp, Date.now());
+    // the selected train's way ahead, from where it is drawn now, under the trains
+    if (trainRoute && selectedTrain) layers.push(...trainRouteLayers(trainRoute, selectedTrain));
     if (trainRing) layers.push(trainRing.halo);
-    layers.push(...trainLayers(trains, flat, mpp, Date.now()));
+    layers.push(...trainsDrawn);
+    // dev builds: the reports each train is drawn from
+    if (import.meta.env.DEV) layers.push(...sightingLayers(trains, selectedTrain, Date.now()));
     if (trainRing) layers.push(trainRing.ring);
     if (tileUrl && labels && fontsReady) {
       const marked = [airport, ...(selected && route ? [route.origin, route.destination] : [])]
@@ -2365,12 +2600,45 @@
     }
   }
 
+  /** Where the followed train or ship is drawn now, `[lon, lat]`; none when not following one. */
+  function vehicleAt(): [number, number] | null {
+    if (!followVehicle || (follow && selected)) return null;
+    if (selectedTrain) {
+      const i = trainData?.byId.get(selectedTrain.id);
+      return i === undefined ? [selectedTrain.lon, selectedTrain.lat] : [trainData!.positions[i][0], trainData!.positions[i][1]];
+    }
+    if (selectedShip) {
+      const i = shipData?.byMmsi.get(selectedShip.mmsi);
+      return i === undefined ? [selectedShip.lon, selectedShip.lat] : [shipData!.positions[i][0], shipData!.positions[i][1]];
+    }
+    return null;
+  }
+  /** Following a train or ship: the camera flies there, then keeps it in the middle. */
+  let vehicleLocked = false;
+  $effect(() => {
+    if (!followVehicle) {
+      vehicleLocked = false;
+      return;
+    }
+    const at = untrack(vehicleAt);
+    if (!at) return;
+    untrack(() => goTo({ longitude: at[0], latitude: at[1], zoom: Math.max(view.zoom, 13) }, 800, ["longitude", "latitude", "zoom"]));
+    vehicleLocked = true;
+  });
+
   function renderFrame() {
     tick++;
+    // following a train or ship: centred on it every frame (once there)
+    const vehicle = vehicleLocked && Date.now() > transitionUntil ? vehicleAt() : null;
+    if (vehicle) {
+      view = { ...view, longitude: vehicle[0], latitude: vehicle[1] };
+      onviewchange?.(view);
+      deck?.setProps({ initialViewState: { ...view, ...limits() } });
+    }
     // locked to an aircraft, the wheel has to zoom about the centre, or every
     // notch shoves the aircraft aside and the lock drags it straight back; a
     // drag orbits for the same reason
-    const wanted = follow && selected ? "center" : "pointer";
+    const wanted = (follow && selected) || vehicleLocked ? "center" : "pointer";
     if (wanted !== zoomAround) {
       zoomAround = wanted;
       deck?.setProps({ controller: controllerFor(wanted === "center") });
@@ -2408,7 +2676,7 @@
   function loop(t: number) {
     // locked on an aircraft the camera and the aircraft must move together
     // every frame, or at street zoom each 50 ms step is many pixels of jitter
-    const locked = follow && selected && Date.now() > transitionUntil;
+    const locked = ((follow && selected) || vehicleLocked) && Date.now() > transitionUntil;
     const interval = locked && view.zoom > 7 ? 0 : view.zoom > 7 ? 50 : view.zoom > 4 ? 150 : 500;
     if (t - lastTick >= interval) {
       lastTick = t;
@@ -2668,11 +2936,15 @@
       onViewStateChange: ({ viewState }) => {
         const { longitude, latitude, zoom, bearing = 0, pitch = 0 } = viewState as Partial<ViewState>;
         view = { longitude: longitude!, latitude: latitude!, zoom: zoom!, bearing, pitch };
+        if (Math.floor(view.zoom * 2) !== Math.floor(shownZoom * 2)) shownZoom = view.zoom;
         // a gesture while locked on is re-aimed in the same frame, not on the next tick
         const locked = follow && selected && Date.now() > transitionUntil;
         if (locked) view = lockedView(view, selected!);
+        // following a train or ship, a drag doesn't move it out of the middle
+        const vehicle = !locked && vehicleLocked && Date.now() > transitionUntil ? vehicleAt() : null;
+        if (vehicle) view = { ...view, longitude: vehicle[0], latitude: vehicle[1] };
         onviewchange?.(view);
-        return locked ? { ...viewState, ...view } : viewState;
+        return locked || vehicle ? { ...viewState, ...view } : viewState;
       },
       getTooltip: tooltip,
       getCursor: ({ isDragging, isHovering }) => (isDragging ? "grabbing" : isHovering ? "pointer" : "grab"),
@@ -2712,7 +2984,7 @@
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
     void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
-    void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain];
+    void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain, trainRoute];
     void [hoveredTrainId, hoveredShipMmsi];
     render();
   });
@@ -2721,6 +2993,15 @@
 <div class="globe" bind:this={container} bind:clientWidth={areaWidth} bind:clientHeight={areaHeight}>
   {#if hoverCard}
     <HoverCard {...hoverCard} x={pointer.x} y={pointer.y} width={areaWidth} height={areaHeight} />
+  {/if}
+  {#if railMap && railSpeeds && shownZoom >= RAIL_MIN_ZOOM}
+    <div class="speed-legend" aria-label="Track speed limits, km/h">
+      <span class="unit">km/h</span>
+      {#each SPEED_BANDS as band (band.label)}
+        <span class="band" style:--c="rgb({band.color.slice(0, 3).join(' ')})">{band.upTo === Infinity ? `${band.label}+` : band.label}</span>
+      {/each}
+      <span class="band" style:--c="rgb({SPEED_UNKNOWN.slice(0, 3).join(' ')})" title="Limit not mapped">?</span>
+    </div>
   {/if}
   {#if mapError}
     <div class="map-error surface" role="alert">
@@ -2738,6 +3019,36 @@
   .globe {
     position: absolute;
     inset: 0;
+  }
+  /* the speed colours, small along the bottom: the lines say the rest close in */
+  .speed-legend {
+    position: absolute;
+    left: 50%;
+    bottom: calc(var(--sheet-h, 0px) + 26px);
+    z-index: 2;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px 6px;
+    border-radius: var(--radius-sm);
+    background: oklch(0.15 0 0 / 0.8);
+    font: 600 10px / 1 var(--font-data);
+    color: var(--text-2);
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  .speed-legend .unit {
+    margin-right: 4px;
+    color: var(--text-3);
+  }
+  .speed-legend .band {
+    min-width: 26px;
+    padding: 3px 4px;
+    border-radius: 2px;
+    background: var(--c);
+    color: oklch(0.16 0.01 260);
+    text-align: center;
   }
   .map-error {
     position: absolute;

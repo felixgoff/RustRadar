@@ -1,5 +1,5 @@
 // @ts-ignore bun's types are not a dependency; the runner provides the module
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   Backoff,
   isStation,
@@ -12,6 +12,13 @@ import {
   railLayers,
   railWidth,
   railWidthScale,
+  railSpeedColor,
+  railSpeedWidth,
+  railTilesUrl,
+  SPEED_BANDS,
+  SPEED_UNKNOWN,
+  speedColor,
+  speedLabels,
 } from "./rail-layer";
 
 const t = (p: Record<string, unknown>) => ({ properties: { layerName: "transportation", ...p } });
@@ -102,4 +109,44 @@ test("OpenRailwayMap backoff: a 429 pauses at once, other failures after a run o
   expect(b.paused).toBe(false);
   b.failed(true);
   expect(b.paused).toBe(true);
+});
+
+describe("speed limits", () => {
+  const line = (coordinates: [number, number][], properties: Record<string, unknown>) => ({
+    geometry: { type: "LineString", coordinates },
+    properties: { feature: "rail", state: "present", ...properties },
+  });
+
+  test("each limit gets its band's colour; unmapped and other railways their own", () => {
+    expect(speedColor(30)).toEqual(SPEED_BANDS[0].color);
+    expect(speedColor(80)).toEqual(SPEED_BANDS[1].color);
+    expect(speedColor(81)).toEqual(SPEED_BANDS[2].color);
+    expect(speedColor(320)).toEqual(SPEED_BANDS[SPEED_BANDS.length - 1].color);
+    expect(speedColor(undefined)).toEqual(SPEED_UNKNOWN);
+    expect(railSpeedColor({ properties: { feature: "tram", maxspeed: 50 } })).toEqual(RAIL_TRANSIT);
+    expect(railSpeedColor({ properties: { feature: "rail", state: "razed", maxspeed: 50 } })[3]).toBe(0);
+    expect(railSpeedWidth({ properties: { feature: "rail", service: "siding" } })).toBeLessThan(
+      railSpeedWidth({ properties: { feature: "rail" } }),
+    );
+  });
+
+  test("one label per stretch: a double track says its limit once, sidings not at all", () => {
+    const labels = speedLabels(
+      [
+        line([[0, 0.5], [1, 0.5]], { maxspeed: 160 }),
+        line([[0, 0.505], [1, 0.505]], { maxspeed: 160 }),
+        line([[0, 0.8], [1, 0.8]], { maxspeed: 80 }),
+        line([[0, 0.2], [1, 0.2]], { maxspeed: 40, service: "siding" }),
+        line([[0, 0.9], [0.01, 0.9]], { maxspeed: 120 }),
+      ],
+      1,
+    );
+    expect(labels.map((l) => l.text).sort()).toEqual(["160", "80"]);
+    expect(labels.find((l) => l.text === "160")!.position).toEqual([0.5, 0.5]);
+  });
+
+  test("the tiles come through the app's protocol", () => {
+    expect(railTilesUrl("Mozilla/5.0 (Macintosh)")).toBe("railtiles://localhost/{z}/{x}/{y}");
+    expect(railTilesUrl("Mozilla/5.0 (Linux; Android 14)")).toBe("http://railtiles.localhost/{z}/{x}/{y}");
+  });
 });

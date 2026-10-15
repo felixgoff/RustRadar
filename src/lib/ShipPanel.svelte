@@ -17,12 +17,14 @@
     /** The clock the report's age is measured against (Unix ms), ticking. */
     now: number;
     onretry: () => void;
-    /** Fly the camera to the ship. */
-    oncentre: () => void;
+    /** Whether the camera follows the ship. */
+    following: boolean;
+    /** Follow it with the camera, or stop. */
+    onfollow: () => void;
     onclose: () => void;
   }
 
-  let { ship, details, error = null, now, onretry, oncentre, onclose }: Props = $props();
+  let { ship, details, error = null, now, onretry, following, onfollow, onclose }: Props = $props();
 
   const loading = $derived(!details && !error);
   const name = $derived(details?.name || (ship.name !== String(ship.mmsi) ? ship.name : "") || "Unnamed ship");
@@ -214,8 +216,13 @@
       {/if}
     </div>
     <div class="actions">
-      <button class="button compact" aria-label="Centre on the ship" title="Centre the map on this ship" onclick={oncentre}>
-        <LocateFixed size={14} strokeWidth={1.75} />
+      <button
+        class="button"
+        aria-pressed={following}
+        title={following ? "Stop following (C)" : "Follow with the camera (C)"}
+        onclick={onfollow}
+      >
+        <LocateFixed size={14} strokeWidth={1.75} /> Follow
       </button>
       <button class="button" onclick={() => openUrl(pageUrl)}>
         VesselFinder <ExternalLink size={14} strokeWidth={1.75} />

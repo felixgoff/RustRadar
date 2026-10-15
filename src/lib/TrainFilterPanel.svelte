@@ -3,8 +3,8 @@
   import type { Train } from "./api";
   import FilterChips from "./FilterChips.svelte";
   import ToggleRow from "./ToggleRow.svelte";
-  import { DEFAULT_TRAIN_FILTERS, TRAIN_REGIONS, trainFilterCount, type TrainFilters } from "./train-list";
-  import { TRAIN_KINDS, trainColor, trainLabel } from "./trains";
+  import { DEFAULT_TRAIN_FILTERS, TRAIN_REGIONS, trainFilterCount, trainOperators, type TrainFilters } from "./train-list";
+  import { TRAIN_KINDS, trainColor, trainColorOf, trainLabel } from "./trains";
 
   interface Props {
     filters: TrainFilters;
@@ -33,9 +33,22 @@
     return TRAIN_REGIONS.map((r) => ({ value: r.source, label: r.label, count: n.get(r.source) }));
   });
 
+  // those of the trains loaded, and any left out that aren't running now (so they can be put back)
+  const operators = $derived.by(() => {
+    const running = trainOperators(trains);
+    const gone = filters.hiddenOperators.filter((o) => !running.some((r) => r.name === o));
+    return [...running, ...gone.map((name) => ({ name, count: 0 }))].map((o) => ({
+      value: o.name,
+      label: o.name || "Unknown",
+      color: o.name ? `rgb(${trainColorOf({ kind: "other", operator: o.name }).join(", ")})` : undefined,
+      count: o.count,
+    }));
+  });
+
   function reset() {
     filters.hiddenKinds = [];
     filters.hiddenSources = [];
+    filters.hiddenOperators = [];
     filters.delayedOnly = DEFAULT_TRAIN_FILTERS.delayedOnly;
   }
 </script>
@@ -53,6 +66,12 @@
   <div class="body">
     <FilterChips label="Kind" options={kinds} bind:hidden={filters.hiddenKinds} />
     <FilterChips label="Region" options={regions} bind:hidden={filters.hiddenSources} />
+    <FilterChips
+      label="Operator"
+      options={operators}
+      bind:hidden={filters.hiddenOperators}
+      hint="In Sweden each operator's trains come live on their own stream; one left out isn't streamed."
+    />
     <ToggleRow label="Delayed only" hint="5 min or more late, as the operator reports" bind:checked={filters.delayedOnly} />
   </div>
 </section>

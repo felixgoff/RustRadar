@@ -11,6 +11,7 @@ import {
   trainFilter,
   trainFilterCount,
   trainMatches,
+  trainOperators,
 } from "./train-list";
 
 const train = (over: Partial<Train>): Train => ({
@@ -89,6 +90,29 @@ describe("trainFilter", () => {
     expect(isDelayed({ delayMinutes: -3 })).toBe(false);
   });
 
+  test("hidden operators are left out, those not known as \"\"", () => {
+    const ops = [
+      train({ name: "sj", operator: "SJ" }),
+      train({ name: "sl", operator: "SL" }),
+      train({ name: "none", operator: null }),
+    ];
+    const shown = (hiddenOperators: string[]) =>
+      ops.filter(trainFilter({ ...DEFAULT_TRAIN_FILTERS, hiddenOperators })).map((t) => t.name);
+    expect(shown(["SJ"])).toEqual(["sl", "none"]);
+    expect(shown([""])).toEqual(["sj", "sl"]);
+    expect(trainFilterCount({ ...DEFAULT_TRAIN_FILTERS, hiddenOperators: ["SJ"] })).toBe(1);
+  });
+
+  test("operators are listed most trains first, unknown last", () => {
+    const ops = [null, "SL", "SJ", "SL", null, "Mälartåg", "SL", "SJ"].map((operator) => train({ operator }));
+    expect(trainOperators(ops)).toEqual([
+      { name: "SL", count: 3 },
+      { name: "SJ", count: 2 },
+      { name: "Mälartåg", count: 1 },
+      { name: "", count: 2 },
+    ]);
+  });
+
   test("each group counts once for the badge", () => {
     expect(trainFilterCount({ ...DEFAULT_TRAIN_FILTERS, hiddenKinds: ["metro", "other"], hiddenSources: ["vbb"] })).toBe(2);
   });
@@ -148,8 +172,20 @@ describe("mergeTrainFilters", () => {
   });
 
   test("stored choices are kept; unknown kinds, sources and sorts are dropped", () => {
-    const f = mergeTrainFilters({ hiddenKinds: ["metro", "hovercraft"], hiddenSources: ["vbb", "mars"], delayedOnly: true, sort: "speed" });
-    expect(f).toEqual({ hiddenKinds: ["metro"], hiddenSources: ["vbb"], delayedOnly: true, sort: "speed" });
+    const f = mergeTrainFilters({
+      hiddenKinds: ["metro", "hovercraft"],
+      hiddenSources: ["vbb", "mars"],
+      hiddenOperators: ["SJ", 7],
+      delayedOnly: true,
+      sort: "speed",
+    });
+    expect(f).toEqual({
+      hiddenKinds: ["metro"],
+      hiddenSources: ["vbb"],
+      hiddenOperators: ["SJ"],
+      delayedOnly: true,
+      sort: "speed",
+    });
     expect(mergeTrainFilters({ sort: "colour", delayedOnly: "yes" })).toEqual(DEFAULT_TRAIN_FILTERS);
   });
 });

@@ -27,6 +27,8 @@ export interface TrainFilters {
   hiddenKinds: TrainKind[];
   /** Sources (regions) left out. */
   hiddenSources: TrainSource[];
+  /** Operators left out, as trains name them ("" for trains whose operator isn't known); not streamed live either. */
+  hiddenOperators: string[];
   delayedOnly: boolean;
   sort: TrainSort;
 }
@@ -34,6 +36,7 @@ export interface TrainFilters {
 export const DEFAULT_TRAIN_FILTERS: TrainFilters = {
   hiddenKinds: [],
   hiddenSources: [],
+  hiddenOperators: [],
   delayedOnly: false,
   sort: "delay",
 };
@@ -49,6 +52,7 @@ export function mergeTrainFilters(saved: unknown): TrainFilters {
   const sources = new Set<string>(TRAIN_REGIONS.map((r) => r.source));
   if (Array.isArray(s.hiddenKinds)) f.hiddenKinds = s.hiddenKinds.filter((k) => kinds.has(k)) as TrainKind[];
   if (Array.isArray(s.hiddenSources)) f.hiddenSources = s.hiddenSources.filter((k) => sources.has(k)) as TrainSource[];
+  if (Array.isArray(s.hiddenOperators)) f.hiddenOperators = s.hiddenOperators.filter((o) => typeof o === "string");
   if (typeof s.delayedOnly === "boolean") f.delayedOnly = s.delayedOnly;
   if (SORTS.includes(s.sort as TrainSort)) f.sort = s.sort as TrainSort;
   return f;
@@ -56,7 +60,9 @@ export function mergeTrainFilters(saved: unknown): TrainFilters {
 
 /** How many filter groups narrow the list, for the badge (the sort is not a filter). */
 export function trainFilterCount(f: TrainFilters): number {
-  return [f.hiddenKinds.length > 0, f.hiddenSources.length > 0, f.delayedOnly].filter(Boolean).length;
+  return [f.hiddenKinds.length > 0, f.hiddenSources.length > 0, f.hiddenOperators.length > 0, f.delayedOnly].filter(
+    Boolean,
+  ).length;
 }
 
 /** Lower case without accents, so "helsinki" finds "Helsinki" and "oslo s" finds "Oslo S". */
@@ -81,7 +87,9 @@ export const isDelayed = (t: Pick<Train, "delayMinutes">) =>
 export function trainFilter(f: TrainFilters): (t: Train) => boolean {
   const kinds = new Set(f.hiddenKinds);
   const sources = new Set(f.hiddenSources);
-  return (t) => !kinds.has(t.kind) && !sources.has(t.source) && (!f.delayedOnly || isDelayed(t));
+  const operators = new Set(f.hiddenOperators);
+  return (t) =>
+    !kinds.has(t.kind) && !sources.has(t.source) && !operators.has(t.operator ?? "") && (!f.delayedOnly || isDelayed(t));
 }
 
 const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -121,4 +129,13 @@ export function distanceKm(lat: number, lon: number, centre: { lat: number; lon:
 export function distanceLabel(km: number): string {
   if (km < 1) return `${Math.round(km * 100) * 10} m`;
   return `${Math.round(km).toLocaleString("en-GB")} km`;
+}
+
+/** The operators of these trains, most trains first ("" for those whose operator isn't known, last). */
+export function trainOperators(trains: readonly Pick<Train, "operator">[]): { name: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const t of trains) counts.set(t.operator ?? "", (counts.get(t.operator ?? "") ?? 0) + 1);
+  return [...counts]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => Number(a.name === "") - Number(b.name === "") || b.count - a.count || a.name.localeCompare(b.name));
 }

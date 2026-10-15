@@ -118,8 +118,13 @@ const TURN_BACK_MS: i64 = 60_000;
 const ON_PATH_M: f64 = 40.0;
 /// A station's point this far off the way still has its trains call there, metres.
 const STATION_OFF_M: f64 = 150.0;
+/// The real train reported this far past a station (beyond its platform) is
+/// done with it: the drawn train doesn't call there, metres.
+const LEFT_BEHIND_M: f64 = 250.0;
+/// A train standing this far on from a station's point is at that station, metres.
+const SAME_STATION_M: f64 = 400.0;
 /// Standing this near a station's point, a drawn train has pulled in there (not waiting short of it), metres.
-const PULLED_IN_M: f64 = 100.0;
+const PULLED_IN_M: f64 = 300.0;
 /// A report off any track (in a tunnel, say) is along a way this near it, metres.
 const OFF_TRACK_M: f64 = 300.0;
 /// A way to a place longer than this many times the distance (plus metres) goes round, not to it.
@@ -1081,10 +1086,14 @@ fn follow(
     // calls at every station its timetable stops at on its way, whatever the
     // live data says (a train seen running through one has stood there briefly too)
     let calls = |i: usize| stops.get(i).is_some_and(|s| !s.pass);
+    // (but not one the real train is reported well past: it is done with that one)
+    let left_behind = |at: f64| !real.standing && layout.p0 - at > LEFT_BEHIND_M;
+    // (and where the real train stands at one, it calls there, not at the station's point as well)
+    let stood_on = |at: f64| pred.hold.is_some_and(|h| h >= at - ARRIVED_M && h - at <= SAME_STATION_M);
     let mut dwells: Vec<(f64, i64)> = layout
         .marks
         .iter()
-        .filter(|m| calls(m.stop) && m.at > s + ARRIVED_M)
+        .filter(|m| calls(m.stop) && m.at > s + ARRIVED_M && !left_behind(m.at) && !stood_on(m.at))
         .map(|m| (m.at, dwell_of(&stops[m.stop])))
         .collect();
     // and those its way passes it hasn't been sent through (one the real train
@@ -1095,7 +1104,9 @@ fn follow(
     let away = |stop: &Stop| distance(here, (stop.lat, stop.lon)) >= PULLED_IN_M;
     for (_, stop) in stops.iter().enumerate().filter(|(i, st)| calls(*i) && unmarked(*i) && away(st)) {
         // (where the way passes nearest it: one behind it is not ahead just because the way goes on)
-        if let Some(at) = path.locate((stop.lat, stop.lon), STATION_OFF_M, None, 0.0).filter(|at| *at > s + ARRIVED_M) {
+        if let Some(at) =
+            path.locate((stop.lat, stop.lon), STATION_OFF_M, None, 0.0).filter(|at| *at > s + ARRIVED_M && !left_behind(*at) && !stood_on(*at))
+        {
             dwells.push((at, dwell_of(stop)));
         }
     }
@@ -1103,7 +1114,7 @@ fn follow(
     // standing at one already (pulled in, not waiting short of it): what is left of its call
     let pulled_in = |i: usize| drawn.is_some_and(|d| distance(d.at, (stops[i].lat, stops[i].lon)) < PULLED_IN_M);
     let mut wait_until = match (layout.standing_at, since) {
-        (Some(i), Some(since)) if calls(i) && (i < real.next || pulled_in(i)) && layout.d0.is_some() => {
+        (Some(i), Some(since)) if calls(i) && (i < real.next || pulled_in(i)) && !left_behind(s) && layout.d0.is_some() => {
             Some(since + dwell_of(&stops[i]))
         }
         _ => None,
@@ -1742,14 +1753,14 @@ mod tests {
     }
 
     #[test]
-    fn it_calls_at_a_station_the_real_train_has_passed_since() {
-        // drawn at 0 heading for the station at 1 km; the real train is reported 600 m past it
+    fn it_calls_at_a_station_the_real_train_is_only_just_past() {
+        // drawn at 0 heading for the station at 1 km; the real train is reported 100 m past it (at the platform's end)
         let track = rails(100.0);
         let stops = [call(1_000.0, NOW + 30_000), far()];
         let first = sim(None, &fix(0.0, NOW, Some(25.0)), None, &stops, NOW, &track);
         let now = NOW + 10_000;
-        let latest = fix(1_600.0, now, Some(20.0));
-        let f = sim(Some(&first[..]), &latest, Some(&fix(1_100.0, now - 20_000, Some(5.0))), &stops, now, &track);
+        let latest = fix(1_100.0, now, Some(10.0));
+        let f = sim(Some(&first[..]), &latest, Some(&fix(1_000.0, now - 20_000, Some(0.0))), &stops, now, &track);
         never_back(&f);
         let xs = trace(&f, now);
         let at_station: Vec<i64> = xs.iter().filter(|(_, x)| (x - 1_000.0).abs() < 0.5).map(|(t, _)| *t).collect();
@@ -1758,6 +1769,22 @@ mod tests {
         assert!(stood >= DWELL_MS.0 - 1_000 && stood <= DWELL_MS.2 + 1_000, "briefly: {stood} ms");
         assert!(xs.last().unwrap().1 > 1_300.0, "and on after the real train: {xs:?}");
         assert!(jerkiest(&f) <= CATCH_ACCEL + 0.2, "{}", jerkiest(&f));
+    }
+
+    #[test]
+    fn a_station_the_real_train_is_well_past_is_left_out() {
+        // as above, but the real train is reported 600 m past the station: done with it
+        let track = rails(100.0);
+        let stops = [call(1_000.0, NOW + 30_000), far()];
+        let first = sim(None, &fix(0.0, NOW, Some(25.0)), None, &stops, NOW, &track);
+        let now = NOW + 10_000;
+        let latest = fix(1_600.0, now, Some(20.0));
+        let f = sim(Some(&first[..]), &latest, Some(&fix(1_100.0, now - 20_000, Some(5.0))), &stops, now, &track);
+        never_back(&f);
+        let xs = trace(&f, now);
+        let stood = xs.windows(2).filter(|w| (w[0].1 - 1_000.0).abs() < 20.0 && (w[1].1 - w[0].1).abs() < 0.01).count();
+        assert!(stood < 3, "not called at: stood {stood} s");
+        assert!(xs.last().unwrap().1 > 1_600.0, "on after the real train: {xs:?}");
     }
 
     #[test]

@@ -166,6 +166,8 @@
   let session = $state.raw<SessionInfo | null>(null);
   /** The camera follows the selected aircraft. */
   let following = $state(false);
+  /** The camera follows the selected train or ship. */
+  let followingVehicle = $state(false);
   /** IATA code of the airport whose board is open. */
   let boardCode = $state<string | null>(null);
   /** The open flight was picked from that board. */
@@ -583,6 +585,12 @@
   });
   // follow the selected train live while its panel is open
   const followedId = $derived(pickedTrain?.id ?? null);
+  // another train or ship (or none): the camera lets go (not on a refresh of the same one)
+  const followableKey = $derived(`${followedId ?? ""}|${selectedShip?.mmsi ?? ""}`);
+  $effect(() => {
+    void followableKey;
+    untrack(() => (followingVehicle = false));
+  });
   $effect(() => {
     const id = followedId;
     liveTrain = null;
@@ -1085,7 +1093,10 @@
     "/": () => searchBox?.focus(),
     "?": () => (helpOpen = !helpOpen),
     f: () => (filtersOpen = !filtersOpen),
-    c: () => selectedId !== null && toggleFollow(),
+    c: () => {
+      if (selectedId !== null) toggleFollow();
+      else if (selectedTrain || selectedShip) followingVehicle = !followingVehicle;
+    },
     t: () => globe.setPitch(view.pitch > 5 ? 0 : TILT),
     n: () => globe.resetOrientation(),
     "+": () => globe.zoomBy(1),
@@ -1225,6 +1236,7 @@
     railMap={settings.railMap}
     terrain={settings.terrain}
     follow={following}
+    followVehicle={followingVehicle}
     {selectedShip}
     {selectedTrain}
     trainRoute={shownRoute}
@@ -1507,10 +1519,8 @@
       error={shipCard?.mmsi === selectedShip.mmsi ? shipCard.error : null}
       {now}
       onretry={() => loadShipCard(selectedShip.mmsi)}
-      oncentre={() => {
-        following = false;
-        globe.flyTo(selectedShip.lon, selectedShip.lat, Math.max(view.zoom, 12));
-      }}
+      following={followingVehicle}
+      onfollow={() => (followingVehicle = !followingVehicle)}
       onclose={() => selectShip(null)}
     />
   {/if}
@@ -1519,10 +1529,8 @@
     <TrainPanel
       train={selectedTrain}
       {now}
-      oncentre={() => {
-        following = false;
-        globe.flyTo(selectedTrain.lon, selectedTrain.lat, Math.max(view.zoom, 12));
-      }}
+      following={followingVehicle}
+      onfollow={() => (followingVehicle = !followingVehicle)}
       onclose={() => selectTrain(null)}
       {liveStops}
     />

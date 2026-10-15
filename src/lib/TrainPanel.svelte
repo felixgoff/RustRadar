@@ -25,14 +25,16 @@
     train: Train;
     /** The clock the report's age is measured against (Unix ms), ticking. */
     now: number;
-    /** Fly the camera to the train. */
-    oncentre: () => void;
+    /** Whether the camera follows the train. */
+    following: boolean;
+    /** Follow it with the camera, or stop. */
+    onfollow: () => void;
     onclose: () => void;
     /** The stops as the live stream last sent them; they win over the ones fetched here. */
     liveStops?: TrainStop[] | null;
   }
 
-  let { train, now, oncentre, onclose, liveStops = null }: Props = $props();
+  let { train, now, following, onfollow, onclose, liveStops = null }: Props = $props();
 
   const kind = $derived(trainLabel(train.kind));
   /** Names run long ("Amtrak 171 Northeast Regional"): those wrap to a second line instead of losing their end. */
@@ -228,8 +230,13 @@
       {/if}
     </div>
     <div class="actions">
-      <button class="button compact" aria-label="Centre on the train" title="Centre the map on this train" onclick={oncentre}>
-        <LocateFixed size={14} strokeWidth={1.75} />
+      <button
+        class="button"
+        aria-pressed={following}
+        title={following ? "Stop following (C)" : "Follow with the camera (C)"}
+        onclick={onfollow}
+      >
+        <LocateFixed size={14} strokeWidth={1.75} /> Follow
       </button>
       {#if credit}
         <button class="button" onclick={() => openUrl(credit.url)} title={credit.url}>

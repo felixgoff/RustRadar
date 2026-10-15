@@ -11,7 +11,7 @@
 </script>
 
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import {
     _CameraLight as CameraLight,
     AmbientLight,
@@ -159,6 +159,8 @@
     hoveredShipMmsi?: number | null;
     /** Keep the camera centred on the selected aircraft. */
     follow: boolean;
+    /** Keep the camera centred on the selected train or ship. */
+    followVehicle?: boolean;
     onselect: (flight: LiveFlight | null) => void;
     /** The selected ship, ringed in the selection amber. */
     selectedShip?: Ship | null;
@@ -196,6 +198,7 @@
     hoveredTrainId = null,
     hoveredShipMmsi = null,
     follow,
+    followVehicle = false,
     onselect,
     selectedShip = null,
     onshipselect,
@@ -2597,12 +2600,45 @@
     }
   }
 
+  /** Where the followed train or ship is drawn now, `[lon, lat]`; none when not following one. */
+  function vehicleAt(): [number, number] | null {
+    if (!followVehicle || (follow && selected)) return null;
+    if (selectedTrain) {
+      const i = trainData?.byId.get(selectedTrain.id);
+      return i === undefined ? [selectedTrain.lon, selectedTrain.lat] : [trainData!.positions[i][0], trainData!.positions[i][1]];
+    }
+    if (selectedShip) {
+      const i = shipData?.byMmsi.get(selectedShip.mmsi);
+      return i === undefined ? [selectedShip.lon, selectedShip.lat] : [shipData!.positions[i][0], shipData!.positions[i][1]];
+    }
+    return null;
+  }
+  /** Following a train or ship: the camera flies there, then keeps it in the middle. */
+  let vehicleLocked = false;
+  $effect(() => {
+    if (!followVehicle) {
+      vehicleLocked = false;
+      return;
+    }
+    const at = untrack(vehicleAt);
+    if (!at) return;
+    untrack(() => goTo({ longitude: at[0], latitude: at[1], zoom: Math.max(view.zoom, 13) }, 800, ["longitude", "latitude", "zoom"]));
+    vehicleLocked = true;
+  });
+
   function renderFrame() {
     tick++;
+    // following a train or ship: centred on it every frame (once there)
+    const vehicle = vehicleLocked && Date.now() > transitionUntil ? vehicleAt() : null;
+    if (vehicle) {
+      view = { ...view, longitude: vehicle[0], latitude: vehicle[1] };
+      onviewchange?.(view);
+      deck?.setProps({ initialViewState: { ...view, ...limits() } });
+    }
     // locked to an aircraft, the wheel has to zoom about the centre, or every
     // notch shoves the aircraft aside and the lock drags it straight back; a
     // drag orbits for the same reason
-    const wanted = follow && selected ? "center" : "pointer";
+    const wanted = (follow && selected) || vehicleLocked ? "center" : "pointer";
     if (wanted !== zoomAround) {
       zoomAround = wanted;
       deck?.setProps({ controller: controllerFor(wanted === "center") });
@@ -2640,7 +2676,7 @@
   function loop(t: number) {
     // locked on an aircraft the camera and the aircraft must move together
     // every frame, or at street zoom each 50 ms step is many pixels of jitter
-    const locked = follow && selected && Date.now() > transitionUntil;
+    const locked = ((follow && selected) || vehicleLocked) && Date.now() > transitionUntil;
     const interval = locked && view.zoom > 7 ? 0 : view.zoom > 7 ? 50 : view.zoom > 4 ? 150 : 500;
     if (t - lastTick >= interval) {
       lastTick = t;
@@ -2904,8 +2940,11 @@
         // a gesture while locked on is re-aimed in the same frame, not on the next tick
         const locked = follow && selected && Date.now() > transitionUntil;
         if (locked) view = lockedView(view, selected!);
+        // following a train or ship, a drag doesn't move it out of the middle
+        const vehicle = !locked && vehicleLocked && Date.now() > transitionUntil ? vehicleAt() : null;
+        if (vehicle) view = { ...view, longitude: vehicle[0], latitude: vehicle[1] };
         onviewchange?.(view);
-        return locked ? { ...viewState, ...view } : viewState;
+        return locked || vehicle ? { ...viewState, ...view } : viewState;
       },
       getTooltip: tooltip,
       getCursor: ({ isDragging, isHovering }) => (isDragging ? "grabbing" : isHovering ? "pointer" : "grab"),

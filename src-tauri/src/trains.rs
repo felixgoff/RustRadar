@@ -1013,8 +1013,17 @@ async fn refresh(source: Source, key: String, area: Area) -> Result<Arc<Vec<Trai
     with_state(source, |s| {
         s.refreshing.remove(&key);
         match result {
-            Ok(trains) => {
+            Ok(mut trains) => {
                 s.succeeded();
+                // a train the stream moved on since keeps its newer report
+                if let Some((_, had)) = s.entries.get(&key) {
+                    let newer: HashMap<&str, &Train> = had.iter().map(|t| (t.id.as_str(), t)).collect();
+                    for t in &mut trains {
+                        if let Some(n) = newer.get(t.id.as_str()).filter(|n| n.position_unix > t.position_unix) {
+                            *t = (*n).clone();
+                        }
+                    }
+                }
                 let trains = Arc::new(trains);
                 s.store(key, trains.clone());
                 Ok(trains)
@@ -1047,6 +1056,49 @@ async fn from_source(source: Source, view: Area) -> Result<Vec<Train>, String> {
     };
     let within = view.padded(0.1);
     Ok(trains.iter().filter(|t| within.contains(t.lat, t.lon)).cloned().collect())
+}
+
+/// Puts trains a live stream moved into the source's cached answer, in
+/// place of their older selves; trains not there yet are added. Whether
+/// anything changed. The cache's age is left alone: the regular refresh
+/// still comes, for the trains that stopped reporting.
+pub fn patch(source: Source, moved: Vec<Train>) -> bool {
+    let (key, _) = source.request(&Area::WORLD);
+    with_state(source, |s| {
+        let Some((at, had)) = s.entries.get(&key) else { return false };
+        let at = *at;
+        let mut trains: Vec<Train> = had.as_ref().clone();
+        let mut index: HashMap<String, usize> = trains.iter().enumerate().map(|(i, t)| (t.id.clone(), i)).collect();
+        let mut changed = false;
+        for t in moved {
+            match index.get(&t.id) {
+                Some(&i) if trains[i].position_unix >= t.position_unix => {}
+                Some(&i) => {
+                    trains[i] = t;
+                    changed = true;
+                }
+                None => {
+                    index.insert(t.id.clone(), trains.len());
+                    trains.push(t);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            s.entries.insert(key, (at, Arc::new(trains)));
+        }
+        changed
+    })
+}
+
+/// When the map last asked for Trafikverket's trains, Unix ms.
+static TRAFIKVERKET_ASKED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+/// The country stream runs while the map asked for them this recently.
+const WANTED_FOR_MS: i64 = 120_000;
+
+/// Whether the map shows Trafikverket's trains: their live stream is worth running.
+pub fn trafikverket_wanted() -> bool {
+    now_ms() - TRAFIKVERKET_ASKED.load(std::sync::atomic::Ordering::Relaxed) < WANTED_FOR_MS
 }
 
 /// The sources worth asking for a view at a deck.gl zoom.
@@ -1114,6 +1166,9 @@ pub async fn train_stops(id: String) -> CmdResult<Vec<crate::trafikverket::Stop>
 pub async fn trains_in_view(west: f64, south: f64, east: f64, north: f64, zoom: f64) -> CmdResult<Vec<Train>> {
     let view = Area::view(west, south, east, north).ok_or("not an area")?;
     let sources = sources_for(&view, if zoom.is_finite() { zoom } else { 0.0 });
+    if sources.contains(&Source::Trafikverket) {
+        TRAFIKVERKET_ASKED.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
     let results = futures_util::future::join_all(sources.iter().map(|s| from_source(*s, view))).await;
     let mut trains = Vec::new();
     let mut errors = Vec::new();
@@ -1371,6 +1426,37 @@ mod tests {
         let (k2, _) = Source::Vbb.request(&Area::view(13.31, 52.41, 13.51, 52.61).unwrap());
         assert_eq!(k1, k2);
         assert_eq!(Source::Amtrak.request(&big).0, "all");
+    }
+
+    #[test]
+    fn streamed_trains_are_patched_in_newest_first() {
+        let t = |id: &str, at: i64| Train {
+            id: id.into(),
+            source: "trafikverket",
+            name: id.into(),
+            kind: Kind::Regional,
+            lat: 59.0,
+            lon: 18.0,
+            heading: None,
+            speed_kmh: None,
+            destination: None,
+            operator: None,
+            delay_minutes: None,
+            position_unix: at,
+            frames: Vec::new(),
+            reports: Vec::new(),
+        };
+        let source = Source::Trafikverket;
+        let (key, _) = source.request(&Area::WORLD);
+        with_state(source, |s| s.entries.clear());
+        assert!(!patch(source, vec![t("a", 10)]), "nothing to patch before the first answer");
+        with_state(source, |s| s.store(key.clone(), Arc::new(vec![t("a", 10), t("b", 10)])));
+        assert!(!patch(source, vec![t("a", 5)]), "an older report changes nothing");
+        assert!(patch(source, vec![t("a", 20), t("c", 20)]));
+        let now = with_state(source, |s| s.entries.get(&key).unwrap().1.clone());
+        let at = |id: &str| now.iter().find(|x| x.id == id).map(|x| x.position_unix);
+        assert_eq!((at("a"), at("b"), at("c")), (Some(20), Some(10), Some(20)));
+        with_state(source, |s| s.entries.clear());
     }
 
     #[test]

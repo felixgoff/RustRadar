@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { Funnel, Radar, RefreshCw, Ship as ShipIcon, TrainFront, TriangleAlert } from "@lucide/svelte";
   import {
     adsbCallsign,
@@ -496,6 +497,32 @@
       if (request === trainsRequest) trainsFailed = true;
     }
   }
+  // Trafikverket's trains come live, the whole country in one stream: the
+  // backend moves them as reports come and says so; asked again for the view,
+  // at most this often
+  const TRAINS_LIVE_MS = 1_500;
+  let trainsLiveAt = 0;
+  let trainsLivePending: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    if (!isTauri()) return;
+    let stop: (() => void) | undefined;
+    let gone = false;
+    listen("trains-changed", () => {
+      if (!trainsOn || trainsLivePending) return;
+      const wait = Math.max(0, trainsLiveAt + TRAINS_LIVE_MS - Date.now());
+      trainsLivePending = setTimeout(() => {
+        trainsLivePending = undefined;
+        trainsLiveAt = Date.now();
+        loadTrains();
+      }, wait);
+    }).then((un) => (gone ? un() : (stop = un)));
+    return () => {
+      gone = true;
+      stop?.();
+      clearTimeout(trainsLivePending);
+      trainsLivePending = undefined;
+    };
+  });
   $effect(() => {
     void view;
     if (!trainsOn) {

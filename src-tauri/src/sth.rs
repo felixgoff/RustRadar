@@ -20,9 +20,12 @@ const CELL: f64 = 0.002;
 /// Limits in km/h, per train category: A, B, C, S.
 pub type Limits = [u16; 4];
 
+/// A piece as the file has it: direction, limits, `[lon, lat]` points.
+type RawPiece = (u8, Limits, Vec<(f64, f64)>);
+
 #[derive(Deserialize)]
 struct File {
-    pieces: Vec<(u8, Limits, Vec<(f64, f64)>)>,
+    pieces: Vec<RawPiece>,
 }
 
 struct Piece {

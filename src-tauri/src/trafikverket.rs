@@ -952,22 +952,159 @@ pub async fn trains(http: &reqwest::Client, key: &str, now_ms: i64) -> Result<Ve
     });
     let trains: Vec<Train> =
         reports.iter().map(|r| train(r, previous(r).as_ref(), &services, &delays, &stations, now_ms)).collect();
-    // which operational number each train runs under, for following one
+    remember(&trains, &reports, now_ms, true);
+    Ok(trains)
+}
+
+/// Notes which number each train runs under (for following it) and where
+/// it was last seen (for its route); `all`: these are all the trains now.
+fn remember(trains: &[Train], reports: &[Report], now_ms: i64, all: bool) {
     let mut numbers = operational_numbers().lock().unwrap();
-    numbers.clear();
-    numbers.extend(trains.iter().zip(&reports).map(|(t, r)| (t.id.clone(), r.lookup().to_owned())));
+    if all {
+        numbers.clear();
+    }
+    numbers.extend(trains.iter().zip(reports).map(|(t, r)| (t.id.clone(), r.lookup().to_owned())));
     drop(numbers);
     let mut places = last_places().lock().unwrap();
-    for (t, r) in trains.iter().zip(&reports) {
+    for (t, r) in trains.iter().zip(reports) {
         if places.get(&t.id).is_none_or(|p| p.latest.t_ms <= r.at_ms) {
             let prev = history().lock().unwrap().get(r.lookup()).and_then(|h| h.1.as_ref().map(Report::fix));
             places.insert(t.id.clone(), Seen { latest: r.fix(), prev });
         }
     }
     places.retain(|_, p| now_ms - p.latest.t_ms < 6 * 3_600_000);
-    history().lock().unwrap().retain(|_, h| now_ms - h.0.at_ms < 6 * 3_600_000);
     drop(places);
-    Ok(trains)
+    history().lock().unwrap().retain(|_, h| now_ms - h.0.at_ms < 6 * 3_600_000);
+}
+
+// ---------------------------------------------------- the whole country, live
+
+/// Every train's position report as it comes, for the whole country: one
+/// stream, only what the map needs.
+fn national_query() -> String {
+    format!(
+        "<QUERY sseurl=\"true\" objecttype=\"TrainPosition\" namespace=\"järnväg.trafikinfo\" schemaversion=\"1.1\" limit=\"0\">\
+         <FILTER><EQ name=\"Status.Active\" value=\"true\"/></FILTER>{}</QUERY>",
+        includes(&[
+            "Train.AdvertisedTrainNumber",
+            "Train.OperationalTrainNumber",
+            "Train.JourneyPlanDepartureDate",
+            "Position.WGS84",
+            "Bearing",
+            "Speed",
+            "TimeStamp",
+        ])
+    )
+}
+
+/// Reports gathered this long before the trains they move are worked out.
+const NATIONAL_BATCH: Duration = Duration::from_millis(1000);
+/// How often the stream checks it is still wanted, and with the same key.
+const NATIONAL_CHECK: Duration = Duration::from_secs(5);
+
+/// Streams the whole country's train positions while the map shows
+/// Trafikverket's trains (`trains::trafikverket_wanted`): each report moves
+/// its train in the trains' cache at once, and the page is told
+/// (`trains-changed`) to show it.
+pub fn start_national(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let key = crate::keys::current().trafikverket;
+            if key.is_empty() || !crate::trains::trafikverket_wanted() {
+                tokio::time::sleep(NATIONAL_CHECK).await;
+                continue;
+            }
+            national(&app, &key).await;
+            tokio::time::sleep(RECONNECT).await;
+        }
+    });
+}
+
+/// One stream, until it ends, isn't wanted any more, or the key changes.
+async fn national(app: &tauri::AppHandle, key: &str) {
+    let Ok(http) = stream_client() else { return };
+    let url = match sse_url(http, key, &national_query()).await {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("trafikverket: country stream: {e}");
+            return;
+        }
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u8, String)>();
+    let read = async {
+        if let Err(e) = read_stream(&url, 2, &tx).await {
+            eprintln!("trafikverket: country stream: {e}");
+        }
+    };
+    let still_wanted = async {
+        loop {
+            tokio::time::sleep(NATIONAL_CHECK).await;
+            if crate::keys::current().trafikverket != key || !crate::trains::trafikverket_wanted() {
+                return;
+            }
+        }
+    };
+    let handle = async {
+        let mut pending: HashMap<String, Report> = HashMap::new();
+        let mut tick = tokio::time::interval(NATIONAL_BATCH);
+        loop {
+            tokio::select! {
+                got = rx.recv() => {
+                    let Some((_, data)) = got else { return };
+                    for r in parse_positions(&data).unwrap_or_default() {
+                        let k = r.lookup().to_owned();
+                        if pending.get(&k).is_none_or(|old| old.at_ms < r.at_ms) {
+                            pending.insert(k, r);
+                        }
+                    }
+                }
+                _ = tick.tick() => {
+                    if !pending.is_empty() {
+                        let reports: Vec<Report> = pending.drain().map(|(_, r)| r).collect();
+                        move_trains(app, http, key, reports).await;
+                    }
+                }
+            }
+        }
+    };
+    tokio::select! {
+        _ = read => {}
+        _ = still_wanted => {}
+        _ = handle => {}
+    }
+}
+
+/// The trains these reports move, worked out and put in the trains' cache.
+async fn move_trains(app: &tauri::AppHandle, http: &reqwest::Client, key: &str, reports: Vec<Report>) {
+    use tauri::Emitter;
+    let now_ms = crate::trains::now_ms();
+    // only what is newer than what the map has
+    let reports: Vec<Report> = reports
+        .into_iter()
+        .filter(|r| now_ms - r.at_ms < STALE_REPORT_MS)
+        .filter(|r| history().lock().unwrap().get(r.lookup()).is_none_or(|h| h.0.at_ms < r.at_ms))
+        .collect();
+    if reports.is_empty() {
+        return;
+    }
+    let numbers = reports.iter().map(|r| r.lookup().to_owned()).collect();
+    let services = learn_services(http, key, numbers).await;
+    let stations = station_cache().lock().unwrap().clone().map(|(_, _, s)| s).unwrap_or_default();
+    let delays = delay_cache().lock().unwrap().clone().map(|(_, _, d)| d).unwrap_or_default();
+    // the way along the track is worked out off the async threads
+    let worked = tauri::async_runtime::spawn_blocking(move || {
+        let trains: Vec<Train> = reports
+            .iter()
+            .map(|r| train(r, previous(r).as_ref(), &services, &delays, &stations, now_ms))
+            .collect();
+        (trains, reports)
+    })
+    .await;
+    let Ok((trains, reports)) = worked else { return };
+    remember(&trains, &reports, now_ms, false);
+    if crate::trains::patch(crate::trains::Source::Trafikverket, trains) {
+        let _ = app.emit("trains-changed", ());
+    }
 }
 
 /// Every stop of a train, by the id `trains` gave it.
@@ -1067,7 +1204,12 @@ async fn read_stream(
     while let Some(chunk) = stream.next().await {
         buf.push_str(&String::from_utf8_lossy(&chunk.map_err(|e| e.to_string())?).replace("\r\n", "\n"));
         for data in take_events(&mut buf) {
-            crate::devlog::received(if kind == 0 { "Trafikverket stream: positions" } else { "Trafikverket stream: announcements" }, url, &data);
+            let source = match kind {
+                0 => "Trafikverket stream: positions",
+                1 => "Trafikverket stream: announcements",
+                _ => "Trafikverket stream: country",
+            };
+            crate::devlog::received(source, url, &data);
             if tx.send((kind, data)).is_err() {
                 return Ok(());
             }

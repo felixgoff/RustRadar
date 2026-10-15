@@ -668,6 +668,8 @@ pub fn run() {
             if let Ok(dir) = app.path().app_cache_dir() {
                 rail::set_cache_dir(dir);
             }
+            // every Swedish train's position as it comes, while the map shows them
+            trafikverket::start_national(app.handle().clone());
             // the main window starts hidden: update first, then open it
             #[cfg(desktop)]
             tauri::async_runtime::spawn(updater::run(app.handle().clone()));

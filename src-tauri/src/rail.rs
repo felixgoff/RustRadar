@@ -1114,20 +1114,31 @@ fn places(g: &Graph, start: (f64, f64), heading: Option<f64>, spread: f64) -> Ve
     let Some(nearest) = snaps.first().map(|s| s.3) else { return Vec::new() };
     let mut out = Vec::new();
     for (a, b, on, d) in snaps.into_iter().take_while(|s| s.3 <= nearest + spread).take(6) {
-        let forward = Place { on, behind: a, front: b };
-        let backward = Place { on, behind: b, front: a };
-        match heading {
-            Some(h) => {
-                let toward_b = turn(h, course(g.nodes[a], g.nodes[b])) <= 90.0;
-                out.push((if toward_b { forward } else { backward }, d));
-            }
-            None => {
-                out.push((forward, d));
-                out.push((backward, d));
-            }
-        }
+        out.push((Place { on, behind: a, front: b }, d));
+        out.push((Place { on, behind: b, front: a }, d));
+    }
+    // with a heading, the way it points first
+    if let Some(h) = heading {
+        out.sort_by_key(|(p, _)| turn(h, course(g.nodes[p.behind], g.nodes[p.front])) > 90.0);
     }
     out
+}
+
+/// A way that goes against the train's heading costs this much more
+/// (metres' worth): the heading tips the balance, the next station decides.
+const AGAINST_HEADING: f64 = 400.0;
+
+/// `route_in`, going only the way `heading` points (on from a station
+/// without turning back there); with no heading, as `route_in`.
+fn route_in_onwards(
+    g: &Graph,
+    start: (f64, f64),
+    heading: Option<f64>,
+    targets: &[(f64, f64)],
+    onwards_m: f64,
+    spread: f64,
+) -> Option<Route> {
+    route_in_dir(g, start, heading, targets, onwards_m, spread, None, true)
 }
 
 fn route_in(
@@ -1138,7 +1149,7 @@ fn route_in(
     onwards_m: f64,
     spread: f64,
 ) -> Option<Route> {
-    route_in_as(g, start, heading, targets, onwards_m, spread, None)
+    route_in_dir(g, start, heading, targets, onwards_m, spread, None, false)
 }
 
 /// `route_in`, with the speed limits for a train of this class.
@@ -1151,20 +1162,52 @@ fn route_in_as(
     spread: f64,
     class: Option<&crate::train_class::TrainClass>,
 ) -> Option<Route> {
-    // the likeliest: reaching the most targets, the cheapest way, near the report
-    let best = places(g, start, heading, spread)
+    route_in_dir(g, start, heading, targets, onwards_m, spread, class, false)
+}
+
+/// The way from `start`: towards the targets whichever way the heading
+/// points, or (`only_onwards`, or no targets) only the way it points.
+#[allow(clippy::too_many_arguments)]
+fn route_in_dir(
+    g: &Graph,
+    start: (f64, f64),
+    heading: Option<f64>,
+    targets: &[(f64, f64)],
+    onwards_m: f64,
+    spread: f64,
+    class: Option<&crate::train_class::TrainClass>,
+    only_onwards: bool,
+) -> Option<Route> {
+    // the likeliest: reaching the most targets (it goes towards its next
+    // station, whichever way it seemed to point), the cheapest way, near the report
+    let candidates = places(g, start, heading, spread);
+    let candidates = if heading.is_some() && (targets.is_empty() || only_onwards) {
+        // nowhere it must go: the way it points
+        let n = candidates.len().div_ceil(2);
+        candidates.into_iter().take(n).collect()
+    } else {
+        candidates
+    };
+    let best = candidates
         .into_iter()
         .filter_map(|(place, off)| {
             let edge = g.edge(place.behind, place.front);
             let service = edge.is_some_and(|e| e.service);
             // on the track running the other way: possible, but unlikely
             let wrong_way = edge.is_some_and(|e| e.flow == Some(false));
+            let way = course(g.nodes[place.behind], g.nodes[place.front]);
+            let against_heading = heading.is_some_and(|h| turn(h, way) > 90.0);
+            // reaching none of them: at least towards the first
+            let away = targets.first().is_some_and(|t| turn(course(place.on, *t), way) > 90.0);
             let b = route_from(g, place, targets, onwards_m, class)?;
+            let reached = b.route.reached.len();
             let score = b.cost
                 + off * 20.0
                 + if service && targets.is_empty() { 50.0 } else { 0.0 }
-                + if wrong_way { 200.0 } else { 0.0 };
-            Some((b.route.reached.len(), score, b))
+                + if wrong_way { 200.0 } else { 0.0 }
+                + if against_heading { AGAINST_HEADING } else { 0.0 }
+                + if reached == 0 && away { 2.0 * AGAINST_HEADING } else { 0.0 };
+            Some((reached, score, b))
         })
         .min_by(|x, y| y.0.cmp(&x.0).then(x.1.total_cmp(&y.1)))?;
     let route = best.2.route;
@@ -1295,9 +1338,14 @@ fn hold_in(g: &Graph, at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)
 /// turning back at the station it leaves when it must (a terminus).
 fn leg(g: &Graph, from: (f64, f64), heading: Option<f64>, to: (f64, f64)) -> Option<Route> {
     let reaches = |r: &Route| r.reached.len() == 1;
-    route_in(g, from, heading, &[to], 0.0, 1.0)
+    route_in_onwards(g, from, heading, &[to], 0.0, 1.0)
         .filter(reaches)
         .or_else(|| heading.and_then(|_| route_in(g, from, None, &[to], 0.0, 1.0)).filter(reaches))
+}
+
+/// Whether a train can go on from `from` (arriving so) to `to` without turning back.
+fn goes_on(g: &Graph, from: (f64, f64), heading: Option<f64>, to: (f64, f64)) -> bool {
+    route_in_onwards(g, from, heading, &[to], 0.0, 1.0).is_some_and(|r| r.reached.len() == 1)
 }
 
 fn end_heading(points: &[(f64, f64)]) -> Option<f64> {
@@ -1352,7 +1400,7 @@ pub fn way_through(places: &[Vec<(f64, f64)>]) -> (Vec<Line>, bool) {
                 // and on from there to the next place?
                 let on_keys = keys_between(&[spot], next);
                 let goes_on = on_keys.len() > MAX_LEG_TILES
-                    || graph_for(on_keys).is_none_or(|g2| next.iter().any(|n| leg(&g2, spot, end_heading(&r.points), *n).is_some()));
+                    || graph_for(on_keys).is_none_or(|g2| next.iter().any(|n| goes_on(&g2, spot, end_heading(&r.points), *n)));
                 if goes_on {
                     through = Some((spot, r));
                     break;
@@ -1578,6 +1626,21 @@ mod tests {
         let west = route_in(&g, between, Some(270.0), &[], 400.0, SNAP_SPREAD_M).unwrap();
         assert!(east.points.iter().all(|p| p.0 > a.0 + 0.00002), "eastbound on the northern track");
         assert!(west.points.iter().all(|p| p.0 < a.0 + 0.00002), "westbound on the southern track");
+    }
+
+    #[test]
+    fn it_heads_for_its_next_station_whatever_its_heading_says() {
+        // a line east-west; the station is 3 km west, but the heading says east
+        let g = graph(vec![track(line((57.0, 12.0), 90.0, 8.0))]);
+        let here = ahead((57.0, 12.0), 90.0, 4_000.0);
+        let station = ahead((57.0, 12.0), 90.0, 1_000.0);
+        let r = route_in(&g, here, Some(90.0), &[station], 500.0, SNAP_SPREAD_M).unwrap();
+        assert_eq!(r.reached.len(), 1, "reaches the station");
+        assert!((r.reached[0] - 3_000.0).abs() < 50.0, "straight there: {}", r.reached[0]);
+        assert!(r.points.iter().all(|p| p.1 <= here.1 + 1e-9), "never east of where it is");
+        // with nowhere it must go, the heading is followed
+        let r = route_in(&g, here, Some(90.0), &[], 500.0, SNAP_SPREAD_M).unwrap();
+        assert!(r.points.last().unwrap().1 > here.1, "east, as it points");
     }
 
     #[test]

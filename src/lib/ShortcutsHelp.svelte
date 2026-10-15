@@ -32,6 +32,10 @@
     [["D"], "Day and night"],
     [["?"], "This list"],
     [["Ctrl", "Alt", "I"], "Developer tools, for bug reports (⌘⌥I on a Mac)"],
+    // dev builds: what the APIs answered
+    ...(import.meta.env.DEV
+      ? [[["Ctrl", "Shift", "D"], "API calls and the selected train's data (dev builds, ⌘⇧D on a Mac)"] as [string[], string]]
+      : []),
   ];
 
   let dialog: HTMLDialogElement;

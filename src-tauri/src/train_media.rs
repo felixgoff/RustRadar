@@ -111,11 +111,20 @@ fn parse_summary(body: &str) -> Option<Summary> {
 }
 
 async fn get(url: &str) -> Option<String> {
-    let response = client().ok()?.get(url).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
+    let call = crate::devlog::start("Wikimedia", "GET", url, None);
+    let answer = async {
+        let response = client()?.get(url).send().await.map_err(|e| e.to_string())?;
+        let status = response.status().as_u16();
+        Ok::<_, String>((status, response.text().await.map_err(|e| e.to_string())?))
     }
-    response.text().await.ok()
+    .await;
+    if let Some(c) = call {
+        match &answer {
+            Ok((status, body)) => c.finish(*status, body.as_bytes()),
+            Err(e) => c.fail(e),
+        }
+    }
+    answer.ok().filter(|(s, _)| (200..300).contains(s)).map(|(_, body)| body)
 }
 
 async fn summary(lang: &str, title: &str) -> Option<Summary> {

@@ -54,6 +54,7 @@
   import ShipPanel from "$lib/ShipPanel.svelte";
   import ShortcutsHelp from "$lib/ShortcutsHelp.svelte";
   import KeysDialog from "$lib/KeysDialog.svelte";
+  import DevPanel from "$lib/DevPanel.svelte";
   import TrainFilterPanel from "$lib/TrainFilterPanel.svelte";
   import TrainList from "$lib/TrainList.svelte";
   import TrainPanel from "$lib/TrainPanel.svelte";
@@ -1030,8 +1031,16 @@
     e: () => (settings.terrain = !settings.terrain),
   };
 
+  /** Dev builds: the API calls and the selected train's data (Ctrl/Cmd+Shift+D). */
+  let devOpen = $state(false);
+
   function onkeydown(e: KeyboardEvent) {
     const t = e.target as HTMLElement | null;
+    if (import.meta.env.DEV && (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyD") {
+      e.preventDefault();
+      devOpen = !devOpen;
+      return;
+    }
     const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || !!t?.isContentEditable;
     // Cmd/Ctrl+Alt+I: the web inspector, for bug reports
     if ((e.ctrlKey || e.metaKey) && e.altKey && e.code === "KeyI" && isTauri()) {
@@ -1467,6 +1476,9 @@
   />
 
   <ShortcutsHelp open={helpOpen} onclose={() => (helpOpen = false)} />
+  {#if import.meta.env.DEV}
+    <DevPanel bind:open={devOpen} train={selectedTrain} stops={liveStops} route={shownRoute} />
+  {/if}
   <KeysDialog
     open={keysOpen}
     {session}

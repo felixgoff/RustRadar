@@ -1,5 +1,6 @@
 mod adsblol;
 mod board;
+mod devlog;
 mod dwd;
 mod export;
 mod geocode;
@@ -731,6 +732,8 @@ pub fn run() {
             trains::trains_in_view,
             trains::train_stops,
             trains::train_route,
+            devlog::dev_log,
+            devlog::dev_log_clear,
             trains::follow_train,
             trains::unfollow_train,
             train_media::train_media,

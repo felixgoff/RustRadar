@@ -437,9 +437,10 @@ pub async fn tile_bytes(z: u32, x: u32, y: u32) -> Result<Arc<Vec<u8>>, String> 
         Some((bytes, false)) => Some(bytes),
         None => None,
     };
+    let url = format!("{TILES}/{z}/{x}/{y}");
+    let call = crate::devlog::start("OpenRailwayMap", "GET", &url, None);
     let fetched = async {
-        let url = format!("{TILES}/{z}/{x}/{y}");
-        let response = client().ok_or("no HTTP client")?.get(url).send().await.map_err(|e| e.to_string())?;
+        let response = client().ok_or("no HTTP client")?.get(&url).send().await.map_err(|e| e.to_string())?;
         match response.status().as_u16() {
             204 | 404 => Ok(Vec::new()),
             s if (200..300).contains(&s) => Ok(response.bytes().await.map_err(|e| e.to_string())?.to_vec()),
@@ -447,6 +448,12 @@ pub async fn tile_bytes(z: u32, x: u32, y: u32) -> Result<Arc<Vec<u8>>, String> 
         }
     }
     .await;
+    if let Some(c) = call {
+        match &fetched {
+            Ok(b) => c.finish(if b.is_empty() { 204 } else { 200 }, b),
+            Err(e) => c.fail(e),
+        }
+    }
     match (fetched, stale) {
         (Ok(bytes), _) => {
             to_disk(z, x, y, &bytes);

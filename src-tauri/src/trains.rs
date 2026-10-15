@@ -880,7 +880,31 @@ type Failure = (String, Option<Duration>);
 
 async fn send(source: Source, request: reqwest::RequestBuilder) -> Result<String, Failure> {
     let name = source.label();
-    let response = request.send().await.map_err(|e| (format!("can't reach {name}: {e}"), None))?;
+    let (http, request) = request.build_split();
+    let request = request.map_err(|e| (format!("{name}: {e}"), None))?;
+    let sent = request.body().and_then(|b| b.as_bytes()).map(String::from_utf8_lossy);
+    let call = crate::devlog::start(name, request.method().as_str(), request.url().as_str(), sent.as_deref());
+    let response = match http.execute(request).await {
+        Ok(r) => r,
+        Err(e) => {
+            let e = format!("can't reach {name}: {e}");
+            if let Some(c) = call {
+                c.fail(&e);
+            }
+            return Err((e, None));
+        }
+    };
+    let status = response.status();
+    let Some(call) = call else { return read(name, response).await };
+    let text = read(name, response).await;
+    match &text {
+        Ok(body) => call.finish(status.as_u16(), body.as_bytes()),
+        Err((e, _)) => call.fail(e),
+    }
+    text
+}
+
+async fn read(name: &str, response: reqwest::Response) -> Result<String, Failure> {
     let status = response.status();
     if !status.is_success() {
         let retry_after = response

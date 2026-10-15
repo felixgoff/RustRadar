@@ -664,15 +664,23 @@ pub fn parse_stops(body: &str, stations: &HashMap<String, Station>) -> Result<Ve
 // ---------------------------------------------------------------- fetching
 
 async fn post(http: &reqwest::Client, key: &str, queries: &str) -> Result<String, String> {
-    let response = http
-        .post(URL)
-        .header("content-type", "text/xml; charset=utf-8")
-        .body(request(key, queries))
-        .send()
-        .await
-        .map_err(|e| format!("can't reach Trafikverket: {e}"))?;
+    let sent = request(key, queries);
+    let call = crate::devlog::start("Trafikverket", "POST", URL, Some(&sent));
+    let response = match http.post(URL).header("content-type", "text/xml; charset=utf-8").body(sent).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let e = format!("can't reach Trafikverket: {e}");
+            if let Some(c) = call {
+                c.fail(&e);
+            }
+            return Err(e);
+        }
+    };
     let status = response.status();
     let body = response.text().await.map_err(|e| format!("Trafikverket: {e}"))?;
+    if let Some(c) = call {
+        c.finish(status.as_u16(), body.as_bytes());
+    }
     if status.as_u16() == 401 || status.as_u16() == 403 {
         return Err("Trafikverket didn't accept the API key (check it on the keys page)".into());
     }
@@ -840,6 +848,26 @@ fn operational_numbers() -> &'static Mutex<HashMap<String, String>> {
 const STALE_REPORT_MS: i64 = 15 * 60_000;
 /// Waiting before opening a stream again after it closed or failed.
 const RECONNECT: Duration = Duration::from_secs(3);
+/// A stream quiet this long (a train standing for a long time sends nothing) is opened again.
+const STREAM_IDLE: Duration = Duration::from_secs(10 * 60);
+
+/// The client streams are read with: no limit on the whole request (a stream
+/// stays open for as long as the train is followed, and a client's overall
+/// timeout would cut it off mid-body, "error decoding response body"), only
+/// on connecting and on silence.
+fn stream_client() -> Result<&'static reqwest::Client, String> {
+    static C: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(c) = C.get() {
+        return Ok(c);
+    }
+    let c = fr24::client_builder()
+        .user_agent(concat!("RustRadar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/felixgoff/RustRadar)"))
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(STREAM_IDLE)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(C.get_or_init(|| c))
+}
 
 /// The URL of a stream of changes to what one query asks for.
 async fn sse_url(http: &reqwest::Client, key: &str, query: &str) -> Result<String, String> {
@@ -867,13 +895,13 @@ pub fn take_events(buf: &mut String) -> Vec<String> {
 
 /// Reads a stream until it ends, sending each event's data on.
 async fn read_stream(
-    http: &reqwest::Client,
     url: &str,
     kind: u8,
     tx: &tokio::sync::mpsc::UnboundedSender<(u8, String)>,
 ) -> Result<(), String> {
     use futures_util::StreamExt;
-    let response = http.get(url).header("accept", "text/event-stream").send().await.map_err(|e| e.to_string())?;
+    let response =
+        stream_client()?.get(url).header("accept", "text/event-stream").send().await.map_err(|e| e.to_string())?;
     if !response.status().is_success() {
         return Err(format!("stream answered {}", response.status()));
     }
@@ -882,6 +910,7 @@ async fn read_stream(
     while let Some(chunk) = stream.next().await {
         buf.push_str(&String::from_utf8_lossy(&chunk.map_err(|e| e.to_string())?).replace("\r\n", "\n"));
         for data in take_events(&mut buf) {
+            crate::devlog::received(if kind == 0 { "Trafikverket stream: positions" } else { "Trafikverket stream: announcements" }, url, &data);
             if tx.send((kind, data)).is_err() {
                 return Ok(());
             }
@@ -926,7 +955,7 @@ pub async fn follow(http: reqwest::Client, key: String, id: String, channel: tau
             loop {
                 match sse_url(&http, &key, &query).await {
                     Ok(url) => {
-                        if let Err(e) = read_stream(&http, &url, kind, &tx).await {
+                        if let Err(e) = read_stream(&url, kind, &tx).await {
                             eprintln!("trafikverket: train stream: {e}");
                         }
                     }

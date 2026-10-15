@@ -1931,23 +1931,20 @@
   }
 
   const SIGHT_LATEST: [number, number, number, number] = [240, 60, 60, 255];
-  const SIGHT_PREV: [number, number, number, number] = [255, 165, 40, 255];
   const SIGHT_LABEL_BG: [number, number, number, number] = [12, 14, 20, 225];
   const SIGHT_PREDICTED: [number, number, number, number] = [80, 220, 120, 255];
   /**
-   * Dev builds: each train's latest report (red) and the one before it,
-   * which it is drawn from (an orange ring), joined; the selected train's
-   * with their age and speed.
+   * Dev builds: each train's latest report (red), the selected train's with
+   * its age and speed, and where the real train most likely is now (green).
    */
   function sightingLayers(list: Train[], selected: Train | null, nowMs: number): Layer[] {
     const sighted = list.filter((t) => t.reports?.length);
     const sel = selected?.reports?.length ? selected : null;
     if (sel && !sighted.some((t) => t.id === sel.id)) sighted.push(sel);
-    const points: Sighting[] = sighted.flatMap((t) => t.reports ?? []);
-    const pairs = sighted.filter((t) => t.reports!.length === 2).map((t) => t.reports!);
+    const points: Sighting[] = sighted.flatMap((t) => t.reports ?? []).filter((s) => s.latest);
     const age = (s: Sighting) => `${Math.max(0, Math.round((nowMs - s.unixMs) / 1000))} s`;
     const speed = (s: Sighting) => (s.speedKmh === null ? "no speed" : `${Math.round(s.speedKmh)} km/h`);
-    const labels = (sel?.reports ?? []).map((s) => ({ s, text: `${s.latest ? "live" : "Δ"} ${age(s)} · ${speed(s)}` }));
+    const labels = (sel?.reports ?? []).filter((s) => s.latest).map((s) => ({ s, text: `live ${age(s)} · ${speed(s)}` }));
     // where the real trains most likely are now, by their reports
     const predicted = sighted
       .filter((t) => (t.predicted?.length ?? 0) > 0)
@@ -1985,25 +1982,16 @@
         parameters: top,
         updateTriggers: { getPosition: nowMs },
       }),
-      new PathLayer<Sighting[]>({
-        id: "dev-sighting-links",
-        data: pairs,
-        getPath: (p) => p.map((s) => [s.lon, s.lat] as [number, number]),
-        getColor: SIGHT_PREV,
-        getWidth: 1.5,
-        widthUnits: "pixels",
-        parameters: top,
-      }),
       new ScatterplotLayer<Sighting>({
         id: "dev-sightings",
         data: points,
         getPosition: (s) => [s.lon, s.lat],
-        getRadius: (s) => (s.latest ? 4 : 5),
+        getRadius: 4,
         radiusUnits: "pixels",
         filled: true,
         stroked: true,
-        getFillColor: (s) => (s.latest ? SIGHT_LATEST : [0, 0, 0, 0]),
-        getLineColor: (s) => (s.latest ? [255, 255, 255, 255] : SIGHT_PREV),
+        getFillColor: SIGHT_LATEST,
+        getLineColor: [255, 255, 255, 255],
         getLineWidth: 2,
         lineWidthUnits: "pixels",
         parameters: top,
@@ -2013,10 +2001,10 @@
         data: labels,
         getPosition: (l) => [l.s.lon, l.s.lat],
         getText: (l) => l.text,
-        getColor: (l) => (l.s.latest ? SIGHT_LATEST : SIGHT_PREV),
+        getColor: SIGHT_LATEST,
         getSize: 11,
         sizeUnits: "pixels",
-        getPixelOffset: (l) => [0, l.s.latest ? -14 : 14],
+        getPixelOffset: [0, -14],
         fontFamily: "ui-monospace, monospace",
         background: true,
         getBackgroundColor: SIGHT_LABEL_BG,

@@ -767,9 +767,16 @@ fn calls_ahead<'a>(
             placed.swap(i, i + 1);
         }
     }
+    // by the clock only long gone ones: which it has passed is told by where
+    // it is (`motion::plan`), so a late train still calls at the next one
+    let gone = |c: &Call| {
+        let due = c.depart.map(|t| t + late.max(0)).or(c.arrive.map(|t| t + late));
+        due.is_none_or(|t| t < at_ms - PASSED_BY_CLOCK_MS)
+    };
     placed
         .iter()
         .enumerate()
+        .skip_while(|(_, (c, _, _))| gone(c))
         .map(|(i, &(c, station, place))| {
             // the way it runs through: from the station before to the one after
             let (before, after) = (placed[i.saturating_sub(1)].2, placed[(i + 1).min(placed.len() - 1)].2);
@@ -785,9 +792,6 @@ fn calls_ahead<'a>(
             };
             (c, station, stop, heading)
         })
-        // by the clock only long gone ones: which it has passed is told by where
-        // it is (`motion::plan`), so a late train still calls at the next one
-        .skip_while(|(_, _, s, _)| s.depart_ms.or(s.arrive_ms).is_none_or(|t| t < at_ms - PASSED_BY_CLOCK_MS))
         .collect()
 }
 
@@ -2123,6 +2127,51 @@ mod tests {
             }
         }
         std::fs::write(format!("{dir}/replay.csv"), out).unwrap();
+    }
+
+    /// Times working out the trains' frames over recorded live data (`LIVE_DIR`, `RAIL_TILES`).
+    #[test]
+    #[ignore]
+    fn bench_frames() {
+        let dir = std::env::var("LIVE_DIR").unwrap();
+        crate::rail::load_tiles_for_tests(&std::env::var("RAIL_TILES").unwrap());
+        let stations = parse_stations(&std::fs::read_to_string(format!("{dir}/stations.json")).unwrap()).unwrap();
+        let services = parse_services(&std::fs::read_to_string(format!("{dir}/services.json")).unwrap()).unwrap();
+        let mut events: Vec<(i64, Vec<Report>)> = std::fs::read_to_string(format!("{dir}/stream.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| {
+                let v: Value = serde_json::from_str(l).ok()?;
+                Some((v["at"].as_i64()?, parse_positions(v["data"].as_str()?).ok()?))
+            })
+            .collect();
+        events.sort_by_key(|e| e.0);
+        let limit: usize = std::env::var("BENCH_EVENTS").ok().and_then(|n| n.parse().ok()).unwrap_or(40);
+        let plans: Plans = Default::default();
+        let (mut n, t0) = (0, Instant::now());
+        let mut slowest = (Duration::ZERO, String::new());
+        for (now, reports) in events.into_iter().take(limit) {
+            for r in reports.iter().filter(|r| now - r.at_ms < STALE_REPORT_MS) {
+                let prev = previous(r);
+                let service = services.get(r.lookup()).and_then(|runs| run_of(runs, r.date.as_deref()));
+                let stops = service.map(|s| stops_ahead(s, None, &stations, r.at_ms)).unwrap_or_default();
+                let class = service.map(|s| crate::train_class::class_of(s.product_code.as_deref(), s.product.as_deref()));
+                let rail = crate::rail::Rail { class };
+                let t = Instant::now();
+                frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
+                if t.elapsed() > slowest.0 {
+                    slowest = (t.elapsed(), r.lookup().to_owned());
+                }
+                n += 1;
+            }
+        }
+        eprintln!(
+            "{n} trains in {:.1} s: {:.1} ms each; slowest {:.0} ms ({})",
+            t0.elapsed().as_secs_f64(),
+            t0.elapsed().as_secs_f64() * 1000.0 / n as f64,
+            slowest.0.as_secs_f64() * 1000.0,
+            slowest.1
+        );
     }
 
     /// As `replay_live`, the route of each train at each report, from where

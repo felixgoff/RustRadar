@@ -1338,8 +1338,36 @@ pub fn platform(station: (f64, f64), track: Option<&str>, heading: Option<f64>) 
 /// aren't numbered in the map has several). None while the track there
 /// isn't loaded.
 pub fn platforms(station: (f64, f64), track: Option<&str>, heading: Option<f64>) -> Option<Vec<(f64, f64)>> {
+    // the same for every train calling there the same way (worked out once: it takes the track round it)
+    let key = (
+        (station.0 * 1e5).round() as i64,
+        (station.1 * 1e5).round() as i64,
+        track.map(str::to_owned),
+        heading.map(|h| h.round() as i32),
+    );
+    if let Some(found) = platform_cache().lock().unwrap().get(&key) {
+        return Some(found.clone());
+    }
     let g = graph_for(tiles_for(&[station], 0.015))?;
-    Some(platforms_in(&g, station, track, heading))
+    let found = platforms_in(&g, station, track, heading);
+    let mut cache = platform_cache().lock().unwrap();
+    if cache.len() >= MAX_PLATFORM_CACHE {
+        cache.clear();
+    }
+    cache.insert(key, found.clone());
+    Some(found)
+}
+
+/// Stations' platforms worked out, at most.
+const MAX_PLATFORM_CACHE: usize = 50_000;
+
+type PlatformKey = (i64, i64, Option<String>, Option<i32>);
+type PlatformCache = Mutex<HashMap<PlatformKey, Vec<(f64, f64)>>>;
+
+/// The places found at each station (`platforms`), by where it is, the track and the way trains go.
+fn platform_cache() -> &'static PlatformCache {
+    static C: OnceLock<PlatformCache> = OnceLock::new();
+    C.get_or_init(Default::default)
 }
 
 /// How many places a station offers at most.

@@ -1095,7 +1095,7 @@ fn follow(
     let unmarked = |i: usize| !layout.marks.iter().any(|m| m.stop == i);
     // (not the one it is at already, where the real train stopped, its point a little on)
     let away = |stop: &Stop| distance(here, (stop.lat, stop.lon)) >= PULLED_IN_M;
-    for (i, stop) in stops.iter().enumerate().filter(|(i, st)| calls(*i) && unmarked(*i) && away(st)) {
+    for (_, stop) in stops.iter().enumerate().filter(|(i, st)| calls(*i) && unmarked(*i) && away(st)) {
         // (where the way passes nearest it: one behind it is not ahead just because the way goes on)
         if let Some(at) = path.locate((stop.lat, stop.lon), STATION_OFF_M, None, 0.0).filter(|at| *at > s + ARRIVED_M) {
             dwells.push((at, dwell_of(stop)));

@@ -1834,38 +1834,90 @@
   /** The zoom, for what the page shows over the map (the legend). */
   let shownZoom = $state(0);
 
-  const TRAIN_ROUTE_AHEAD: [number, number, number, number] = [255, 196, 64, 235];
-  const TRAIN_ROUTE_BEHIND: [number, number, number, number] = [255, 196, 64, 90];
-  const TRAIN_ROUTE_STOP_FILL: [number, number, number, number] = [16, 18, 24, 240];
-  /** The way the selected train came (faint) and the way it goes (bright), with the stations it stops at. */
-  function trainRouteLayers(r: TrainRoute): Layer[] {
-    const at = r.trainAt ?? 0;
-    const behind = r.trainAt === null ? [] : r.path.slice(0, at + 1);
-    const ahead = r.path.slice(at);
-    const stations = r.stops.filter((s) => s.stops);
+  const TRAIN_ROUTE_DASH: [number, number, number, number] = [0, 0, 0, 255];
+  const TRAIN_ROUTE_CASING: [number, number, number, number] = [236, 238, 244, 215];
+  const TRAIN_ROUTE_DASHES: [number, number] = [2.2, 1.6];
+  /** How far along the route's first stretch the selected train was last found (searching on from there). */
+  let routeCursor: { route: TrainRoute; at: number; rest: [number, number][][] } | null = null;
+  /** A train further than this from its route's start (degrees, about 300 m) isn't on it yet: the route is drawn whole. */
+  const ON_ROUTE = 0.003;
+
+  /** The nearest point to `p` on the segment `a`-`b`, flat (fine over a few hundred metres), and its squared distance. */
+  function nearestOn(p: [number, number], a: [number, number], b: [number, number], k: number) {
+    const [dx, dy] = [(b[0] - a[0]) * k, b[1] - a[1]];
+    const len2 = dx * dx + dy * dy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, (((p[0] - a[0]) * k) * dx + (p[1] - a[1]) * dy) / len2)) : 0;
+    const q: [number, number] = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    return { q, d2: ((p[0] - q[0]) * k) ** 2 + (p[1] - q[1]) ** 2 };
+  }
+
+  /**
+   * The selected train's way ahead as black dashes on a light casing, from
+   * where the train is drawn now along the track, and its stations. The
+   * part behind the train is trimmed off as it goes.
+   */
+  function trainRouteLayers(r: TrainRoute, train: Train): Layer[] {
+    const i = trainData?.byId.get(train.id);
+    const drawn: [number, number] = i !== undefined ? [trainData!.positions[i][0], trainData!.positions[i][1]] : [train.lon, train.lat];
+    const first = r.segments[0] ?? [];
+    if (routeCursor?.route !== r) routeCursor = { route: r, at: -1, rest: r.segments };
+    let head: [number, number][] = [];
+    if (first.length >= 2) {
+      // the segment of the first stretch the train is on: from where it was found last, a little way on
+      const k = Math.cos((drawn[1] * Math.PI) / 180);
+      const from = Math.max(0, routeCursor.at);
+      let best = { j: -1, d2: Infinity };
+      for (let j = from; j < Math.min(first.length - 1, from + 400); j++) {
+        const { d2 } = nearestOn(drawn, first[j], first[j + 1], k);
+        if (d2 < best.d2) best = { j, d2 };
+      }
+      if (best.j >= 0 && best.d2 < ON_ROUTE * ON_ROUTE) {
+        if (best.j !== routeCursor.at) {
+          routeCursor = { route: r, at: best.j, rest: [first.slice(best.j + 1), ...r.segments.slice(1)] };
+        }
+        head = [drawn, first[best.j + 1]];
+      }
+    }
+    const paths = routeCursor.rest.filter((p) => p.length >= 2);
     const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
-    return [
+    const stretch = (id: string, data: [number, number][][]) => [
       new PathLayer<[number, number][]>({
-        id: "train-route",
-        data: [behind, ahead].filter((p) => p.length > 1),
+        id: `${id}-casing`,
+        data,
         getPath: (p) => p,
-        getColor: (p) => (p === ahead ? TRAIN_ROUTE_AHEAD : TRAIN_ROUTE_BEHIND),
-        getWidth: 4,
+        getColor: TRAIN_ROUTE_CASING,
+        getWidth: 6,
         widthUnits: "pixels",
         capRounded: true,
         jointRounded: true,
         parameters: ground,
-        updateTriggers: { getColor: [at, r.path.length] },
       }),
+      new PathLayer<[number, number][], PathStyleExtensionProps<[number, number][]>>({
+        id: `${id}-dashes`,
+        data,
+        getPath: (p) => p,
+        getColor: TRAIN_ROUTE_DASH,
+        getWidth: 3,
+        widthUnits: "pixels",
+        extensions: [dashed],
+        getDashArray: TRAIN_ROUTE_DASHES,
+        dashJustified: false,
+        parameters: ground,
+      }),
+    ];
+    const stations = r.stops.filter((s) => s.stops);
+    return [
+      ...stretch("train-route", paths),
+      ...(head.length ? stretch("train-route-head", [head]) : []),
       new ScatterplotLayer<(typeof stations)[number]>({
         id: "train-route-stops",
         data: stations,
         getPosition: (s) => [s.lon, s.lat],
-        getRadius: 4,
+        getRadius: 4.5,
         radiusUnits: "pixels",
         stroked: true,
-        getFillColor: TRAIN_ROUTE_STOP_FILL,
-        getLineColor: TRAIN_ROUTE_AHEAD,
+        getFillColor: TRAIN_ROUTE_CASING,
+        getLineColor: TRAIN_ROUTE_DASH,
         getLineWidth: 2,
         lineWidthUnits: "pixels",
         parameters: ground,
@@ -2006,8 +2058,6 @@
     }
     // the railway network: over the map, under the weather, ships, trains and aircraft
     if (railMap) layers.push(...railLayers({ tileUrl, flat, zoom, workerUrl: mvtWorkerUrl, speeds: railSpeeds }));
-    // the selected train's way, on the track under the trains
-    if (trainRoute && selectedTrain) layers.push(...trainRouteLayers(trainRoute));
     if (weather) {
       if (Date.now() - radarCheckedAt > 600_000) refreshRadar();
       const lift = liftFor(pitch);
@@ -2034,8 +2084,11 @@
     // on land, like the ships under the labels and every aircraft; the
     // trains' frames are timed on this machine's clock, not the flight feed's
     const trainRing = selectedTrain ? trainSelectionLayers(selectedTrain, zoom, cLon, cLat) : null;
+    const trainsDrawn = trainLayers(trains, flat, mpp, Date.now());
+    // the selected train's way ahead, from where it is drawn now, under the trains
+    if (trainRoute && selectedTrain) layers.push(...trainRouteLayers(trainRoute, selectedTrain));
     if (trainRing) layers.push(trainRing.halo);
-    layers.push(...trainLayers(trains, flat, mpp, Date.now()));
+    layers.push(...trainsDrawn);
     if (trainRing) layers.push(trainRing.ring);
     if (tileUrl && labels && fontsReady) {
       const marked = [airport, ...(selected && route ? [route.origin, route.destination] : [])]

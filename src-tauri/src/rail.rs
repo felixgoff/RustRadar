@@ -43,7 +43,7 @@ const MAX_ROUTE_TILES: usize = 64;
 /// One leg of a whole run, station to station.
 const MAX_LEG_TILES: usize = 160;
 /// Fetches at once in the background.
-const MAX_LOADING: usize = 8;
+const MAX_LOADING: usize = 16;
 /// A tile that failed is asked again after this.
 const RETRY: Duration = Duration::from_secs(120);
 /// A train further than this from any track isn't on one we know.
@@ -1117,42 +1117,53 @@ fn hold_in(g: &Graph, at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)
         .min_by(|p, q| distance(at, *p).total_cmp(&distance(at, *q)))
 }
 
-/// The way through a whole run's places (stations, the places it passes, and
-/// the train itself), leg by leg: its points and the index among them of each
-/// place. Legs whose track isn't loaded yet (it is sent for) are straight
-/// lines, and the answer is marked incomplete.
-pub fn way_through(places: &[(f64, f64)]) -> (Vec<(f64, f64)>, Vec<usize>, bool) {
-    let mut points: Vec<(f64, f64)> = Vec::new();
-    let mut at = Vec::new();
+/// The way along the track through a run's places (stations and the places
+/// it passes, at their platforms), leg by leg, as stretches of track: where
+/// the way between two places can't be found there is a gap, never a line
+/// across country. It stops at the first leg whose track isn't loaded yet
+/// (that, and the next few, are sent for): then it is incomplete.
+pub fn way_through(places: &[(f64, f64)]) -> (Vec<Line>, bool) {
+    let leg_keys = |i: usize| tiles_for(&[places[i - 1], places[i]], 0.03);
+    let mut stretches = Vec::new();
+    let mut cur: Line = Vec::new();
     let mut complete = true;
-    for (i, place) in places.iter().enumerate() {
-        if i > 0 {
-            let from = places[i - 1];
-            let heading = (points.len() >= 2).then(|| course(points[points.len() - 2], points[points.len() - 1]));
-            let keys = tiles_for(&[from, *place], 0.03);
-            let leg = if keys.len() > MAX_LEG_TILES {
-                None
-            } else {
-                match graph_for(keys) {
-                    Some(g) => route_in(&g, from, heading, &[*place], 0.0, 1.0)
-                        .filter(|r| r.reached.len() == 1)
-                        .or_else(|| route_in(&g, from, None, &[*place], 0.0, 1.0).filter(|r| r.reached.len() == 1)),
-                    None => {
-                        complete = false;
-                        None
+    for i in 1..places.len() {
+        let (from, to) = (places[i - 1], places[i]);
+        let keys = leg_keys(i);
+        let leg = if keys.len() > MAX_LEG_TILES {
+            None
+        } else {
+            let Some(g) = graph_for(keys) else {
+                complete = false;
+                // the next legs' track is asked for meanwhile
+                for j in i + 1..places.len().min(i + 4) {
+                    let keys = leg_keys(j);
+                    if keys.len() <= MAX_LEG_TILES {
+                        tracks_of(&keys);
                     }
                 }
+                break;
             };
-            match leg {
-                Some(r) => points.extend(r.points.into_iter().skip(1)),
-                None => points.push(*place),
+            let heading = (cur.len() >= 2).then(|| course(cur[cur.len() - 2], cur[cur.len() - 1]));
+            route_in(&g, from, heading, &[to], 0.0, 1.0)
+                .filter(|r| r.reached.len() == 1)
+                .or_else(|| route_in(&g, from, None, &[to], 0.0, 1.0).filter(|r| r.reached.len() == 1))
+        };
+        match leg {
+            Some(r) if cur.is_empty() => cur = r.points,
+            Some(r) => cur.extend(r.points.into_iter().skip(1)),
+            None => {
+                if cur.len() >= 2 {
+                    stretches.push(std::mem::take(&mut cur));
+                }
+                cur.clear();
             }
-        } else {
-            points.push(*place);
         }
-        at.push(points.len() - 1);
     }
-    (points, at, complete)
+    if cur.len() >= 2 {
+        stretches.push(cur);
+    }
+    (stretches, complete)
 }
 
 /// The track, for the motion module.
@@ -1292,6 +1303,29 @@ mod tests {
         assert_eq!(r.speeds.len(), r.points.len() - 1);
         assert!((r.speeds[0].unwrap() - 160.0 / 3.6).abs() < 0.01);
         assert!((r.speeds.last().unwrap().unwrap() - 80.0 / 3.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_run_is_drawn_along_the_track_with_gaps_never_straight_lines() {
+        // track from A east to B; C is 3 km north of B, off any track
+        let a = (61.0, 15.0);
+        let b = ahead(a, 90.0, 3_000.0);
+        let c = ahead(b, 0.0, 3_000.0);
+        let mut l = line(a, 90.0, 3.0);
+        *l.last_mut().unwrap() = b;
+        let places = [a, b, c];
+        {
+            let mut st = store().lock().unwrap();
+            for key in tiles_for(&places, 0.05) {
+                st.tracks.insert(key, (Instant::now(), Arc::new(Vec::new())));
+            }
+            st.tracks.insert(tile_of(a.0, a.1), (Instant::now(), Arc::new(vec![track(l)])));
+        }
+        let (stretches, complete) = way_through(&places);
+        assert!(complete);
+        assert_eq!(stretches.len(), 1, "A to B only: {stretches:?}");
+        assert!(stretches[0].iter().all(|p| (p.0 - a.0).abs() < 1e-4), "along the track, not off to C");
+        assert!(distance(*stretches[0].last().unwrap(), b) < 1.0);
     }
 
     #[test]

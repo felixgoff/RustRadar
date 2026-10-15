@@ -165,6 +165,50 @@ struct Mark {
     pass: bool,
 }
 
+/// What a train does next, by its report and its stops ahead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Plan {
+    /// At the platform of `stops[0]`, until a report shows it moving.
+    Standing,
+    /// On its way to `stops[next]` (the ones before it are behind it already).
+    Moving { next: usize },
+}
+
+/// Whether a train is standing at its first stop or on its way, and to which
+/// stop: a stop behind it was passed already (the timetable runs a little
+/// late or early).
+pub fn plan(pos: (f64, f64), speed: Option<f64>, heading: Option<f64>, stops: &[Stop], t0_ms: i64) -> Plan {
+    let Some(first) = stops.first() else { return Plan::Moving { next: 0 } };
+    let speed = speed.filter(|s| s.is_finite() && *s >= 0.0);
+    // still, or (not saying) due there already
+    let standing = match speed {
+        Some(s) => s < STILL,
+        None => first.arrive_ms.is_none_or(|a| a <= t0_ms),
+    };
+    if !first.pass && standing && distance(pos, (first.lat, first.lon)) < AT_STOP_M {
+        return Plan::Standing;
+    }
+    let mut next = 0;
+    if let Some(h) = heading.filter(|h| h.is_finite() && speed.unwrap_or(0.0) > 3.0) {
+        while next + 1 < stops.len() {
+            let s = &stops[next];
+            let off = (bearing(pos, (s.lat, s.lon)) - h).rem_euclid(360.0);
+            if (120.0..=240.0).contains(&off) && distance(pos, (s.lat, s.lon)) < 5_000.0 {
+                next += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    Plan::Moving { next }
+}
+
+/// How many of the stops ahead the way along the track is found through:
+/// up to the next one it stops at, and one more.
+pub fn route_targets(ahead: &[Stop]) -> usize {
+    ahead.iter().position(|s| !s.pass).map_or(ahead.len(), |i| i + 2).min(6).min(ahead.len())
+}
+
 /// Frames `(lat, lon, unix_ms)` from a report at `t0_ms` up to `now_ms` plus
 /// the horizon, in straight lines. `speed` in m/s; `heading` in degrees.
 /// Empty when there is nothing to move: no speed and no stops, or a report
@@ -205,44 +249,26 @@ pub fn frames_with(
     let heading = heading.filter(|h| h.is_finite());
     let pos = (lat, lon);
     let mut t = t0_ms;
-    let mut next = 0;
 
     if stops.is_empty() && (heading.is_none() || v <= 0.5) {
         return Vec::new();
     }
-    if let Some(first) = stops.first() {
-        let platform = (first.lat, first.lon);
-        // still, or (not saying) due there already
-        let standing = match speed {
-            Some(s) => s < STILL,
-            None => first.arrive_ms.is_none_or(|a| a <= t0_ms),
-        };
-        if !first.pass && standing && distance(pos, platform) < AT_STOP_M {
+    let next = match plan(pos, speed, heading, stops, t0_ms) {
+        Plan::Standing => {
             // at the platform: there until a report shows it on its way
+            let platform = (stops[0].lat, stops[0].lon);
             let at = track.and_then(|tr| tr.hold(pos, platform)).unwrap_or(pos);
             return vec![(at.0, at.1, t0_ms), (at.0, at.1, until)];
         }
-        if let Some(h) = heading.filter(|_| v > 3.0) {
-            // a stop behind it was passed already: the timetable runs a little late or early
-            while next + 1 < stops.len() {
-                let s = &stops[next];
-                let off = (bearing(pos, (s.lat, s.lon)) - h).rem_euclid(360.0);
-                if (120.0..=240.0).contains(&off) && distance(pos, (s.lat, s.lon)) < 5_000.0 {
-                    next += 1;
-                } else {
-                    break;
-                }
-            }
-        }
-    }
+        Plan::Moving { next, .. } => next,
+    };
     let ahead_stops = &stops[next.min(stops.len())..];
     // as far as it could go by the horizon, and a little more
     let reach = v.max(TOP) * (until - t) as f64 / 1000.0 + 500.0;
 
     // the way: along the track through the next places (to the next stop and
     // one more), else straight to them
-    let upto = ahead_stops.iter().position(|s| !s.pass).map_or(ahead_stops.len(), |i| i + 2);
-    let targets: Vec<(f64, f64)> = ahead_stops.iter().take(upto.min(6)).map(|s| (s.lat, s.lon)).collect();
+    let targets: Vec<(f64, f64)> = ahead_stops.iter().take(route_targets(ahead_stops)).map(|s| (s.lat, s.lon)).collect();
     let routed = track.and_then(|tr| tr.route(pos, heading, &targets, reach)).filter(|(p, _, _)| p.len() >= 2);
     let (points, reached, speeds) = match routed {
         Some(r) => r,

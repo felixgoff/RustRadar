@@ -66,6 +66,9 @@ const MAX_TURN: f64 = 120.0;
 const SHORT_M: f64 = 3.0;
 /// Sidings, yards and spurs cost this much more than running lines.
 const SERVICE_COST: f64 = 3.0;
+/// Running against a track's usual direction (the left-hand track of double
+/// track, in Sweden) costs this much more: it happens, but seldom.
+const WRONG_WAY_COST: f64 = 4.0;
 /// The extent of a tile's own units when it doesn't say.
 const EXTENT_DEFAULT: f64 = 4096.0;
 
@@ -606,6 +609,9 @@ struct Edge {
     track: Option<u32>,
     /// Trafikverket's limits going this way (km/h per train category), where known.
     sth: Option<crate::sth::Limits>,
+    /// Going this way: with the way trains run on this track (true), against
+    /// it (false), or either / not known.
+    flow: Option<bool>,
 }
 
 /// The limit on a piece of track for a train: Trafikverket's for its
@@ -707,19 +713,28 @@ impl Graph {
         g
     }
 
-    /// Trafikverket's limits on each piece, each way, where it has them.
+    /// Trafikverket's limits and traffic flow on each piece, each way, where it has them.
     fn add_limits(&mut self) {
         let (mut s, mut w, mut n, mut e) = (90.0f64, 180.0f64, -90.0f64, -180.0f64);
         for p in &self.nodes {
             (s, n, w, e) = (s.min(p.0), n.max(p.0), w.min(p.1), e.max(p.1));
         }
-        if self.nodes.is_empty() || !crate::sth::covers(s, w, n, e) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let (limits, flow) = (crate::sth::covers(s, w, n, e), crate::flow::covers(s, w, n, e));
+        if !limits && !flow {
             return;
         }
         for a in 0..self.nodes.len() {
             for i in 0..self.adj[a].len() {
-                let b = self.adj[a][i].to;
-                self.adj[a][i].sth = crate::sth::along(self.nodes[a], self.nodes[b]);
+                let (pa, pb) = (self.nodes[a], self.nodes[self.adj[a][i].to]);
+                if limits {
+                    self.adj[a][i].sth = crate::sth::along(pa, pb);
+                }
+                if flow {
+                    self.adj[a][i].flow = crate::flow::with_flow(pa, pb);
+                }
             }
         }
     }
@@ -730,7 +745,7 @@ impl Graph {
         }
         let len = distance(self.nodes[a], self.nodes[b]);
         let edge =
-            |to| Edge { to, len, speed: attr.speed, service: attr.service, yard: attr.yard, track: attr.track, sth: None };
+            |to| Edge { to, len, speed: attr.speed, service: attr.service, yard: attr.yard, track: attr.track, sth: None, flow: None };
         self.adj[a].push(edge(b));
         self.adj[b].push(edge(a));
     }
@@ -883,7 +898,11 @@ impl Graph {
     }
 
     fn cost(e: &Edge) -> f64 {
-        if e.service { e.len * SERVICE_COST } else { e.len }
+        let mut c = if e.service { e.len * SERVICE_COST } else { e.len };
+        if e.flow == Some(false) {
+            c *= WRONG_WAY_COST;
+        }
+        c
     }
 
     /// The cheapest way on from standing at `at` having come from `came`, to
@@ -955,7 +974,9 @@ impl Graph {
                 .map(|e| (e, turn(heading, course(self.nodes[at], self.nodes[e.to]))))
                 .filter(|(e, t)| *t <= MAX_TURN || e.len < SHORT_M)
                 .min_by(|a, b| {
-                    let score = |(e, t): &(&Edge, f64)| t + if e.service { 30.0 } else { 0.0 };
+                    let score = |(e, t): &(&Edge, f64)| {
+                        t + if e.service { 30.0 } else { 0.0 } + if e.flow == Some(false) { 45.0 } else { 0.0 }
+                    };
                     score(a).total_cmp(&score(b))
                 });
             let Some((e, _)) = next else { break };
@@ -1060,7 +1081,7 @@ fn route_from<'a>(
         } else {
             let first = *g.edge(at.behind, at.front)?;
             let Some((nodes, cost)) = g.path(at.front, at.behind, ta, tb) else { break };
-            b.cost += distance(at.on, g.nodes[at.front]) * if first.service { SERVICE_COST } else { 1.0 };
+            b.cost += distance(at.on, g.nodes[at.front]) * Graph::cost(&first) / first.len.max(0.01);
             b.on(g.nodes[at.front], Some(&first));
             for w in nodes.windows(2) {
                 b.on(g.nodes[w[1]], g.edge(w[0], w[1]));
@@ -1134,9 +1155,15 @@ fn route_in_as(
     let best = places(g, start, heading, spread)
         .into_iter()
         .filter_map(|(place, off)| {
-            let service = g.edge(place.behind, place.front).is_some_and(|e| e.service);
+            let edge = g.edge(place.behind, place.front);
+            let service = edge.is_some_and(|e| e.service);
+            // on the track running the other way: possible, but unlikely
+            let wrong_way = edge.is_some_and(|e| e.flow == Some(false));
             let b = route_from(g, place, targets, onwards_m, class)?;
-            let score = b.cost + off * 20.0 + if service && targets.is_empty() { 50.0 } else { 0.0 };
+            let score = b.cost
+                + off * 20.0
+                + if service && targets.is_empty() { 50.0 } else { 0.0 }
+                + if wrong_way { 200.0 } else { 0.0 };
             Some((b.route.reached.len(), score, b))
         })
         .min_by(|x, y| y.0.cmp(&x.0).then(x.1.total_cmp(&y.1)))?;
@@ -1532,6 +1559,28 @@ mod tests {
     }
 
     #[test]
+    fn a_train_is_put_on_the_track_running_its_way() {
+        // double track 4.5 m apart: the northern track runs east, the southern west
+        let a = (59.0, 18.0);
+        let north = ahead(a, 0.0, 4.5);
+        let mut g = graph(vec![track(line(north, 90.0, 2.0)), track(line(a, 90.0, 2.0))]);
+        for n in 0..g.nodes.len() {
+            for i in 0..g.adj[n].len() {
+                let (from, to) = (g.nodes[n], g.nodes[g.adj[n][i].to]);
+                let east = to.1 > from.1;
+                let on_north = from.0 > a.0 + 0.00002;
+                g.adj[n][i].flow = Some(east == on_north);
+            }
+        }
+        // reported right between them
+        let between = ahead(ahead(a, 0.0, 2.25), 90.0, 500.0);
+        let east = route_in(&g, between, Some(90.0), &[], 800.0, SNAP_SPREAD_M).unwrap();
+        let west = route_in(&g, between, Some(270.0), &[], 400.0, SNAP_SPREAD_M).unwrap();
+        assert!(east.points.iter().all(|p| p.0 > a.0 + 0.00002), "eastbound on the northern track");
+        assert!(west.points.iter().all(|p| p.0 < a.0 + 0.00002), "westbound on the southern track");
+    }
+
+    #[test]
     fn lines_are_clipped_to_the_tile() {
         let pieces = clip(&[(-64.0, 100.0), (100.0, 100.0), (5000.0, 100.0), (5000.0, 200.0), (100.0, 200.0)], 4096.0);
         assert_eq!(
@@ -1617,6 +1666,21 @@ mod tests {
             r.speeds.iter().flatten().fold(0.0f64, |a, b| a.max(*b * 3.6)));
         assert_eq!(r.reached.len(), 1);
         assert!((15_800.0..22_000.0).contains(&r.reached[0]), "{} m", r.reached[0]);
+        // on the track running its way (Trafikverket's traffic flow), not the one beside it
+        let (mut with, mut against) = (0.0, 0.0);
+        for w in r.points.windows(2) {
+            let mid = ((w[0].0 + w[1].0) / 2.0, (w[0].1 + w[1].1) / 2.0);
+            let Some((a, b, _, _)) = g.snap(mid, 0.5) else { continue };
+            let forward = turn(course(g.nodes[a], g.nodes[b]), course(w[0], w[1])) < 90.0;
+            let e = if forward { g.edge(a, b) } else { g.edge(b, a) };
+            match e.and_then(|e| e.flow) {
+                Some(true) => with += distance(w[0], w[1]),
+                Some(false) => against += distance(w[0], w[1]),
+                None => {}
+            }
+        }
+        eprintln!("with the traffic flow {with:.0} m, against it {against:.0} m");
+        assert!(against < 0.05 * (with + against).max(1.0), "{against:.0} m against the flow");
     }
 
     /// Lund to Malmö C (announced at track 2b, which isn't numbered in the

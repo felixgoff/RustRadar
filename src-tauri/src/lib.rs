@@ -3,8 +3,10 @@ mod board;
 mod devlog;
 mod dwd;
 mod export;
+mod flow;
 mod geocode;
 mod keys;
+mod lines;
 mod liveries;
 // the checks run in the desktop tests too; only phones use it
 #[cfg(any(mobile, test))]

@@ -422,6 +422,17 @@ pub struct Report {
 }
 
 impl Report {
+    /// The report as the motion takes it.
+    pub fn fix(&self) -> motion::Fix {
+        motion::Fix {
+            lat: self.lat,
+            lon: self.lon,
+            t_ms: self.at_ms,
+            speed: self.speed.map(|s| f64::from(s) / 3.6),
+            heading: self.bearing.map(f64::from),
+        }
+    }
+
     /// The number its timetable is looked up by: the operational one, which
     /// every report has, else the advertised one.
     pub fn lookup(&self) -> &str {
@@ -473,6 +484,7 @@ pub fn parse_positions(body: &str) -> Result<Vec<Report>, String> {
 /// A train from its report, named and described from its timetable when known.
 pub fn train(
     report: &Report,
+    prev: Option<&Report>,
     services: &HashMap<String, Vec<Service>>,
     delays: &HashMap<String, i32>,
     stations: &HashMap<String, Station>,
@@ -488,16 +500,8 @@ pub fn train(
     let number = advertised.clone().unwrap_or_else(|| report.lookup().to_owned());
     let delay = delays.get(report.lookup()).or_else(|| delays.get(advertised.as_deref()?)).copied();
     let stops = service.map(|s| stops_ahead(s, delay, stations, report.at_ms)).unwrap_or_default();
-    let frames = motion::frames_with(
-        report.lat,
-        report.lon,
-        report.at_ms,
-        report.speed.map(|s| f64::from(s) / 3.6),
-        report.bearing.map(f64::from),
-        &stops,
-        now_ms,
-        Some(&crate::rail::Rail),
-    );
+    // drawn a report behind: from the one before along the track through this one
+    let frames = motion::frames_between(&report.fix(), prev.map(Report::fix).as_ref(), &stops, now_ms, Some(&crate::rail::Rail));
     let place = frames
         .first()
         .map(|f| (f.0, f.1))
@@ -796,7 +800,8 @@ pub async fn trains(http: &reqwest::Client, key: &str, now_ms: i64) -> Result<Ve
         eprintln!("trafikverket: delays: {e}");
         Default::default()
     });
-    let trains: Vec<Train> = reports.iter().map(|r| train(r, &services, &delays, &stations, now_ms)).collect();
+    let trains: Vec<Train> =
+        reports.iter().map(|r| train(r, previous(r).as_ref(), &services, &delays, &stations, now_ms)).collect();
     // which operational number each train runs under, for following one
     let mut numbers = operational_numbers().lock().unwrap();
     numbers.clear();
@@ -804,11 +809,13 @@ pub async fn trains(http: &reqwest::Client, key: &str, now_ms: i64) -> Result<Ve
     drop(numbers);
     let mut places = last_places().lock().unwrap();
     for (t, r) in trains.iter().zip(&reports) {
-        if places.get(&t.id).is_none_or(|p| p.at_ms <= r.at_ms) {
-            places.insert(t.id.clone(), Seen::of(r));
+        if places.get(&t.id).is_none_or(|p| p.latest.t_ms <= r.at_ms) {
+            let prev = history().lock().unwrap().get(r.lookup()).and_then(|h| h.1.as_ref().map(Report::fix));
+            places.insert(t.id.clone(), Seen { latest: r.fix(), prev });
         }
     }
-    places.retain(|_, p| now_ms - p.at_ms < 6 * 3_600_000);
+    places.retain(|_, p| now_ms - p.latest.t_ms < 6 * 3_600_000);
+    history().lock().unwrap().retain(|_, h| now_ms - h.0.at_ms < 6 * 3_600_000);
     drop(places);
     Ok(trains)
 }
@@ -993,8 +1000,9 @@ pub async fn follow(http: reqwest::Client, key: String, id: String, channel: tau
             if let Some(d) = delay {
                 delays.insert(report.lookup().to_owned(), d);
             }
-            let train = train(&report, &services, &delays, &stations, now);
-            last_places().lock().unwrap().insert(train.id.clone(), Seen::of(&report));
+            let prev = previous(&report);
+            let train = train(&report, prev.as_ref(), &services, &delays, &stations, now);
+            last_places().lock().unwrap().insert(train.id.clone(), Seen { latest: report.fix(), prev: prev.as_ref().map(Report::fix) });
             if channel.send(TrainEvent::Train { train: Box::new(train) }).is_err() {
                 return;
             }
@@ -1019,25 +1027,37 @@ async fn push_stops(
 
 // ------------------------------------------------------------------- route
 
-/// A train's latest report, as its motion was worked out from.
+/// A train's latest report and the one before, as its motion was worked out from.
 #[derive(Clone, Copy, Debug)]
 struct Seen {
-    lat: f64,
-    lon: f64,
-    at_ms: i64,
-    /// m/s.
-    speed: Option<f64>,
-    heading: Option<f64>,
+    latest: motion::Fix,
+    prev: Option<motion::Fix>,
 }
 
-impl Seen {
-    fn of(r: &Report) -> Seen {
-        Seen {
-            lat: r.lat,
-            lon: r.lon,
-            at_ms: r.at_ms,
-            speed: r.speed.map(|s| f64::from(s) / 3.6),
-            heading: r.bearing.map(f64::from),
+/// Each train's latest report and the one before, by its number.
+type History = Mutex<HashMap<String, (Report, Option<Report>)>>;
+
+fn history() -> &'static History {
+    static H: OnceLock<History> = OnceLock::new();
+    H.get_or_init(Default::default)
+}
+
+/// The report before this one of the same train; this one is remembered.
+fn previous(report: &Report) -> Option<Report> {
+    let mut h = history().lock().unwrap();
+    let key = report.lookup().to_owned();
+    match h.get(&key) {
+        Some((latest, prev)) if latest.at_ms == report.at_ms => prev.clone(),
+        Some((latest, _)) if latest.at_ms < report.at_ms => {
+            let prev = latest.clone();
+            h.insert(key, (report.clone(), Some(prev.clone())));
+            Some(prev)
+        }
+        // an older one (a stream catching up): nothing to draw from
+        Some(_) => None,
+        None => {
+            h.insert(key, (report.clone(), None));
+            None
         }
     }
 }
@@ -1091,21 +1111,16 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
     let stations = station_cache().lock().unwrap().clone().map(|(_, _, s)| s).unwrap_or_default();
     let delay = delay_cache().lock().unwrap().clone().and_then(|(_, _, d)| d.get(ident).copied());
     let seen = last_places().lock().unwrap().get(id).copied();
-    let at_ms = seen.map_or_else(crate::trains::now_ms, |s| s.at_ms);
+    let at_ms = seen.map_or_else(crate::trains::now_ms, |s| s.latest.t_ms);
     let calls = calls_ahead(&run, delay, &stations, at_ms);
     let stops: Vec<motion::Stop> = calls.iter().map(|c| c.2).collect();
 
-    // where the train is and the way it goes from there: as its motion has it
-    let (first, start) = match seen {
-        Some(s) => match motion::plan((s.lat, s.lon), s.speed, s.heading, &stops, s.at_ms) {
-            motion::Plan::Standing => (0, None),
-            motion::Plan::Moving { next } => (next, Some(s)),
-        },
-        None => (0, None),
-    };
-    let ahead = &stops[first.min(stops.len())..];
-    let ahead_calls = &calls[first.min(calls.len())..];
-    let places: Vec<(f64, f64)> = ahead.iter().map(|s| (s.lat, s.lon)).collect();
+    // where the train is drawn from and the way it goes: as its motion has it
+    // (standing at a platform, or not seen: from its next stop)
+    let way = seen.and_then(|s| motion::way(&s.latest, s.prev.as_ref(), &stops));
+    let first = way.as_ref().map_or(0, |w| w.next).min(stops.len());
+    let ahead_calls = &calls[first..];
+    let places: Vec<(f64, f64)> = ahead_calls.iter().map(|c| (c.2.lat, c.2.lon)).collect();
     // each place's possible spots: the one the train's motion heads for first
     let spots: Vec<Vec<(f64, f64)>> = ahead_calls
         .iter()
@@ -1119,37 +1134,34 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
             spots
         })
         .collect();
-    let (segments, complete) = match start {
-        Some(s) => {
-            let n = motion::route_targets(ahead);
-            match crate::rail::route((s.lat, s.lon), s.heading, &places[..n], 0.0) {
-                // the stretch the train is moving along, then on from the last place it reached
-                Some(r) => {
-                    let k = r.reached.len();
-                    let mut rest_places = spots[k.saturating_sub(1)..].to_vec();
-                    if k > 0
-                        && let Some(reached) = rest_places.first_mut()
-                    {
-                        // where its motion stops there
-                        *reached = vec![places[k - 1]];
-                    }
-                    let (mut rest, complete) = crate::rail::way_through(&rest_places);
-                    match rest.first_mut() {
-                        Some(next)
-                            if k > 0
-                                && next.first().zip(r.points.last()).is_some_and(|(a, b)| motion::distance(*a, *b) < 1.0) =>
-                        {
-                            let mut joined = r.points;
-                            joined.extend(next.drain(1..));
-                            rest[0] = joined;
-                        }
-                        _ => rest.insert(0, r.points),
-                    }
-                    (rest, complete)
+    let (segments, complete) = match way {
+        Some(w) => match crate::rail::route(w.from, w.heading, &w.targets, 0.0) {
+            // the stretch the train is moving along, then on from the last stop it reached
+            Some(r) => {
+                let k = r.reached.len().saturating_sub(usize::from(w.lead));
+                let mut rest_places = spots[k.saturating_sub(1)..].to_vec();
+                if k > 0
+                    && let Some(reached) = rest_places.first_mut()
+                {
+                    // where its motion stops there
+                    *reached = vec![places[k - 1]];
                 }
-                None => (Vec::new(), false),
+                let (mut rest, complete) = crate::rail::way_through(&rest_places);
+                match rest.first_mut() {
+                    Some(next)
+                        if k > 0
+                            && next.first().zip(r.points.last()).is_some_and(|(a, b)| motion::distance(*a, *b) < 1.0) =>
+                    {
+                        let mut joined = r.points;
+                        joined.extend(next.drain(1..));
+                        rest[0] = joined;
+                    }
+                    _ => rest.insert(0, r.points),
+                }
+                (rest, complete)
             }
-        }
+            None => (Vec::new(), false),
+        },
         None => crate::rail::way_through(&spots),
     };
     Ok(TrainRoute {
@@ -1158,7 +1170,7 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
             .filter(|s| s.len() >= 2)
             .map(|s| s.into_iter().map(|p| [p.1, p.0]).collect())
             .collect(),
-        stops: calls[first.min(calls.len())..]
+        stops: ahead_calls
             .iter()
             .map(|(call, station, stop)| RouteStop {
                 name: station.name.clone(),
@@ -1236,7 +1248,7 @@ mod tests {
         let services = parse_services(ANNOUNCEMENTS).unwrap();
         let delays = parse_delays(ANNOUNCEMENTS, now).unwrap();
         let reports = parse_positions(POSITIONS).unwrap();
-        let mut trains: Vec<Train> = reports.iter().map(|r| train(r, &services, &delays, &stations, now)).collect();
+        let mut trains: Vec<Train> = reports.iter().map(|r| train(r, None, &services, &delays, &stations, now)).collect();
         trains.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(trains.len(), 3, "the inactive one is left out, the repeat merged");
 
@@ -1342,7 +1354,7 @@ mod tests {
         assert_eq!(report.lookup(), "11065");
         assert!(services_query(&["11065".into()]).contains("<EQ name=\"OperationalTrainNumber\" value=\"11065\"/>"));
 
-        let t = train(report, &services, &delays, &HashMap::new(), now);
+        let t = train(report, None, &services, &delays, &HashMap::new(), now);
         assert_eq!(t.name, "Öresundståg 1065", "named by the number travellers see");
         assert_eq!(t.operator.as_deref(), Some("Skånetrafiken"));
         assert_eq!(t.id, "trafikverket:2026-10-15:1065", "its stops are found by the advertised number");

@@ -69,6 +69,9 @@ const SERVICE_COST: f64 = 3.0;
 /// Running against a track's usual direction (the left-hand track of double
 /// track, in Sweden) costs this much more: it happens, but seldom.
 const WRONG_WAY_COST: f64 = 4.0;
+/// Known for this much of a stretch between switches (or a third of it), the
+/// way trains run there holds for all of it, metres.
+const SPREAD_FLOW_M: f64 = 100.0;
 /// The extent of a tile's own units when it doesn't say.
 const EXTENT_DEFAULT: f64 = 4096.0;
 
@@ -737,6 +740,59 @@ impl Graph {
                 }
             }
         }
+        if flow {
+            self.spread_flow();
+        }
+    }
+
+    /// Along each stretch of track between switches (or ends), the way
+    /// trains run where the data says so for enough of it, and nowhere the
+    /// other way: also where the map's line strays from Trafikverket's.
+    fn spread_flow(&mut self) {
+        for start in 0..self.nodes.len() {
+            if self.adj[start].len() == 2 {
+                continue;
+            }
+            for first in 0..self.adj[start].len() {
+                // the stretch: on through nodes with only one way on
+                let mut stretch = vec![(start, self.adj[start][first].to)];
+                while let Some(&(a, b)) = stretch.last() {
+                    if self.adj[b].len() != 2 || b == start || stretch.len() > 100_000 {
+                        break;
+                    }
+                    let next = self.adj[b].iter().map(|e| e.to).find(|n| *n != a).unwrap_or(a);
+                    stretch.push((b, next));
+                }
+                // what is known of it, either way along it, as going along the stretch
+                let (mut with, mut against, mut total) = (0.0, 0.0, 0.0);
+                for &(a, b) in &stretch {
+                    let Some(e) = self.edge(a, b) else { continue };
+                    total += e.len;
+                    let back = self.edge(b, a).and_then(|e| e.flow).map(|f| !f);
+                    for f in [e.flow, back].into_iter().flatten() {
+                        if f {
+                            with += e.len;
+                        } else {
+                            against += e.len;
+                        }
+                    }
+                }
+                let known = with + against;
+                if known == 0.0 || (with > 0.0 && against > 0.0) || known < (0.3 * total).min(SPREAD_FLOW_M) {
+                    continue;
+                }
+                let along = with > 0.0;
+                for &(a, b) in &stretch {
+                    for (x, y, f) in [(a, b, along), (b, a, !along)] {
+                        if let Some(e) = self.adj[x].iter_mut().find(|e| e.to == y)
+                            && e.flow.is_none()
+                        {
+                            e.flow = Some(f);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn link(&mut self, a: usize, b: usize, attr: Attr) {
@@ -1255,19 +1311,20 @@ pub fn snap(p: (f64, f64)) -> Option<(f64, f64)> {
 
 /// Where a train stops at a station: on its announced track (`"4b"` is
 /// track 4b, else track 4), at the point nearest the station's; else on the
-/// nearest running line. None while the track there isn't loaded, or when
-/// there is none.
-pub fn platform(station: (f64, f64), track: Option<&str>) -> Option<(f64, f64)> {
-    platforms(station, track)?.into_iter().next()
+/// running line that runs the way it goes there (`heading`, degrees), the
+/// nearest. None while the track there isn't loaded, or when there is none.
+pub fn platform(station: (f64, f64), track: Option<&str>, heading: Option<f64>) -> Option<(f64, f64)> {
+    platforms(station, track, heading)?.into_iter().next()
 }
 
 /// The places a train might stop at a station, likeliest first: its
-/// announced track, then the running lines near the station, nearest first
-/// (a station whose tracks aren't numbered in the map has several). None
-/// while the track there isn't loaded.
-pub fn platforms(station: (f64, f64), track: Option<&str>) -> Option<Vec<(f64, f64)>> {
+/// announced track, then the running lines near the station, those running
+/// the way it goes (`heading`) first, nearest first (a station whose tracks
+/// aren't numbered in the map has several). None while the track there
+/// isn't loaded.
+pub fn platforms(station: (f64, f64), track: Option<&str>, heading: Option<f64>) -> Option<Vec<(f64, f64)>> {
     let g = graph_for(tiles_for(&[station], 0.015))?;
-    Some(platforms_in(&g, station, track))
+    Some(platforms_in(&g, station, track, heading))
 }
 
 /// How many places a station offers at most.
@@ -1275,7 +1332,7 @@ const MAX_PLATFORMS: usize = 6;
 /// Two places nearer than this are the same track, metres.
 const SAME_TRACK_M: f64 = 3.0;
 
-fn platforms_in(g: &Graph, station: (f64, f64), track: Option<&str>) -> Vec<(f64, f64)> {
+fn platforms_in(g: &Graph, station: (f64, f64), track: Option<&str>, heading: Option<f64>) -> Vec<(f64, f64)> {
     let near = g.snaps(station, PLATFORM_M);
     let mut out: Vec<(f64, f64)> = Vec::new();
     let add = |p: (f64, f64), out: &mut Vec<(f64, f64)>| {
@@ -1300,9 +1357,23 @@ fn platforms_in(g: &Graph, station: (f64, f64), track: Option<&str>) -> Vec<(f64
             }
         }
     }
-    // then the running lines through the station, nearest first; sidings, and never a yard
+    // then the running lines through the station, those running its way
+    // first (on double track, never the one for trains the other way while
+    // its own is there), nearest first; sidings; never a yard
+    let way = |s: &(usize, usize, (f64, f64), f64)| -> u8 {
+        let Some(h) = heading else { return 1 };
+        let forward = turn(h, course(g.nodes[s.0], g.nodes[s.1])) < 90.0;
+        let e = if forward { g.edge(s.0, s.1) } else { g.edge(s.1, s.0) };
+        match e.and_then(|e| e.flow) {
+            Some(true) => 0,
+            None => 1,
+            Some(false) => 2,
+        }
+    };
+    let mut lines: Vec<&(usize, usize, (f64, f64), f64)> = near.iter().filter(|s| s.3 <= STATION_SNAP_M).collect();
+    lines.sort_by(|a, b| way(a).cmp(&way(b)).then(a.3.total_cmp(&b.3)));
     for running in [true, false] {
-        for s in near.iter().filter(|s| s.3 <= STATION_SNAP_M) {
+        for s in &lines {
             if g.edge(s.0, s.1).is_some_and(|e| !e.yard && e.service != running) {
                 add(s.2, &mut out);
             }
@@ -1358,7 +1429,8 @@ fn end_heading(points: &[(f64, f64)]) -> Option<f64> {
 /// found there is a gap, never a line across country. It stops at the first
 /// leg whose track isn't loaded yet (that and the next few are sent for):
 /// then it is incomplete.
-/// `heading`: the way it goes from the first place, when known.
+/// `heading`: the way it is going at the first place, when it is on its way
+/// (it never turns back there).
 pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Line>, bool) {
     let places: Vec<&[(f64, f64)]> = places.iter().map(|p| &p[..p.len().min(MAX_PLATFORMS)]).filter(|p| !p.is_empty()).collect();
     let keys_between = |a: &[(f64, f64)], b: &[(f64, f64)]| {
@@ -1387,11 +1459,15 @@ pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Lin
                 }
                 break;
             };
-            let heading = if i == 1 { heading } else { end_heading(&cur) };
             let mut first_reached = None;
             let mut through = None;
             for &spot in places[i] {
-                let Some(r) = leg(&g, at, heading, spot) else { continue };
+                // a train on its way never turns back to start with
+                let r = match heading.filter(|_| i == 1) {
+                    Some(h) => route_in_onwards(&g, at, Some(h), &[spot], 0.0, 1.0).filter(|r| r.reached.len() == 1),
+                    None => leg(&g, at, end_heading(&cur), spot),
+                };
+                let Some(r) = r else { continue };
                 let Some(next) = places.get(i + 1) else {
                     through = Some((spot, r));
                     break;
@@ -1469,7 +1545,7 @@ mod tests {
     }
 
     fn platform_in(g: &Graph, station: (f64, f64), track: Option<&str>) -> Option<(f64, f64)> {
-        platforms_in(g, station, track).into_iter().next()
+        platforms_in(g, station, track, None).into_iter().next()
     }
 
     fn graph(tracks: Vec<Track>) -> Graph {
@@ -1630,6 +1706,51 @@ mod tests {
     }
 
     #[test]
+    fn the_way_trains_run_spreads_along_a_stretch_of_track() {
+        // known for the first 300 m of a 2 km stretch, going east
+        let a = (59.0, 18.0);
+        let mut g = graph(vec![track(line(a, 90.0, 2.0))]);
+        for n in 0..g.nodes.len() {
+            for i in 0..g.adj[n].len() {
+                let (from, to) = (g.nodes[n], g.nodes[g.adj[n][i].to]);
+                g.adj[n][i].flow = (from.1.max(to.1) <= ahead(a, 90.0, 300.0).1 + 1e-9).then_some(to.1 > from.1);
+            }
+        }
+        g.spread_flow();
+        for n in 0..g.nodes.len() {
+            for e in &g.adj[n] {
+                assert_eq!(e.flow, Some(g.nodes[e.to].1 > g.nodes[n].1), "all of it, both ways");
+            }
+        }
+        // said both ways on the same stretch: left as it is
+        let mut g = graph(vec![track(line(a, 90.0, 2.0))]);
+        let last = g.nodes.len() - 1;
+        g.adj[0][0].flow = Some(true);
+        g.adj[last][0].flow = Some(true);
+        g.spread_flow();
+        assert!(g.adj.iter().flatten().filter(|e| e.flow.is_some()).count() == 2);
+    }
+
+    #[test]
+    fn a_station_offers_the_track_running_the_trains_way_first() {
+        // double track 4.5 m apart, the northern running east; the station's point by the southern one
+        let a = (59.0, 18.0);
+        let north = ahead(a, 0.0, 4.5);
+        let mut g = graph(vec![track(line(north, 90.0, 2.0)), track(line(a, 90.0, 2.0))]);
+        for n in 0..g.nodes.len() {
+            for i in 0..g.adj[n].len() {
+                let (from, to) = (g.nodes[n], g.nodes[g.adj[n][i].to]);
+                g.adj[n][i].flow = Some((to.1 > from.1) == (from.0 > a.0 + 0.00002));
+            }
+        }
+        let station = ahead(ahead(a, 90.0, 1_000.0), 180.0, 20.0);
+        let on_north = |p: (f64, f64)| p.0 > a.0 + 0.00002;
+        assert!(on_north(platforms_in(&g, station, None, Some(90.0))[0]), "eastbound: the northern track");
+        assert!(!on_north(platforms_in(&g, station, None, Some(270.0))[0]), "westbound: the southern track");
+        assert!(!on_north(platforms_in(&g, station, None, None)[0]), "not saying: the nearest");
+    }
+
+    #[test]
     fn it_heads_for_its_next_station_whatever_its_heading_says() {
         // a line east-west; the station is 3 km west, but the heading says east
         let g = graph(vec![track(line((57.0, 12.0), 90.0, 8.0))]);
@@ -1768,7 +1889,7 @@ mod tests {
         }
         let g = Graph::build(&sets);
         let (lund, malmo, triangeln) = ((55.7056, 13.1868), (55.6094, 13.0006), (55.5937, 13.0003));
-        let spots = |p, t| platforms_in(&g, p, Some(t));
+        let spots = |p, t| platforms_in(&g, p, Some(t), None);
         let malmo_spots = spots(malmo, "2b");
         let yard_2a = (55.6105, 13.0074);
         assert!(malmo_spots.iter().all(|p| distance(*p, yard_2a) > 150.0), "never the yard: {malmo_spots:?}");
@@ -1980,5 +2101,31 @@ mod tests {
         assert!(worst < 600.0 && mean < 150.0, "off by {worst:.0} m at worst, {mean:.0} on average");
         let end = drawn.last().unwrap();
         assert!((end.1 - length).abs() < 60.0, "in at Malmö: {:.0} of {length:.0} m", end.1);
+    }
+
+    /// Real tiles (`RAIL_TILES`): Hjärup's tracks aren't numbered in the map;
+    /// a train is stopped on the one running its way, each way.
+    #[test]
+    #[ignore]
+    fn hjarup_offers_the_track_running_the_trains_way() {
+        let dir = std::env::var("RAIL_TILES").unwrap();
+        let sets: Vec<Arc<Vec<Track>>> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.ok()?.file_name().into_string().ok()?;
+                let (x, y) = name.strip_suffix(".pbf")?.split_once('_')?;
+                let bytes = std::fs::read(format!("{dir}/{name}")).ok()?;
+                Some(Arc::new(decode(&bytes, ZOOM, x.parse().ok()?, y.parse().ok()?)))
+            })
+            .collect();
+        let g = Graph::build(&sets);
+        let hjarup = (55.6696, 13.1361);
+        for heading in [225.0, 45.0] {
+            let p = platforms_in(&g, hjarup, None, Some(heading))[0];
+            let (a, b, _, _) = g.snap(p, 1.0).unwrap();
+            let forward = turn(course(g.nodes[a], g.nodes[b]), heading) < 90.0;
+            let e = if forward { g.edge(a, b) } else { g.edge(b, a) };
+            assert_eq!(e.and_then(|e| e.flow), Some(true), "going {heading}°: {p:?}");
+        }
     }
 }

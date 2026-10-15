@@ -1470,16 +1470,29 @@
   };
   /** How long a ship or train takes to ease onto a new report. */
   const EASE_MS = 2000;
-  type Ease = { dLat: number; dLon: number; from: number };
+  /**
+   * An offset to ease away; or, for a vehicle that would go back to get onto
+   * its new frames, the place it holds at (heading `heading`) until they pass it.
+   */
+  type Ease = { dLat: number; dLon: number; from: number; hold?: { lat: number; lon: number; heading: number } };
+  /** How far `p` is ahead of `from` going `heading` (degrees), metres. */
+  function aheadOf(p: { lat: number; lon: number }, from: { lat: number; lon: number }, heading: number): number {
+    const k = Math.cos((from.lat * Math.PI) / 180);
+    const east = (((p.lon - from.lon + 540) % 360) - 180) * k * 111_320;
+    const north = (p.lat - from.lat) * 111_320;
+    const h = (heading * Math.PI) / 180;
+    return east * Math.sin(h) + north * Math.cos(h);
+  }
   /**
    * The offset from where a vehicle is now expected to where it was drawn
    * (index `was` in the old positions), to ease away; none for a new one, one
    * that hasn't moved, or one that jumped further than it could have gone.
+   * Never back: drawn ahead of where its new frames have it, it holds there.
    */
   function easeFrom(
     was: number | undefined,
     positions: [number, number, number][] | undefined,
-    to: { lat: number; lon: number; frames: [number, number, number][] },
+    to: { lat: number; lon: number; heading: number | null; frames: [number, number, number][] },
     nowMs: number,
   ): Ease | null {
     if (was === undefined || !positions) return null;
@@ -1487,7 +1500,12 @@
     const target = positionAt(to, nowMs);
     const dLat = lat - target.lat;
     const dLon = ((lon - target.lon + 540) % 360) - 180;
-    return (dLat || dLon) && Math.abs(dLat) < 0.05 && Math.abs(dLon) < 0.1 ? { dLat, dLon, from: nowMs } : null;
+    if (!(dLat || dLon) || Math.abs(dLat) >= 0.05 || Math.abs(dLon) >= 0.1) return null;
+    const heading = headingAt(to, nowMs);
+    if (heading !== null && aheadOf({ lat, lon }, target, heading) > 0.05) {
+      return { dLat: 0, dLon: 0, from: nowMs, hold: { lat, lon, heading } };
+    }
+    return { dLat, dLon, from: nowMs };
   }
   /** Where a vehicle is drawn at `nowMs`: along its frames, plus what is left of its easing (smoothstep). */
   function eased(
@@ -1498,7 +1516,11 @@
   ): { lat: number; lon: number } {
     let { lat, lon } = positionAt(v, nowMs);
     const blend = blends.get(i);
-    if (blend) {
+    if (blend?.hold) {
+      // there until its frames come past
+      if (aheadOf({ lat, lon }, blend.hold, blend.hold.heading) < 0) return { lat: blend.hold.lat, lon: blend.hold.lon };
+      blends.delete(i);
+    } else if (blend) {
       const left = 1 - Math.min(1, (nowMs - blend.from) / EASE_MS);
       const k = left * left * (3 - 2 * left);
       lat += blend.dLat * k;

@@ -454,6 +454,12 @@ fn frames_for(
     }
     let key = report.lookup().to_owned();
     let old = plans().lock().unwrap().get(&key).cloned().filter(|d| now_ms - d.made_ms < CONTINUE_MS);
+    // an older report than it is drawn from (one source lagging another) changes nothing
+    if let Some(d) = &old
+        && latest.t_ms < d.fix.t_ms
+    {
+        return d.sim.clone();
+    }
     if let Some(d) = &old
         && motion::distance((d.fix.lat, d.fix.lon), (latest.lat, latest.lon)) < SAME_PLACE_M
     {
@@ -717,24 +723,37 @@ fn stops_ahead(
     stations: &HashMap<String, Station>,
     at_ms: i64,
 ) -> Vec<motion::Stop> {
-    calls_ahead(run, delay, stations, at_ms).into_iter().map(|(_, _, stop)| stop).collect()
+    calls_ahead(run, delay, stations, at_ms).into_iter().map(|(_, _, stop, _)| stop).collect()
 }
 
-/// As `stops_ahead`, with each stop's call and station.
+/// A stop ahead with its call and station, and the way the train runs through it.
+type CallAhead<'a> = (&'a Call, &'a Station, motion::Stop, Option<f64>);
+
+/// As `stops_ahead`, with each stop's call and station, and the way the train runs through it.
 fn calls_ahead<'a>(
     run: &'a Service,
     delay: Option<i32>,
     stations: &'a HashMap<String, Station>,
     at_ms: i64,
-) -> Vec<(&'a Call, &'a Station, motion::Stop)> {
+) -> Vec<CallAhead<'a>> {
     let late = i64::from(delay.unwrap_or(0)) * 60_000;
-    run.calls
+    let placed: Vec<(&Call, &Station, (f64, f64))> = run
+        .calls
         .iter()
         .filter_map(|c| {
             let station = stations.get(&c.station)?;
-            // at the platform it is announced at, where the track is known
-            let place = (station.lat?, station.lon?);
-            let (lat, lon) = crate::rail::platform(place, c.track.as_deref()).unwrap_or(place);
+            Some((c, station, (station.lat?, station.lon?)))
+        })
+        .collect();
+    placed
+        .iter()
+        .enumerate()
+        .map(|(i, &(c, station, place))| {
+            // the way it runs through: from the station before to the one after
+            let (before, after) = (placed[i.saturating_sub(1)].2, placed[(i + 1).min(placed.len() - 1)].2);
+            let heading = (motion::distance(before, after) > 1.0).then(|| motion::course(before, after));
+            // at the platform it is announced at, else on the track running its way, where the track is known
+            let (lat, lon) = crate::rail::platform(place, c.track.as_deref(), heading).unwrap_or(place);
             let stop = motion::Stop {
                 lat,
                 lon,
@@ -742,11 +761,11 @@ fn calls_ahead<'a>(
                 depart_ms: c.depart.map(|t| t + late.max(0)),
                 pass: !c.stops,
             };
-            Some((c, station, stop))
+            (c, station, stop, heading)
         })
         // by the clock only long gone ones: which it has passed is told by where
         // it is (`motion::plan`), so a late train still calls at the next one
-        .skip_while(|(_, _, s)| s.depart_ms.or(s.arrive_ms).is_none_or(|t| t < at_ms - PASSED_BY_CLOCK_MS))
+        .skip_while(|(_, _, s, _)| s.depart_ms.or(s.arrive_ms).is_none_or(|t| t < at_ms - PASSED_BY_CLOCK_MS))
         .collect()
 }
 
@@ -1617,17 +1636,17 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
     let ahead_calls = &calls[first.min(calls.len())..];
     // each place's possible spots, the one its motion heads for first
     let mut places: Vec<Vec<(f64, f64)>> = start.iter().map(|s| vec![s.0]).collect();
-    places.extend(calls[onwards.min(calls.len())..].iter().map(|(call, station, stop)| {
+    places.extend(calls[onwards.min(calls.len())..].iter().map(|(call, station, stop, heading)| {
         let mut spots = vec![(stop.lat, stop.lon)];
         if let (Some(lat), Some(lon)) = (station.lat, station.lon)
-            && let Some(more) = crate::rail::platforms((lat, lon), call.track.as_deref())
+            && let Some(more) = crate::rail::platforms((lat, lon), call.track.as_deref(), *heading)
         {
             spots.extend(more.into_iter().filter(|p| motion::distance(*p, (stop.lat, stop.lon)) >= 3.0));
         }
         spots
     }));
-    // on the way it is going: never back the way it came
-    let heading = start.and_then(|s| s.2);
+    // on its way: on the way it is going, never back the way it came
+    let heading = start.filter(|s| s.1.is_some_and(|v| v >= 0.5)).and_then(|s| s.2);
     let (segments, complete) = crate::rail::way_through(&places, heading);
     Ok(TrainRoute {
         segments: segments
@@ -1637,7 +1656,7 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
             .collect(),
         stops: ahead_calls
             .iter()
-            .map(|(call, station, stop)| RouteStop {
+            .map(|(call, station, stop, _)| RouteStop {
                 name: station.name.clone(),
                 lat: stop.lat,
                 lon: stop.lon,

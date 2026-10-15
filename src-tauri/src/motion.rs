@@ -65,12 +65,20 @@ const DRAWN_ACCEL: f64 = 0.5;
 const DRAWN_BRAKE: f64 = 0.8;
 /// The hardest the drawn train brakes, only when it must to stop in time, m/s².
 const HARD_BRAKE: f64 = 1.2;
-/// The drawn train closes the gap to the predicted one over about this long, seconds.
-const FOLLOW_S: f64 = 20.0;
+/// The drawn train runs up to this far behind the predicted one (where it
+/// was this long before), so a new report moving the predicted train a
+/// little changes little, ms.
+const LAG_MS: i64 = 5_000;
+/// Within that, it drifts back by its distance from there over this long, seconds.
+const DRIFT_S: f64 = 60.0;
+/// It closes the gap to there over about this long, seconds (far off,
+/// no faster than it can ease out of again at `EASE`).
+const FOLLOW_S: f64 = 5.0;
+const EASE: f64 = 0.4;
 /// Behind, the drawn train may run this much faster than the track allows to catch up,
-const CATCH_UP: f64 = 1.3;
+const CATCH_UP: f64 = 1.4;
 /// and accelerate this much harder (m/s²), all of it 300 m behind.
-const CATCH_UP_ACCEL: f64 = 0.3;
+const CATCH_UP_ACCEL: f64 = 0.5;
 /// Ahead, it slows to no less than this share of the predicted train's speed.
 const AHEAD_FLOOR: f64 = 0.6;
 /// Further behind than this it is put where the predicted train is, metres.
@@ -152,6 +160,14 @@ fn project(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> ((f64, f64), f64) {
     let len2 = dx * dx + dy * dy;
     let t = if len2 > 0.0 { ((((p.1 - a.1) * k) * dx + (p.0 - a.0) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
     ((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t), t)
+}
+
+/// How far `p` is ahead of `from` going `heading` (degrees), metres; behind, less than 0.
+fn ahead_of(p: (f64, f64), from: (f64, f64), heading: f64) -> f64 {
+    let east = (p.1 - from.1).to_radians() * EARTH_M * from.0.to_radians().cos();
+    let north = (p.0 - from.0).to_radians() * EARTH_M;
+    let h = heading.to_radians();
+    east * h.sin() + north * h.cos()
 }
 
 /// Adds a frame; one at the same moment as the last replaces it.
@@ -250,11 +266,15 @@ impl Path {
 
     /// How far along the way `p` is, if it is on it (within `within`
     /// metres), running within 90° of `heading` when given: where the way
-    /// first comes that near (a way that passes twice takes the first).
-    fn locate(&self, p: (f64, f64), within: f64, heading: Option<f64>) -> Option<f64> {
+    /// first comes that near past `after` metres (a way that passes twice
+    /// takes the first).
+    fn locate(&self, p: (f64, f64), within: f64, heading: Option<f64>, after: f64) -> Option<f64> {
         let mut best: Option<(f64, f64)> = None;
         let last = self.points.len().saturating_sub(1);
         for i in 1..self.points.len() {
+            if self.at[i] < after {
+                continue;
+            }
             let (a, b) = (self.points[i - 1], self.points[i]);
             let (q, k) = project(p, a, b);
             let d = distance(p, q);
@@ -559,19 +579,42 @@ fn find(
             rest.is_empty() || reached.first().is_some_and(|s| *s <= distance(start, rest[0].at) * DETOUR.0 + DETOUR.1);
         if first_ok {
             let reached = reached.into_iter().zip(rest.iter().copied()).collect();
-            return Some(Found { path: Path::new(pts, &speeds), reached, behind: targets[..skip].to_vec() });
+            return Some(beside(Path::new(pts, &speeds), reached, targets, skip));
         }
         if skip >= 3 || distance(start, rest[0].at) > BEHIND_M {
             // its stops can't be reached from here: just the way on
             let (pts, _, speeds) = track.route(start, heading, &[], onwards, only)?;
-            return (pts.len() >= 2).then(|| Found {
-                path: Path::new(pts, &speeds),
-                reached: Vec::new(),
-                behind: Vec::new(),
-            });
+            return (pts.len() >= 2).then(|| beside(Path::new(pts, &speeds), Vec::new(), targets, targets.len()));
         }
         skip += 1;
     }
+}
+
+/// The way found, with the targets it didn't go through (the first `skipped`
+/// left out as behind it, and those after the ones `reached`) placed where it
+/// passes them: a stop whose platform is on the track beside the way (the one
+/// for trains the other way, say) is still stopped at. Those it doesn't pass
+/// near, of the skipped, are behind it.
+fn beside(path: Path, routed: Vec<(f64, Target)>, targets: &[Target], skipped: usize) -> Found {
+    let (first, rest) = targets.split_at(skipped.min(targets.len()));
+    let mut reached = Vec::new();
+    let mut behind = Vec::new();
+    for t in first {
+        match path.locate(t.at, ON_PATH_M, None, 0.0).filter(|s| *s > ARRIVED_M) {
+            Some(s) => reached.push((s, *t)),
+            None => behind.push(*t),
+        }
+    }
+    let mut after = routed.last().map_or(0.0, |r| r.0);
+    for t in &rest[routed.len().min(rest.len())..] {
+        if let Some(s) = path.locate(t.at, ON_PATH_M, None, after) {
+            reached.push((s, *t));
+            after = s;
+        }
+    }
+    reached.extend(routed);
+    reached.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Found { path, reached, behind }
 }
 
 /// The stretch of track both trains are worked out on.
@@ -668,7 +711,7 @@ fn layout(
     // from the drawn train through the report: it is behind
     let on_drawn_way = |found: Found| -> Result<Layout, Found> {
         let heading = real.seen.then_some(real.heading).flatten();
-        match found.path.locate(r_at, ON_PATH_M, heading) {
+        match found.path.locate(r_at, ON_PATH_M, heading, f64::NEG_INFINITY) {
             Some(p0) => Ok(Layout::new(found, Some(0.0), p0, r_at, standing_at)),
             None => Err(found),
         }
@@ -683,7 +726,7 @@ fn layout(
     };
     // from the report through the drawn train: it is ahead
     let on_report_way = |found: Found| -> Result<Layout, Found> {
-        match found.path.locate(d.at, ON_PATH_M, d.heading) {
+        match found.path.locate(d.at, ON_PATH_M, d.heading, f64::NEG_INFINITY) {
             Some(d0) => Ok(Layout::new(found, Some(d0), 0.0, r_at, standing_at)),
             None => Err(found),
         }
@@ -754,9 +797,12 @@ struct Predicted {
 }
 
 impl Predicted {
-    /// Where it is at `t`: metres along, m/s.
+    /// Where it is at `t`: metres along, m/s (before the report, on back at its speed then).
     fn at(&self, t: i64) -> (f64, f64) {
-        let k = ((t - self.t0) as f64 / STEP_MS as f64).max(0.0);
+        if t < self.t0 {
+            return (self.s[0] - self.v[0] * (self.t0 - t) as f64 / 1000.0, self.v[0]);
+        }
+        let k = (t - self.t0) as f64 / STEP_MS as f64;
         let i = (k.floor() as usize).min(self.s.len() - 1);
         let j = (i + 1).min(self.s.len() - 1);
         let f = (k - i as f64).clamp(0.0, 1.0);
@@ -861,10 +907,12 @@ fn follow(
     cruise: f64,
 ) -> Vec<Frame> {
     let path = &layout.path;
+    // put anew: where the predicted train was a little before, never before the report
+    let lag = if layout.d0.is_some() { LAG_MS } else { LAG_MS.min(now_ms - pred.t0).max(0) };
     let (mut s, mut v, since) = match (layout.d0, drawn) {
         (Some(d0), Some(d)) => (d0, d.v, d.still_since),
         _ => {
-            let (s, v) = pred.at(now_ms);
+            let (s, v) = pred.at(now_ms - lag);
             (s, v, None)
         }
     };
@@ -881,15 +929,31 @@ fn follow(
         (Some(i), Some(since)) if calls(i) && layout.d0.is_some() => Some(since + dwell_of(&stops[i])),
         _ => None,
     };
+    // carried on from where it is drawn: exactly there, until the way gets past
+    // it (its place on the way can be a little behind), so never a step back
+    let (drawn_at_start, past) = match (layout.d0, drawn) {
+        (Some(d0), Some(d)) => {
+            let on = path.point(d0);
+            let lead = ahead_of(d.at, on, course(on, path.point(d0 + 1.0)));
+            (Some(d.at), d0 + lead.max(0.0))
+        }
+        _ => (None, f64::NEG_INFINITY),
+    };
+    let pos = |x: f64| match drawn_at_start {
+        Some(at) if x <= past => at,
+        _ => path.point(x),
+    };
     let still_at_start = v < 0.05;
     let first_t = if still_at_start { since.unwrap_or(now_ms).min(now_ms) } else { now_ms };
     let mut out: Vec<Frame> =
         drawn.filter(|_| still_at_start && layout.d0.is_some()).and_then(|d| d.came).into_iter().collect();
     out.push({
-        let p = path.point(s);
+        let p = pos(s);
         (p.0, p.1, first_t)
     });
     let mut was_still = still_at_start;
+    // how far along the last frame is
+    let mut pushed = s;
     let mut t = now_ms;
     let mut steps = 0;
     while t < until {
@@ -900,11 +964,13 @@ fn follow(
             v = 0.0;
         } else {
             wait_until = None;
-            // where the predicted train is as this step starts
-            let (sp, vp) = pred.at(t - STEP_MS);
+            // where it should be, as this step starts: between where the
+            // predicted train was a little before (`back`) and where it is
+            let (back, v_back) = pred.at(t - STEP_MS - lag);
+            let (front, v_front) = pred.at(t - STEP_MS);
             let stop_at = dwells.first().map(|d| d.0).into_iter().chain(pred.hold).fold(path.len(), f64::min);
             let room = stop_at - s;
-            let gap = sp - s;
+            let gap = back - s;
             let slack = if gap > 0.0 { CATCH_UP } else { 1.0 };
             let line = line_cap(path, s, v, |l| l.unwrap_or(cruise).min(top) * slack);
             let stop = stop_cap(room);
@@ -914,10 +980,17 @@ fn follow(
             } else if pred.stood(t) {
                 // the predicted train stands ahead: in at a train's pace
                 cap
-            } else if gap >= 0.0 {
-                vp + gap / FOLLOW_S
-            } else if vp > STILL {
-                (vp + gap / FOLLOW_S).max(vp * AHEAD_FLOOR)
+            } else if gap > 0.0 {
+                // behind: catching up, easing off as it gets there
+                v_back + (gap / FOLLOW_S).min((2.0 * EASE * gap).sqrt())
+            } else if s <= front {
+                // between: at the predicted train's pace, drifting back a little
+                let k = if front > back { (s - back) / (front - back) } else { 1.0 };
+                v_back + (v_front - v_back) * k - (s - back) / DRIFT_S
+            } else if v_front > STILL {
+                // ahead of it: slower, for it to catch up
+                let ahead = s - front;
+                (v_front - (ahead / FOLLOW_S).min((2.0 * EASE * ahead).sqrt())).max(v_front * AHEAD_FLOOR)
             } else {
                 0.0
             };
@@ -945,18 +1018,39 @@ fn follow(
         }
         let still = v < 0.01 && (s - before).abs() < 1e-6;
         if still && !was_still {
-            push(&mut out, path.point(s), t);
+            push(&mut out, pos(s), t);
+            pushed = s;
         }
         if !still && was_still {
-            push(&mut out, path.point(before), t - STEP_MS);
+            push(&mut out, pos(before), t - STEP_MS);
+            pushed = before;
         }
-        if !still && steps % FRAME_EVERY == 0 {
-            push(&mut out, path.point(s), t);
+        // through a bend, a frame before the line between frames leaves the track
+        if !still && cuts_bend(path, pushed, s) {
+            push(&mut out, pos(before), t - STEP_MS);
+            pushed = before;
+        }
+        if !still && (steps % FRAME_EVERY == 0 || cuts_bend(path, pushed, s)) {
+            push(&mut out, pos(s), t);
+            pushed = s;
         }
         was_still = still;
     }
-    push(&mut out, path.point(s), until);
+    push(&mut out, pos(s), until);
     out
+}
+
+/// The line between frames this far off the track at most, metres.
+const BEND_M: f64 = 1.0;
+
+/// Whether a line from `a` to `b` metres along cuts the bend between them by more than `BEND_M`.
+fn cuts_bend(path: &Path, a: f64, b: f64) -> bool {
+    let (pa, pb) = (path.point(a), path.point(b));
+    [0.25, 0.5, 0.75].iter().any(|k| {
+        let on = path.point(a + (b - a) * k);
+        let chord = (pa.0 + (pb.0 - pa.0) * k, pa.1 + (pb.1 - pa.1) * k);
+        distance(on, chord) > BEND_M
+    })
 }
 
 /// The predicted train's frames from now, for the developer's map.
@@ -1041,7 +1135,7 @@ pub fn simulate(
     };
     let pred = predict(&layout, &real, stops, until, top, cruise, share);
     // far behind: put where the predicted train is
-    if layout.d0.is_some_and(|d0| pred.at(now_ms).0 - d0 > RESET_M) {
+    if layout.d0.is_some_and(|d0| pred.at(now_ms - LAG_MS).0 - d0 > RESET_M) {
         layout.d0 = None;
     }
     let frames = follow(&layout, &pred, d.as_ref(), &real, stops, now_ms, until, top, cruise);
@@ -1095,7 +1189,8 @@ mod tests {
             let mut end = x0;
             for t in targets {
                 let xt = x_of(*t);
-                if (xt - end) * dir < -0.5 {
+                // behind, or on another track beside this one: not reached
+                if (xt - end) * dir < -0.5 || distance(*t, at(xt)) > 3.0 {
                     break;
                 }
                 end = xt;
@@ -1203,12 +1298,12 @@ mod tests {
 
     #[test]
     fn it_is_drawn_where_the_real_train_is_by_now() {
-        // seen 30 s ago at 0 doing 30 m/s on a 108 km/h line: by now 900 m on
+        // seen 30 s ago at 0 doing 30 m/s on a 108 km/h line: by now 900 m on, drawn where it was 5 s ago
         let track = rails(108.0);
         let f = sim(None, &fix(0.0, NOW - 30_000, Some(30.0)), None, &[far()], NOW, &track);
         assert_eq!(f[0].2, NOW);
         let x = x_of((f[0].0, f[0].1));
-        assert!((x - 900.0).abs() < 5.0, "{x}");
+        assert!((x - 750.0).abs() < 5.0, "{x}");
         let v = legs(&f)[0];
         assert!((v - 30.0).abs() < 0.5, "{v}");
         never_back(&f);
@@ -1254,6 +1349,19 @@ mod tests {
     }
 
     #[test]
+    fn it_stops_at_a_station_whose_platform_is_on_the_track_beside() {
+        // the station's platform is on the other track, 5 m to the side: never reached, still stopped at
+        let track = rails(120.0);
+        let beside = ahead(at(1_500.0), 90.0, 5.0);
+        let station = Stop { lat: beside.0, lon: beside.1, ..call(1_500.0, NOW + 60_000) };
+        let f = sim(None, &fix(0.0, NOW, Some(25.0)), None, &[station, far()], NOW, &track);
+        let xs = trace(&f, NOW);
+        let end = xs.last().unwrap().1;
+        assert!((end - 1_500.0).abs() < 5.0, "stops there: {end}");
+        assert!(xs.iter().all(|(_, x)| *x < 1_505.0), "not on past it");
+    }
+
+    #[test]
     fn reported_standing_it_stays_put_anywhere() {
         let track = rails(120.0);
         let f = sim(None, &fix(700.0, NOW - 60_000, Some(0.0)), None, &[far()], NOW, &track);
@@ -1274,12 +1382,14 @@ mod tests {
         assert!((x_of((next[0].0, next[0].1)) - drawn_x).abs() < 0.5, "from where it was drawn");
         never_back(&next);
         assert!(jerkiest(&next) <= HARD_BRAKE + 0.1, "{}", jerkiest(&next));
-        // it lets the real train catch up, and runs with it
+        // it lets the real train catch up, and runs with it, a little behind
         let before = fix(0.0, NOW, Some(30.0));
         let predicted =
             simulate(Some(&first[..]), &latest, Some(&before), &stops, now, Some(&track as &dyn Track)).predicted;
-        let end = |f: &[Frame]| x_of((f.last().unwrap().0, f.last().unwrap().1));
-        assert!((end(&next) - end(&predicted)).abs() < 60.0, "{} vs {}", end(&next), end(&predicted));
+        let end = x_of((next.last().unwrap().0, next.last().unwrap().1));
+        let lagged = x_of(sample(&predicted, now + HORIZON_MS - LAG_MS).unwrap().0);
+        let front = x_of((predicted.last().unwrap().0, predicted.last().unwrap().1));
+        assert!(end > lagged - 30.0 && end < front + 1.0, "{end} between {lagged} and {front}");
     }
 
     #[test]
@@ -1296,10 +1406,11 @@ mod tests {
         assert!((x_of((f[0].0, f[0].1)) - drawn_x).abs() < 0.5, "no jump");
         never_back(f);
         assert!(legs(f).iter().all(|v| *v <= 120.0 / 3.6 * CATCH_UP + 0.5), "{:?}", legs(f));
-        assert!(jerkiest(f) <= DRAWN_BRAKE + 0.1, "{}", jerkiest(f));
+        assert!(jerkiest(f) <= DRAWN_ACCEL + CATCH_UP_ACCEL + 0.1, "{}", jerkiest(f));
         let gap = |t: i64| x_of(sample(&s.predicted, t).unwrap().0) - x_of(sample(f, t).unwrap().0);
+        // caught up: no further behind than where it was 5 s before
         assert!(
-            gap(now) > 790.0 && gap(now + HORIZON_MS - 1) < 100.0,
+            gap(now) > 790.0 && gap(now + HORIZON_MS - 1) < 120.0 / 3.6 * LAG_MS as f64 / 1000.0 + 30.0,
             "{} then {}",
             gap(now),
             gap(now + HORIZON_MS - 1)
@@ -1338,7 +1449,7 @@ mod tests {
         let stood = at_station.last().unwrap() - at_station[0];
         assert!(stood >= DWELL_MS.0 - 1_000 && stood <= DWELL_MS.2 + 1_000, "briefly: {stood} ms");
         assert!(xs.last().unwrap().1 > 1_300.0, "and on after the real train: {xs:?}");
-        assert!(jerkiest(&f) <= DRAWN_BRAKE + 0.1, "{}", jerkiest(&f));
+        assert!(jerkiest(&f) <= DRAWN_ACCEL + CATCH_UP_ACCEL + 0.1, "{}", jerkiest(&f));
     }
 
     #[test]

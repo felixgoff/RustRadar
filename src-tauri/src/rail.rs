@@ -84,6 +84,8 @@ pub struct Track {
     pub track_ref: Option<String>,
     /// A siding, yard track, spur or crossover.
     pub service: bool,
+    /// A yard track or a spur: never where a passenger train is guessed to stop.
+    pub yard: bool,
 }
 
 struct Store {
@@ -362,6 +364,7 @@ pub fn decode(pbf: &[u8], z: u32, x: u32, y: u32) -> Vec<Track> {
             };
             let track_ref = text("track_ref").map(str::to_owned);
             let service = text("service").is_some();
+            let yard = matches!(text("service"), Some("yard" | "spur"));
 
             // MoveTo starts a line, LineTo goes on; coordinates are zigzag deltas
             let commands = packed(geometry);
@@ -397,6 +400,7 @@ pub fn decode(pbf: &[u8], z: u32, x: u32, y: u32) -> Vec<Track> {
                     maxspeed,
                     track_ref: track_ref.clone(),
                     service,
+                    yard,
                 });
             }
         }
@@ -597,6 +601,7 @@ struct Edge {
     /// m/s.
     speed: Option<f32>,
     service: bool,
+    yard: bool,
     /// Index into `Graph::refs`.
     track: Option<u32>,
 }
@@ -611,14 +616,40 @@ struct Graph {
 struct Attr {
     speed: Option<f32>,
     service: bool,
+    yard: bool,
     track: Option<u32>,
 }
 
-/// A track number as signed at the platform, without its sector ("4b": "4").
-fn track_number(s: &str) -> &str {
-    let s = s.trim();
-    let digits = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-    if digits == 0 { s } else { &s[..digits] }
+/// A track's number as compared: its first word, in lower case ("2a Kofta": "2a").
+fn track_name(s: &str) -> String {
+    s.split_whitespace().next().unwrap_or_default().to_lowercase()
+}
+
+/// How well a mapped track's number fits the announced one, best first:
+/// the same ("4b", "4b"); the track of an announced sector ("4b", "4");
+/// a sector of an announced track ("4", "4a"); else not at all. Different
+/// sectors are different tracks ("2b" is not "2a").
+fn track_fit(announced: &str, mapped: &str) -> Option<u8> {
+    let (a, m) = (track_name(announced), track_name(mapped));
+    if a.is_empty() || m.is_empty() {
+        return None;
+    }
+    if a == m {
+        return Some(0);
+    }
+    let split = |s: &str| {
+        let d = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+        (s[..d].to_owned(), s[d..].to_owned())
+    };
+    let ((ad, asx), (md, msx)) = (split(&a), split(&m));
+    if ad.is_empty() || ad != md {
+        return None;
+    }
+    match (asx.is_empty(), msx.is_empty()) {
+        (false, true) => Some(1),
+        (true, false) => Some(2),
+        _ => None,
+    }
 }
 
 impl Graph {
@@ -628,7 +659,7 @@ impl Graph {
         let mut refs: HashMap<String, u32> = HashMap::new();
         for track in sets.iter().flat_map(|s| s.iter()) {
             let track_index = track.track_ref.as_deref().map(|r| {
-                let r = track_number(r).to_owned();
+                let r = track_name(r);
                 *refs.entry(r.clone()).or_insert_with(|| {
                     g.refs.push(r);
                     (g.refs.len() - 1) as u32
@@ -637,6 +668,7 @@ impl Graph {
             let attr = Attr {
                 speed: track.maxspeed.map(|k| (k / 3.6) as f32),
                 service: track.service,
+                yard: track.yard,
                 track: track_index,
             };
             let mut prev: Option<usize> = None;
@@ -662,13 +694,13 @@ impl Graph {
             return;
         }
         let len = distance(self.nodes[a], self.nodes[b]);
-        let edge = |to| Edge { to, len, speed: attr.speed, service: attr.service, track: attr.track };
+        let edge = |to| Edge { to, len, speed: attr.speed, service: attr.service, yard: attr.yard, track: attr.track };
         self.adj[a].push(edge(b));
         self.adj[b].push(edge(a));
     }
 
     fn attr(e: &Edge) -> Attr {
-        Attr { speed: e.speed, service: e.service, track: e.track }
+        Attr { speed: e.speed, service: e.service, yard: e.yard, track: e.track }
     }
 
     fn edge(&self, a: usize, b: usize) -> Option<&Edge> {
@@ -1080,27 +1112,61 @@ pub fn snap(p: (f64, f64)) -> Option<(f64, f64)> {
 }
 
 /// Where a train stops at a station: on its announced track (`"4b"` is
-/// track 4), at the point nearest the station's; else on the nearest running
-/// line. None while the track there isn't loaded, or when there is none.
+/// track 4b, else track 4), at the point nearest the station's; else on the
+/// nearest running line. None while the track there isn't loaded, or when
+/// there is none.
 pub fn platform(station: (f64, f64), track: Option<&str>) -> Option<(f64, f64)> {
-    let g = graph_for(tiles_for(&[station], 0.015))?;
-    platform_in(&g, station, track)
+    platforms(station, track)?.into_iter().next()
 }
 
-fn platform_in(g: &Graph, station: (f64, f64), track: Option<&str>) -> Option<(f64, f64)> {
-    let wanted = track.map(track_number).and_then(|t| g.refs.iter().position(|r| r == t)).map(|i| i as u32);
+/// The places a train might stop at a station, likeliest first: its
+/// announced track, then the running lines near the station, nearest first
+/// (a station whose tracks aren't numbered in the map has several). None
+/// while the track there isn't loaded.
+pub fn platforms(station: (f64, f64), track: Option<&str>) -> Option<Vec<(f64, f64)>> {
+    let g = graph_for(tiles_for(&[station], 0.015))?;
+    Some(platforms_in(&g, station, track))
+}
+
+/// How many places a station offers at most.
+const MAX_PLATFORMS: usize = 6;
+/// Two places nearer than this are the same track, metres.
+const SAME_TRACK_M: f64 = 3.0;
+
+fn platforms_in(g: &Graph, station: (f64, f64), track: Option<&str>) -> Vec<(f64, f64)> {
     let near = g.snaps(station, PLATFORM_M);
-    if let Some(w) = wanted
-        && let Some(s) = near.iter().find(|s| g.edge(s.0, s.1).is_some_and(|e| e.track == Some(w)))
-    {
-        return Some(s.2);
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    let add = |p: (f64, f64), out: &mut Vec<(f64, f64)>| {
+        if out.len() < MAX_PLATFORMS && out.iter().all(|q| distance(*q, p) >= SAME_TRACK_M) {
+            out.push(p);
+        }
+    };
+    // the announced track: the best fit, nearest first
+    if let Some(announced) = track {
+        let mut fits: Vec<(u8, f64, (f64, f64))> = near
+            .iter()
+            .filter_map(|s| {
+                let r = g.edge(s.0, s.1)?.track?;
+                Some((track_fit(announced, &g.refs[r as usize])?, s.3, s.2))
+            })
+            .collect();
+        fits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        if let Some(best) = fits.first().map(|f| f.0) {
+            // that track only: one place on it
+            if let Some(f) = fits.iter().find(|f| f.0 == best) {
+                add(f.2, &mut out);
+            }
+        }
     }
-    // no such track mapped: the nearest running line, else any track
-    near.iter()
-        .filter(|s| s.3 <= STATION_SNAP_M)
-        .find(|s| g.edge(s.0, s.1).is_some_and(|e| !e.service))
-        .or_else(|| near.first().filter(|s| s.3 <= STATION_SNAP_M))
-        .map(|s| s.2)
+    // then the running lines through the station, nearest first; sidings, and never a yard
+    for running in [true, false] {
+        for s in near.iter().filter(|s| s.3 <= STATION_SNAP_M) {
+            if g.edge(s.0, s.1).is_some_and(|e| !e.yard && e.service != running) {
+                add(s.2, &mut out);
+            }
+        }
+    }
+    out
 }
 
 /// Where a train standing near `platform` is: its reported place moved onto
@@ -1124,46 +1190,91 @@ fn hold_in(g: &Graph, at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)
         .min_by(|p, q| distance(at, *p).total_cmp(&distance(at, *q)))
 }
 
+/// The way along one leg, from `from` (heading roughly `heading`) to `to`;
+/// turning back at the station it leaves when it must (a terminus).
+fn leg(g: &Graph, from: (f64, f64), heading: Option<f64>, to: (f64, f64)) -> Option<Route> {
+    let reaches = |r: &Route| r.reached.len() == 1;
+    route_in(g, from, heading, &[to], 0.0, 1.0)
+        .filter(reaches)
+        .or_else(|| heading.and_then(|_| route_in(g, from, None, &[to], 0.0, 1.0)).filter(reaches))
+}
+
+fn end_heading(points: &[(f64, f64)]) -> Option<f64> {
+    (points.len() >= 2).then(|| course(points[points.len() - 2], points[points.len() - 1]))
+}
+
 /// The way along the track through a run's places (stations and the places
-/// it passes, at their platforms), leg by leg, as stretches of track: where
-/// the way between two places can't be found there is a gap, never a line
-/// across country. It stops at the first leg whose track isn't loaded yet
-/// (that, and the next few, are sent for): then it is incomplete.
-pub fn way_through(places: &[(f64, f64)]) -> (Vec<Line>, bool) {
-    let leg_keys = |i: usize| tiles_for(&[places[i - 1], places[i]], 0.03);
+/// it passes; each with the spots it might stop at, likeliest first), leg by
+/// leg, as stretches of track. At each place it takes the likeliest spot it
+/// can both reach and go on from to the next place (a platform track that
+/// ends there is no way through). Where the way between two places can't be
+/// found there is a gap, never a line across country. It stops at the first
+/// leg whose track isn't loaded yet (that and the next few are sent for):
+/// then it is incomplete.
+pub fn way_through(places: &[Vec<(f64, f64)>]) -> (Vec<Line>, bool) {
+    let places: Vec<&[(f64, f64)]> = places.iter().map(|p| &p[..p.len().min(MAX_PLATFORMS)]).filter(|p| !p.is_empty()).collect();
+    let keys_between = |a: &[(f64, f64)], b: &[(f64, f64)]| {
+        let mut points = a.to_vec();
+        points.extend(b);
+        tiles_for(&points, 0.03)
+    };
     let mut stretches = Vec::new();
     let mut cur: Line = Vec::new();
     let mut complete = true;
+    let Some(first) = places.first() else { return (stretches, complete) };
+    let mut at = first[0];
     for i in 1..places.len() {
-        let (from, to) = (places[i - 1], places[i]);
-        let keys = leg_keys(i);
-        let leg = if keys.len() > MAX_LEG_TILES {
+        let keys = keys_between(&[at], places[i]);
+        let found = if keys.len() > MAX_LEG_TILES {
             None
         } else {
             let Some(g) = graph_for(keys) else {
                 complete = false;
                 // the next legs' track is asked for meanwhile
                 for j in i + 1..places.len().min(i + 4) {
-                    let keys = leg_keys(j);
+                    let keys = keys_between(places[j - 1], places[j]);
                     if keys.len() <= MAX_LEG_TILES {
                         tracks_of(&keys);
                     }
                 }
                 break;
             };
-            let heading = (cur.len() >= 2).then(|| course(cur[cur.len() - 2], cur[cur.len() - 1]));
-            route_in(&g, from, heading, &[to], 0.0, 1.0)
-                .filter(|r| r.reached.len() == 1)
-                .or_else(|| route_in(&g, from, None, &[to], 0.0, 1.0).filter(|r| r.reached.len() == 1))
+            let heading = end_heading(&cur);
+            let mut first_reached = None;
+            let mut through = None;
+            for &spot in places[i] {
+                let Some(r) = leg(&g, at, heading, spot) else { continue };
+                let Some(next) = places.get(i + 1) else {
+                    through = Some((spot, r));
+                    break;
+                };
+                // and on from there to the next place?
+                let on_keys = keys_between(&[spot], next);
+                let goes_on = on_keys.len() > MAX_LEG_TILES
+                    || graph_for(on_keys).is_none_or(|g2| next.iter().any(|n| leg(&g2, spot, end_heading(&r.points), *n).is_some()));
+                if goes_on {
+                    through = Some((spot, r));
+                    break;
+                }
+                first_reached.get_or_insert((spot, r));
+            }
+            through.or(first_reached)
         };
-        match leg {
-            Some(r) if cur.is_empty() => cur = r.points,
-            Some(r) => cur.extend(r.points.into_iter().skip(1)),
+        match found {
+            Some((spot, r)) => {
+                if cur.is_empty() {
+                    cur = r.points;
+                } else {
+                    cur.extend(r.points.into_iter().skip(1));
+                }
+                at = spot;
+            }
             None => {
                 if cur.len() >= 2 {
                     stretches.push(std::mem::take(&mut cur));
                 }
                 cur.clear();
+                at = places[i][0];
             }
         }
     }
@@ -1198,6 +1309,10 @@ mod tests {
 
     fn track(points: Line) -> Track {
         Track { points, ..Default::default() }
+    }
+
+    fn platform_in(g: &Graph, station: (f64, f64), track: Option<&str>) -> Option<(f64, f64)> {
+        platforms_in(g, station, track).into_iter().next()
     }
 
     fn graph(tracks: Vec<Track>) -> Graph {
@@ -1320,10 +1435,10 @@ mod tests {
         let c = ahead(b, 0.0, 3_000.0);
         let mut l = line(a, 90.0, 3.0);
         *l.last_mut().unwrap() = b;
-        let places = [a, b, c];
+        let places = [vec![a], vec![b], vec![c]];
         {
             let mut st = store().lock().unwrap();
-            for key in tiles_for(&places, 0.05) {
+            for key in tiles_for(&[a, b, c], 0.05) {
                 st.tracks.insert(key, (Instant::now(), Arc::new(Vec::new())));
             }
             st.tracks.insert(tile_of(a.0, a.1), (Instant::now(), Arc::new(vec![track(l)])));
@@ -1421,5 +1536,47 @@ mod tests {
             r.speeds.iter().flatten().fold(0.0f64, |a, b| a.max(*b * 3.6)));
         assert_eq!(r.reached.len(), 1);
         assert!((15_800.0..22_000.0).contains(&r.reached[0]), "{} m", r.reached[0]);
+    }
+
+    /// Lund to Malmö C (announced at track 2b, which isn't numbered in the
+    /// map: the City Tunnel's platforms) and on to Triangeln, on real tiles
+    /// (`RAIL_TILES`): through the tunnel, not into the yard's track 2a.
+    #[test]
+    #[ignore]
+    fn through_malmo_city_tunnel() {
+        let dir = std::env::var("RAIL_TILES").unwrap();
+        let mut sets = Vec::new();
+        {
+            let mut st = store().lock().unwrap();
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let name = e.unwrap().file_name().into_string().unwrap();
+                let Some((x, y)) = name.strip_suffix(".pbf").and_then(|n| n.split_once('_')) else { continue };
+                let (x, y) = (x.parse().unwrap(), y.parse().unwrap());
+                let tracks = Arc::new(decode(&std::fs::read(format!("{dir}/{name}")).unwrap(), ZOOM, x, y));
+                sets.push(tracks.clone());
+                st.tracks.insert((x, y), (Instant::now(), tracks));
+            }
+        }
+        let g = Graph::build(&sets);
+        let (lund, malmo, triangeln) = ((55.7056, 13.1868), (55.6094, 13.0006), (55.5937, 13.0003));
+        let spots = |p, t| platforms_in(&g, p, Some(t));
+        let malmo_spots = spots(malmo, "2b");
+        let yard_2a = (55.6105, 13.0074);
+        assert!(malmo_spots.iter().all(|p| distance(*p, yard_2a) > 150.0), "never the yard: {malmo_spots:?}");
+        let (stretches, complete) = way_through(&[spots(lund, "2"), malmo_spots, spots(triangeln, "1")]);
+        assert!(complete);
+        eprintln!("{} stretches, {:?} points", stretches.len(), stretches.iter().map(|s| s.len()).collect::<Vec<_>>());
+        assert_eq!(stretches.len(), 1, "no gap");
+        let end = *stretches[0].last().unwrap();
+        assert!(distance(end, triangeln) < 300.0, "at Triangeln: {end:?}");
+        // through the City Tunnel, west of the station, and never into the yard
+        let tunnel = (55.6082, 12.9947);
+        assert!(stretches[0].iter().any(|p| distance(*p, tunnel) < 30.0), "through the tunnel");
+        let on_yard: Vec<(f64, f64)> = stretches[0]
+            .windows(2)
+            .map(|w| ((w[0].0 + w[1].0) / 2.0, (w[0].1 + w[1].1) / 2.0))
+            .filter(|m| g.snap(*m, 0.5).is_some_and(|s| g.edge(s.0, s.1).is_some_and(|e| e.yard)))
+            .collect();
+        assert!(on_yard.is_empty(), "not on yard tracks: {on_yard:?}");
     }
 }

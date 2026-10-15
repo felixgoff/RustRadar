@@ -1104,7 +1104,21 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
         None => (0, None),
     };
     let ahead = &stops[first.min(stops.len())..];
+    let ahead_calls = &calls[first.min(calls.len())..];
     let places: Vec<(f64, f64)> = ahead.iter().map(|s| (s.lat, s.lon)).collect();
+    // each place's possible spots: the one the train's motion heads for first
+    let spots: Vec<Vec<(f64, f64)>> = ahead_calls
+        .iter()
+        .map(|(call, station, stop)| {
+            let mut spots = vec![(stop.lat, stop.lon)];
+            if let (Some(lat), Some(lon)) = (station.lat, station.lon)
+                && let Some(more) = crate::rail::platforms((lat, lon), call.track.as_deref())
+            {
+                spots.extend(more.into_iter().filter(|p| motion::distance(*p, (stop.lat, stop.lon)) >= 3.0));
+            }
+            spots
+        })
+        .collect();
     let (segments, complete) = match start {
         Some(s) => {
             let n = motion::route_targets(ahead);
@@ -1112,7 +1126,14 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
                 // the stretch the train is moving along, then on from the last place it reached
                 Some(r) => {
                     let k = r.reached.len();
-                    let (mut rest, complete) = crate::rail::way_through(&places[k.saturating_sub(1)..]);
+                    let mut rest_places = spots[k.saturating_sub(1)..].to_vec();
+                    if k > 0
+                        && let Some(reached) = rest_places.first_mut()
+                    {
+                        // where its motion stops there
+                        *reached = vec![places[k - 1]];
+                    }
+                    let (mut rest, complete) = crate::rail::way_through(&rest_places);
                     match rest.first_mut() {
                         Some(next)
                             if k > 0
@@ -1129,7 +1150,7 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
                 None => (Vec::new(), false),
             }
         }
-        None => crate::rail::way_through(&places),
+        None => crate::rail::way_through(&spots),
     };
     Ok(TrainRoute {
         segments: segments

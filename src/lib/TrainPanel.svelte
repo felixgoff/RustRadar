@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ExternalLink, LocateFixed, X } from "@lucide/svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { isTauri, trainStops, type Train, type TrainStop } from "./api";
+  import { isTauri, trainMedia, trainStops, type Train, type TrainMedia, type TrainStop } from "./api";
   import { degrees } from "./aircraft-readings";
   import { latLon } from "./ship-details";
   import { clockAt, clockWithZone } from "./time";
@@ -12,6 +12,7 @@
     nextStop,
     positionAt,
     stopView,
+    trainProduct,
     TRAIN_CREDITS,
     TRAIN_SOURCE_NAMES,
     trainColorOf,
@@ -75,6 +76,29 @@
   });
 
   const next = $derived(stops ? nextStop(stops) : -1);
+
+  /** A photo and the operator's logo from Wikimedia; looked up when the product or operator changes. */
+  let media = $state.raw<TrainMedia | null>(null);
+  let failedPhoto = $state<string | null>(null);
+  let failedLogo = $state<string | null>(null);
+  const product = $derived(trainProduct(train));
+  const operator = $derived(train.operator);
+  const source = $derived(train.source);
+  $effect(() => {
+    const ask = { source, product, operator };
+    media = null;
+    if (!isTauri() || (!ask.product && !ask.operator)) return;
+    let live = true;
+    trainMedia(ask.source, ask.product, ask.operator).then(
+      (m) => live && (media = m),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  });
+  const photo = $derived(media?.photo && media.photo.url !== failedPhoto ? media.photo : null);
+  const logo = $derived(media?.logo && media.logo !== failedLogo ? media.logo : null);
 </script>
 
 <aside class="panel surface" aria-label="Selected train">
@@ -93,6 +117,15 @@
       <X size={18} strokeWidth={1.75} />
     </button>
   </header>
+
+  {#if photo}
+    <div class="photo">
+      <button class="image" onclick={() => openUrl(photo.pageUrl)} title="{photo.title} on Wikipedia">
+        <img src={photo.url} alt={photo.title} onerror={() => (failedPhoto = photo.url)} />
+      </button>
+      <span class="credit">Photo: Wikipedia, {photo.title}</span>
+    </div>
+  {/if}
 
   {#if train.destination || delay}
     <section class="voyage" aria-label="Journey">
@@ -162,7 +195,10 @@
     <dl class="facts">
       <div>
         <dt>Operator</dt>
-        <dd>{train.operator ?? "Not given"}</dd>
+        <dd class="operator">
+          {#if logo}<img src={logo} alt="" class="logo" onerror={() => (failedLogo = logo)} />{/if}
+          {train.operator ?? "Not given"}
+        </dd>
       </div>
       <div>
         <dt>Source</dt>
@@ -332,6 +368,52 @@
   .unknown {
     font-size: var(--text-sm);
     color: var(--text-2);
+  }
+
+  .photo {
+    position: relative;
+    flex: none;
+    aspect-ratio: 2 / 1;
+    background: var(--surface-raised);
+    overflow: hidden;
+  }
+  .image {
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+  }
+  .photo img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .credit {
+    position: absolute;
+    right: var(--space-2);
+    bottom: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--text-1);
+    text-shadow: 0 1px 2px oklch(0 0 0 / 0.9);
+    pointer-events: none;
+  }
+  .operator {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  /* logos are drawn for light backgrounds: a light tile keeps them legible */
+  .logo {
+    max-width: 56px;
+    max-height: 22px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    background: oklch(0.96 0 0);
+    object-fit: contain;
   }
 
   .stops {

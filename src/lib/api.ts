@@ -661,5 +661,22 @@ export interface TrainStop {
   notes: string[];
 }
 
+/** A photo of a train, from the Wikipedia article on its product or operator. */
+export interface TrainPhoto {
+  url: string;
+  /** The article it comes from. */
+  title: string;
+  pageUrl: string;
+}
+
+/** Pictures for the train panel, from Wikimedia: a photo of the train and its operator's logo, when found. */
+export interface TrainMedia {
+  photo: TrainPhoto | null;
+  logo: string | null;
+}
+
+export const trainMedia = (source: string, product: string | null, operator: string | null) =>
+  invoke<TrainMedia>("train_media", { source, product, operator });
+
 /** Every stop of a train, in order, for sources with its timetable (Trafikverket); empty for the others. */
 export const trainStops = (id: string) => invoke<TrainStop[]>("train_stops", { id });

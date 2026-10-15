@@ -19,6 +19,7 @@ import {
   trainIconSize,
   trainLabel,
   trainPositionAge,
+  trainProduct,
 } from "./trains";
 
 const train = (over: Partial<Train> = {}): Train => ({
@@ -219,5 +220,14 @@ describe("stops", () => {
     expect(trainColorOf({ kind: "regional", operator: "Someone else" })).toEqual(trainColor("regional"));
     expect(trainIcon("regional", 90, "Mälartåg")).toMatch(/^car-op\d+$/);
     expect(trainIcon("regional", null, null)).toBe("box-regional");
+  });
+});
+
+describe("products", () => {
+  test("a Swedish train's product is its name without the number", () => {
+    expect(trainProduct({ source: "trafikverket", name: "Öresundståg 1322" })).toBe("Öresundståg");
+    expect(trainProduct({ source: "trafikverket", name: "SJ Snabbtåg 531" })).toBe("SJ Snabbtåg");
+    expect(trainProduct({ source: "trafikverket", name: "Train 1322" })).toBeNull();
+    expect(trainProduct({ source: "amtrak", name: "Amtrak 5 California Zephyr" })).toBeNull();
   });
 });

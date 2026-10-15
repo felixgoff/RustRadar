@@ -19,6 +19,7 @@ mod session;
 mod ships;
 mod taxiways;
 mod trafikverket;
+mod train_media;
 mod trains;
 #[cfg(desktop)]
 mod updater;
@@ -720,6 +721,7 @@ pub fn run() {
             ships::ship_details,
             trains::trains_in_view,
             trains::train_stops,
+            train_media::train_media,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

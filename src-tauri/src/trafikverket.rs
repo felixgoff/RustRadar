@@ -450,13 +450,14 @@ async fn stations(http: &reqwest::Client, key: &str) -> Result<Arc<HashMap<Strin
 /// Every train in Sweden reporting a position.
 pub async fn trains(http: &reqwest::Client, key: &str, now_ms: i64) -> Result<Vec<Train>, String> {
     let (announcements, positions) = (announcements_query(), positions_query());
-    let (stations, services, positions) = futures_util::join!(
+    let (stations, services, positions) = futures_util::future::join3(
         stations(http, key),
         cached(service_cache(), key, ANNOUNCEMENTS_TTL, async {
             parse_announcements(&post(http, key, &announcements).await?, now_ms)
         }),
         post(http, key, &positions),
-    );
+    )
+    .await;
     // names and timetables are niceties: positions alone still make trains
     let stations = stations.unwrap_or_default();
     let services = services.unwrap_or_default();
@@ -472,7 +473,7 @@ pub async fn stops(http: &reqwest::Client, key: &str, id: &str) -> Result<Vec<St
         return Ok(Vec::new());
     }
     let query = stops_query(ident, date);
-    let (stations, body) = futures_util::join!(stations(http, key), post(http, key, &query));
+    let (stations, body) = futures_util::future::join(stations(http, key), post(http, key, &query)).await;
     parse_stops(&body?, &stations.unwrap_or_default())
 }
 

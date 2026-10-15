@@ -19,6 +19,9 @@ pub struct Piece<T> {
     points: Vec<(f64, f64)>,
 }
 
+/// A piece as the data files have it: direction, value, `[lon, lat]` points.
+pub type Raw<T> = (u8, T, Vec<(f64, f64)>);
+
 /// Segments (piece, first point) by the grid cells they cross.
 type Cells = HashMap<(i32, i32), Vec<(u32, u32)>>;
 
@@ -49,7 +52,7 @@ fn nearest(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
 
 impl<T> Lines<T> {
     /// From pieces as the files have them: direction, value, `[lon, lat]` points.
-    pub fn new(raw: Vec<(u8, T, Vec<(f64, f64)>)>) -> Lines<T> {
+    pub fn new(raw: Vec<Raw<T>>) -> Lines<T> {
         let pieces: Vec<Piece<T>> = raw
             .into_iter()
             .map(|(direction, value, coords)| Piece {

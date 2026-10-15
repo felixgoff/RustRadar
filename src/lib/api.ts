@@ -631,13 +631,15 @@ export interface Train {
   /** When the position was reported, Unix seconds. */
   positionUnix: number;
   /**
-   * Expected positions ahead as `[lat, lon, unixMs]`, in time order, the first
-   * at the report; only from HAFAS radar sources (vbb), else empty. See
-   * `positionAt` in trains.ts.
+   * Where it is drawn as `[lat, lon, unixMs]`, in time order, from about now
+   * on (along the track, for trains on one); empty when there is nothing to
+   * move it by. See `positionAt` in trains.ts.
    */
   frames: [number, number, number][];
-  /** Dev builds: the reports it is drawn from, the one before the latest first. */
+  /** Dev builds: its latest report and the one before. */
   reports?: Sighting[];
+  /** Dev builds: where the real train most likely is, as `frames`. */
+  predicted?: [number, number, number][];
 }
 
 /**

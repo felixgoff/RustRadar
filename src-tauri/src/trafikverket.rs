@@ -409,15 +409,15 @@ pub fn product_codes() -> Vec<ProductSeen> {
     out
 }
 
-/// The way a train is drawn, kept per train so the next report carries it
-/// on from where it is drawn instead of starting it anew.
+/// How a train is drawn, kept per train so the next report carries it on
+/// from where it is drawn instead of starting it anew.
+#[derive(Clone)]
 struct Drawn {
-    /// The report the frames were made for: when, and where it put the train.
-    at_ms: i64,
-    place: (f64, f64),
-    frames: Vec<(f64, f64, i64)>,
-    /// How far apart its reports come, smoothed: ms.
-    interval_ms: f64,
+    /// The report it was worked out from.
+    fix: motion::Fix,
+    /// When it was worked out.
+    made_ms: i64,
+    sim: motion::Sim,
 }
 
 type Plans = Mutex<HashMap<String, Drawn>>;
@@ -427,63 +427,76 @@ fn plans() -> &'static Plans {
     P.get_or_init(Default::default)
 }
 
-/// Report spacing taken until a train's own is known: ms.
-const INTERVAL_MS: f64 = 20_000.0;
-/// Reports further apart than this start the train anew.
-const CONTINUE_MS: i64 = 180_000;
-/// A train catching up is paced to reach its newest report this many report
-/// intervals on: a little later than the next report usually comes, so it
-/// isn't drawn past where it was seen.
-const ARRIVE_LATER: f64 = 1.15;
+/// The same report is worked out again this often, to stay on the horizon, ms.
+const REWORK_MS: i64 = 60_000;
+/// Drawn longer ago than this, a train starts anew, ms.
+const CONTINUE_MS: i64 = 5 * 60_000;
+/// Reported at the same place (without a speed) this much later, a train is standing, ms.
+const STOOD_MS: i64 = 5_000;
 
-/// The frames a train is drawn along. The same report gives the same
-/// frames (the map refreshing doesn't move it); a newer one carries it on
-/// from where it is drawn, along the track, paced to reach the newest
-/// position in about a report's time: no jump when reports come unevenly.
-/// The first report it is seen with (or after a long gap) starts it a
-/// report behind, from the one before (`motion::frames_between`).
+/// A train's frames (`motion::simulate`): from where it is drawn, following
+/// where the real train most likely is by its newest report. The same
+/// report gives the same frames for a while (the map refreshing doesn't
+/// move it); a report that only repeats the last one's place (its position
+/// not updated) changes nothing, unless it says the train has stopped.
 fn frames_for(
     report: &Report,
     prev: Option<&Report>,
     stops: &[motion::Stop],
     now_ms: i64,
     rail: &crate::rail::Rail,
-) -> Vec<(f64, f64, i64)> {
-    let latest = report.fix();
-    let fresh = || motion::frames_between(&latest, prev.map(Report::fix).as_ref(), stops, now_ms, Some(rail));
+) -> motion::Sim {
+    let mut latest = report.fix();
+    let prev = prev.map(Report::fix);
     // tests share no state between them
     if cfg!(test) {
-        return fresh();
+        return motion::simulate(None, &latest, prev.as_ref(), stops, now_ms, Some(rail));
     }
     let key = report.lookup().to_owned();
-    let old = plans().lock().unwrap().get(&key).map(|d| (d.at_ms, d.frames.clone(), d.interval_ms, d.place));
-    // the same report, or one that puts it where that one did: the same way
-    // (unless it now says it has stopped there: then it is brought to a stand)
-    let stopped = report.speed.is_some_and(|v| v < 1.0);
-    if let Some((at, frames, _, place)) = &old
-        && (*at == report.at_ms || (!stopped && motion::distance(*place, (report.lat, report.lon)) < SAME_PLACE_M))
+    let old = plans().lock().unwrap().get(&key).cloned().filter(|d| now_ms - d.made_ms < CONTINUE_MS);
+    if let Some(d) = &old
+        && motion::distance((d.fix.lat, d.fix.lon), (latest.lat, latest.lon)) < SAME_PLACE_M
     {
-        return frames.clone();
+        match latest.speed {
+            // says it has stopped there
+            Some(v) if v < 1.0 => {}
+            // not saying, but there a while: it is standing
+            None if latest.t_ms - d.fix.t_ms >= STOOD_MS => latest.speed = Some(0.0),
+            // its position only not updated
+            _ => latest = d.fix,
+        }
     }
-    let interval = old.as_ref().map_or(INTERVAL_MS, |o| o.2);
-    let carried = old.as_ref().filter(|(at, _, _, _)| (1..=CONTINUE_MS).contains(&(report.at_ms - at))).and_then(
-        |(at, frames, interval, _)| {
-            let (from, v, heading) = motion::sample(frames, now_ms)?;
-            let interval = interval * 0.6 + (report.at_ms - at) as f64 * 0.4;
-            // a little later than the reports usually come: it gets there as the next one does
-            let arrive = now_ms + (interval * ARRIVE_LATER) as i64;
-            let frames = motion::frames_chasing(from, v, heading, &latest, arrive, stops, now_ms, Some(rail));
-            (!frames.is_empty()).then_some((frames, interval))
-        },
-    );
-    let (frames, interval) = carried.unwrap_or_else(|| (fresh(), interval));
+    if let Some(d) = &old
+        && latest == d.fix
+    {
+        if now_ms - d.made_ms < REWORK_MS {
+            return d.sim.clone();
+        }
+        // standing, and nothing new: still there
+        if let [.., a, b] = d.sim.frames.as_slice()
+            && (a.0, a.1) == (b.0, b.1)
+            && b.2 <= now_ms + motion::HORIZON_MS
+        {
+            let mut sim = d.sim.clone();
+            if let Some(last) = sim.frames.last_mut() {
+                last.2 = now_ms + motion::HORIZON_MS;
+            }
+            plans().lock().unwrap().insert(key, Drawn { fix: latest, made_ms: now_ms, sim: sim.clone() });
+            return sim;
+        }
+    }
+    let drawn = old.as_ref().map(|d| d.sim.frames.as_slice());
+    let sim = motion::simulate(drawn, &latest, prev.as_ref(), stops, now_ms, Some(rail));
     let mut plans = plans().lock().unwrap();
-    plans.retain(|_, d| now_ms - d.at_ms < 6 * 3_600_000);
-    plans.insert(
-        key,
-        Drawn { at_ms: report.at_ms, place: (report.lat, report.lon), frames: frames.clone(), interval_ms: interval },
-    );
-    frames
+    plans.retain(|_, d| now_ms - d.made_ms < CONTINUE_MS);
+    plans.insert(key, Drawn { fix: latest, made_ms: now_ms, sim: sim.clone() });
+    sim
+}
+
+/// How the train with this report's number is drawn now, if it is.
+fn drawn_now(lookup: &str, now_ms: i64) -> Option<motion::Drawn> {
+    let plans = plans().lock().unwrap();
+    plans.get(lookup).and_then(|d| motion::drawn_at(&d.sim.frames, now_ms))
 }
 
 /// The run a position belongs to: the day the position names, else the latest.
@@ -647,11 +660,10 @@ pub fn train(
     let number = advertised.clone().unwrap_or_else(|| report.lookup().to_owned());
     let delay = delays.get(report.lookup()).or_else(|| delays.get(advertised.as_deref()?)).copied();
     let stops = service.map(|s| stops_ahead(s, delay, stations, report.at_ms)).unwrap_or_default();
-    // drawn a report behind: from the one before along the track through this one
-    // on the track's limits for its kind of train
+    // along the track, on its limits for its kind of train
     let class = service.map(|s| crate::train_class::class_of(s.product_code.as_deref(), s.product.as_deref()));
     let rail = crate::rail::Rail { class };
-    let frames = frames_for(report, prev, &stops, now_ms, &rail);
+    let motion::Sim { frames, predicted } = frames_for(report, prev, &stops, now_ms, &rail);
     let place = frames
         .first()
         .map(|f| (f.0, f.1))
@@ -690,6 +702,7 @@ pub fn train(
         } else {
             Vec::new()
         },
+        predicted: if crate::devlog::ENABLED { predicted } else { Vec::new() },
     }
 }
 
@@ -984,8 +997,7 @@ fn remember(trains: &[Train], reports: &[Report], now_ms: i64, all: bool) {
     let mut places = last_places().lock().unwrap();
     for (t, r) in trains.iter().zip(reports) {
         if places.get(&t.id).is_none_or(|p| p.latest.t_ms <= r.at_ms) {
-            let prev = history().lock().unwrap().get(r.lookup()).and_then(|h| h.1.as_ref().map(Report::fix));
-            places.insert(t.id.clone(), Seen { latest: r.fix(), prev });
+            places.insert(t.id.clone(), Seen { latest: r.fix() });
         }
     }
     places.retain(|_, p| now_ms - p.latest.t_ms < 6 * 3_600_000);
@@ -1465,7 +1477,7 @@ pub async fn follow(http: reqwest::Client, key: String, id: String, channel: tau
             }
             let prev = previous(&report);
             let train = train(&report, prev.as_ref(), &services, &delays, &stations, now);
-            last_places().lock().unwrap().insert(train.id.clone(), Seen { latest: report.fix(), prev: prev.as_ref().map(Report::fix) });
+            last_places().lock().unwrap().insert(train.id.clone(), Seen { latest: report.fix() });
             if channel.send(TrainEvent::Train { train: Box::new(train) }).is_err() {
                 return;
             }
@@ -1490,11 +1502,10 @@ async fn push_stops(
 
 // ------------------------------------------------------------------- route
 
-/// A train's latest report and the one before, as its motion was worked out from.
+/// A train's latest report.
 #[derive(Clone, Copy, Debug)]
 struct Seen {
     latest: motion::Fix,
-    prev: Option<motion::Fix>,
 }
 
 /// Each train's latest report and the one before, by its number.
@@ -1585,71 +1596,39 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
     let stations = station_cache().lock().unwrap().clone().map(|(_, _, s)| s).unwrap_or_default();
     let delay = delay_cache().lock().unwrap().clone().and_then(|(_, _, d)| d.get(ident).copied());
     let seen = last_places().lock().unwrap().get(id).copied();
-    let at_ms = seen.map_or_else(crate::trains::now_ms, |s| s.latest.t_ms);
+    let now = crate::trains::now_ms();
+    let at_ms = seen.map_or(now, |s| s.latest.t_ms);
     let calls = calls_ahead(&run, delay, &stations, at_ms);
     let stops: Vec<motion::Stop> = calls.iter().map(|c| c.2).collect();
 
-    // where the train is drawn from and the way it goes: as its motion has it
-    // (standing at a platform, or not seen: from its next stop)
-    let way = seen.and_then(|s| motion::way(&s.latest, s.prev.as_ref(), &stops));
-    let standing_at = seen.and_then(|s| {
-        match motion::plan((s.latest.lat, s.latest.lon), s.latest.speed, s.latest.heading, &stops, s.latest.t_ms) {
-            motion::Plan::Standing { at } => Some(at),
-            motion::Plan::Moving { .. } => None,
-        }
-    });
-    // the first station on its way: one the drawn train still calls at, else the real one's next
-    let first = way
-        .as_ref()
-        .map(|w| w.targets.iter().find_map(|t| t.stop).unwrap_or(w.next))
-        .or(standing_at)
-        .unwrap_or(0)
-        .min(stops.len());
-    let ahead_calls = &calls[first..];
-    // each place's possible spots: the one the train's motion heads for first
-    let spots: Vec<Vec<(f64, f64)>> = ahead_calls
-        .iter()
-        .map(|(call, station, stop)| {
-            let mut spots = vec![(stop.lat, stop.lon)];
-            if let (Some(lat), Some(lon)) = (station.lat, station.lon)
-                && let Some(more) = crate::rail::platforms((lat, lon), call.track.as_deref())
-            {
-                spots.extend(more.into_iter().filter(|p| motion::distance(*p, (stop.lat, stop.lon)) >= 3.0));
-            }
-            spots
-        })
-        .collect();
-    let (segments, complete) = match way {
-        Some(w) => match crate::rail::route(w.from, w.heading, &w.points(), 0.0) {
-            // the stretch the train is moving along, then on from the last stop it reached
-            Some(r) => {
-                let reached_stop = w.targets[..r.reached.len().min(w.targets.len())].iter().rev().find_map(|t| t.stop);
-                let from = reached_stop.unwrap_or(w.next).max(first);
-                let mut rest_places = spots[(from - first).min(spots.len())..].to_vec();
-                if reached_stop.is_some()
-                    && let Some(reached) = rest_places.first_mut()
-                {
-                    // where its motion stops there
-                    *reached = vec![(stops[from].lat, stops[from].lon)];
-                }
-                let (mut rest, complete) = crate::rail::way_through(&rest_places);
-                match rest.first_mut() {
-                    Some(next)
-                        if reached_stop.is_some()
-                            && next.first().zip(r.points.last()).is_some_and(|(a, b)| motion::distance(*a, *b) < 1.0) =>
-                    {
-                        let mut joined = r.points;
-                        joined.extend(next.drain(1..));
-                        rest[0] = joined;
-                    }
-                    _ => rest.insert(0, r.points),
-                }
-                (rest, complete)
-            }
-            None => (Vec::new(), false),
-        },
-        None => crate::rail::way_through(&spots),
+    // from where the train is drawn now (else where it was last seen): its
+    // place, speed and the way it goes
+    let lookup = operational_numbers().lock().unwrap().get(id).cloned();
+    let start = lookup
+        .and_then(|n| drawn_now(&n, now))
+        .map(|d| (d.at, Some(d.v), d.heading))
+        .or_else(|| seen.map(|s| ((s.latest.lat, s.latest.lon), s.latest.speed, s.latest.heading)));
+    // the station it stands at (it goes on from there), else the next on its way
+    let (first, onwards) = match start.map(|(at, v, h)| motion::plan(at, v, h, &stops, now)) {
+        Some(motion::Plan::Standing { at }) => (at, at + 1),
+        Some(motion::Plan::Moving { next }) => (next, next),
+        None => (0, 0),
     };
+    let ahead_calls = &calls[first.min(calls.len())..];
+    // each place's possible spots, the one its motion heads for first
+    let mut places: Vec<Vec<(f64, f64)>> = start.iter().map(|s| vec![s.0]).collect();
+    places.extend(calls[onwards.min(calls.len())..].iter().map(|(call, station, stop)| {
+        let mut spots = vec![(stop.lat, stop.lon)];
+        if let (Some(lat), Some(lon)) = (station.lat, station.lon)
+            && let Some(more) = crate::rail::platforms((lat, lon), call.track.as_deref())
+        {
+            spots.extend(more.into_iter().filter(|p| motion::distance(*p, (stop.lat, stop.lon)) >= 3.0));
+        }
+        spots
+    }));
+    // on the way it is going: never back the way it came
+    let heading = start.and_then(|s| s.2);
+    let (segments, complete) = crate::rail::way_through(&places, heading);
     Ok(TrainRoute {
         segments: segments
             .into_iter()

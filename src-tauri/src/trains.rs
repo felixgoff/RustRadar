@@ -111,13 +111,18 @@ pub struct Train {
     pub delay_minutes: Option<i32>,
     /// When the position was reported, Unix seconds.
     pub position_unix: i64,
-    /// Expected positions ahead, `(lat, lon, unix_ms)` in time order, the
-    /// first at the report; empty when the source has none.
+    /// Where it is drawn, `(lat, lon, unix_ms)` in time order, from about
+    /// now on (from when it stopped, standing); empty when there is nothing
+    /// to move it by.
     pub frames: Vec<(f64, f64, i64)>,
-    /// Dev builds: the reports it is drawn from (the one before the latest,
-    /// then the latest), for the map to mark. Empty in release builds.
+    /// Dev builds: its latest report and the one before, for the map to
+    /// mark. Empty in release builds.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reports: Vec<Sighting>,
+    /// Dev builds: where the real train most likely is, as `frames`, for the
+    /// map to mark. Empty in release builds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub predicted: Vec<(f64, f64, i64)>,
 }
 
 /// A position report as the dev map marks it.
@@ -468,6 +473,7 @@ fn digitraffic_train(t: &Value) -> Option<Train> {
         position_unix: latest["timestamp"].as_str().and_then(unix_ms).map(|ms| ms / 1000)?,
         frames: Vec::new(),
         reports: Vec::new(),
+        predicted: Vec::new(),
     })
 }
 
@@ -534,6 +540,7 @@ fn amtraker_train(t: &Value) -> Option<Train> {
         position_unix: position_ms / 1000,
         frames: Vec::new(),
         reports: Vec::new(),
+        predicted: Vec::new(),
     })
 }
 
@@ -601,6 +608,7 @@ fn entur_train(v: &Value) -> Option<Train> {
         position_unix: v["lastUpdated"].as_str().and_then(unix_ms)? / 1000,
         frames: Vec::new(),
         reports: Vec::new(),
+        predicted: Vec::new(),
     })
 }
 
@@ -672,6 +680,7 @@ fn irishrail_train(block: &str, now_ms: i64) -> Option<Train> {
         position_unix: now_ms / 1000,
         frames: Vec::new(),
         reports: Vec::new(),
+        predicted: Vec::new(),
     })
 }
 
@@ -754,6 +763,7 @@ fn radar_train(m: &Value, source: &'static str, now_ms: i64) -> Option<Train> {
         position_unix: now_ms / 1000,
         frames,
         reports: Vec::new(),
+        predicted: Vec::new(),
     })
 }
 
@@ -1195,17 +1205,16 @@ pub async fn trains_in_view(west: f64, south: f64, east: f64, north: f64, zoom: 
     }
     // the rest glide on along the track ahead (or their heading) between reports
     let now = now_ms();
+    let rail = crate::rail::Rail { class: None };
     for t in trains.iter_mut().filter(|t| t.frames.is_empty()) {
-        t.frames = crate::motion::frames_with(
-            t.lat,
-            t.lon,
-            t.position_unix * 1000,
-            t.speed_kmh.map(|s| f64::from(s) / 3.6),
-            t.heading.map(f64::from),
-            &[],
-            now,
-            Some(&crate::rail::Rail { class: None }),
-        );
+        let report = crate::motion::Fix {
+            lat: t.lat,
+            lon: t.lon,
+            t_ms: t.position_unix * 1000,
+            speed: t.speed_kmh.map(|s| f64::from(s) / 3.6),
+            heading: t.heading.map(f64::from),
+        };
+        t.frames = crate::motion::simulate(None, &report, None, &[], now, Some(&rail)).frames;
     }
     Ok(trains)
 }
@@ -1457,6 +1466,7 @@ mod tests {
             position_unix: at,
             frames: Vec::new(),
             reports: Vec::new(),
+            predicted: Vec::new(),
         };
         let source = Source::Trafikverket;
         let (key, _) = source.request(&Area::WORLD);

@@ -1929,6 +1929,7 @@
   const SIGHT_LATEST: [number, number, number, number] = [240, 60, 60, 255];
   const SIGHT_PREV: [number, number, number, number] = [255, 165, 40, 255];
   const SIGHT_LABEL_BG: [number, number, number, number] = [12, 14, 20, 225];
+  const SIGHT_PREDICTED: [number, number, number, number] = [80, 220, 120, 255];
   /**
    * Dev builds: each train's latest report (red) and the one before it,
    * which it is drawn from (an orange ring), joined; the selected train's
@@ -1943,8 +1944,43 @@
     const age = (s: Sighting) => `${Math.max(0, Math.round((nowMs - s.unixMs) / 1000))} s`;
     const speed = (s: Sighting) => (s.speedKmh === null ? "no speed" : `${Math.round(s.speedKmh)} km/h`);
     const labels = (sel?.reports ?? []).map((s) => ({ s, text: `${s.latest ? "live" : "Δ"} ${age(s)} · ${speed(s)}` }));
+    // where the real trains most likely are now, by their reports
+    const predicted = sighted
+      .filter((t) => (t.predicted?.length ?? 0) > 0)
+      .map((t) => ({ selected: t.id === sel?.id, at: positionAt({ lat: t.lat, lon: t.lon, frames: t.predicted! }, nowMs) }));
     const top = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
     return [
+      new ScatterplotLayer<(typeof predicted)[number]>({
+        id: "dev-predicted",
+        data: predicted,
+        getPosition: (p) => [p.at.lon, p.at.lat],
+        getRadius: 7,
+        radiusUnits: "pixels",
+        filled: false,
+        stroked: true,
+        getLineColor: SIGHT_PREDICTED,
+        getLineWidth: 2,
+        lineWidthUnits: "pixels",
+        parameters: top,
+        updateTriggers: { getPosition: nowMs },
+      }),
+      new TextLayer<(typeof predicted)[number]>({
+        id: "dev-predicted-label",
+        data: predicted.filter((p) => p.selected),
+        getPosition: (p) => [p.at.lon, p.at.lat],
+        getText: () => "predicted",
+        getColor: SIGHT_PREDICTED,
+        getSize: 11,
+        sizeUnits: "pixels",
+        getPixelOffset: [0, 16],
+        fontFamily: "ui-monospace, monospace",
+        background: true,
+        getBackgroundColor: SIGHT_LABEL_BG,
+        backgroundPadding: [4, 2],
+        billboard: true,
+        parameters: top,
+        updateTriggers: { getPosition: nowMs },
+      }),
       new PathLayer<Sighting[]>({
         id: "dev-sighting-links",
         data: pairs,

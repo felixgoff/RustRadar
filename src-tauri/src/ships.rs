@@ -464,7 +464,7 @@ fn track(ships: &mut [Ship], now: i64) {
         }
         ship.frames = match t.velocity {
             Some((speed, course)) if !ship.old && speed > 0.2 => {
-                crate::motion::frames(ship.lat, ship.lon, t.since, Some(speed), Some(course), &[], now)
+                crate::motion::frames(ship.lat, ship.lon, t.since, Some(speed), Some(course), now)
             }
             _ => Vec::new(),
         };

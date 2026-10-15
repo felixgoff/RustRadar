@@ -1152,19 +1152,6 @@ fn route_in(
     route_in_dir(g, start, heading, targets, onwards_m, spread, None, false)
 }
 
-/// `route_in`, with the speed limits for a train of this class.
-fn route_in_as(
-    g: &Graph,
-    start: (f64, f64),
-    heading: Option<f64>,
-    targets: &[(f64, f64)],
-    onwards_m: f64,
-    spread: f64,
-    class: Option<&crate::train_class::TrainClass>,
-) -> Option<Route> {
-    route_in_dir(g, start, heading, targets, onwards_m, spread, class, false)
-}
-
 /// The way from `start`: towards the targets whichever way the heading
 /// points, or (`only_onwards`, or no targets) only the way it points.
 #[allow(clippy::too_many_arguments)]
@@ -1214,27 +1201,38 @@ fn route_in_dir(
     (route.points.len() >= 2).then_some(route)
 }
 
+/// How far on past its targets a way's track is loaded for, at most, metres.
+const LOAD_ON_M: f64 = 8_000.0;
+
 /// A way along the known track from `start` (heading roughly `heading`)
 /// through as many of `targets` as it can reach in order, then on along the
-/// track for `onwards_m`. None while the track there isn't loaded (it is sent
+/// track for `onwards_m`, on the limits for a train of this class; with
+/// `only_onwards`, going only the way `heading` points (else whichever way
+/// reaches the targets). None while the track there isn't loaded (it is sent
 /// for), or when `start` isn't on a track.
-pub fn route(start: (f64, f64), heading: Option<f64>, targets: &[(f64, f64)], onwards_m: f64) -> Option<Route> {
-    route_as(start, heading, targets, onwards_m, None)
-}
-
-/// `route`, with the speed limits for a train of this class.
-pub fn route_as(
+pub fn route_for(
     start: (f64, f64),
     heading: Option<f64>,
     targets: &[(f64, f64)],
     onwards_m: f64,
     class: Option<&crate::train_class::TrainClass>,
+    only_onwards: bool,
 ) -> Option<Route> {
     let mut targets = targets.to_vec();
-    let mut keys = tiles_for(&[start, ahead(start, heading.unwrap_or(0.0), onwards_m.min(5_000.0))], 0.01);
+    let on = onwards_m.clamp(0.0, LOAD_ON_M);
+    // the track round the start and as far on as it goes
+    let mut keys = match heading {
+        Some(h) => tiles_for(&[start, ahead(start, h, on)], 0.01),
+        None => tiles_for(&[start], 0.01 + on / 111_000.0),
+    };
     if !targets.is_empty() {
         let mut points = vec![start];
         points.extend(&targets);
+        // and on past the last target, the way they lead, when they end close by
+        let n = points.len();
+        if on > 0.0 && distance(start, points[n - 1]) < on {
+            points.push(ahead(points[n - 1], course(points[n - 2], points[n - 1]), on));
+        }
         let all = tiles_for(&points, 0.02);
         if all.len() <= MAX_ROUTE_TILES {
             keys = all;
@@ -1246,7 +1244,7 @@ pub fn route_as(
         return None;
     }
     let g = graph_for(keys)?;
-    route_in_as(&g, start, heading, &targets, onwards_m, SNAP_SPREAD_M, class)
+    route_in_dir(&g, start, heading, &targets, onwards_m, SNAP_SPREAD_M, class, only_onwards)
 }
 
 /// The nearest point on the track, if it is loaded and near.
@@ -1360,7 +1358,8 @@ fn end_heading(points: &[(f64, f64)]) -> Option<f64> {
 /// found there is a gap, never a line across country. It stops at the first
 /// leg whose track isn't loaded yet (that and the next few are sent for):
 /// then it is incomplete.
-pub fn way_through(places: &[Vec<(f64, f64)>]) -> (Vec<Line>, bool) {
+/// `heading`: the way it goes from the first place, when known.
+pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Line>, bool) {
     let places: Vec<&[(f64, f64)]> = places.iter().map(|p| &p[..p.len().min(MAX_PLATFORMS)]).filter(|p| !p.is_empty()).collect();
     let keys_between = |a: &[(f64, f64)], b: &[(f64, f64)]| {
         let mut points = a.to_vec();
@@ -1388,7 +1387,7 @@ pub fn way_through(places: &[Vec<(f64, f64)>]) -> (Vec<Line>, bool) {
                 }
                 break;
             };
-            let heading = end_heading(&cur);
+            let heading = if i == 1 { heading } else { end_heading(&cur) };
             let mut first_reached = None;
             let mut through = None;
             for &spot in places[i] {
@@ -1446,8 +1445,10 @@ impl crate::motion::Track for Rail {
         heading: Option<f64>,
         targets: &[(f64, f64)],
         onwards_m: f64,
+        onwards_only: bool,
     ) -> Option<crate::motion::Routed> {
-        route_as(start, heading, targets, onwards_m, self.class.as_ref()).map(|r| (r.points, r.reached, r.speeds))
+        route_for(start, heading, targets, onwards_m, self.class.as_ref(), onwards_only)
+            .map(|r| (r.points, r.reached, r.speeds))
     }
 
     fn top(&self) -> Option<f64> {
@@ -1599,7 +1600,7 @@ mod tests {
             }
             st.tracks.insert(tile_of(a.0, a.1), (Instant::now(), Arc::new(vec![track(l)])));
         }
-        let (stretches, complete) = way_through(&places);
+        let (stretches, complete) = way_through(&places, None);
         assert!(complete);
         assert_eq!(stretches.len(), 1, "A to B only: {stretches:?}");
         assert!(stretches[0].iter().all(|p| (p.0 - a.0).abs() < 1e-4), "along the track, not off to C");
@@ -1771,7 +1772,7 @@ mod tests {
         let malmo_spots = spots(malmo, "2b");
         let yard_2a = (55.6105, 13.0074);
         assert!(malmo_spots.iter().all(|p| distance(*p, yard_2a) > 150.0), "never the yard: {malmo_spots:?}");
-        let (stretches, complete) = way_through(&[spots(lund, "2"), malmo_spots, spots(triangeln, "1")]);
+        let (stretches, complete) = way_through(&[spots(lund, "2"), malmo_spots, spots(triangeln, "1")], None);
         assert!(complete);
         eprintln!("{} stretches, {:?} points", stretches.len(), stretches.iter().map(|s| s.len()).collect::<Vec<_>>());
         assert_eq!(stretches.len(), 1, "no gap");
@@ -1786,5 +1787,198 @@ mod tests {
             .filter(|m| g.snap(*m, 0.5).is_some_and(|s| g.edge(s.0, s.1).is_some_and(|e| e.yard)))
             .collect();
         assert!(on_yard.is_empty(), "not on yard tracks: {on_yard:?}");
+    }
+
+    /// The track of these graphs, for the motion module, as a train of a class runs on it.
+    struct OnGraph<'a> {
+        g: &'a Graph,
+        class: Option<crate::train_class::TrainClass>,
+    }
+
+    impl crate::motion::Track for OnGraph<'_> {
+        fn route(
+            &self,
+            start: (f64, f64),
+            heading: Option<f64>,
+            targets: &[(f64, f64)],
+            onwards_m: f64,
+            onwards_only: bool,
+        ) -> Option<crate::motion::Routed> {
+            route_in_dir(self.g, start, heading, targets, onwards_m, SNAP_SPREAD_M, self.class.as_ref(), onwards_only)
+                .map(|r| (r.points, r.reached, r.speeds))
+        }
+
+        fn hold(&self, at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)> {
+            hold_in(self.g, at, platform)
+        }
+
+        fn top(&self) -> Option<f64> {
+            self.class.map(|c| c.top())
+        }
+    }
+
+    /// An Öresundståg from Lund to Malmö C on real tiles (`RAIL_TILES`),
+    /// reported every 5 to 30 s with a little GPS error, drawn as the map
+    /// does (anew on each report and every 10 s): on the track all the way,
+    /// never backwards, close to the real train, and in at Malmö.
+    #[test]
+    #[ignore]
+    fn a_train_from_lund_to_malmo_is_drawn_on_the_track() {
+        use crate::motion::{self, Fix, Frame, Stop};
+        let dir = std::env::var("RAIL_TILES").unwrap();
+        let sets: Vec<Arc<Vec<Track>>> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.ok()?.file_name().into_string().ok()?;
+                let (x, y) = name.strip_suffix(".pbf")?.split_once('_')?;
+                let bytes = std::fs::read(format!("{dir}/{name}")).ok()?;
+                Some(Arc::new(decode(&bytes, ZOOM, x.parse().ok()?, y.parse().ok()?)))
+            })
+            .collect();
+        let g = Graph::build(&sets);
+        let class = crate::train_class::class_of(Some("PNA044"), None);
+        let track = OnGraph { g: &g, class: Some(class) };
+        let lund = platform_in(&g, (55.7056, 13.1868), Some("2")).unwrap();
+        let malmo = platform_in(&g, (55.6094, 13.0006), Some("3")).unwrap();
+        let way = route_in_dir(&g, lund, None, &[malmo], 0.0, 1.0, Some(&class), false).unwrap();
+        let path: Vec<(f64, f64)> = way.points.clone();
+        let mut at = vec![0.0];
+        for w in path.windows(2) {
+            at.push(at.last().unwrap() + distance(w[0], w[1]));
+        }
+        let length = *at.last().unwrap();
+        const T0: i64 = 1_800_000_000_000;
+        let point = |s: f64| {
+            let i = at.partition_point(|d| *d <= s).clamp(1, path.len() - 1);
+            let k = ((s - at[i - 1]) / (at[i] - at[i - 1]).max(1e-9)).clamp(0.0, 1.0);
+            let (a, b) = (path[i - 1], path[i]);
+            ((a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k), course(a, b))
+        };
+        // how far along the real way a place is, and how far off it
+        let along = |p: (f64, f64)| {
+            path.windows(2)
+                .enumerate()
+                .map(|(i, w)| {
+                    let (q, _) = project(p, w[0], w[1]);
+                    (distance(p, q), at[i] + distance(w[0], q))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .unwrap()
+        };
+        // the real run: the track's limits (90% of them), up to its top, braking into Malmö
+        let limit = |s: f64| {
+            let i = at.partition_point(|d| *d <= s).clamp(1, path.len() - 1);
+            way.speeds.get(i - 1).copied().flatten().unwrap_or(30.0).min(class.top()) * 0.9
+        };
+        // calling at Hjärup on the way, for 45 s
+        let hjarup = platform_in(&g, (55.6696, 13.1361), None).unwrap();
+        let (hjarup_off, hjarup_at) = along(hjarup);
+        assert!(hjarup_off < 10.0, "Hjärup's platform is on the way: {hjarup_off:.0} m off");
+        let mut real: Vec<(f64, f64)> = Vec::new();
+        let (mut s, mut v) = (0.0f64, 0.0f64);
+        let (mut stood, mut left_hjarup) = (0, None);
+        for i in 0..12_000 {
+            real.push((s, v));
+            let end = if stood < 450 { hjarup_at } else { length };
+            if (end - s).abs() < 0.01 && end == hjarup_at {
+                stood += 1;
+                v = 0.0;
+                if stood == 450 {
+                    left_hjarup = Some(T0 + i * 100);
+                }
+                continue;
+            }
+            let mut cap = (2.0 * 0.5 * (end - s - 1.0).max(0.0)).sqrt().min(limit(s));
+            let mut d = 0.0;
+            while d < 2_500.0 {
+                cap = cap.min((limit(s + d).powi(2) + 2.0 * 0.5 * d).sqrt());
+                d += 50.0;
+            }
+            v = if v > cap { (v - 0.05).max(cap) } else { (v + 0.04).min(cap.max(0.3)) };
+            s = (s + v * 0.1).min(end);
+        }
+        let real_at = |t: i64| real[(((t - T0) / 100) as usize).min(real.len() - 1)];
+        let stops = [
+            Stop { lat: lund.0, lon: lund.1, arrive_ms: None, depart_ms: Some(T0), pass: false },
+            Stop { lat: hjarup.0, lon: hjarup.1, arrive_ms: Some(T0 + 300_000), depart_ms: Some(T0 + 360_000), pass: false },
+            Stop { lat: malmo.0, lon: malmo.1, arrive_ms: Some(T0 + 1_000_000), depart_ms: None, pass: false },
+        ];
+        let gaps = [12, 25, 8, 30, 15, 20, 5, 28, 18, 10];
+        let mut times = vec![T0];
+        while *times.last().unwrap() < T0 + 1_250_000 {
+            times.push(times.last().unwrap() + gaps[times.len() % gaps.len()] * 1000);
+        }
+        let report = |t: i64, k: usize| {
+            let (s, v) = real_at(t);
+            let (p, heading) = point(s);
+            // a few metres off, either side
+            let p = ahead(p, heading + 90.0, [3.0, -4.0, 1.5, -2.0, 5.0][k % 5]);
+            Fix { lat: p.0, lon: p.1, t_ms: t, speed: Some((v * 3.6).round() / 3.6), heading: Some(heading.round()) }
+        };
+        let (mut frames, mut latest, mut prev): (Option<Vec<Frame>>, Option<Fix>, Option<Fix>) = (None, None, None);
+        let (mut heard, mut last_sim) = (0, i64::MIN);
+        let mut drawn: Vec<(i64, f64, f64)> = Vec::new();
+        let mut gaps_off: Vec<f64> = Vec::new();
+        let mut moving_again = None;
+        for now in (T0..T0 + 1_250_000).step_by(1000) {
+            let mut fresh = false;
+            while heard < times.len() && times[heard] + 2_000 <= now {
+                let r = report(times[heard], heard);
+                heard += 1;
+                if left_hjarup.is_some_and(|t| r.t_ms > t) && moving_again.is_none() {
+                    moving_again = Some(now);
+                }
+                if latest.is_some_and(|l| distance((l.lat, l.lon), (r.lat, r.lon)) < 2.0 && r.speed.is_some_and(|v| v >= 1.0)) {
+                    continue;
+                }
+                if latest.is_none_or(|l| distance((l.lat, l.lon), (r.lat, r.lon)) >= 2.0) {
+                    prev = latest;
+                }
+                latest = Some(r);
+                fresh = true;
+            }
+            let Some(l) = latest else { continue };
+            if fresh || now - last_sim >= 10_000 {
+                let next = motion::simulate(frames.as_deref(), &l, prev.as_ref(), &stops, now, Some(&track)).frames;
+                assert!(!next.is_empty());
+                if let Some(old) = &frames {
+                    let a = motion::sample(old, now).unwrap().0;
+                    let b = motion::sample(&next, now).map_or((next[0].0, next[0].1), |s| s.0);
+                    assert!(distance(a, b) < 25.0, "a jump at {} s: {:.0} m", (now - T0) / 1000, distance(a, b));
+                }
+                frames = Some(next);
+                last_sim = now;
+            }
+            let f = frames.as_ref().unwrap();
+            let p = motion::sample(f, now).map_or((f[0].0, f[0].1), |s| s.0);
+            let (off, s) = along(p);
+            let on = g.snap(p, 50.0).map_or(f64::MAX, |s| s.3);
+            drawn.push((now, s, off));
+            gaps_off.push(on);
+        }
+        let back = drawn.windows(2).map(|w| w[0].1 - w[1].1).fold(0.0f64, f64::max);
+        let errors: Vec<f64> = drawn.iter().map(|(t, s, _)| (s - real_at(*t).0).abs()).collect();
+        let worst = errors.iter().fold(0.0f64, |a, b| a.max(*b));
+        let mean = errors.iter().sum::<f64>() / errors.len() as f64;
+        let off = drawn.iter().map(|d| d.2).fold(0.0f64, f64::max);
+        let track_off = gaps_off.iter().fold(0.0f64, |a, b| a.max(*b));
+        eprintln!("off the track: at most {track_off:.1} m");
+        // (between frames it cuts across bends a little)
+        assert!(track_off < 3.0, "on the track: {track_off:.1} m off it");
+        // in at Hjärup, and out only once a report shows the real train moving off
+        let at_hjarup: Vec<i64> = drawn
+            .windows(2)
+            .filter(|w| (w[0].1 - hjarup_at).abs() < 60.0 && (w[1].1 - w[0].1).abs() < 0.01)
+            .map(|w| w[0].0)
+            .collect();
+        eprintln!("stood at Hjärup {} s", at_hjarup.len());
+        assert!(at_hjarup.len() >= 30, "stood at Hjärup: {} s", at_hjarup.len());
+        let set_off = *at_hjarup.last().unwrap();
+        assert!(set_off + 1_000 >= moving_again.unwrap(), "left Hjärup at {} s, before a report said so at {} s", (set_off - T0) / 1000, (moving_again.unwrap() - T0) / 1000);
+        eprintln!("{length:.0} m: off by {worst:.0} m at worst, {mean:.0} on average; {off:.1} m from the real way at most; back {back:.1} m");
+        assert!(back < 6.0, "went back {back:.1} m (between tracks side by side at most)");
+        assert!(worst < 600.0 && mean < 150.0, "off by {worst:.0} m at worst, {mean:.0} on average");
+        let end = drawn.last().unwrap();
+        assert!((end.1 - length).abs() < 60.0, "in at Malmö: {:.0} of {length:.0} m", end.1);
     }
 }

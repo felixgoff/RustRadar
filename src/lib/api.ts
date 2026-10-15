@@ -416,6 +416,12 @@ export interface Ship {
   old: boolean;
   /** Metres from the AIS reference point to bow, stern, port and starboard; close in only. */
   dims: [number, number, number, number] | null;
+  /**
+   * Where it is expected over the next couple of minutes as `[lat, lon,
+   * unixMs]`, worked out from how it was seen to move; empty when it isn't
+   * moving. See `positionAt` in trains.ts.
+   */
+  frames: [number, number, number][];
 }
 
 /**

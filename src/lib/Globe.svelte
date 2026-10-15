@@ -1463,6 +1463,45 @@
     /** The zoom from which it is long enough on screen to be a model. */
     minZoom: number;
   };
+  /** How long a ship or train takes to ease onto a new report. */
+  const EASE_MS = 2000;
+  type Ease = { dLat: number; dLon: number; from: number };
+  /**
+   * The offset from where a vehicle is now expected to where it was drawn
+   * (index `was` in the old positions), to ease away; none for a new one, one
+   * that hasn't moved, or one that jumped further than it could have gone.
+   */
+  function easeFrom(
+    was: number | undefined,
+    positions: [number, number, number][] | undefined,
+    to: { lat: number; lon: number; frames: [number, number, number][] },
+    nowMs: number,
+  ): Ease | null {
+    if (was === undefined || !positions) return null;
+    const [lon, lat] = positions[was];
+    const target = positionAt(to, nowMs);
+    const dLat = lat - target.lat;
+    const dLon = ((lon - target.lon + 540) % 360) - 180;
+    return (dLat || dLon) && Math.abs(dLat) < 0.05 && Math.abs(dLon) < 0.1 ? { dLat, dLon, from: nowMs } : null;
+  }
+  /** Where a vehicle is drawn at `nowMs`: along its frames, plus what is left of its easing (smoothstep). */
+  function eased(
+    v: { lat: number; lon: number; frames: [number, number, number][] },
+    blends: Map<number, Ease>,
+    i: number,
+    nowMs: number,
+  ): { lat: number; lon: number } {
+    let { lat, lon } = positionAt(v, nowMs);
+    const blend = blends.get(i);
+    if (blend) {
+      const left = 1 - Math.min(1, (nowMs - blend.from) / EASE_MS);
+      const k = left * left * (3 - 2 * left);
+      lat += blend.dLat * k;
+      lon += blend.dLon * k;
+      if (left === 0) blends.delete(i);
+    }
+    return { lat, lon };
+  }
   type ShipData = {
     list: Ship[];
     positions: [number, number, number][];
@@ -1474,14 +1513,37 @@
     models: Map<ShipClass, ShipModel[]>;
     /** Close in: the models shown and the ships left as icons, for one quarter-zoom step. */
     split: { step: number; models: Map<ShipClass, ShipModel[]>; icons: number[] } | null;
+    byMmsi: Map<number, number>;
+    /** Ships under way (or easing onto a new report), stepped on every frame. */
+    moving: number[];
+    blends: Map<number, { dLat: number; dLon: number; from: number }>;
   };
   let shipData: ShipData | null = null;
+  /** Bumped whenever the ships' drawn positions change. */
+  let shipMoves = 0;
   let shipAtlasData: ReturnType<typeof shipAtlas> | undefined;
-  function shipsFor(list: Ship[]): ShipData {
+  function shipsFor(list: Ship[], nowMs: number): ShipData {
     if (shipData?.list === list) return shipData;
-    const data: ShipData = { list, positions: [], icons: [], colors: [], all: [], models: new Map(), split: null };
+    const old = shipData;
+    const data: ShipData = {
+      list,
+      positions: [],
+      icons: [],
+      colors: [],
+      all: [],
+      models: new Map(),
+      split: null,
+      byMmsi: new Map(),
+      moving: [],
+      blends: new Map(),
+    };
     list.forEach((ship, i) => {
       const color: ShipColor = [...shipColor(ship.kind), ship.old ? SHIP_OLD_ALPHA : SHIP_ALPHA];
+      // a new report moves the ship on from where it is drawn, not with a jump
+      const blend = easeFrom(old?.byMmsi.get(ship.mmsi), old?.positions, ship, nowMs);
+      if (blend) data.blends.set(i, blend);
+      data.byMmsi.set(ship.mmsi, i);
+      if ((ship.frames?.length ?? 0) > 1 || blend) data.moving.push(i);
       const position: [number, number, number] = [ship.lon, ship.lat, 0];
       data.positions.push(position);
       data.icons.push(shipIcon(ship));
@@ -1505,6 +1567,16 @@
     });
     shipData = data;
     return data;
+  }
+  /** Steps the moving ships on to `nowMs`, in place: the icons and the models share the positions. */
+  function moveShips(data: ShipData, nowMs: number) {
+    if (!data.moving.length) return;
+    for (const i of data.moving) {
+      const { lat, lon } = eased(data.list[i], data.blends, i, nowMs);
+      data.positions[i][0] = lon;
+      data.positions[i][1] = lat;
+    }
+    shipMoves++;
   }
   /** Which ships are models and which icons at `zoom`, in quarter steps so the split is rarely redone. */
   function shipSplit(data: ShipData, zoom: number) {
@@ -1552,7 +1624,7 @@
           // a ship hovered in the sidebar's list lights up as if under the pointer
           ...(hoveredShip !== null ? { highlightedObjectIndex: group.findIndex((d) => d.index === hoveredShip) } : {}),
           parameters: NO_CULL,
-          updateTriggers: { getOrientation: yawOffset, getTranslation: sign },
+          updateTriggers: { getPosition: shipMoves, getOrientation: yawOffset, getTranslation: sign },
         }),
       );
     }
@@ -1571,10 +1643,11 @@
     const i = shipData.list.findIndex((s) => s.mmsi === hoveredShipMmsi);
     return i === -1 ? null : i;
   }
-  function shipLayers(list: Ship[], flat: boolean, mpp: number): Layer[] {
+  function shipLayers(list: Ship[], flat: boolean, mpp: number, nowMs: number): Layer[] {
     const { zoom, bearing, pitch, longitude, latitude } = view;
-    const data = shipsFor(list);
+    const data = shipsFor(list, nowMs);
     if (!list.length) return [];
+    moveShips(data, nowMs);
     shipAtlasData ??= shipAtlas();
     const split = zoom >= SHIP_MESH_ZOOM ? shipSplit(data, zoom) : null;
     const layers: Layer[] = split ? shipMeshLayers(split, flat) : [];
@@ -1616,7 +1689,7 @@
         billboard: true,
         pickable: true,
         parameters: SHIP_PARAMETERS,
-        updateTriggers: { getAngle: shipAngles.version, getSize: shipIconScale(zoom) },
+        updateTriggers: { getPosition: shipMoves, getAngle: shipAngles.version, getSize: shipIconScale(zoom) },
       }),
     );
     return layers;
@@ -1640,11 +1713,9 @@
     /** Indices of the trains with frames to move along. */
     moving: number[];
     byId: Map<string, number>;
-    /** Trains easing from where they were drawn onto their new report: the offset left, and since when. */
-    blends: Map<number, { dLat: number; dLon: number; from: number }>;
+    /** Trains easing from where they were drawn onto their new report. */
+    blends: Map<number, Ease>;
   };
-  /** How long a train takes to ease onto a new report. */
-  const TRAIN_BLEND_MS = 2000;
   let trainData: TrainData | null = null;
   let trainAtlasData: ReturnType<typeof trainAtlas> | undefined;
   /** Bumped whenever the drawn positions change: a new list, or the moving trains stepping on. */
@@ -1665,17 +1736,8 @@
     };
     list.forEach((train, i) => {
       // a new report moves the train on from where it is drawn, not with a jump
-      const was = old?.byId.get(train.id);
-      if (was !== undefined) {
-        const [lon, lat] = old!.positions[was];
-        const to = positionAt(train, nowMs);
-        const dLat = lat - to.lat;
-        const dLon = ((lon - to.lon + 540) % 360) - 180;
-        // further than a train goes in a minute is a different place, not a correction
-        if ((dLat || dLon) && Math.abs(dLat) < 0.05 && Math.abs(dLon) < 0.1) {
-          data.blends.set(i, { dLat, dLon, from: nowMs });
-        }
-      }
+      const blend = easeFrom(old?.byId.get(train.id), old?.positions, train, nowMs);
+      if (blend) data.blends.set(i, blend);
       data.positions.push([train.lon, train.lat, 0]);
       data.headings.push(train.heading);
       data.icons.push(trainIcon(train.kind, train.heading, train.operator));
@@ -1693,16 +1755,7 @@
     if (!data.moving.length) return;
     for (const i of data.moving) {
       const train = data.list[i];
-      let { lat, lon } = positionAt(train, nowMs);
-      const blend = data.blends.get(i);
-      if (blend) {
-        // eased: quick at first, settling onto the new course
-        const left = 1 - Math.min(1, (nowMs - blend.from) / TRAIN_BLEND_MS);
-        const k = left * left * (3 - 2 * left);
-        lat += blend.dLat * k;
-        lon += blend.dLon * k;
-        if (left === 0) data.blends.delete(i);
-      }
+      const { lat, lon } = eased(train, data.blends, i, nowMs);
       const heading = headingAt(train, nowMs);
       data.positions[i] = [lon, lat, 0];
       data.headings[i] = heading;
@@ -1926,7 +1979,7 @@
     // on the water, under the labels and every aircraft
     const shipRing = selectedShip ? shipSelectionLayers(selectedShip, mpp, zoom, cLon, cLat) : null;
     if (shipRing) layers.push(shipRing.halo);
-    layers.push(...shipLayers(ships, flat, mpp));
+    layers.push(...shipLayers(ships, flat, mpp, Date.now()));
     if (shipRing) layers.push(shipRing.ring);
     // on land, like the ships under the labels and every aircraft; the
     // trains' frames are timed on this machine's clock, not the flight feed's

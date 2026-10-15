@@ -45,6 +45,11 @@ pub fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
     2.0 * EARTH_M * h.sqrt().min(1.0).asin()
 }
 
+/// The initial course from `a` to `b`, degrees clockwise from north.
+pub fn course(a: (f64, f64), b: (f64, f64)) -> f64 {
+    bearing(a, b)
+}
+
 fn bearing(a: (f64, f64), b: (f64, f64)) -> f64 {
     let (la1, la2) = (a.0.to_radians(), b.0.to_radians());
     let dlon = (b.1 - a.1).to_radians();

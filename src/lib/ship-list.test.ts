@@ -22,6 +22,7 @@ const ship = (over: Partial<Ship>): Ship => ({
   heading: 90,
   old: false,
   dims: null,
+  frames: [],
   ...over,
 });
 

@@ -84,15 +84,25 @@ const ANNOUNCEMENT_FIELDS: &[&str] = &[
 
 /// What runs as each of these numbers (a batch of them): every call since
 /// yesterday, with the fields that don't change along the way.
-fn services_query(idents: &[String]) -> String {
-    let any: String =
-        idents.iter().map(|i| format!("<EQ name=\"AdvertisedTrainIdent\" value=\"{}\"/>", xml_escape(i))).collect();
+fn services_query(numbers: &[String]) -> String {
+    // a position names its train by its operational number (and its advertised
+    // one when it has one): either finds the announcements
+    let any: String = numbers
+        .iter()
+        .map(|n| {
+            let n = xml_escape(n);
+            format!(
+                "<EQ name=\"OperationalTrainNumber\" value=\"{n}\"/><EQ name=\"AdvertisedTrainIdent\" value=\"{n}\"/>"
+            )
+        })
+        .collect();
     format!(
         "<QUERY objecttype=\"TrainAnnouncement\" schemaversion=\"1.9\" orderby=\"AdvertisedTimeAtLocation\">\
          <FILTER><AND><OR>{any}</OR>\
          <GT name=\"ScheduledDepartureDateTime\" value=\"$dateadd(-1.12:00:00)\"/></AND></FILTER>{}</QUERY>",
         includes(&[
             "AdvertisedTrainIdent",
+            "OperationalTrainNumber",
             "ScheduledDepartureDateTime",
             "ActivityType",
             "LocationSignature",
@@ -114,6 +124,7 @@ fn delays_query() -> String {
          <LT name=\"AdvertisedTimeAtLocation\" value=\"$dateadd(0.00:30:00)\"/></AND></FILTER>{}</QUERY>",
         includes(&[
             "AdvertisedTrainIdent",
+            "OperationalTrainNumber",
             "ScheduledDepartureDateTime",
             "AdvertisedTimeAtLocation",
             "EstimatedTimeAtLocation",
@@ -210,6 +221,8 @@ pub fn parse_stations(body: &str) -> Result<HashMap<String, Station>, String> {
 /// Who runs a train, as what, and where to: the same for its whole run.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Service {
+    /// The advertised number, the one travellers see (and the stops are looked up by).
+    pub ident: String,
     pub product: Option<String>,
     pub owner: Option<String>,
     /// Destination's signature.
@@ -232,20 +245,48 @@ fn day(row: &Value) -> String {
     row["ScheduledDepartureDateTime"].as_str().map(|s| s.chars().take(10).collect()).unwrap_or_default()
 }
 
-/// The runs in the answer, per advertised number (one per day it runs).
+/// A row's numbers: its advertised one (else its operational one) to group
+/// it by, and its operational one when that differs.
+fn numbers(row: &Value) -> Option<(String, Option<String>)> {
+    let ident = text(&row["AdvertisedTrainIdent"]);
+    let operational = text(&row["OperationalTrainNumber"]);
+    let primary = ident.or(operational.clone())?;
+    let alias = operational.filter(|o| *o != primary);
+    Some((primary, alias))
+}
+
+/// Makes what is known under each number also known under its other number.
+fn with_aliases<T: Clone>(mut map: HashMap<String, T>, aliases: HashMap<String, String>) -> HashMap<String, T> {
+    for (alias, primary) in aliases {
+        if !map.contains_key(&alias)
+            && let Some(v) = map.get(&primary).cloned()
+        {
+            map.insert(alias, v);
+        }
+    }
+    map
+}
+
+/// The runs in the answer (one per day it runs), under both the advertised
+/// and the operational number.
 pub fn parse_services(body: &str) -> Result<HashMap<String, Vec<Service>>, String> {
     let results = results(body)?;
     let mut services: HashMap<String, Vec<Service>> = HashMap::new();
+    let mut aliases: HashMap<String, String> = HashMap::new();
     for row in results.iter().flat_map(|r| rows(r, "TrainAnnouncement")) {
-        let Some(ident) = text(&row["AdvertisedTrainIdent"]) else {
+        let Some((ident, alias)) = numbers(row) else {
             continue;
         };
+        if let Some(alias) = alias {
+            aliases.insert(alias, ident.clone());
+        }
         let date = day(row);
-        let runs = services.entry(ident).or_default();
+        let runs = services.entry(ident.clone()).or_default();
         let at = match runs.iter().position(|s| s.date == date) {
             Some(at) => at,
             None => {
                 runs.push(Service {
+                    ident,
                     product: description(&row["ProductInformation"]),
                     owner: text(&row["InformationOwner"]).or_else(|| text(&row["Operator"])),
                     to: last_location(&row["ToLocation"]),
@@ -279,7 +320,7 @@ pub fn parse_services(body: &str) -> Result<HashMap<String, Vec<Service>>, Strin
     for run in services.values_mut().flatten() {
         run.calls.sort_by_key(|c| c.arrive.or(c.depart).unwrap_or(0));
     }
-    Ok(services)
+    Ok(with_aliases(services, aliases))
 }
 
 /// The run a position belongs to: the day the position names, else the latest.
@@ -299,10 +340,14 @@ pub fn parse_delays(body: &str, now_ms: i64) -> Result<HashMap<String, i32>, Str
     let results = results(body)?;
     // (number, day) -> (rows in time order, distance of its nearest row from now)
     let mut runs: HashMap<(String, String), (Vec<&Value>, i64)> = HashMap::new();
+    let mut aliases: HashMap<String, String> = HashMap::new();
     for row in results.iter().flat_map(|r| rows(r, "TrainAnnouncement")) {
-        let Some(ident) = text(&row["AdvertisedTrainIdent"]) else {
+        let Some((ident, alias)) = numbers(row) else {
             continue;
         };
+        if let Some(alias) = alias {
+            aliases.insert(alias, ident.clone());
+        }
         let gap = row["AdvertisedTimeAtLocation"].as_str().and_then(unix_ms).map_or(i64::MAX, |t| (t - now_ms).abs());
         let run = runs.entry((ident, day(row))).or_insert_with(|| (Vec::new(), i64::MAX));
         run.0.push(row);
@@ -321,7 +366,7 @@ pub fn parse_delays(body: &str, now_ms: i64) -> Result<HashMap<String, i32>, Str
             best.insert(ident, (gap, delay));
         }
     }
-    Ok(best.into_iter().map(|(k, (_, d))| (k, d)).collect())
+    Ok(with_aliases(best.into_iter().map(|(k, (_, d))| (k, d)).collect(), aliases))
 }
 
 /// The kind from the product name: Trafikverket has no category of its own.
@@ -347,9 +392,10 @@ fn kind(product: Option<&str>, owner: Option<&str>) -> Kind {
 /// A position report, before it is matched with its timetable.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
-    /// The advertised number, the one travellers see; else the operational one.
-    pub number: String,
-    pub advertised: bool,
+    /// The number travellers see, when the report gives it.
+    pub advertised: Option<String>,
+    /// The number the train runs under on the network.
+    pub operational: Option<String>,
     /// `YYYY-MM-DD`, when the report names its run's day.
     pub date: Option<String>,
     pub lat: f64,
@@ -357,6 +403,14 @@ pub struct Report {
     pub bearing: Option<f32>,
     pub speed: Option<f32>,
     pub at_ms: i64,
+}
+
+impl Report {
+    /// The number its timetable is looked up by: the operational one, which
+    /// every report has, else the advertised one.
+    pub fn lookup(&self) -> &str {
+        self.operational.as_deref().or(self.advertised.as_deref()).unwrap_or_default()
+    }
 }
 
 /// The newest report of each active train.
@@ -374,16 +428,17 @@ pub fn parse_positions(body: &str) -> Result<Vec<Report>, String> {
             continue;
         };
         let advertised = text(&row["Train"]["AdvertisedTrainNumber"]);
-        let Some(number) = advertised.clone().or_else(|| text(&row["Train"]["OperationalTrainNumber"])) else {
+        let operational = text(&row["Train"]["OperationalTrainNumber"]);
+        if advertised.is_none() && operational.is_none() {
             continue;
-        };
+        }
         let date = ["JourneyPlanDepartureDate", "OperationalTrainDepartureDate"]
             .iter()
             .find_map(|f| row["Train"][*f].as_str())
             .map(|s| s.chars().take(10).collect());
         let report = Report {
-            number,
-            advertised: advertised.is_some(),
+            advertised,
+            operational,
             date,
             lat,
             lon,
@@ -391,7 +446,7 @@ pub fn parse_positions(body: &str) -> Result<Vec<Report>, String> {
             speed: row["Speed"].as_f64().map(|s| s as f32),
             at_ms,
         };
-        let key = format!("{}{}", if report.advertised { "" } else { "~" }, report.number);
+        let key = report.lookup().to_owned();
         if newest.get(&key).is_none_or(|old| old.at_ms < report.at_ms) {
             newest.insert(key, report);
         }
@@ -407,16 +462,15 @@ pub fn train(
     stations: &HashMap<String, Station>,
     now_ms: i64,
 ) -> Train {
-    let service = if report.advertised {
-        services.get(&report.number).and_then(|r| run_of(r, report.date.as_deref()))
-    } else {
-        None
-    };
+    let runs = services.get(report.lookup()).or_else(|| services.get(report.advertised.as_deref()?));
+    let service = runs.and_then(|r| run_of(r, report.date.as_deref()));
     let product = service.and_then(|s| s.product.clone());
     let owner = service.and_then(|s| s.owner.clone());
     let date = service.map(|s| s.date.clone()).or_else(|| report.date.clone()).unwrap_or_default();
-    let number = &report.number;
-    let delay = if report.advertised { delays.get(number).copied() } else { None };
+    // the number travellers know it by: the timetable's, else the report's
+    let advertised = service.map(|s| s.ident.clone()).or_else(|| report.advertised.clone());
+    let number = advertised.clone().unwrap_or_else(|| report.lookup().to_owned());
+    let delay = delays.get(report.lookup()).or_else(|| delays.get(advertised.as_deref()?)).copied();
     let stops = service.map(|s| stops_ahead(s, delay, stations, report.at_ms)).unwrap_or_default();
     let frames = motion::frames(
         report.lat,
@@ -429,7 +483,7 @@ pub fn train(
     );
     Train {
         // the advertised number and its day are what the stops are looked up by
-        id: format!("trafikverket:{date}:{}{number}", if report.advertised { "" } else { "~" }),
+        id: format!("trafikverket:{date}:{}{number}", if advertised.is_some() { "" } else { "~" }),
         source: "trafikverket",
         name: match &product {
             Some(p) => format!("{p} {number}"),
@@ -681,7 +735,7 @@ pub async fn trains(http: &reqwest::Client, key: &str, now_ms: i64) -> Result<Ve
     )
     .await;
     let reports = parse_positions(&positions?)?;
-    let numbers = reports.iter().filter(|r| r.advertised).map(|r| r.number.clone()).collect();
+    let numbers = reports.iter().map(|r| r.lookup().to_owned()).filter(|n| !n.is_empty()).collect();
     let services = learn_services(http, key, numbers).await;
     // names, places and delays are niceties: positions alone still make trains
     let stations = stations.unwrap_or_else(|e| {
@@ -849,5 +903,30 @@ mod tests {
     fn errors_from_the_api_are_reported() {
         let body = r#"{"RESPONSE":{"RESULT":[{"ERROR":{"SOURCE":"Request","MESSAGE":"Invalid authentication"}}]}}"#;
         assert_eq!(results(body).unwrap_err(), "Invalid authentication");
+    }
+
+    #[test]
+    fn a_position_with_only_its_operational_number_finds_its_announcements() {
+        let now = unix_ms("2026-10-15T08:45:00+02:00").unwrap();
+        let announcements = r#"{"RESPONSE":{"RESULT":[{"TrainAnnouncement":[
+            {"AdvertisedTrainIdent":"1065","OperationalTrainNumber":"11065","ScheduledDepartureDateTime":"2026-10-15T00:00:00.000+02:00",
+             "ActivityType":"Avgang","LocationSignature":"Lu","AdvertisedTimeAtLocation":"2026-10-15T08:40:00.000+02:00",
+             "TimeAtLocation":"2026-10-15T08:43:00.000+02:00",
+             "ProductInformation":[{"Description":"Öresundståg"}],"InformationOwner":"Skånetrafiken",
+             "ToLocation":[{"LocationName":"Hb","Order":0}]}]}]}}"#;
+        let positions = r#"{"RESPONSE":{"RESULT":[{"TrainPosition":[
+            {"Train":{"OperationalTrainNumber":"11065"},"Position":{"WGS84":"POINT (13.2 55.72)"},
+             "TimeStamp":"2026-10-15T08:44:30.000+02:00","Status":{"Active":true}}]}]}}"#;
+        let services = parse_services(announcements).unwrap();
+        let delays = parse_delays(announcements, now).unwrap();
+        let report = &parse_positions(positions).unwrap()[0];
+        assert_eq!(report.lookup(), "11065");
+        assert!(services_query(&["11065".into()]).contains("<EQ name=\"OperationalTrainNumber\" value=\"11065\"/>"));
+
+        let t = train(report, &services, &delays, &HashMap::new(), now);
+        assert_eq!(t.name, "Öresundståg 1065", "named by the number travellers see");
+        assert_eq!(t.operator.as_deref(), Some("Skånetrafiken"));
+        assert_eq!(t.id, "trafikverket:2026-10-15:1065", "its stops are found by the advertised number");
+        assert_eq!(t.delay_minutes, Some(3));
     }
 }

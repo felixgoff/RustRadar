@@ -81,6 +81,13 @@ const CATCH_UP: f64 = 1.4;
 const CATCH_UP_ACCEL: f64 = 0.5;
 /// Ahead, it slows to no less than this share of the predicted train's speed.
 const AHEAD_FLOOR: f64 = 0.6;
+/// Further behind than this the drawn train may run faster than the track
+/// allows (by the rest of the gap over `FOLLOW_S`), to catch up, metres.
+const CATCH_FREE_M: f64 = 300.0;
+/// Catching up (or slowing from it), its speed follows the speed wanted over about this long, seconds,
+const CATCH_LAG_S: f64 = 3.0;
+/// and changes no faster than this, m/s².
+const CATCH_ACCEL: f64 = 3.0;
 /// Further behind than this it is put where the predicted train is, metres.
 const RESET_M: f64 = 3_000.0;
 
@@ -1128,13 +1135,20 @@ fn follow(
             let gap = back - s;
             let slack = if gap > 0.0 { CATCH_UP } else { 1.0 };
             let line = line_cap(path, s, v, |l| l.unwrap_or(cruise).min(top) * slack);
+            // far behind: faster the further it is, to get back without a jump
+            let extra = (gap - CATCH_FREE_M).max(0.0) / FOLLOW_S;
             let stop = stop_cap(room);
-            let cap = line.min(stop);
+            let cap = (line + extra).min(stop);
             let want = if room <= ARRIVED_M {
                 0.0
             } else if pred.stood(t) {
                 // the predicted train stands ahead: in at a train's pace
                 cap
+            } else if gap > CATCH_FREE_M {
+                // far behind: faster the further it is from where it should be
+                v_back
+                    + (CATCH_FREE_M / FOLLOW_S).min((2.0 * EASE * CATCH_FREE_M).sqrt())
+                    + (gap - CATCH_FREE_M) / FOLLOW_S
             } else if gap > 0.0 {
                 // behind: catching up, easing off as it gets there
                 v_back + (gap / FOLLOW_S).min((2.0 * EASE * gap).sqrt())
@@ -1151,13 +1165,18 @@ fn follow(
             };
             let want = want.clamp(0.0, cap);
             v = if want > v {
-                // livelier the further behind it is
-                let accel = DRAWN_ACCEL + CATCH_UP_ACCEL * (gap / 300.0).clamp(0.0, 1.0);
+                // livelier the further behind it is; far behind, up to speed in a second or two
+                let far = ((gap - CATCH_FREE_M) / CATCH_FREE_M).clamp(0.0, 1.0);
+                let accel =
+                    (DRAWN_ACCEL + CATCH_UP_ACCEL * (gap / 300.0).clamp(0.0, 1.0) + far * (want - v) / CATCH_LAG_S)
+                        .min(CATCH_ACCEL);
                 (v + accel * DT).min(want)
             } else {
-                // harder only when it must, to stop in time
+                // harder only when it must, to stop in time; and back down from catching up as it closes in
                 let need = if room > ARRIVED_M { v * v / (2.0 * (room - ARRIVED_M).max(1.0)) } else { HARD_BRAKE };
-                (v - DRAWN_BRAKE.max(need.min(HARD_BRAKE)) * DT).max(want)
+                let surplus = ((v - line).max(0.0) / CATCH_LAG_S).min(CATCH_ACCEL);
+                let brake = DRAWN_BRAKE.max(need.min(HARD_BRAKE.max(surplus))).max(surplus);
+                (v - brake * DT).max(want)
             };
             s += v * DT;
             if before < stop_at - ARRIVED_M + 1e-9 && s >= stop_at - ARRIVED_M {
@@ -1672,9 +1691,12 @@ mod tests {
         let f = &s.frames;
         assert!((x_of((f[0].0, f[0].1)) - drawn_x).abs() < 0.5, "no jump");
         never_back(f);
-        assert!(legs(f).iter().all(|v| *v <= 120.0 / 3.6 * CATCH_UP + 0.5), "{:?}", legs(f));
-        assert!(jerkiest(f) <= DRAWN_ACCEL + CATCH_UP_ACCEL + 0.1, "{}", jerkiest(f));
+        // far behind: faster the further it is (beyond the track's limit), speeding up and easing off gradually
+        let fastest = legs(f).into_iter().fold(0.0, f64::max);
+        assert!(fastest > 120.0 / 3.6 * CATCH_UP, "{:?}", legs(f));
+        assert!(jerkiest(f) <= CATCH_ACCEL + 0.2, "{}", jerkiest(f));
         let gap = |t: i64| x_of(sample(&s.predicted, t).unwrap().0) - x_of(sample(f, t).unwrap().0);
+        assert!(gap(now + 30_000) < 300.0, "most of the way back in half a minute: {}", gap(now + 30_000));
         // caught up: no further behind than where it was 5 s before
         assert!(
             gap(now) > 790.0 && gap(now + HORIZON_MS - 1) < 120.0 / 3.6 * LAG_MS as f64 / 1000.0 + 30.0,
@@ -1716,7 +1738,7 @@ mod tests {
         let stood = at_station.last().unwrap() - at_station[0];
         assert!(stood >= DWELL_MS.0 - 1_000 && stood <= DWELL_MS.2 + 1_000, "briefly: {stood} ms");
         assert!(xs.last().unwrap().1 > 1_300.0, "and on after the real train: {xs:?}");
-        assert!(jerkiest(&f) <= DRAWN_ACCEL + CATCH_UP_ACCEL + 0.1, "{}", jerkiest(&f));
+        assert!(jerkiest(&f) <= CATCH_ACCEL + 0.2, "{}", jerkiest(&f));
     }
 
     #[test]

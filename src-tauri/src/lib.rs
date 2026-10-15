@@ -16,6 +16,7 @@ mod motion;
 mod mrms;
 mod opensky;
 mod radar;
+mod osm_platforms;
 mod rail;
 mod reference;
 mod runways;
@@ -668,6 +669,7 @@ pub fn run() {
         })
         .setup(|app| {
             if let Ok(dir) = app.path().app_cache_dir() {
+                osm_platforms::set_cache_dir(dir.clone());
                 rail::set_cache_dir(dir);
             }
             // every Swedish train's position as it comes, while the map shows them

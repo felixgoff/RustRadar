@@ -1930,6 +1930,11 @@
     ];
   }
 
+  /** Metres between two places (flat: fine over a few km). */
+  function metresBetween(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
+    const k = Math.cos((a.lat * Math.PI) / 180);
+    return Math.hypot((b.lat - a.lat) * 111_320, (b.lon - a.lon) * 111_320 * k);
+  }
   const SIGHT_LATEST: [number, number, number, number] = [240, 60, 60, 255];
   const SIGHT_LABEL_BG: [number, number, number, number] = [12, 14, 20, 225];
   const SIGHT_PREDICTED: [number, number, number, number] = [80, 220, 120, 255];
@@ -1944,7 +1949,21 @@
     const points: Sighting[] = sighted.flatMap((t) => t.reports ?? []).filter((s) => s.latest);
     const age = (s: Sighting) => `${Math.max(0, Math.round((nowMs - s.unixMs) / 1000))} s`;
     const speed = (s: Sighting) => (s.speedKmh === null ? "no speed" : `${Math.round(s.speedKmh)} km/h`);
-    const labels = (sel?.reports ?? []).filter((s) => s.latest).map((s) => ({ s, text: `live ${age(s)} · ${speed(s)}` }));
+    // the drawn train against the real one: how far ahead (+) or behind (−) where it most likely is now, and how much faster than reported
+    const versus = (() => {
+      const i = sel ? trainData?.byId.get(sel.id) : undefined;
+      if (!sel || i === undefined || !sel.predicted?.length) return "";
+      const [lon, lat] = trainData!.positions[i];
+      const drawnSpeed = metresBetween(positionAt(sel, nowMs), positionAt(sel, nowMs + 1000));
+      const real = positionAt({ lat: sel.lat, lon: sel.lon, frames: sel.predicted }, nowMs);
+      const heading = headingAt({ heading: sel.heading, frames: sel.predicted }, nowMs) ?? sel.heading;
+      const off = heading === null ? metresBetween({ lat, lon }, real) : aheadOf({ lat, lon }, real, heading);
+      const reported = sel.reports?.find((s) => s.latest)?.speedKmh ?? null;
+      const signed = (n: number, unit: string) => `${n >= 0 ? "+" : "−"}${Math.abs(Math.round(n))} ${unit}`;
+      const faster = reported === null ? "" : `, ${signed(drawnSpeed * 3.6 - reported, "km/h")}`;
+      return ` · drawn ${signed(off, "m")}${faster}`;
+    })();
+    const labels = (sel?.reports ?? []).filter((s) => s.latest).map((s) => ({ s, text: `live ${age(s)} · ${speed(s)}${versus}` }));
     // where the real trains most likely are now, by their reports
     const predicted = sighted
       .filter((t) => (t.predicted?.length ?? 0) > 0)

@@ -127,6 +127,11 @@ pub fn set_cache_dir(dir: PathBuf) {
     let _ = cache_dir().set(dir.join("rail-tiles"));
 }
 
+/// The HTTP client the track's data is fetched with.
+pub(crate) fn http() -> Option<&'static reqwest::Client> {
+    client()
+}
+
 fn client() -> Option<&'static reqwest::Client> {
     static C: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     C.get_or_init(|| {
@@ -1279,10 +1284,14 @@ pub fn route_for(
     let mut targets = targets.to_vec();
     let on = onwards_m.clamp(0.0, LOAD_ON_M);
     // the track round the start and as far on as it goes
-    let mut keys = match heading {
+    let near = match heading {
         Some(h) => tiles_for(&[start, ahead(start, h, on)], 0.01),
         None => tiles_for(&[start], 0.01 + on / 111_000.0),
     };
+    if near.len() > MAX_ROUTE_TILES {
+        return None;
+    }
+    let mut graph = None;
     if !targets.is_empty() {
         let mut points = vec![start];
         points.extend(&targets);
@@ -1293,15 +1302,17 @@ pub fn route_for(
         }
         let all = tiles_for(&points, 0.02);
         if all.len() <= MAX_ROUTE_TILES {
-            keys = all;
-        } else {
-            targets.clear();
+            graph = graph_for(all);
+        }
+        // the track to far targets not here yet (it is sent for): those on the track that is
+        if graph.is_none() {
+            targets.retain(|t| near.contains(&tile_of(t.0, t.1)));
         }
     }
-    if keys.len() > MAX_ROUTE_TILES {
-        return None;
-    }
-    let g = graph_for(keys)?;
+    let g = match graph {
+        Some(g) => g,
+        None => graph_for(near)?,
+    };
     route_in_dir(&g, start, heading, &targets, onwards_m, SNAP_SPREAD_M, class, only_onwards)
 }
 
@@ -1349,7 +1360,13 @@ pub fn platforms(station: (f64, f64), track: Option<&str>, heading: Option<f64>)
         return Some(found.clone());
     }
     let g = graph_for(tiles_for(&[station], 0.015))?;
-    let found = platforms_in(&g, station, track, heading);
+    // the platforms the map has there, with the tracks they serve (sent for the first time)
+    let mapped = track.and(crate::osm_platforms::near(station));
+    let found = platforms_in(&g, station, track, heading, mapped.as_deref().map_or(&[], Vec::as_slice));
+    // (worked out again once the platforms are here)
+    if track.is_some() && mapped.is_none() {
+        return Some(found);
+    }
     let mut cache = platform_cache().lock().unwrap();
     if cache.len() >= MAX_PLATFORM_CACHE {
         cache.clear();
@@ -1375,12 +1392,36 @@ const MAX_PLATFORMS: usize = 6;
 /// Two places nearer than this are the same track, metres.
 const SAME_TRACK_M: f64 = 3.0;
 
-fn platforms_in(g: &Graph, station: (f64, f64), track: Option<&str>, heading: Option<f64>) -> Vec<(f64, f64)> {
+/// A track segment near a point: its ends, the nearest point on it, and how far off that is.
+type Snap = (usize, usize, (f64, f64), f64);
+
+/// Tracks this near a platform's middle are beside it, metres (an island
+/// platform is up to about 12 m wide).
+const BESIDE_M: f64 = 15.0;
+
+fn platforms_in(
+    g: &Graph,
+    station: (f64, f64),
+    track: Option<&str>,
+    heading: Option<f64>,
+    mapped: &[crate::osm_platforms::Platform],
+) -> Vec<(f64, f64)> {
     let near = g.snaps(station, PLATFORM_M);
     let mut out: Vec<(f64, f64)> = Vec::new();
     let add = |p: (f64, f64), out: &mut Vec<(f64, f64)>| {
         if out.len() < MAX_PLATFORMS && out.iter().all(|q| distance(*q, p) >= SAME_TRACK_M) {
             out.push(p);
+        }
+    };
+    // which way a piece of track runs, for a train going `heading`: its way, either, the other
+    let way = |s: &(usize, usize, (f64, f64), f64)| -> u8 {
+        let Some(h) = heading else { return 1 };
+        let forward = turn(h, course(g.nodes[s.0], g.nodes[s.1])) < 90.0;
+        let e = if forward { g.edge(s.0, s.1) } else { g.edge(s.1, s.0) };
+        match e.and_then(|e| e.flow) {
+            Some(true) => 0,
+            None => 1,
+            Some(false) => 2,
         }
     };
     // the announced track: the best fit, nearest first
@@ -1398,21 +1439,16 @@ fn platforms_in(g: &Graph, station: (f64, f64), track: Option<&str>, heading: Op
             if let Some(f) = fits.iter().find(|f| f.0 == best) {
                 add(f.2, &mut out);
             }
+        } else {
+            // not numbered in the map: beside the platforms that serve it
+            for p in beside_platforms(g, announced, mapped, &way) {
+                add(p, &mut out);
+            }
         }
     }
     // then the running lines through the station, those running its way
     // first (on double track, never the one for trains the other way while
     // its own is there), nearest first; sidings; never a yard
-    let way = |s: &(usize, usize, (f64, f64), f64)| -> u8 {
-        let Some(h) = heading else { return 1 };
-        let forward = turn(h, course(g.nodes[s.0], g.nodes[s.1])) < 90.0;
-        let e = if forward { g.edge(s.0, s.1) } else { g.edge(s.1, s.0) };
-        match e.and_then(|e| e.flow) {
-            Some(true) => 0,
-            None => 1,
-            Some(false) => 2,
-        }
-    };
     let mut lines: Vec<&(usize, usize, (f64, f64), f64)> = near.iter().filter(|s| s.3 <= STATION_SNAP_M).collect();
     lines.sort_by(|a, b| way(a).cmp(&way(b)).then(a.3.total_cmp(&b.3)));
     for running in [true, false] {
@@ -1421,6 +1457,49 @@ fn platforms_in(g: &Graph, station: (f64, f64), track: Option<&str>, heading: Op
                 add(s.2, &mut out);
             }
         }
+    }
+    out
+}
+
+/// Where the announced track is by the platforms mapped as serving it: the
+/// track beside a platform serving it alone; of one serving it and others (an
+/// island platform), the track on each side, one numbered otherwise in the
+/// map left out, those running the train's way (`way`) first. At the
+/// platform's middle.
+fn beside_platforms(
+    g: &Graph,
+    announced: &str,
+    mapped: &[crate::osm_platforms::Platform],
+    way: &dyn Fn(&Snap) -> u8,
+) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    for p in mapped.iter().filter(|p| p.tracks.iter().any(|t| track_fit(announced, t).is_some())) {
+        let n = p.line.len() as f64;
+        let mid = p.line.iter().fold((0.0, 0.0), |a, q| (a.0 + q.0 / n, a.1 + q.1 / n));
+        let beside: Vec<_> =
+            g.snaps(mid, BESIDE_M).into_iter().filter(|s| g.edge(s.0, s.1).is_some_and(|e| !e.yard)).collect();
+        let Some(first) = beside.first() else {
+            continue;
+        };
+        let mut sides = vec![*first];
+        if p.tracks.len() > 1 {
+            // the nearest across the platform from it too
+            let off =
+                |s: &(usize, usize, (f64, f64), f64)| ((s.2.0 - mid.0), (s.2.1 - mid.1) * mid.0.to_radians().cos());
+            let o = off(first);
+            if let Some(other) = beside.iter().find(|s| {
+                let q = off(s);
+                q.0 * o.0 + q.1 * o.1 < 0.0
+            }) {
+                sides.push(*other);
+            }
+        }
+        // a side numbered as another track isn't this one
+        sides.retain(|s| {
+            g.edge(s.0, s.1).and_then(|e| e.track).is_none_or(|r| track_fit(announced, &g.refs[r as usize]).is_some())
+        });
+        sides.sort_by_key(|s| way(s));
+        out.extend(sides.iter().map(|s| s.2));
     }
     out
 }
@@ -1477,7 +1556,8 @@ fn end_heading(points: &[(f64, f64)]) -> Option<f64> {
 /// is one it has passed, and it goes on to the one after (up to
 /// `MAX_PASSED` of them). Also how many it passed.
 pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Line>, bool, usize) {
-    let places: Vec<&[(f64, f64)]> = places.iter().map(|p| &p[..p.len().min(MAX_PLATFORMS)]).filter(|p| !p.is_empty()).collect();
+    let places: Vec<&[(f64, f64)]> =
+        places.iter().map(|p| &p[..p.len().min(MAX_PLATFORMS)]).filter(|p| !p.is_empty()).collect();
     let keys_between = |a: &[(f64, f64)], b: &[(f64, f64)]| {
         let mut points = a.to_vec();
         points.extend(b);
@@ -1525,7 +1605,8 @@ pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Lin
                 // and on from there to the next place?
                 let on_keys = keys_between(&[spot], next);
                 let goes_on = on_keys.len() > MAX_LEG_TILES
-                    || graph_for(on_keys).is_none_or(|g2| next.iter().any(|n| goes_on(&g2, spot, end_heading(&r.points), *n)));
+                    || graph_for(on_keys)
+                        .is_none_or(|g2| next.iter().any(|n| goes_on(&g2, spot, end_heading(&r.points), *n)));
                 if goes_on {
                     through = Some((spot, r));
                     break;
@@ -1604,7 +1685,7 @@ mod tests {
     }
 
     fn platform_in(g: &Graph, station: (f64, f64), track: Option<&str>) -> Option<(f64, f64)> {
-        platforms_in(g, station, track, None).into_iter().next()
+        platforms_in(g, station, track, None, &[]).into_iter().next()
     }
 
     fn graph(tracks: Vec<Track>) -> Graph {
@@ -1765,6 +1846,39 @@ mod tests {
     }
 
     #[test]
+    fn an_unnumbered_track_is_found_beside_the_platform_mapped_as_serving_it() {
+        use crate::osm_platforms::Platform;
+        // three tracks east-west, 5 m apart (none numbered); the station's point on the southern one
+        let a = (60.0, 15.0);
+        let (south, middle, north) = (a, ahead(a, 0.0, 5.0), ahead(a, 0.0, 10.0));
+        let g =
+            graph(vec![track(line(south, 90.0, 1.0)), track(line(middle, 90.0, 1.0)), track(line(north, 90.0, 1.0))]);
+        let station = ahead(south, 90.0, 500.0);
+        let along = |p: (f64, f64), m: f64| ahead(p, 90.0, m);
+        let lat_of = |p: (f64, f64)| p.0;
+        // platform "3" north of the northern track; island "1;2" between the southern and middle ones
+        let side = Platform {
+            tracks: vec!["3".into()],
+            line: vec![along(ahead(north, 0.0, 4.0), 400.0), along(ahead(north, 0.0, 4.0), 600.0)],
+        };
+        let island = Platform {
+            tracks: vec!["1".into(), "2".into()],
+            line: vec![along(ahead(south, 0.0, 2.5), 400.0), along(ahead(south, 0.0, 2.5), 600.0)],
+        };
+        let mapped = [side, island];
+        let on = |p: (f64, f64), t: (f64, f64)| (lat_of(p) - lat_of(t)).abs() < 1e-6;
+        let p3 = platforms_in(&g, station, Some("3"), None, &mapped)[0];
+        assert!(on(p3, north), "track 3: beside its platform, not the nearest to the station");
+        assert!(distance(p3, along(north, 500.0)) < 1.0, "at the platform's middle");
+        // the island's two tracks both offered
+        let p1 = platforms_in(&g, station, Some("1"), None, &mapped);
+        assert!(on(p1[0], south) || on(p1[0], middle));
+        assert!(p1.iter().take(2).any(|p| on(*p, south)) && p1.iter().take(2).any(|p| on(*p, middle)));
+        // with no platform mapped, as before: the nearest
+        assert!(on(platforms_in(&g, station, Some("3"), None, &[])[0], south));
+    }
+
+    #[test]
     fn a_train_is_put_on_the_track_running_its_way() {
         // double track 4.5 m apart: the northern track runs east, the southern west
         let a = (59.0, 18.0);
@@ -1826,9 +1940,9 @@ mod tests {
         }
         let station = ahead(ahead(a, 90.0, 1_000.0), 180.0, 20.0);
         let on_north = |p: (f64, f64)| p.0 > a.0 + 0.00002;
-        assert!(on_north(platforms_in(&g, station, None, Some(90.0))[0]), "eastbound: the northern track");
-        assert!(!on_north(platforms_in(&g, station, None, Some(270.0))[0]), "westbound: the southern track");
-        assert!(!on_north(platforms_in(&g, station, None, None)[0]), "not saying: the nearest");
+        assert!(on_north(platforms_in(&g, station, None, Some(90.0), &[])[0]), "eastbound: the northern track");
+        assert!(!on_north(platforms_in(&g, station, None, Some(270.0), &[])[0]), "westbound: the southern track");
+        assert!(!on_north(platforms_in(&g, station, None, None, &[])[0]), "not saying: the nearest");
     }
 
     #[test]
@@ -1928,8 +2042,12 @@ mod tests {
         eprintln!("{} nodes, Malmö C track 3 at {malmo:?}", g.nodes.len());
         let r = route_in(&g, lund, None, &[malmo], 0.0, 1.0).unwrap();
         let known = r.speeds.iter().filter(|s| s.is_some()).count();
-        eprintln!("reached {:?}, {} points, {known} with a limit, top {:?} km/h", r.reached, r.points.len(),
-            r.speeds.iter().flatten().fold(0.0f64, |a, b| a.max(*b * 3.6)));
+        eprintln!(
+            "reached {:?}, {} points, {known} with a limit, top {:?} km/h",
+            r.reached,
+            r.points.len(),
+            r.speeds.iter().flatten().fold(0.0f64, |a, b| a.max(*b * 3.6))
+        );
         assert_eq!(r.reached.len(), 1);
         assert!((15_800.0..22_000.0).contains(&r.reached[0]), "{} m", r.reached[0]);
         // on the track running its way (Trafikverket's traffic flow), not the one beside it
@@ -1970,7 +2088,7 @@ mod tests {
         }
         let g = Graph::build(&sets);
         let (lund, malmo, triangeln) = ((55.7056, 13.1868), (55.6094, 13.0006), (55.5937, 13.0003));
-        let spots = |p, t| platforms_in(&g, p, Some(t), None);
+        let spots = |p, t| platforms_in(&g, p, Some(t), None, &[]);
         let malmo_spots = spots(malmo, "2b");
         let yard_2a = (55.6105, 13.0074);
         assert!(malmo_spots.iter().all(|p| distance(*p, yard_2a) > 150.0), "never the yard: {malmo_spots:?}");
@@ -2020,6 +2138,30 @@ mod tests {
     }
 
     #[test]
+    fn a_train_whose_next_station_is_on_track_not_loaded_yet_still_moves() {
+        use crate::motion::{self, Fix, Stop};
+        // only the track round it is here: its station, 25 km on, is beyond it
+        let a = (64.0, 18.0);
+        let (station, start) = (ahead(a, 90.0, 25_000.0), ahead(a, 90.0, 1_000.0));
+        {
+            let mut st = store().lock().unwrap();
+            for key in tiles_for(&[a, ahead(a, 90.0, 8_000.0)], 0.05) {
+                st.tracks.insert(key, (Instant::now(), Arc::new(Vec::new())));
+            }
+            st.tracks.insert(tile_of(a.0, a.1), (Instant::now(), Arc::new(vec![track(line(a, 90.0, 8.0))])));
+            assert!(!st.tracks.contains_key(&tile_of(station.0, station.1)));
+        }
+        const T0: i64 = 1_800_000_000_000;
+        let report = Fix { lat: start.0, lon: start.1, t_ms: T0, speed: Some(40.0), heading: Some(90.0) };
+        let stops =
+            [Stop { lat: station.0, lon: station.1, arrive_ms: Some(T0 + 900_000), depart_ms: None, pass: false }];
+        let sim = motion::simulate(None, &report, None, &stops, T0 + 5_000, Some(&Rail { class: None }));
+        let (first, last) = (sim.frames.first().unwrap(), sim.frames.last().unwrap());
+        let gone = distance((first.0, first.1), (last.0, last.1));
+        assert!(gone > 1_000.0, "it goes on along the track it has: {gone:.0} m");
+    }
+
+    #[test]
     fn a_train_takes_the_branch_its_next_station_is_on_however_far_it_is() {
         use crate::motion::{self, Fix, Stop};
         // north 3 km to a junction: straight on north, or off north-east to its station 16 km on
@@ -2035,7 +2177,13 @@ mod tests {
         const T0: i64 = 1_800_000_000_000;
         let at = ahead(a, 0.0, 1_000.0);
         let report = Fix { lat: at.0, lon: at.1, t_ms: T0, speed: Some(30.0), heading: Some(0.0) };
-        let stops = [Stop { lat: station.0, lon: station.1, arrive_ms: Some(T0 + 600_000), depart_ms: Some(T0 + 660_000), pass: false }];
+        let stops = [Stop {
+            lat: station.0,
+            lon: station.1,
+            arrive_ms: Some(T0 + 600_000),
+            depart_ms: Some(T0 + 660_000),
+            pass: false,
+        }];
         let sim = motion::simulate(None, &report, None, &stops, T0 + 5_000, Some(&track));
         // two minutes on it is well past the junction: on the branch, not straight on
         let end = sim.predicted.last().unwrap();
@@ -2127,7 +2275,13 @@ mod tests {
         let real_at = |t: i64| real[(((t - T0) / 100) as usize).min(real.len() - 1)];
         let stops = [
             Stop { lat: lund.0, lon: lund.1, arrive_ms: None, depart_ms: Some(T0), pass: false },
-            Stop { lat: hjarup.0, lon: hjarup.1, arrive_ms: Some(T0 + 300_000), depart_ms: Some(T0 + 360_000), pass: false },
+            Stop {
+                lat: hjarup.0,
+                lon: hjarup.1,
+                arrive_ms: Some(T0 + 300_000),
+                depart_ms: Some(T0 + 360_000),
+                pass: false,
+            },
             Stop { lat: malmo.0, lon: malmo.1, arrive_ms: Some(T0 + 1_000_000), depart_ms: None, pass: false },
         ];
         let gaps = [12, 25, 8, 30, 15, 20, 5, 28, 18, 10];
@@ -2155,7 +2309,9 @@ mod tests {
                 if left_hjarup.is_some_and(|t| r.t_ms > t) && moving_again.is_none() {
                     moving_again = Some(now);
                 }
-                if latest.is_some_and(|l| distance((l.lat, l.lon), (r.lat, r.lon)) < 2.0 && r.speed.is_some_and(|v| v >= 1.0)) {
+                if latest.is_some_and(|l| {
+                    distance((l.lat, l.lon), (r.lat, r.lon)) < 2.0 && r.speed.is_some_and(|v| v >= 1.0)
+                }) {
                     continue;
                 }
                 if latest.is_none_or(|l| distance((l.lat, l.lon), (r.lat, r.lon)) >= 2.0) {
@@ -2201,8 +2357,15 @@ mod tests {
         eprintln!("stood at Hjärup {} s", at_hjarup.len());
         assert!(at_hjarup.len() >= 30, "stood at Hjärup: {} s", at_hjarup.len());
         let set_off = *at_hjarup.last().unwrap();
-        assert!(set_off + 1_000 >= moving_again.unwrap(), "left Hjärup at {} s, before a report said so at {} s", (set_off - T0) / 1000, (moving_again.unwrap() - T0) / 1000);
-        eprintln!("{length:.0} m: off by {worst:.0} m at worst, {mean:.0} on average; {off:.1} m from the real way at most; back {back:.1} m");
+        assert!(
+            set_off + 1_000 >= moving_again.unwrap(),
+            "left Hjärup at {} s, before a report said so at {} s",
+            (set_off - T0) / 1000,
+            (moving_again.unwrap() - T0) / 1000
+        );
+        eprintln!(
+            "{length:.0} m: off by {worst:.0} m at worst, {mean:.0} on average; {off:.1} m from the real way at most; back {back:.1} m"
+        );
         assert!(back < 6.0, "went back {back:.1} m (between tracks side by side at most)");
         assert!(worst < 600.0 && mean < 150.0, "off by {worst:.0} m at worst, {mean:.0} on average");
         let end = drawn.last().unwrap();
@@ -2227,7 +2390,7 @@ mod tests {
         let g = Graph::build(&sets);
         let hjarup = (55.6696, 13.1361);
         for heading in [225.0, 45.0] {
-            let p = platforms_in(&g, hjarup, None, Some(heading))[0];
+            let p = platforms_in(&g, hjarup, None, Some(heading), &[])[0];
             let (a, b, _, _) = g.snap(p, 1.0).unwrap();
             let forward = turn(course(g.nodes[a], g.nodes[b]), heading) < 90.0;
             let e = if forward { g.edge(a, b) } else { g.edge(b, a) };

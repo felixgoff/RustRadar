@@ -1,7 +1,7 @@
 // @ts-ignore bun's types are not a dependency; the runner provides the module
 import { describe, expect, test } from "bun:test";
 import type { TrainRoute } from "./api";
-import { type LonLat, type RouteAhead, routeAhead as ahead } from "./train-route";
+import { type LonLat, type RouteAhead, routeAhead as ahead, wayToStop } from "./train-route";
 
 /** About 11 m of longitude at 60°N: a straight line east along 60°N, one point every `step` of it. */
 const east = (from: number, to: number, step = 100): LonLat[] => {
@@ -109,5 +109,22 @@ describe("routeAhead", () => {
     expect(b.cursor.route).toBe(r2);
     expect(b.on).toBe(true);
     expect(b.paths[0][0]).toEqual(at(1500));
+  });
+});
+
+describe("wayToStop", () => {
+  // frames: [lat, lon, ms], east along 60°N, standing from 30 s
+  const f = (m: number, t: number): [number, number, number] => [60, 18 + m * 0.000018, t];
+  const frames = [f(0, 0), f(100, 10_000), f(200, 20_000), f(250, 30_000), f(250, 60_000), f(400, 70_000)];
+
+  test("from the train to where it next stands", () => {
+    const w = wayToStop(at(120), frames, 12_000);
+    expect(w[0]).toEqual(at(120));
+    expect(w.slice(1)).toEqual([at(200), at(250)]);
+  });
+
+  test("none while it stands, or with no stop ahead in its frames", () => {
+    expect(wayToStop(at(250), frames, 40_000)).toEqual([]);
+    expect(wayToStop(at(300), frames, 62_000)).toEqual([]);
   });
 });

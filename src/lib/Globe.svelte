@@ -110,7 +110,7 @@
     trainLabel,
     trainPositionAge,
   } from "./trains";
-  import { type RouteCursor, routeAhead } from "./train-route";
+  import { type RouteCursor, routeAhead, wayToStop } from "./train-route";
 
   interface Props {
     flights: LiveFlight[];
@@ -1864,6 +1864,8 @@
   const TRAIN_ROUTE_DASH: [number, number, number, number] = [0, 0, 0, 255];
   const TRAIN_ROUTE_CASING: [number, number, number, number] = [236, 238, 244, 215];
   const TRAIN_ROUTE_DASHES: [number, number] = [2.2, 1.6];
+  /** The way to where the selected train stops next. */
+  const TRAIN_TO_STOP: [number, number, number, number] = [37, 99, 235, 255];
   /** Where along its route the selected train was last found (searching on from there). */
   let routeCursor: RouteCursor | null = null;
 
@@ -1886,17 +1888,6 @@
     const paths = way.rest;
     const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
     const stretch = (id: string, data: [number, number][][]) => [
-      new PathLayer<[number, number][]>({
-        id: `${id}-casing`,
-        data,
-        getPath: (p) => p,
-        getColor: TRAIN_ROUTE_CASING,
-        getWidth: 6,
-        widthUnits: "pixels",
-        capRounded: true,
-        jointRounded: true,
-        parameters: ground,
-      }),
       new PathLayer<[number, number][], PathStyleExtensionProps<[number, number][]>>({
         id: `${id}-dashes`,
         data,
@@ -1911,9 +1902,35 @@
       }),
     ];
     const stations = r.stops.filter((s) => s.stops);
+    // where the drawn train is going to stop next: the way there, and the spot
+    const toStop = wayToStop(drawn, frames, nowMs);
     return [
       ...stretch("train-route", paths),
       ...(head.length ? stretch("train-route-head", [head]) : []),
+      new PathLayer<LonLat[]>({
+        id: "train-route-to-stop",
+        data: toStop.length >= 2 ? [toStop] : [],
+        getPath: (p) => p,
+        getColor: TRAIN_TO_STOP,
+        getWidth: 4,
+        widthUnits: "pixels",
+        capRounded: true,
+        jointRounded: true,
+        parameters: ground,
+      }),
+      new ScatterplotLayer<LonLat>({
+        id: "train-route-stop-spot",
+        data: toStop.length >= 2 ? [toStop[toStop.length - 1]] : [],
+        getPosition: (p) => p,
+        getRadius: 5,
+        radiusUnits: "pixels",
+        stroked: true,
+        getFillColor: [255, 255, 255, 255],
+        getLineColor: TRAIN_TO_STOP,
+        getLineWidth: 2.5,
+        lineWidthUnits: "pixels",
+        parameters: ground,
+      }),
       new ScatterplotLayer<(typeof stations)[number]>({
         id: "train-route-stops",
         data: stations,

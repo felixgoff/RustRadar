@@ -116,6 +116,10 @@ const MAX_REACH_M: f64 = 25_000.0;
 const TURN_BACK_MS: i64 = 60_000;
 /// A place this near the way is on it, metres (the track beside it, or a report a little off).
 const ON_PATH_M: f64 = 40.0;
+/// A station's point this far off the way still has its trains call there, metres.
+const STATION_OFF_M: f64 = 150.0;
+/// Standing this near a station's point, a drawn train has pulled in there (not waiting short of it), metres.
+const PULLED_IN_M: f64 = 100.0;
 /// A report off any track (in a tunnel, say) is along a way this near it, metres.
 const OFF_TRACK_M: f64 = 300.0;
 /// A way to a place longer than this many times the distance (plus metres) goes round, not to it.
@@ -1076,17 +1080,34 @@ fn follow(
             (s, v, None)
         }
     };
-    // calls at stations the real train has left since, on the way to it
-    let calls = |i: usize| i < real.next && stops.get(i).is_some_and(|s| !s.pass);
+    // calls at every station its timetable stops at on its way, whatever the
+    // live data says (a train seen running through one has stood there briefly too)
+    let calls = |i: usize| stops.get(i).is_some_and(|s| !s.pass);
     let mut dwells: Vec<(f64, i64)> = layout
         .marks
         .iter()
-        .filter(|m| calls(m.stop) && m.at > s + ARRIVED_M && m.at < layout.p0)
+        .filter(|m| calls(m.stop) && m.at > s + ARRIVED_M)
         .map(|m| (m.at, dwell_of(&stops[m.stop])))
         .collect();
-    // standing at one already: what is left of its call
+    // and those its way passes it hasn't been sent through (one the real train
+    // is reported just past, say), their point a little off the track too
+    let here = path.point(s);
+    let unmarked = |i: usize| !layout.marks.iter().any(|m| m.stop == i);
+    // (not the one it is at already, where the real train stopped, its point a little on)
+    let away = |stop: &Stop| distance(here, (stop.lat, stop.lon)) >= PULLED_IN_M;
+    for (i, stop) in stops.iter().enumerate().filter(|(i, st)| calls(*i) && unmarked(*i) && away(st)) {
+        // (where the way passes nearest it: one behind it is not ahead just because the way goes on)
+        if let Some(at) = path.locate((stop.lat, stop.lon), STATION_OFF_M, None, 0.0).filter(|at| *at > s + ARRIVED_M) {
+            dwells.push((at, dwell_of(stop)));
+        }
+    }
+    dwells.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // standing at one already (pulled in, not waiting short of it): what is left of its call
+    let pulled_in = |i: usize| drawn.is_some_and(|d| distance(d.at, (stops[i].lat, stops[i].lon)) < PULLED_IN_M);
     let mut wait_until = match (layout.standing_at, since) {
-        (Some(i), Some(since)) if calls(i) && layout.d0.is_some() => Some(since + dwell_of(&stops[i])),
+        (Some(i), Some(since)) if calls(i) && (i < real.next || pulled_in(i)) && layout.d0.is_some() => {
+            Some(since + dwell_of(&stops[i]))
+        }
         _ => None,
     };
     // carried on from where it is drawn: exactly there, until the way gets past
@@ -1935,6 +1956,11 @@ mod tests {
             let at = sample(f, now).map_or((f[0].0, f[0].1), |s| s.0);
             drawn.push((now, x_of(at)));
         }
+        if std::env::var("TRACE").is_ok() {
+            for (t, x) in drawn.iter().step_by(20) {
+                eprintln!("TRACE {} {x:.0} real {:.0}", (t - NOW) / 1000, real_at(*t).0);
+            }
+        }
         // never back, gently
         assert!(drawn.windows(2).all(|w| w[1].1 >= w[0].1 - 0.01), "never backwards");
         // speeds over two frames' time (6 s), and how they change from one to the next
@@ -1965,7 +1991,7 @@ mod tests {
             set_off - NOW,
             first_moving - NOW
         );
-        assert!(((at_station[0] - NOW) as f64 / 1000.0 - arrived).abs() < 40.0, "arrived about when it did");
+        assert!(((at_station[0] - NOW) as f64 / 1000.0 - arrived).abs() < 40.0, "arrived about when it did: {} vs {arrived}", (at_station[0] - NOW) / 1000);
     }
 
     #[test]

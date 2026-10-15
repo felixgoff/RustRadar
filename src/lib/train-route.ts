@@ -119,3 +119,20 @@ export function routeAhead(route: TrainRoute, drawn: LonLat, cursor: RouteCursor
   const at = onFrom(found.leg);
   return { head: [drawn, found.q, line[found.leg + 1]], rest: at.rest, cursor: at, on };
 }
+
+/**
+ * The way from where the train is drawn (`drawn`) to the next place its
+ * frames (`[lat, lon, unix ms]`) have it stand still, from `nowMs`: empty when
+ * it doesn't stop within them, or stands there already.
+ */
+export function wayToStop(drawn: LonLat, frames: [number, number, number][], nowMs: number): LonLat[] {
+  const way: LonLat[] = [drawn];
+  for (let i = 1; i < frames.length; i++) {
+    const [a, b] = [frames[i - 1], frames[i]];
+    if (b[2] <= nowMs) continue;
+    // a frame where it was a moment before: it stands there
+    if (a[0] === b[0] && a[1] === b[1]) return a[2] <= nowMs ? [] : way;
+    way.push([b[1], b[0]]);
+  }
+  return [];
+}

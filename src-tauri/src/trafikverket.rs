@@ -2129,6 +2129,17 @@ mod tests {
         std::fs::write(format!("{dir}/replay.csv"), out).unwrap();
     }
 
+    /// Prints the queries the app asks for these trains' timetables (`NUMBERS`), comma separated, and the stations.
+    #[test]
+    #[ignore]
+    fn print_queries() {
+        let numbers: Vec<String> = std::env::var("NUMBERS").unwrap().split(',').map(str::to_owned).collect();
+        for chunk in numbers.chunks(SERVICE_BATCH) {
+            println!("Q {}", services_query(chunk));
+        }
+        println!("S {}", stations_query());
+    }
+
     /// Times working out the trains' frames over recorded live data (`LIVE_DIR`, `RAIL_TILES`).
     #[test]
     #[ignore]
@@ -2299,6 +2310,15 @@ mod tests {
                     continue;
                 };
                 let stops = stops_ahead(service, None, &stations, r.at_ms);
+                if !drawn.contains_key(r.lookup()) {
+                    // where its timetable has it stop, and when
+                    let calls: Vec<String> = calls_ahead(service, None, &stations, r.at_ms)
+                        .iter()
+                        .filter(|c| c.0.stops)
+                        .map(|c| format!("[{},{},\"{}\",{}]", c.2.lon, c.2.lat, c.1.name, c.2.arrive_ms.unwrap_or(0)))
+                        .collect();
+                    out += &format!("{{\"train\":\"{}\",\"t\":{now},\"calls\":[{}]}}\n", r.lookup(), calls.join(","));
+                }
                 let class = crate::train_class::class_of(service.product_code.as_deref(), service.product.as_deref());
                 let rail = crate::rail::Rail { class: Some(class) };
                 let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);

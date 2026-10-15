@@ -105,8 +105,10 @@ fn services_query(numbers: &[String]) -> String {
             "OperationalTrainNumber",
             "ScheduledDepartureDateTime",
             "ActivityType",
+            "Advertised",
             "LocationSignature",
             "AdvertisedTimeAtLocation",
+            "TrackAtLocation",
             "ProductInformation",
             "InformationOwner",
             "Operator",
@@ -135,8 +137,11 @@ fn delays_query() -> String {
 
 /// Every stop of one train on one day.
 fn stops_query(ident: &str, date: &str) -> String {
-    let more: Vec<&str> =
-        ANNOUNCEMENT_FIELDS.iter().copied().chain(["TrackAtLocation", "Deviation", "OtherInformation"]).collect();
+    let more: Vec<&str> = ANNOUNCEMENT_FIELDS
+        .iter()
+        .copied()
+        .chain(["Advertised", "TrackAtLocation", "Deviation", "OtherInformation"])
+        .collect();
     format!(
         "<QUERY objecttype=\"TrainAnnouncement\" schemaversion=\"1.9\" orderby=\"AdvertisedTimeAtLocation\">\
          <FILTER><AND><EQ name=\"AdvertisedTrainIdent\" value=\"{}\"/>\
@@ -239,6 +244,10 @@ pub struct Call {
     pub station: String,
     pub arrive: Option<i64>,
     pub depart: Option<i64>,
+    /// A stop for travellers; else a place it only passes (still on its way).
+    pub stops: bool,
+    /// The track it is announced at ("4b"), for the platform.
+    pub track: Option<String>,
 }
 
 fn day(row: &Value) -> String {
@@ -296,6 +305,11 @@ pub fn parse_services(body: &str) -> Result<HashMap<String, Vec<Service>>, Strin
                 runs.len() - 1
             }
         };
+        // the rows of places it only passes carry no product, owner or destination
+        let run = &mut runs[at];
+        run.product = run.product.take().or_else(|| description(&row["ProductInformation"]));
+        run.owner = run.owner.take().or_else(|| text(&row["InformationOwner"])).or_else(|| text(&row["Operator"]));
+        run.to = run.to.take().or_else(|| last_location(&row["ToLocation"]));
         let (Some(station), Some(time)) =
             (text(&row["LocationSignature"]), row["AdvertisedTimeAtLocation"].as_str().and_then(unix_ms))
         else {
@@ -316,6 +330,8 @@ pub fn parse_services(body: &str) -> Result<HashMap<String, Vec<Service>>, Strin
         } else {
             call.arrive = Some(time);
         }
+        call.stops |= row["Advertised"].as_bool() != Some(false);
+        call.track = call.track.take().or_else(|| text(&row["TrackAtLocation"]));
     }
     for run in services.values_mut().flatten() {
         run.calls.sort_by_key(|c| c.arrive.or(c.depart).unwrap_or(0));
@@ -523,6 +539,7 @@ fn stops_ahead(
                 lon: station.lon?,
                 arrive_ms: c.arrive.map(|t| t + late),
                 depart_ms: c.depart.map(|t| t + late.max(0)),
+                pass: !c.stops,
             })
         })
         // a couple of minutes' grace: the delay is the one at its last report
@@ -574,6 +591,10 @@ pub fn parse_stops(body: &str, stations: &HashMap<String, Station>) -> Result<Ve
         let Some(sig) = text(&row["LocationSignature"]) else {
             continue;
         };
+        // places it only passes (Advertised: false) are no stops for travellers
+        if row["Advertised"].as_bool() == Some(false) {
+            continue;
+        }
         let departure = row["ActivityType"].as_str() == Some("Avgang");
         // an arrival and a departure at the same station make one stop, in
         // either order (they often share a minute); a third row starts another

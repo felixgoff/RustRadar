@@ -14,6 +14,8 @@ pub struct Stop {
     pub arrive_ms: Option<i64>,
     /// When it leaves; none: it ends there.
     pub depart_ms: Option<i64>,
+    /// A place it only passes: on its way there, but it doesn't stop.
+    pub pass: bool,
 }
 
 /// How far ahead the frames reach, past now.
@@ -130,6 +132,7 @@ struct Mark {
     at: f64,
     arrive_ms: Option<i64>,
     depart_ms: Option<i64>,
+    pass: bool,
 }
 
 /// Frames `(lat, lon, unix_ms)` from a report at `t0_ms` up to `now_ms` plus
@@ -176,7 +179,7 @@ pub fn frames_with(
         return Vec::new();
     }
     if let Some(first) = stops.first() {
-        if v < 1.5 && distance(pos, (first.lat, first.lon)) < AT_STOP_M {
+        if !first.pass && v < 1.5 && distance(pos, (first.lat, first.lon)) < AT_STOP_M {
             // standing at the first stop: it is waiting there
             pos = (first.lat, first.lon);
             dwell = Some(first.depart_ms.unwrap_or(i64::MAX));
@@ -219,8 +222,10 @@ pub fn frames_with(
     let marks: Vec<Mark> = reached
         .iter()
         .zip(ahead_stops)
-        .map(|(at, s)| Mark { at: *at, arrive_ms: s.arrive_ms, depart_ms: s.depart_ms })
+        .map(|(at, s)| Mark { at: *at, arrive_ms: s.arrive_ms, depart_ms: s.depart_ms, pass: s.pass })
         .collect();
+    // where it next stops: places it only passes don't slow it
+    let stop_after = |from: usize| (from..marks.len()).find(|i| !marks[*i].pass);
 
     let mut s = 0.0;
     let mut mark = 0;
@@ -228,7 +233,7 @@ pub fn frames_with(
         Some(st) => pace(distance(pos, (st.lat, st.lon)), st.arrive_ms, t),
         None => v,
     };
-    let mut cruise = match marks.first() {
+    let mut cruise = match stop_after(0).map(|i| &marks[i]) {
         Some(m) if v > 3.0 => v.max(pace(m.at, m.arrive_ms, t).min(v * 1.2)),
         Some(m) => pace(m.at, m.arrive_ms, t),
         None => v.max(unreached(t)),
@@ -247,20 +252,24 @@ pub fn frames_with(
                 continue;
             }
             dwell = None;
-            cruise = match marks.get(mark) {
+            cruise = match stop_after(mark).map(|i| &marks[i]) {
                 Some(m) => pace(m.at - s, m.arrive_ms, t),
                 None => pace(path.len() - s, None, t),
             };
             push(&mut out, path.point(s), t);
         }
-        match marks.get(mark) {
-            Some(m) => {
+        // the places passed by now
+        while marks.get(mark).is_some_and(|m| m.pass && m.at <= s) {
+            mark += 1;
+        }
+        match stop_after(mark).map(|i| (i, &marks[i])) {
+            Some((i, m)) => {
                 let d = m.at - s;
                 if d <= ARRIVED_M {
                     s = m.at;
                     v = 0.0;
                     dwell = Some(m.depart_ms.unwrap_or(i64::MAX));
-                    mark += 1;
+                    mark = i + 1;
                     push(&mut out, path.point(s), t);
                     continue;
                 }
@@ -315,10 +324,15 @@ mod tests {
     fn it_slows_into_a_station_and_waits_there() {
         // 1.5 km to the station at 25 m/s, leaving it a minute after now
         let station = ahead((59.0, 18.0), 0.0, 1500.0);
-        let stop =
-            Stop { lat: station.0, lon: station.1, arrive_ms: Some(NOW + 60_000), depart_ms: Some(NOW + 90_000) };
+        let stop = Stop {
+            lat: station.0,
+            lon: station.1,
+            arrive_ms: Some(NOW + 60_000),
+            depart_ms: Some(NOW + 90_000),
+            pass: false,
+        };
         let beyond = ahead((59.0, 18.0), 0.0, 20_000.0);
-        let after = Stop { lat: beyond.0, lon: beyond.1, arrive_ms: Some(NOW + 900_000), depart_ms: None };
+        let after = Stop { lat: beyond.0, lon: beyond.1, arrive_ms: Some(NOW + 900_000), depart_ms: None, pass: false };
         let f = frames(59.0, 18.0, NOW, Some(25.0), Some(0.0), &[stop, after], NOW);
 
         let arrived = f.iter().position(|p| distance((p.0, p.1), station) < 1.0).expect("reaches the station");
@@ -336,8 +350,8 @@ mod tests {
         let here = (59.0, 18.0);
         let next = ahead(here, 90.0, 10_000.0);
         let stops = [
-            Stop { lat: here.0, lon: here.1, arrive_ms: None, depart_ms: Some(NOW + 30_000) },
-            Stop { lat: next.0, lon: next.1, arrive_ms: Some(NOW + 630_000), depart_ms: None },
+            Stop { lat: here.0, lon: here.1, arrive_ms: None, depart_ms: Some(NOW + 30_000), pass: false },
+            Stop { lat: next.0, lon: next.1, arrive_ms: Some(NOW + 630_000), depart_ms: None, pass: false },
         ];
         let f = frames(here.0, here.1, NOW, Some(0.0), None, &stops, NOW);
         assert!(f.iter().filter(|p| p.2 <= NOW + 30_000).all(|p| distance((p.0, p.1), here) < 1.0));
@@ -351,8 +365,8 @@ mod tests {
         let behind = ahead(here, 180.0, 800.0);
         let front = ahead(here, 0.0, 30_000.0);
         let stops = [
-            Stop { lat: behind.0, lon: behind.1, arrive_ms: None, depart_ms: Some(NOW) },
-            Stop { lat: front.0, lon: front.1, arrive_ms: Some(NOW + 1_200_000), depart_ms: None },
+            Stop { lat: behind.0, lon: behind.1, arrive_ms: None, depart_ms: Some(NOW), pass: false },
+            Stop { lat: front.0, lon: front.1, arrive_ms: Some(NOW + 1_200_000), depart_ms: None, pass: false },
         ];
         let f = frames(here.0, here.1, NOW, Some(25.0), Some(0.0), &stops, NOW);
         assert!(f.last().unwrap().0 > here.0, "still heading north");
@@ -367,7 +381,8 @@ mod tests {
         let router = |_: (f64, f64), _: Option<f64>, _: &[(f64, f64)], _: f64| -> Option<Routed> {
             Some((vec![start, corner, station], vec![4_000.0]))
         };
-        let stop = Stop { lat: station.0, lon: station.1, arrive_ms: Some(NOW + 200_000), depart_ms: None };
+        let stop =
+            Stop { lat: station.0, lon: station.1, arrive_ms: Some(NOW + 200_000), depart_ms: None, pass: false };
         let f = frames_with(start.0, start.1, NOW, Some(30.0), Some(90.0), &[stop], NOW, Some(&router));
         // halfway through the horizon it has gone round the corner, not cut across
         let mid = f.iter().find(|p| p.2 >= NOW + 100_000).unwrap();

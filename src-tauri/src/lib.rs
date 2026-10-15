@@ -17,6 +17,7 @@ mod runways;
 mod session;
 mod ships;
 mod taxiways;
+mod trafikverket;
 mod trains;
 #[cfg(desktop)]
 mod updater;
@@ -666,12 +667,12 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
                 let mut fr24 = Fr24::clone(&state.client());
-                let creds = (!saved.fr24_email.is_empty() && !saved.fr24_password.is_empty()).then(|| {
+                let creds = (!saved.fr24_email.is_empty() && !saved.fr24_password.is_empty()).then_some(
                     fr24::auth::Credentials::UsernamePassword {
                         username: saved.fr24_email,
                         password: saved.fr24_password,
-                    }
-                });
+                    },
+                );
                 match fr24.login(creds).await {
                     Ok(Some(_)) => *state.fr24.write().unwrap() = Arc::new(fr24),
                     Ok(None) => {}
@@ -717,6 +718,7 @@ pub fn run() {
             ships::ships_in_view,
             ships::ship_details,
             trains::trains_in_view,
+            trains::train_stops,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

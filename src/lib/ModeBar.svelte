@@ -143,19 +143,29 @@
   .modebar :global(label:has(+ .show.on) > span) {
     color: var(--text-1);
   }
-  /* Phones (the query in phone.svelte.ts): under the search, in the flow */
+  /* Phones (the query in phone.svelte.ts): under the search, in the flow, the
+     three sharing the width evenly */
   @media (max-width: 899px), (max-height: 500px) {
     .wrap {
       position: static;
-      justify-content: flex-start;
-      overflow-x: auto;
-      scrollbar-width: none;
     }
     .modebar {
+      flex: 1;
       border: 0;
       background: none;
       box-shadow: none;
       padding: 0;
+    }
+    .modebar :global(.options) {
+      width: 100%;
+    }
+    .modebar :global(.options > label) {
+      flex: 1;
+      min-width: 0;
+    }
+    .modebar :global(.options > label > span) {
+      justify-content: center;
+      padding: 6px var(--space-2);
     }
   }
 </style>

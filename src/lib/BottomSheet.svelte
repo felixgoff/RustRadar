@@ -10,7 +10,7 @@
 
   interface Props {
     detent?: Detent;
-    /** The sheet's height now, in px: what sits above it moves with it. */
+    /** The sheet's height on screen now, in px, home-bar padding included: what sits above it moves with it. */
     height?: number;
     label: string;
     /** Always on show, under the handle. */
@@ -20,7 +20,7 @@
 
   let { detent = $bindable("peek"), height = $bindable(0), label, head, children }: Props = $props();
 
-  const PEEK = 132;
+  const PEEK = 90;
   /** What the full sheet leaves clear at the top: the search and mode buttons. */
   const TOP_CLEAR = 104;
   const ORDER: Detent[] = ["peek", "half", "full"];
@@ -31,9 +31,6 @@
   const heights = $derived({ peek: PEEK, half: Math.round(vh * 0.5), full: Math.max(PEEK, vh - TOP_CLEAR) });
   const shown = $derived(drag ? drag.now : heights[detent]);
 
-  $effect(() => {
-    height = shown;
-  });
 
   function down(e: PointerEvent) {
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -69,7 +66,8 @@
 
 <svelte:window bind:innerHeight={vh} />
 
-<section class="sheet surface" class:dragging={drag} style:height="{shown}px" aria-label={label}>
+<!-- `shown` is the content's height; the home-bar padding goes under it, and the measured whole is reported -->
+<section class="sheet surface" class:dragging={drag} style:height="{shown}px" bind:offsetHeight={height} aria-label={label}>
   <button
     class="grab"
     aria-label="{label}: {detent === 'full' ? 'full height' : detent === 'half' ? 'half height' : 'lowered'}. Drag, tap or use the arrow keys to resize"
@@ -87,6 +85,7 @@
 
 <style>
   .sheet {
+    box-sizing: content-box;
     position: fixed;
     left: 0;
     right: 0;
@@ -109,7 +108,7 @@
     flex: none;
     display: grid;
     place-items: center;
-    height: 22px;
+    height: 18px;
     padding: 0;
     border: 0;
     background: none;
@@ -127,7 +126,7 @@
   }
   .head {
     flex: none;
-    padding: 0 var(--space-4) var(--space-2);
+    padding: 0 var(--space-4) var(--space-1);
     padding-left: max(var(--space-4), env(safe-area-inset-left, 0px));
     padding-right: max(var(--space-4), env(safe-area-inset-right, 0px));
   }

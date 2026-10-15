@@ -3,7 +3,7 @@
   import type { Train } from "./api";
   import Segmented from "./Segmented.svelte";
   import { distanceKm, distanceLabel, TRAIN_COVERAGE, type TrainSort } from "./train-list";
-  import { delayText, delayTone, trainColor, trainLabel } from "./trains";
+  import { delayText, delayTone, trainColorOf, trainLabel } from "./trains";
 
   interface Props {
     /** The trains that match the search and filters, in order. */
@@ -36,7 +36,7 @@
   ] as const;
 
   const rows = $derived(trains.slice(0, LIMIT));
-  const swatch = (t: Train) => `rgb(${trainColor(t.kind).join(", ")})`;
+  const swatch = (t: Train) => `rgb(${trainColorOf(t).join(", ")})`;
   const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 </script>
 

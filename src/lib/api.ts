@@ -591,7 +591,7 @@ export const airlineLogoUrl = (airlineId: number) =>
   `https://cdn.flightradar24.com/assets/airlines/logotypes/${airlineId}.png`;
 
 /** Where a train comes from: one regional public feed each. */
-export type TrainSource = "digitraffic" | "amtrak" | "entur" | "irishrail" | "vbb";
+export type TrainSource = "trafikverket" | "digitraffic" | "amtrak" | "entur" | "irishrail" | "vbb";
 
 export type TrainKind = "highSpeed" | "intercity" | "regional" | "suburban" | "metro" | "freight" | "other";
 
@@ -624,10 +624,36 @@ export interface Train {
 
 /**
  * Trains in an area (`west > east` crosses the antimeridian) at a deck.gl
- * zoom, from every regional source covering it (Finland, Norway, Ireland,
- * the USA and Canada at any zoom; Berlin–Brandenburg from zoom 6). Cached
+ * zoom, from every regional source covering it (Sweden with a Trafikverket
+ * key from the keys page; Finland, Norway, Ireland, the USA and Canada at any
+ * zoom; Berlin–Brandenburg from zoom 6). Cached
  * 20–30 s per source in Rust, with backoff; a failing source is left out,
  * and it rejects only when every source in view failed.
  */
 export const trainsInView = (area: BoundingBox, zoom: number) =>
   invoke<Train[]>("trains_in_view", { ...area, zoom });
+
+/** A time at a stop, Unix seconds: as planned, as now expected, as it happened. */
+export interface StopTime {
+  planned: number | null;
+  estimated: number | null;
+  actual: number | null;
+}
+
+/** One stop of a train's run. */
+export interface TrainStop {
+  name: string;
+  lat: number | null;
+  lon: number | null;
+  /** None at the first stop. */
+  arrival: StopTime | null;
+  /** None at the last stop. */
+  departure: StopTime | null;
+  track: string | null;
+  canceled: boolean;
+  /** Notices at the stop: delay causes, replacement buses. */
+  notes: string[];
+}
+
+/** Every stop of a train, in order, for sources with its timetable (Trafikverket); empty for the others. */
+export const trainStops = (id: string) => invoke<TrainStop[]>("train_stops", { id });

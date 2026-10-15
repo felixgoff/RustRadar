@@ -72,7 +72,7 @@
   import { placeView } from "$lib/places";
   import { afterRound, feedFreshness, type FeedClock } from "$lib/freshness";
   import { clockAt } from "$lib/time";
-  import { delayText, trainColor, trainCredits, trainLabel } from "$lib/trains";
+  import { delayText, trainColorOf, trainCredits, trainLabel } from "$lib/trains";
   import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -590,7 +590,7 @@
         key: t.id,
         label: t.name,
         detail: [t.destination && `To ${t.destination}`, delayText(t.delayMinutes) || trainLabel(t.kind)].filter(Boolean).join(" · "),
-        color: rgb(trainColor(t.kind)),
+        color: rgb(trainColorOf(t)),
       })),
     onpick: (id) => {
       const t = trains.find((t) => t.id === id);
@@ -1542,6 +1542,14 @@
     }
     .brand {
       display: none;
+    }
+    /* in the sheet's head: the list's own heading gives the count, just below */
+    .toolbar .counts {
+      display: none;
+    }
+    .filter-toggle {
+      height: 30px;
+      padding: 0 var(--space-3);
     }
     .list {
       flex: 1 1 auto;

@@ -101,7 +101,7 @@
     headingAt,
     positionAt,
     trainAtlas,
-    trainColor,
+    trainColorOf,
     trainIcon,
     trainIconScale,
     trainIconSize,
@@ -1651,8 +1651,8 @@
     list.forEach((train, i) => {
       data.positions.push([train.lon, train.lat, 0]);
       data.headings.push(train.heading);
-      data.icons.push(trainIcon(train.kind, train.heading));
-      data.colors.push([...trainColor(train.kind), TRAIN_ALPHA]);
+      data.icons.push(trainIcon(train.kind, train.heading, train.operator));
+      data.colors.push([...trainColorOf(train), TRAIN_ALPHA]);
       data.all.push(i);
       data.byId.set(train.id, i);
       if ((train.frames?.length ?? 0) > 1) data.moving.push(i);
@@ -1670,7 +1670,7 @@
       const heading = headingAt(train, nowMs);
       data.positions[i] = [lon, lat, 0];
       data.headings[i] = heading;
-      data.icons[i] = trainIcon(train.kind, heading);
+      data.icons[i] = trainIcon(train.kind, heading, train.operator);
     }
     trainMoves++;
   }

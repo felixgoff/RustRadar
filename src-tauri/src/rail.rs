@@ -1991,6 +1991,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_train_takes_the_branch_its_next_station_is_on_however_far_it_is() {
+        use crate::motion::{self, Fix, Stop};
+        // north 3 km to a junction: straight on north, or off north-east to its station 16 km on
+        let a = (63.0, 17.0);
+        let j = ahead(a, 0.0, 3_000.0);
+        let mut trunk = line(a, 0.0, 3.0);
+        *trunk.last_mut().unwrap() = j;
+        let (mut straight, mut branch) = (line(j, 0.0, 20.0), line(j, 30.0, 20.0));
+        (straight[0], branch[0]) = (j, j);
+        let g = graph(vec![track(trunk), track(straight), track(branch)]);
+        let track = OnGraph { g: &g, class: None };
+        let station = ahead(j, 30.0, 16_000.0);
+        const T0: i64 = 1_800_000_000_000;
+        let at = ahead(a, 0.0, 1_000.0);
+        let report = Fix { lat: at.0, lon: at.1, t_ms: T0, speed: Some(30.0), heading: Some(0.0) };
+        let stops = [Stop { lat: station.0, lon: station.1, arrive_ms: Some(T0 + 600_000), depart_ms: Some(T0 + 660_000), pass: false }];
+        let sim = motion::simulate(None, &report, None, &stops, T0 + 5_000, Some(&track));
+        // two minutes on it is well past the junction: on the branch, not straight on
+        let end = sim.predicted.last().unwrap();
+        let (end, j_on) = ((end.0, end.1), distance(j, (end.0, end.1)));
+        assert!(j_on > 1_000.0, "past the junction: {j_on:.0} m");
+        assert!(turn(course(j, end), 30.0) < 5.0, "on the branch to its station: {:.0}°", course(j, end));
+    }
+
     /// An Öresundståg from Lund to Malmö C on real tiles (`RAIL_TILES`),
     /// reported every 5 to 30 s with a little GPS error, drawn as the map
     /// does (anew on each report and every 10 s): on the track all the way,

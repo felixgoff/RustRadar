@@ -718,14 +718,20 @@ impl Layout {
     }
 }
 
+/// The next stop is aimed for when this near, however far beyond its reach it
+/// is (which way it goes at junctions on the way is its way), metres.
+const AIM_M: f64 = 30_000.0;
+
 /// The stops from `from` a way is found through: up to the first it calls
-/// at and one more, as far as a train could get, and a few at most.
+/// at and one more, as far as a train could get, and a few at most; and
+/// the next, further on, unless far off.
 fn ahead_targets(stops: &[Stop], from: usize, at: (f64, f64), reach: f64) -> Vec<Target> {
     let from = from.min(stops.len());
     let calls = stops[from..].iter().position(|s| !s.pass).map_or(stops.len(), |i| from + i + 2);
     (from..calls.min(from + 6).min(stops.len()))
-        .take_while(|&i| distance(at, (stops[i].lat, stops[i].lon)) <= reach + 3_500.0)
-        .map(|i| Target { at: (stops[i].lat, stops[i].lon), stop: Some(i) })
+        .enumerate()
+        .take_while(|&(k, i)| distance(at, (stops[i].lat, stops[i].lon)) <= if k == 0 { AIM_M } else { reach + 3_500.0 })
+        .map(|(_, i)| Target { at: (stops[i].lat, stops[i].lon), stop: Some(i) })
         .collect()
 }
 

@@ -867,7 +867,7 @@ fn client() -> Result<&'static reqwest::Client, String> {
     if let Some(c) = CLIENT.get() {
         return Ok(c);
     }
-    let c = reqwest::Client::builder()
+    let c = fr24::client_builder()
         .user_agent(USER_AGENT)
         .timeout(REQUEST_TIMEOUT)
         .gzip(true)
@@ -1041,6 +1041,19 @@ pub async fn trains_in_view(west: f64, south: f64, east: f64, north: f64, zoom: 
     }
     if trains.is_empty() && !errors.is_empty() && errors.len() == sources.len() {
         return Err(errors.join("; "));
+    }
+    // the rest glide on along their heading between reports
+    let now = now_ms();
+    for t in trains.iter_mut().filter(|t| t.frames.is_empty()) {
+        t.frames = crate::motion::frames(
+            t.lat,
+            t.lon,
+            t.position_unix * 1000,
+            t.speed_kmh.map(|s| f64::from(s) / 3.6),
+            t.heading.map(f64::from),
+            &[],
+            now,
+        );
     }
     Ok(trains)
 }

@@ -71,10 +71,24 @@ pub struct Fr24 {
     json_headers: HeaderMap,
 }
 
+/// A [`reqwest::ClientBuilder`] that works on every platform the app runs on.
+///
+/// reqwest checks certificates with the platform's own verifier, which on
+/// Android has to be initialised from Java first and panics otherwise. There
+/// it is given Mozilla's root certificates instead.
+pub fn client_builder() -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder();
+    #[cfg(target_os = "android")]
+    let builder = builder.tls_certs_only(
+        webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().filter_map(|der| reqwest::Certificate::from_der(der).ok()),
+    );
+    builder
+}
+
 impl Fr24 {
     /// Create an anonymous client with sensible timeouts.
     pub fn new() -> Result<Self> {
-        let http = reqwest::Client::builder()
+        let http = client_builder()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(30))
             .build()?;

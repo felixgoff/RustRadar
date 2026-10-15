@@ -9,6 +9,7 @@ mod liveries;
 #[cfg(any(mobile, test))]
 #[cfg_attr(not(mobile), allow(dead_code))]
 mod mobile_update;
+mod motion;
 mod mrms;
 mod opensky;
 mod radar;

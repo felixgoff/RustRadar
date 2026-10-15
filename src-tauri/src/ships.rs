@@ -8,6 +8,7 @@
 //! refusal or failure backs off. Ships are credited to VesselFinder where they
 //! are shown.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -72,6 +73,10 @@ pub struct Ship {
     /// Metres from the AIS reference point to bow, stern, port and starboard
     /// (only close in, and only when plausible).
     pub dims: Option<[u16; 4]>,
+    /// Where it is expected over the next couple of minutes, `(lat, lon,
+    /// unix_ms)`, for the map to move it along; empty when it isn't moving
+    /// (or hasn't been seen move yet). See `track`.
+    pub frames: Vec<(f64, f64, i64)>,
 }
 
 /// Big-endian reads that stop at the end of the buffer instead of panicking.
@@ -166,6 +171,7 @@ fn record(r: &mut Reader, zoom: u8, selected: i32) -> Option<Option<Ship>> {
         heading,
         old: w & 1 != 0,
         dims,
+        frames: Vec::new(),
     }))
 }
 
@@ -348,7 +354,7 @@ fn client() -> Result<&'static reqwest::Client, String> {
     if let Some(c) = CLIENT.get() {
         return Ok(c);
     }
-    let c = reqwest::Client::builder()
+    let c = fr24::client_builder()
         .user_agent(USER_AGENT)
         .timeout(REQUEST_TIMEOUT)
         .gzip(true)
@@ -395,6 +401,65 @@ async fn request(url: &str) -> Result<Vec<u8>, (String, Option<Duration>)> {
     Ok(body.to_vec())
 }
 
+// ------------------------------------------------------------ motion
+
+/// The feed gives no speed or course, only where each ship is: they are
+/// worked out here from where it was when last seen to move.
+struct Track {
+    lat: f64,
+    lon: f64,
+    /// When this position was first seen, Unix ms.
+    since: i64,
+    /// Last seen at all, for forgetting ships out of view.
+    seen: i64,
+    /// Speed (m/s) and course (degrees), once seen to move.
+    velocity: Option<(f64, f64)>,
+}
+
+/// Faster than any ship (about 50 knots): a jump, not a voyage.
+const MAX_SHIP_SPEED: f64 = 26.0;
+/// Moves seen further apart than this say little about the speed now.
+const MAX_TRACK_GAP_MS: i64 = 20 * 60_000;
+/// Ships out of sight this long are forgotten.
+const FORGET_MS: i64 = 30 * 60_000;
+
+fn tracks() -> &'static std::sync::Mutex<HashMap<u32, Track>> {
+    static T: OnceLock<std::sync::Mutex<HashMap<u32, Track>>> = OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// Updates what is known of each ship's motion and gives the moving ones frames.
+fn track(ships: &mut [Ship], now: i64) {
+    let mut tracks = tracks().lock().unwrap_or_else(|e| e.into_inner());
+    for ship in ships.iter_mut() {
+        let here = (ship.lat, ship.lon);
+        let t = tracks.entry(ship.mmsi).or_insert(Track { lat: ship.lat, lon: ship.lon, since: now, seen: now, velocity: None });
+        t.seen = now;
+        let moved = crate::motion::distance((t.lat, t.lon), here);
+        if moved > 3.0 {
+            let dt = now - t.since;
+            let speed = moved / (dt.max(1) as f64 / 1000.0);
+            t.velocity = ((5_000..=MAX_TRACK_GAP_MS).contains(&dt) && speed <= MAX_SHIP_SPEED)
+                .then(|| (speed, crate::motion::course((t.lat, t.lon), here)));
+            (t.lat, t.lon, t.since) = (ship.lat, ship.lon, now);
+        } else if now - t.since > MAX_TRACK_GAP_MS {
+            // still for a long while: moored or anchored
+            t.velocity = None;
+        }
+        ship.frames = match t.velocity {
+            Some((speed, course)) if !ship.old && speed > 0.2 => {
+                crate::motion::frames(ship.lat, ship.lon, t.since, Some(speed), Some(course), &[], now)
+            }
+            _ => Vec::new(),
+        };
+    }
+    tracks.retain(|_, t| now - t.seen < FORGET_MS);
+}
+
 /// Ships in an area (degrees; `west > east` crosses the antimeridian) at a
 /// deck.gl zoom, as many as VesselFinder shows at that zoom.
 #[tauri::command]
@@ -433,6 +498,7 @@ pub async fn ships_in_view(west: f64, south: f64, east: f64, north: f64, zoom: f
         let mut seen = std::collections::HashSet::new();
         ships.retain(|s| seen.insert(s.mmsi));
     }
+    track(&mut ships, unix_ms());
     let mut cache = state().lock().await;
     cache.succeeded();
     cache.last = Some(Fetched { at: Instant::now(), zoom, areas, ships: ships.clone() });
@@ -874,5 +940,42 @@ mod tests {
         assert!(fits(zoom, area));
         // the whole world at low zoom is the feed's own full-width request
         assert_eq!(fit_view(-180.0, -80.0, 180.0, 80.0, 3).0, 3);
+    }
+
+    #[test]
+    fn a_ship_seen_to_move_glides_on_at_its_speed() {
+        let ship = |lat: f64, lon: f64| Ship {
+            mmsi: 999_000_001,
+            lat,
+            lon,
+            name: "TEST".into(),
+            kind: 4,
+            size: 1,
+            heading: Some(90.0),
+            old: false,
+            dims: None,
+            frames: Vec::new(),
+        };
+        let t0 = 1_800_000_000_000;
+        let mut first = [ship(57.0, 11.0)];
+        track(&mut first, t0);
+        assert!(first[0].frames.is_empty(), "not yet seen to move");
+
+        // 100 m east in 10 s: 10 m/s
+        let east = crate::motion::ahead((57.0, 11.0), 90.0, 100.0);
+        let mut second = [ship(east.0, east.1)];
+        track(&mut second, t0 + 10_000);
+        let f = &second[0].frames;
+        assert!(f.len() >= 2);
+        let (a, b) = (f[0], f[f.len() - 1]);
+        let speed = crate::motion::distance((a.0, a.1), (b.0, b.1)) / ((b.2 - a.2) as f64 / 1000.0);
+        assert!((speed - 10.0).abs() < 0.2, "{speed} m/s");
+        assert!(b.1 > a.1, "on east");
+
+        // a jump of 50 km in 10 s is no voyage
+        let far = crate::motion::ahead(east, 90.0, 50_000.0);
+        let mut third = [ship(far.0, far.1)];
+        track(&mut third, t0 + 20_000);
+        assert!(third[0].frames.is_empty());
     }
 }

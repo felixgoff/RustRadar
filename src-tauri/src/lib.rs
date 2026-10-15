@@ -656,7 +656,15 @@ pub fn run() {
             radar_fetching: Mutex::new(HashSet::new()),
             opensky: tokio::sync::Mutex::new(opensky::Cache::default()),
         })
+        // the rail network's tiles, for the map: fetched and kept by the backend
+        .register_asynchronous_uri_scheme_protocol("railtiles", |_ctx, request, responder| {
+            let path = request.uri().path().to_owned();
+            tauri::async_runtime::spawn(async move { responder.respond(rail::serve(&path).await) });
+        })
         .setup(|app| {
+            if let Ok(dir) = app.path().app_cache_dir() {
+                rail::set_cache_dir(dir);
+            }
             // the main window starts hidden: update first, then open it
             #[cfg(desktop)]
             tauri::async_runtime::spawn(updater::run(app.handle().clone()));
@@ -722,6 +730,7 @@ pub fn run() {
             ships::ship_details,
             trains::trains_in_view,
             trains::train_stops,
+            trains::train_route,
             trains::follow_train,
             trains::unfollow_train,
             train_media::train_media,

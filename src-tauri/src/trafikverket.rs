@@ -496,8 +496,13 @@ pub fn train(
         report.bearing.map(f64::from),
         &stops,
         now_ms,
-        Some(&crate::rail::router),
+        Some(&crate::rail::Rail),
     );
+    let place = frames
+        .first()
+        .map(|f| (f.0, f.1))
+        .or_else(|| crate::rail::snap((report.lat, report.lon)))
+        .unwrap_or((report.lat, report.lon));
     Train {
         // the advertised number and its day are what the stops are looked up by
         id: format!("trafikverket:{date}:{}{number}", if advertised.is_some() { "" } else { "~" }),
@@ -507,8 +512,9 @@ pub fn train(
             None => format!("Train {number}"),
         },
         kind: kind(product.as_deref(), owner.as_deref()),
-        lat: report.lat,
-        lon: report.lon,
+        // on the track: where its way starts, else the nearest track
+        lat: place.0,
+        lon: place.1,
         heading: report.bearing,
         speed_kmh: report.speed,
         destination: service
@@ -534,9 +540,12 @@ fn stops_ahead(
         .iter()
         .filter_map(|c| {
             let station = stations.get(&c.station)?;
+            // at the platform it is announced at, where the track is known
+            let place = (station.lat?, station.lon?);
+            let (lat, lon) = crate::rail::platform(place, c.track.as_deref()).unwrap_or(place);
             Some(motion::Stop {
-                lat: station.lat?,
-                lon: station.lon?,
+                lat,
+                lon,
                 arrive_ms: c.arrive.map(|t| t + late),
                 depart_ms: c.depart.map(|t| t + late.max(0)),
                 pass: !c.stops,
@@ -774,6 +783,14 @@ pub async fn trains(http: &reqwest::Client, key: &str, now_ms: i64) -> Result<Ve
     numbers.clear();
     numbers.extend(trains.iter().zip(&reports).map(|(t, r)| (t.id.clone(), r.lookup().to_owned())));
     drop(numbers);
+    let mut places = last_places().lock().unwrap();
+    for (t, r) in trains.iter().zip(&reports) {
+        if places.get(&t.id).is_none_or(|p| p.2 <= r.at_ms) {
+            places.insert(t.id.clone(), (t.lat, t.lon, r.at_ms));
+        }
+    }
+    places.retain(|_, p| now_ms - p.2 < 6 * 3_600_000);
+    drop(places);
     Ok(trains)
 }
 
@@ -937,6 +954,7 @@ pub async fn follow(http: reqwest::Client, key: String, id: String, channel: tau
                 delays.insert(report.lookup().to_owned(), d);
             }
             let train = train(&report, &services, &delays, &stations, now);
+            last_places().lock().unwrap().insert(train.id.clone(), (train.lat, train.lon, report.at_ms));
             if channel.send(TrainEvent::Train { train: Box::new(train) }).is_err() {
                 return;
             }
@@ -957,6 +975,97 @@ async fn push_stops(
     let delay = delay_of(&stops);
     let _ = channel.send(TrainEvent::Stops { stops });
     delay
+}
+
+// ------------------------------------------------------------------- route
+
+/// Where each train was last seen (on the track), and when: Unix ms.
+type Places = Mutex<HashMap<String, (f64, f64, i64)>>;
+
+fn last_places() -> &'static Places {
+    static P: OnceLock<Places> = OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// A place on a train's way: a station it stops at, or one it only passes.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteStop {
+    pub name: String,
+    /// At its platform where the track is known, else the station's point.
+    pub lat: f64,
+    pub lon: f64,
+    pub track: Option<String>,
+    pub stops: bool,
+}
+
+/// The way a train takes along the track, its whole run from its first
+/// station to its last, through the platforms it is announced at.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainRoute {
+    /// `[lon, lat]`, for the map.
+    pub path: Vec<[f64; 2]>,
+    /// The index in `path` where the train is: before it, the way it came.
+    pub train_at: Option<usize>,
+    pub stops: Vec<RouteStop>,
+    /// False while some of the track is still loading (those legs are
+    /// straight lines for now): ask again shortly.
+    pub complete: bool,
+}
+
+/// A train's whole way, by the id `trains` gave it.
+pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
+    let rest = id.strip_prefix("trafikverket:").ok_or("not a Trafikverket train")?;
+    let (date, ident) = rest.split_once(':').ok_or("not a Trafikverket train")?;
+    let services = known_services(key);
+    let run = services
+        .values()
+        .flatten()
+        .find(|s| s.ident == ident && s.date == date)
+        .ok_or("no timetable for this train yet")?
+        .clone();
+    let stations = station_cache().lock().unwrap().clone().map(|(_, _, s)| s).unwrap_or_default();
+    let delay = delay_cache()
+        .lock()
+        .unwrap()
+        .clone()
+        .and_then(|(_, _, d)| d.get(ident).copied())
+        .map_or(0, |d| i64::from(d) * 60_000);
+    let mut complete = true;
+    let mut stops = Vec::new();
+    let mut times = Vec::new();
+    for call in &run.calls {
+        let Some(station) = stations.get(&call.station) else { continue };
+        let (Some(lat), Some(lon)) = (station.lat, station.lon) else { continue };
+        let (lat, lon) = match crate::rail::platform((lat, lon), call.track.as_deref()) {
+            Some(p) => p,
+            None => {
+                complete = false;
+                (lat, lon)
+            }
+        };
+        stops.push(RouteStop { name: station.name.clone(), lat, lon, track: call.track.clone(), stops: call.stops });
+        times.push(call.depart.or(call.arrive).map(|t| t + delay));
+    }
+    if stops.len() < 2 {
+        return Err("too few places with a position".into());
+    }
+    // the train among them: after the last it should have left by its report
+    let mut places: Vec<(f64, f64)> = stops.iter().map(|s| (s.lat, s.lon)).collect();
+    let here = last_places().lock().unwrap().get(id).copied();
+    let train_index = here.map(|(lat, lon, at)| {
+        let after = times.iter().rposition(|t| t.is_some_and(|t| t <= at)).map_or(0, |i| i + 1);
+        places.insert(after, (lat, lon));
+        after
+    });
+    let (points, at, routed) = crate::rail::way_through(&places);
+    Ok(TrainRoute {
+        path: points.iter().map(|p| [p.1, p.0]).collect(),
+        train_at: train_index.map(|i| at[i]),
+        stops,
+        complete: complete && routed,
+    })
 }
 
 /// The runs known so far, by number.

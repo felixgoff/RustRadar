@@ -33,6 +33,8 @@
     type TopFlight,
     type Train,
     type TrainStop,
+    type TrainRoute,
+    trainRoute,
     followTrain,
     unfollowTrain,
   } from "$lib/api";
@@ -78,6 +80,7 @@
   import { afterRound, feedFreshness, type FeedClock } from "$lib/freshness";
   import { clockAt } from "$lib/time";
   import { delayText, trainColorOf, trainCredits, trainLabel } from "$lib/trains";
+  import { RAIL_SPEED_ATTRIBUTION } from "$lib/rail-layer";
   import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -534,6 +537,33 @@
       else if (e.kind === "stops") liveStops = e.stops;
     }).catch(() => {});
     return () => void unfollowTrain().catch(() => {});
+  });
+  /** The selected train's whole way along the track, as the backend works it out. */
+  let shownRoute = $state.raw<TrainRoute | null>(null);
+  /** Asked again this soon while the track is still loading, else this often (the train moves along it). */
+  const ROUTE_LOADING_MS = 2_500;
+  const ROUTE_REFRESH_MS = 30_000;
+  $effect(() => {
+    const id = followedId;
+    shownRoute = null;
+    if (!id || !id.startsWith("trafikverket:") || !isTauri()) return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = () =>
+      trainRoute(id).then(
+        (r) => {
+          if (!live) return;
+          shownRoute = r;
+          timer = setTimeout(load, r.complete ? ROUTE_REFRESH_MS : ROUTE_LOADING_MS);
+        },
+        // no timetable yet (it is learned with the next refresh): ask again
+        () => live && (timer = setTimeout(load, ROUTE_REFRESH_MS / 3)),
+      );
+    load();
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
   });
   $effect(() => {
     const live = selectedTrain;
@@ -1039,7 +1069,8 @@
       // ODbL asks for attribution wherever the data is shown
       measured && "Aircraft data: © adsb.lol contributors, ODbL",
       shipsOn && "Ships © VesselFinder",
-      // the rail map is drawn from the OpenStreetMap data the map credit below covers
+      // the rail map in the app is OpenRailwayMap's; elsewhere the OpenStreetMap data the map credit below covers
+      settings.railMap && isTauri() && RAIL_SPEED_ATTRIBUTION,
       settings.terrain && TERRAIN_ATTRIBUTION,
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]
@@ -1109,6 +1140,7 @@
     follow={following}
     {selectedShip}
     {selectedTrain}
+    trainRoute={shownRoute}
     onselect={(f) => {
       place = null;
       // a click on empty map lets go of a ship or a train too

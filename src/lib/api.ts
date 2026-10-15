@@ -690,5 +690,19 @@ export function followTrain(id: string, onEvent: (e: TrainEvent) => void) {
 
 export const unfollowTrain = () => invoke<void>("unfollow_train");
 
+/** A place on a train's way: a station it stops at, or one it passes; at its platform where the track is known. */
+export type RouteStop = { name: string; lat: number; lon: number; track: string | null; stops: boolean };
+/** A train's whole way along the track, first station to last. */
+export type TrainRoute = {
+  /** `[lon, lat]`. */
+  path: [number, number][];
+  /** Where in `path` the train is: before it, the way it came. */
+  trainAt: number | null;
+  stops: RouteStop[];
+  /** False while some track is still loading (those legs are straight for now): ask again shortly. */
+  complete: boolean;
+};
+export const trainRoute = (id: string) => invoke<TrainRoute>("train_route", { id });
+
 /** Every stop of a train, in order, for sources with its timetable (Trafikverket); empty for the others. */
 export const trainStops = (id: string) => invoke<TrainStop[]>("train_stops", { id });

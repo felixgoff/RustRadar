@@ -19,7 +19,7 @@
 import { COORDINATE_SYSTEM, type Layer } from "@deck.gl/core";
 import { PathStyleExtension } from "@deck.gl/extensions";
 import { MVTLayer, TileLayer } from "@deck.gl/geo-layers";
-import { BitmapLayer } from "@deck.gl/layers";
+import { BitmapLayer, GeoJsonLayer, TextLayer } from "@deck.gl/layers";
 import { railOverview, railOverviewLayer } from "./rail-overview";
 
 type RGBA = [number, number, number, number];
@@ -271,6 +271,185 @@ export const openRailwayMapLayer = (fetchImage: FetchImage = fetchBlob, url = OP
     parameters: SURFACE_NO_CULL,
   });
 
+// --- Speeds: OpenRailwayMap's tracks, through the backend -------------------
+
+/**
+ * The railway as the backend routes trains on it: OpenRailwayMap's tracks
+ * (`railway_line_high`), each with its speed limit, fetched and kept by the
+ * app (its `railtiles:` protocol) and drawn up to the zoom routing uses, then
+ * scaled up: a train on the track is on the line drawn.
+ */
+export const SPEED_TILE_ZOOMS = { min: 7, max: 12 } as const;
+/** Speed labels on the lines from this zoom. */
+export const SPEED_LABEL_MIN_ZOOM = 12.5;
+/** OpenRailwayMap's credit, with the OpenStreetMap one. */
+export const RAIL_SPEED_ATTRIBUTION = "Rail: OpenRailwayMap, © OpenStreetMap contributors";
+
+/** The app's tile URL: Windows and Android webviews reach custom protocols as `http://<scheme>.localhost`. */
+export function railTilesUrl(userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent): string {
+  return /Windows|Android/.test(userAgent) ? "http://railtiles.localhost/{z}/{x}/{y}" : "railtiles://localhost/{z}/{x}/{y}";
+}
+
+/** The speed bands, km/h: each limit up to `upTo` gets the band's colour. Cool for slow, hot for fast. */
+export const SPEED_BANDS: readonly { upTo: number; color: RGBA; label: string }[] = [
+  { upTo: 40, color: [104, 128, 255, 240], label: "40" },
+  { upTo: 80, color: [72, 186, 232, 240], label: "80" },
+  { upTo: 120, color: [86, 206, 128, 240], label: "120" },
+  { upTo: 160, color: [228, 212, 84, 245], label: "160" },
+  { upTo: 200, color: [246, 146, 62, 245], label: "200" },
+  { upTo: Infinity, color: [242, 78, 104, 250], label: "250" },
+];
+/** Track whose limit isn't mapped. */
+export const SPEED_UNKNOWN: RGBA = [138, 142, 156, 190];
+
+/** The colour of a speed limit, km/h. */
+export function speedColor(kmh: unknown): RGBA {
+  if (typeof kmh !== "number" || !(kmh > 0)) return SPEED_UNKNOWN;
+  return (SPEED_BANDS.find((b) => kmh <= b.upTo) ?? SPEED_BANDS[SPEED_BANDS.length - 1]).color;
+}
+
+const MAIN_FEATURES = new Set(["rail", "narrow_gauge"]);
+const TRANSIT_FEATURES = new Set(["tram", "subway", "light_rail", "monorail"]);
+
+/** How an OpenRailwayMap track is drawn: running line, service track, urban transit, or not at all. */
+export function speedKind(p: Record<string, unknown>): "line" | "service" | "transit" | null {
+  if (p.state !== undefined && p.state !== "present") return null;
+  if (TRANSIT_FEATURES.has(String(p.feature))) return "transit";
+  if (!MAIN_FEATURES.has(String(p.feature))) return null;
+  return p.service ? "service" : "line";
+}
+
+/** Line colour: running lines and service tracks by their limit, transit violet, tunnels fainter. */
+export function railSpeedColor({ properties: p }: Feature): RGBA {
+  const kind = speedKind(p);
+  if (!kind) return NONE;
+  const c = kind === "transit" ? RAIL_TRANSIT : speedColor(p.maxspeed);
+  return p.tunnel ? tunnelOf(c) : c;
+}
+
+const SPEED_WIDTH = { line: 2.2, service: 0.9, transit: 1.1 } as const;
+export function railSpeedWidth({ properties: p }: Feature): number {
+  const kind = speedKind(p);
+  return kind ? SPEED_WIDTH[kind] : 0;
+}
+const railSpeedDash = ({ properties: p }: Feature): [number, number] => (p.tunnel ? TUNNEL_DASH : SOLID);
+
+type Coord = [number, number];
+type LineFeature = { geometry: { type: string; coordinates: unknown }; properties: Record<string, unknown> };
+export type SpeedLabel = { position: Coord; text: string; color: RGBA };
+
+const lengthOf = (line: Coord[]) => {
+  let d = 0;
+  for (let i = 1; i < line.length; i++) d += Math.hypot(line[i][0] - line[i - 1][0], line[i][1] - line[i - 1][1]);
+  return d;
+};
+/** The point halfway along a line. */
+function midpoint(line: Coord[]): Coord {
+  let left = lengthOf(line) / 2;
+  for (let i = 1; i < line.length; i++) {
+    const [a, b] = [line[i - 1], line[i]];
+    const d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (d >= left && d > 0) return [a[0] + ((b[0] - a[0]) * left) / d, a[1] + ((b[1] - a[1]) * left) / d];
+    left -= d;
+  }
+  return line[line.length - 1];
+}
+
+/**
+ * Where a tile's speed labels go: one on each running line long enough to
+ * carry one, longest first, and none near another of the same speed (a
+ * double track says it once). `size` is the tile's width in the features'
+ * units; lines shorter than `minLength` of it and labels closer than
+ * `spacing` of it are left out.
+ */
+export function speedLabels(features: LineFeature[], size: number, minLength = 0.06, spacing = 0.18): SpeedLabel[] {
+  const candidates: { line: Coord[]; length: number; kmh: number }[] = [];
+  for (const f of features) {
+    const kmh = f.properties.maxspeed;
+    if (speedKind(f.properties) !== "line" || typeof kmh !== "number" || !(kmh > 0)) continue;
+    const lines = (
+      f.geometry.type === "LineString" ? [f.geometry.coordinates] : f.geometry.type === "MultiLineString" ? f.geometry.coordinates : []
+    ) as Coord[][];
+    for (const line of lines) {
+      const length = lengthOf(line);
+      if (length >= minLength * size) candidates.push({ line, length, kmh });
+    }
+  }
+  candidates.sort((a, b) => b.length - a.length);
+  const out: SpeedLabel[] = [];
+  const near = spacing * size;
+  for (const c of candidates) {
+    const position = midpoint(c.line);
+    const text = String(Math.round(c.kmh));
+    if (out.some((l) => l.text === text && Math.hypot(l.position[0] - position[0], l.position[1] - position[1]) < near)) continue;
+    out.push({ position, text, color: speedColor(c.kmh) });
+  }
+  return out;
+}
+
+const LABEL_TEXT: RGBA = [12, 14, 20, 255];
+function renderSpeedTile(withLabels: boolean) {
+  return (props: any) => {
+    const lines = new GeoJsonLayer(props);
+    const features = props.data as LineFeature[] | null;
+    if (!withLabels || !features?.length) return lines;
+    // local tiles are in tile units (0 to 1); on the globe, in degrees
+    const [[west], [east]] = props.tile.boundingBox;
+    const size = props.coordinateSystem === COORDINATE_SYSTEM.CARTESIAN ? 1 : east - west;
+    const labels = speedLabels(features, size);
+    return [
+      lines,
+      new TextLayer<SpeedLabel>({
+        id: `${props.id}-speeds`,
+        data: labels,
+        modelMatrix: props.modelMatrix,
+        coordinateOrigin: props.coordinateOrigin,
+        coordinateSystem: props.coordinateSystem,
+        extensions: props.extensions?.filter((e: unknown) => !(e instanceof PathStyleExtension)),
+        getPosition: (l) => l.position,
+        getText: (l) => l.text,
+        getColor: LABEL_TEXT,
+        getSize: 10,
+        sizeUnits: "pixels",
+        fontFamily: "Inter, system-ui, sans-serif",
+        fontWeight: 650,
+        characterSet: "0123456789",
+        background: true,
+        getBackgroundColor: (l) => l.color,
+        backgroundPadding: [3, 1],
+        billboard: true,
+        parameters: { ...SURFACE_NO_CULL, depthCompare: "always" },
+      }),
+    ];
+  };
+}
+const speedTileRenderers = { plain: renderSpeedTile(false), labelled: renderSpeedTile(true) };
+
+/** The railway coloured by speed limit, with the limits written along it close in. */
+export const railSpeedLayer = (flat: boolean, zoom: number, workerUrl?: string, url = railTilesUrl()) =>
+  new MVTLayer<Record<string, unknown>, { getDashArray: unknown; dashJustified: boolean }>({
+    id: flat ? "rail-speed-flat" : "rail-speed-globe",
+    data: url,
+    minZoom: SPEED_TILE_ZOOMS.min,
+    maxZoom: SPEED_TILE_ZOOMS.max,
+    loadOptions: loadOptions(["railway_line_high"], workerUrl),
+    // features, not binary: the labels are placed from their lines
+    binary: false,
+    filled: false,
+    stroked: false,
+    getLineColor: railSpeedColor,
+    getLineWidth: railSpeedWidth,
+    lineWidthUnits: "pixels",
+    lineWidthScale: railWidthScale(zoom),
+    lineCapRounded: true,
+    getPointRadius: 0,
+    extensions: RAIL_EXTENSIONS,
+    getDashArray: railSpeedDash,
+    dashJustified: true,
+    renderSubLayers: zoom >= SPEED_LABEL_MIN_ZOOM ? speedTileRenderers.labelled : speedTileRenderers.plain,
+    parameters: SURFACE_NO_CULL,
+  } as never);
+
 export type RailOptions = {
   /** OpenFreeMap's vector tile URL template (Globe.svelte's `tileUrl`, from the TileJSON); null while it loads. */
   tileUrl: string | null;
@@ -290,6 +469,12 @@ export type RailOptions = {
   fetchImage?: FetchImage;
   /** OpenRailwayMap URL template (e.g. a backend proxy or cache); default `OPENRAILWAYMAP_URL`. */
   openRailwayMapUrl?: string;
+  /**
+   * Draw the network from the backend's OpenRailwayMap tracks, coloured by
+   * speed limit (the app only: the tiles come through its `railtiles:`
+   * protocol). Else OpenFreeMap's rail lines.
+   */
+  speeds?: boolean;
 };
 
 /**
@@ -309,6 +494,7 @@ export function railLayers({
   openRailwayMap = false,
   fetchImage,
   openRailwayMapUrl,
+  speeds = false,
 }: RailOptions): Layer[] {
   const layers: Layer[] = [];
   // zoomed out, where the tiles have no rail yet, the shipped overview; the
@@ -318,7 +504,8 @@ export function railLayers({
     const overview = railOverview();
     if (overview) layers.push(railOverviewLayer(overview, { main: RAIL_MAIN, minor: RAIL_MINOR }, flat));
   }
-  if (tileUrl && zoom >= RAIL_MIN_ZOOM) layers.push(railNetworkLayer(tileUrl, flat, zoom, workerUrl));
+  if (speeds && zoom >= RAIL_MIN_ZOOM) layers.push(railSpeedLayer(flat, zoom, workerUrl));
+  else if (tileUrl && zoom >= RAIL_MIN_ZOOM) layers.push(railNetworkLayer(tileUrl, flat, zoom, workerUrl));
   if (openRailwayMap && zoom >= OPENRAILWAYMAP_MIN_ZOOM) layers.push(openRailwayMapLayer(fetchImage, openRailwayMapUrl));
   if (tileUrl && stations && zoom >= STATION_MIN_ZOOM) layers.push(railStationLayer(tileUrl, flat, workerUrl));
   return layers;

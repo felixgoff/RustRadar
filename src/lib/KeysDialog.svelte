@@ -161,27 +161,6 @@
     </fieldset>
 
     <fieldset>
-      <legend>Trafiklab</legend>
-      <p class="note">
-        Live regional trains in Sweden. Free keys from <a href="https://www.trafiklab.se/" target="_blank" rel="noreferrer" onclick={external}>trafiklab.se</a>:
-        make a project and add the APIs below. Realtime has where the trains are;
-        Static names them (operator, line colour, every stop).
-      </p>
-      <label class="field">
-        <span>GTFS Sverige 3 Realtime key</span>
-        <input autocomplete="off" spellcheck="false" bind:value={form.trafiklabGtfs} disabled={busy} />
-      </label>
-      <label class="field">
-        <span>GTFS Sverige 3 Static key</span>
-        <input autocomplete="off" spellcheck="false" bind:value={form.trafiklabGtfsStatic} disabled={busy} />
-      </label>
-      <label class="field">
-        <span>Oxyfi realtime positioning key</span>
-        <input autocomplete="off" spellcheck="false" bind:value={form.trafiklabOxyfi} disabled={busy} />
-      </label>
-    </fieldset>
-
-    <fieldset>
       <legend>Trafikverket</legend>
       <p class="note">
         Every train in Sweden, SJ included. Free key from

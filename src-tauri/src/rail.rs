@@ -1,60 +1,130 @@
 //! The railway network, so trains run along the track rather than straight
-//! across country. It comes from OpenFreeMap's vector tiles, the ones the map
-//! draws its rail map from: the `transportation` layer's `rail` lines at
-//! zoom 12, where they are main lines, not sidings.
+//! across country, stop at the platform they are announced at, and keep to
+//! each section's speed limit.
 //!
-//! Tiles are fetched in the background and kept; a route is only made from
-//! tiles already here, so asking never waits on the network. A train whose
-//! tiles haven't arrived yet goes straight until the next refresh.
+//! It comes from OpenRailwayMap's vector tiles (`railway_line_high`): every
+//! track as mapped in OpenStreetMap, with its `maxspeed` and its `track_ref`
+//! (the platform track's number). The same tiles are what the map draws the
+//! rail network from (through the `railtiles:` protocol, see `serve`), at the
+//! zoom routing uses, so a train on the track is on the line drawn.
+//!
+//! Tiles are fetched in the background and kept, in memory and on disk; a
+//! route is only made from tiles already here, so asking never waits on the
+//! network. A train whose tiles haven't arrived yet goes straight until the
+//! next refresh.
+//!
+//! OpenRailwayMap asks for an identifying User-Agent and Referer and light
+//! use: tiles are kept on disk for two weeks and asked for a few at a time.
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::motion::{ahead, course, distance};
 
-const TILEJSON: &str = "https://tiles.openfreemap.org/planet";
-const ZOOM: u32 = 12;
-/// Tiles kept in memory (each is a few kilobytes of lines).
-const MAX_TILES: usize = 6000;
-/// A route needing more tiles than this is too long to make here.
-const MAX_ROUTE_TILES: usize = 48;
-/// Fetches at once.
+const TILES: &str = "https://openrailwaymap.app/railway_line_high,railway_text_km";
+const REFERER: &str = "https://github.com/felixgoff/RustRadar";
+/// The zoom routing uses, and the deepest the map draws (it scales the
+/// tiles up beyond): their lines are within a metre of the full detail.
+pub const ZOOM: u32 = 12;
+/// The shallowest zoom the tiles are served at.
+pub const MIN_ZOOM: u32 = 7;
+/// Tiles' tracks kept in memory for routing.
+const MAX_TILES: usize = 3000;
+/// Tiles' bytes kept in memory for the map.
+const MAX_BYTES: usize = 400;
+/// Graphs kept built, by the tiles they cover.
+const MAX_GRAPHS: usize = 12;
+/// A tile on disk is used without asking again for this long.
+const DISK_FRESH: Duration = Duration::from_secs(14 * 24 * 3600);
+/// A route near a train needing more tiles than this is too long to make here.
+const MAX_ROUTE_TILES: usize = 64;
+/// One leg of a whole run, station to station.
+const MAX_LEG_TILES: usize = 160;
+/// Fetches at once in the background.
 const MAX_LOADING: usize = 8;
 /// A tile that failed is asked again after this.
 const RETRY: Duration = Duration::from_secs(120);
 /// A train further than this from any track isn't on one we know.
 const SNAP_M: f64 = 150.0;
+/// Tracks this much further than the nearest are also considered for a train
+/// (its reported position is a few metres out; parallel tracks are 4.5 m apart).
+const SNAP_SPREAD_M: f64 = 6.0;
 /// A station further than this from the track isn't on it.
 const STATION_SNAP_M: f64 = 800.0;
-/// Track ends this close are joined (tile seams, small gaps in the data).
-const STITCH_M: f64 = 25.0;
-/// Going on along the track it takes the straightest way at a junction, but
-/// never one turning back on itself (a stitched-on spur).
+/// A platform track this far from the station's point still belongs to it.
+const PLATFORM_M: f64 = 1500.0;
+/// Pieces of a track cut at a tile's edge meeting within this are joined.
+const SEAM_M: f64 = 3.0;
+/// A track ending this close beside another runs into it (a switch whose
+/// node the tile's simplification moved). Under the 4.5 m between tracks.
+const JOIN_M: f64 = 2.0;
+/// The sharpest a train turns at a node, degrees: never back on itself.
 const MAX_TURN: f64 = 120.0;
+/// Segments shorter than this have no reliable direction.
+const SHORT_M: f64 = 3.0;
+/// Sidings, yards and spurs cost this much more than running lines.
+const SERVICE_COST: f64 = 3.0;
+/// The extent of a tile's own units when it doesn't say.
+const EXTENT_DEFAULT: f64 = 4096.0;
 
 type Line = Vec<(f64, f64)>;
 type Key = (u32, u32);
+/// A tile's bytes by `(z, x, y)`, with when they were last used.
+type Bytes = HashMap<(u32, u32, u32), (Instant, Arc<Vec<u8>>)>;
 
-struct Tiles {
-    template: Option<String>,
-    lines: HashMap<Key, (Instant, Arc<Vec<Line>>)>,
-    loading: HashSet<Key>,
-    failed: HashMap<Key, Instant>,
+/// One track as the tile has it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Track {
+    pub points: Line,
+    /// km/h.
+    pub maxspeed: Option<f64>,
+    /// The track's number at its station ("4").
+    pub track_ref: Option<String>,
+    /// A siding, yard track, spur or crossover.
+    pub service: bool,
 }
 
-fn tiles() -> &'static Mutex<Tiles> {
-    static T: OnceLock<Mutex<Tiles>> = OnceLock::new();
-    T.get_or_init(|| {
-        Mutex::new(Tiles { template: None, lines: HashMap::new(), loading: HashSet::new(), failed: HashMap::new() })
+struct Store {
+    tracks: HashMap<Key, (Instant, Arc<Vec<Track>>)>,
+    bytes: Bytes,
+    loading: HashSet<Key>,
+    failed: HashMap<Key, Instant>,
+    graphs: Vec<(Vec<Key>, Arc<Graph>)>,
+}
+
+fn store() -> &'static Mutex<Store> {
+    static S: OnceLock<Mutex<Store>> = OnceLock::new();
+    S.get_or_init(|| {
+        Mutex::new(Store {
+            tracks: HashMap::new(),
+            bytes: HashMap::new(),
+            loading: HashSet::new(),
+            failed: HashMap::new(),
+            graphs: Vec::new(),
+        })
     })
+}
+
+fn cache_dir() -> &'static OnceLock<PathBuf> {
+    static D: OnceLock<PathBuf> = OnceLock::new();
+    &D
+}
+
+/// Where tiles are kept between runs (the app's cache directory).
+pub fn set_cache_dir(dir: PathBuf) {
+    let _ = cache_dir().set(dir.join("rail-tiles"));
 }
 
 fn client() -> Option<&'static reqwest::Client> {
     static C: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     C.get_or_init(|| {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::REFERER, reqwest::header::HeaderValue::from_static(REFERER));
         fr24::client_builder()
             .user_agent(concat!("RustRadar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/felixgoff/RustRadar)"))
+            .default_headers(headers)
             .timeout(Duration::from_secs(20))
             .build()
             .ok()
@@ -72,15 +142,24 @@ pub fn tile_of(lat: f64, lon: f64) -> Key {
     (x as u32, y as u32)
 }
 
-/// A point in tile `(x, y)`'s own units (`0..extent`, y down) to degrees.
-fn to_lat_lon(x: u32, y: u32, extent: f64, px: f64, py: f64) -> (f64, f64) {
-    let n = f64::from(1u32 << ZOOM);
+/// A point in tile `(z, x, y)`'s own units (`0..extent`, y down) to degrees.
+fn to_lat_lon(z: u32, x: u32, y: u32, extent: f64, px: f64, py: f64) -> (f64, f64) {
+    let n = f64::from(1u32 << z);
     let lon = (f64::from(x) + px / extent) / n * 360.0 - 180.0;
     let m = std::f64::consts::PI * (1.0 - 2.0 * (f64::from(y) + py / extent) / n);
     (m.sinh().atan().to_degrees(), lon)
 }
 
-/// Protocol buffer reading, just enough for a vector tile.
+/// Whether a point lies on the edge of a routing tile (where tiles cut tracks).
+fn on_tile_edge(p: (f64, f64)) -> bool {
+    let n = f64::from(1u32 << ZOOM);
+    let fx = (p.1 + 180.0) / 360.0 * n;
+    let lat = p.0.clamp(-85.05, 85.05).to_radians();
+    let fy = (1.0 - lat.tan().asinh() / std::f64::consts::PI) / 2.0 * n;
+    // within about half a metre
+    (fx - fx.round()).abs() < 1e-4 || (fy - fy.round()).abs() < 1e-4
+}
+
 struct Pb<'a> {
     b: &'a [u8],
     i: usize,
@@ -89,37 +168,42 @@ struct Pb<'a> {
 impl<'a> Pb<'a> {
     fn varint(&mut self) -> Option<u64> {
         let mut v = 0u64;
-        for shift in (0..64).step_by(7) {
+        let mut shift = 0;
+        loop {
             let byte = *self.b.get(self.i)?;
             self.i += 1;
             v |= u64::from(byte & 0x7f) << shift;
             if byte < 0x80 {
                 return Some(v);
             }
+            shift += 7;
+            if shift > 63 {
+                return None;
+            }
         }
-        None
     }
 
-    /// The next field: its number, and its value (a varint, or the bytes of a
-    /// length-delimited one); fixed-size fields are skipped over.
+    /// The next field: its number, and its value (a varint, or the bytes of
+    /// a length-delimited or fixed-width one).
     fn field(&mut self) -> Option<(u64, Result<u64, &'a [u8]>)> {
         let key = self.varint()?;
         let value = match key & 7 {
             0 => Ok(self.varint()?),
-            2 => {
-                let len = usize::try_from(self.varint()?).ok()?;
-                let end = self.i.checked_add(len)?;
-                let bytes = self.b.get(self.i..end)?;
-                self.i = end;
-                Err(bytes)
-            }
             1 => {
+                let b = self.b.get(self.i..self.i + 8)?;
                 self.i += 8;
-                Ok(0)
+                Err(b)
+            }
+            2 => {
+                let len = self.varint()? as usize;
+                let b = self.b.get(self.i..self.i.checked_add(len)?)?;
+                self.i += len;
+                Err(b)
             }
             5 => {
+                let b = self.b.get(self.i..self.i + 4)?;
                 self.i += 4;
-                Ok(0)
+                Err(b)
             }
             _ => return None,
         };
@@ -129,7 +213,7 @@ impl<'a> Pb<'a> {
 
 fn fields(b: &[u8]) -> impl Iterator<Item = (u64, Result<u64, &[u8]>)> {
     let mut pb = Pb { b, i: 0 };
-    std::iter::from_fn(move || if pb.i < pb.b.len() { pb.field() } else { None })
+    std::iter::from_fn(move || pb.field())
 }
 
 fn packed(b: &[u8]) -> Vec<u64> {
@@ -137,57 +221,152 @@ fn packed(b: &[u8]) -> Vec<u64> {
     std::iter::from_fn(|| if pb.i < pb.b.len() { pb.varint() } else { None }).collect()
 }
 
-/// The rail lines in a vector tile, in degrees.
-pub fn decode(pbf: &[u8], x: u32, y: u32) -> Vec<Line> {
+/// A tag value: the vector tile spec's string, float, double, int, uint, sint or bool.
+#[derive(Clone, Debug, PartialEq)]
+enum Val<'a> {
+    Str(&'a str),
+    Num(f64),
+    Bool(bool),
+}
+
+fn value(b: &[u8]) -> Option<Val<'_>> {
+    fields(b).find_map(|(f, v)| match (f, v) {
+        (1, Err(s)) => std::str::from_utf8(s).ok().map(Val::Str),
+        (2, Err(b)) => Some(Val::Num(f64::from(f32::from_le_bytes(b.try_into().ok()?)))),
+        (3, Err(b)) => Some(Val::Num(f64::from_le_bytes(b.try_into().ok()?))),
+        (4, Ok(n)) => Some(Val::Num(n as i64 as f64)),
+        (5, Ok(n)) => Some(Val::Num(n as f64)),
+        (6, Ok(n)) => Some(Val::Num(((n >> 1) as i64 ^ -((n & 1) as i64)) as f64)),
+        (7, Ok(n)) => Some(Val::Bool(n != 0)),
+        _ => None,
+    })
+}
+
+/// A segment cut to the square `0..e` (Liang-Barsky); none if it lies outside.
+fn clip_segment(p: (f64, f64), q: (f64, f64), e: f64) -> Option<((f64, f64), (f64, f64))> {
+    let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (pp, qq) in [(-dx, p.0), (dx, e - p.0), (-dy, p.1), (dy, e - p.1)] {
+        if pp == 0.0 {
+            if qq < 0.0 {
+                return None;
+            }
+        } else {
+            let r = qq / pp;
+            if pp < 0.0 {
+                if r > t1 {
+                    return None;
+                }
+                t0 = t0.max(r);
+            } else {
+                if r < t0 {
+                    return None;
+                }
+                t1 = t1.min(r);
+            }
+        }
+    }
+    Some(((p.0 + t0 * dx, p.1 + t0 * dy), (p.0 + t1 * dx, p.1 + t1 * dy)))
+}
+
+/// A line cut to the tile: tiles overlap their neighbours a little, and cut
+/// at the very edge the pieces of neighbouring tiles meet end to end.
+fn clip(points: &[(f64, f64)], e: f64) -> Vec<Line> {
+    let mut out = Vec::new();
+    let mut cur: Line = Vec::new();
+    for w in points.windows(2) {
+        let Some((a, b)) = clip_segment(w[0], w[1], e) else {
+            if cur.len() > 1 {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur.clear();
+            continue;
+        };
+        if cur.last() != Some(&a) {
+            if cur.len() > 1 {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur = vec![a];
+        }
+        if b != a {
+            cur.push(b);
+        }
+        if b != w[1] {
+            // left the tile
+            if cur.len() > 1 {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur.clear();
+        }
+    }
+    if cur.len() > 1 {
+        out.push(cur);
+    }
+    out
+}
+
+/// The railway tracks in an OpenRailwayMap vector tile, in degrees.
+pub fn decode(pbf: &[u8], z: u32, x: u32, y: u32) -> Vec<Track> {
     let mut out = Vec::new();
     for (f, layer) in fields(pbf) {
         let (3, Err(layer)) = (f, layer) else { continue };
         let mut name = "";
         let mut keys: Vec<&str> = Vec::new();
-        let mut values: Vec<Option<&str>> = Vec::new();
+        let mut values: Vec<Option<Val>> = Vec::new();
         let mut features: Vec<&[u8]> = Vec::new();
-        let mut extent = 4096.0;
+        let mut extent = EXTENT_DEFAULT;
         for (lf, v) in fields(layer) {
             match (lf, v) {
                 (1, Err(b)) => name = std::str::from_utf8(b).unwrap_or_default(),
                 (2, Err(b)) => features.push(b),
                 (3, Err(b)) => keys.push(std::str::from_utf8(b).unwrap_or_default()),
-                (4, Err(b)) => values.push(fields(b).find_map(|(vf, vv)| match (vf, vv) {
-                    (1, Err(s)) => std::str::from_utf8(s).ok(),
-                    _ => None,
-                })),
+                (4, Err(b)) => values.push(value(b)),
                 (5, Ok(e)) => extent = e as f64,
                 _ => {}
             }
         }
-        if name != "transportation" {
+        if name != "railway_line_high" {
             continue;
         }
         for feature in features {
-            let mut rail = false;
+            let mut tags: HashMap<&str, &Val> = HashMap::new();
             let mut geometry: &[u8] = &[];
             let mut kind = 0;
             for (ff, v) in fields(feature) {
                 match (ff, v) {
-                    (2, Err(tags)) => {
-                        let t = packed(tags);
-                        rail = t.chunks(2).any(|kv| {
-                            kv.len() == 2
-                                && keys.get(kv[0] as usize) == Some(&"class")
-                                && values.get(kv[1] as usize).copied().flatten() == Some("rail")
-                        });
+                    (2, Err(t)) => {
+                        for kv in packed(t).chunks(2) {
+                            if let [k, v] = kv
+                                && let (Some(k), Some(Some(v))) = (keys.get(*k as usize), values.get(*v as usize))
+                            {
+                                tags.insert(k, v);
+                            }
+                        }
                     }
                     (3, Ok(k)) => kind = k,
                     (4, Err(g)) => geometry = g,
                     _ => {}
                 }
             }
-            if !rail || kind != 2 {
+            let text = |k: &str| match tags.get(k) {
+                Some(Val::Str(s)) => Some(*s),
+                _ => None,
+            };
+            // only railways in use: no trams or metros, nor lines abandoned, razed or being built
+            if kind != 2 || text("feature") != Some("rail") || text("state").is_some_and(|s| s != "present") {
                 continue;
             }
+            let maxspeed = match tags.get("maxspeed") {
+                Some(Val::Num(n)) if *n > 0.0 => Some(*n),
+                _ => None,
+            };
+            let track_ref = text("track_ref").map(str::to_owned);
+            let service = text("service").is_some();
+
             // MoveTo starts a line, LineTo goes on; coordinates are zigzag deltas
             let commands = packed(geometry);
             let (mut cx, mut cy) = (0i64, 0i64);
+            let mut lines: Vec<Line> = Vec::new();
             let mut line: Line = Vec::new();
             let mut i = 0;
             while i < commands.len() {
@@ -202,76 +381,150 @@ pub fn decode(pbf: &[u8], x: u32, y: u32) -> Vec<Line> {
                     cx += ((dx >> 1) as i64) ^ -((dx & 1) as i64);
                     cy += ((dy >> 1) as i64) ^ -((dy & 1) as i64);
                     if id == 1 && line.len() > 1 {
-                        out.push(std::mem::take(&mut line));
+                        lines.push(std::mem::take(&mut line));
                     } else if id == 1 {
                         line.clear();
                     }
-                    line.push(to_lat_lon(x, y, extent, cx as f64, cy as f64));
+                    line.push((cx as f64, cy as f64));
                 }
             }
             if line.len() > 1 {
-                out.push(line);
+                lines.push(line);
+            }
+            for piece in lines.iter().flat_map(|l| clip(l, extent)) {
+                out.push(Track {
+                    points: piece.iter().map(|&(px, py)| to_lat_lon(z, x, y, extent, px, py)).collect(),
+                    maxspeed,
+                    track_ref: track_ref.clone(),
+                    service,
+                });
             }
         }
     }
     out
 }
 
-async fn template() -> Option<String> {
-    if let Some(t) = tiles().lock().unwrap().template.clone() {
-        return Some(t);
+fn disk_path(z: u32, x: u32, y: u32) -> Option<PathBuf> {
+    Some(cache_dir().get()?.join(format!("{z}/{x}/{y}.pbf")))
+}
+
+/// A tile from disk, and whether it is still fresh. An empty file: no rail there.
+fn from_disk(z: u32, x: u32, y: u32) -> Option<(Vec<u8>, bool)> {
+    let path = disk_path(z, x, y)?;
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    let fresh = SystemTime::now().duration_since(modified).is_ok_and(|age| age < DISK_FRESH);
+    Some((std::fs::read(&path).ok()?, fresh))
+}
+
+fn to_disk(z: u32, x: u32, y: u32, bytes: &[u8]) {
+    if let Some(path) = disk_path(z, x, y) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, bytes);
     }
-    let body = client()?.get(TILEJSON).send().await.ok()?.text().await.ok()?;
-    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let t = json["tiles"][0].as_str()?.to_owned();
-    tiles().lock().unwrap().template = Some(t.clone());
-    Some(t)
+}
+
+/// A tile's bytes: from memory, else disk, else OpenRailwayMap. Empty where
+/// there is no railway.
+pub async fn tile_bytes(z: u32, x: u32, y: u32) -> Result<Arc<Vec<u8>>, String> {
+    if let Some((at, b)) = store().lock().unwrap().bytes.get_mut(&(z, x, y)) {
+        *at = Instant::now();
+        return Ok(b.clone());
+    }
+    let stale = match from_disk(z, x, y) {
+        Some((bytes, true)) => return Ok(remember(z, x, y, bytes)),
+        Some((bytes, false)) => Some(bytes),
+        None => None,
+    };
+    let fetched = async {
+        let url = format!("{TILES}/{z}/{x}/{y}");
+        let response = client().ok_or("no HTTP client")?.get(url).send().await.map_err(|e| e.to_string())?;
+        match response.status().as_u16() {
+            204 | 404 => Ok(Vec::new()),
+            s if (200..300).contains(&s) => Ok(response.bytes().await.map_err(|e| e.to_string())?.to_vec()),
+            s => Err(format!("OpenRailwayMap answered {s}")),
+        }
+    }
+    .await;
+    match (fetched, stale) {
+        (Ok(bytes), _) => {
+            to_disk(z, x, y, &bytes);
+            Ok(remember(z, x, y, bytes))
+        }
+        // an old tile beats none
+        (Err(_), Some(bytes)) => Ok(remember(z, x, y, bytes)),
+        (Err(e), None) => Err(e),
+    }
+}
+
+fn remember(z: u32, x: u32, y: u32, bytes: Vec<u8>) -> Arc<Vec<u8>> {
+    let bytes = Arc::new(bytes);
+    let mut s = store().lock().unwrap();
+    if s.bytes.len() >= MAX_BYTES
+        && let Some(oldest) = s.bytes.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| *k)
+    {
+        s.bytes.remove(&oldest);
+    }
+    s.bytes.insert((z, x, y), (Instant::now(), bytes.clone()));
+    bytes
+}
+
+/// The `railtiles:` protocol the map draws the network from: `/{z}/{x}/{y}`.
+pub async fn serve(path: &str) -> tauri::http::Response<Vec<u8>> {
+    let respond = |status: u16, body: Vec<u8>| {
+        tauri::http::Response::builder()
+            .status(status)
+            .header("Content-Type", "application/x-protobuf")
+            .header("Access-Control-Allow-Origin", "*")
+            .body(body)
+            .unwrap_or_default()
+    };
+    let parts: Vec<u32> = path.trim_matches('/').split('/').filter_map(|p| p.parse().ok()).collect();
+    let [z, x, y] = parts[..] else { return respond(400, Vec::new()) };
+    if !(MIN_ZOOM..=ZOOM).contains(&z) || x >= 1 << z || y >= 1 << z {
+        return respond(204, Vec::new());
+    }
+    match tile_bytes(z, x, y).await {
+        Ok(b) if b.is_empty() => respond(204, Vec::new()),
+        Ok(b) => respond(200, b.to_vec()),
+        Err(e) => {
+            eprintln!("rail tile {z}/{x}/{y}: {e}");
+            respond(502, Vec::new())
+        }
+    }
 }
 
 async fn fetch(key: Key) {
-    let lines = async {
-        let url = template()
-            .await?
-            .replace("{z}", &ZOOM.to_string())
-            .replace("{x}", &key.0.to_string())
-            .replace("{y}", &key.1.to_string());
-        let response = client()?.get(url).send().await.ok()?;
-        if response.status().as_u16() == 204 || response.status().as_u16() == 404 {
-            return Some(Vec::new()); // nothing there: no rail
-        }
-        if !response.status().is_success() {
-            return None;
-        }
-        Some(decode(&response.bytes().await.ok()?, key.0, key.1))
-    }
-    .await;
-    let mut t = tiles().lock().unwrap();
-    t.loading.remove(&key);
-    match lines {
-        Some(lines) => {
-            if t.lines.len() >= MAX_TILES
-                && let Some(oldest) = t.lines.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| *k)
+    let tracks = tile_bytes(ZOOM, key.0, key.1).await.map(|b| decode(&b, ZOOM, key.0, key.1));
+    let mut s = store().lock().unwrap();
+    s.loading.remove(&key);
+    match tracks {
+        Ok(tracks) => {
+            if s.tracks.len() >= MAX_TILES
+                && let Some(oldest) = s.tracks.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| *k)
             {
-                t.lines.remove(&oldest);
+                s.tracks.remove(&oldest);
             }
-            t.lines.insert(key, (Instant::now(), Arc::new(lines)));
+            s.tracks.insert(key, (Instant::now(), Arc::new(tracks)));
         }
-        None => {
-            t.failed.insert(key, Instant::now());
+        Err(e) => {
+            eprintln!("rail tile {key:?}: {e}");
+            s.failed.insert(key, Instant::now());
         }
     }
 }
 
-/// The lines of these tiles if all are here; the missing ones are sent for.
-fn lines_of(keys: &[Key]) -> Option<Vec<Arc<Vec<Line>>>> {
-    let mut t = tiles().lock().unwrap();
+/// The tracks of these tiles if all are here; the missing ones are sent for.
+fn tracks_of(keys: &[Key]) -> Option<Vec<Arc<Vec<Track>>>> {
+    let mut s = store().lock().unwrap();
     let mut out = Vec::with_capacity(keys.len());
     let mut missing = Vec::new();
     for key in keys {
-        match t.lines.get_mut(key) {
-            Some((at, lines)) => {
+        match s.tracks.get_mut(key) {
+            Some((at, tracks)) => {
                 *at = Instant::now();
-                out.push(lines.clone());
+                out.push(tracks.clone());
             }
             None => missing.push(*key),
         }
@@ -281,12 +534,34 @@ fn lines_of(keys: &[Key]) -> Option<Vec<Arc<Vec<Line>>>> {
         return missing.is_empty().then_some(out);
     }
     for key in &missing {
-        let recently_failed = t.failed.get(key).is_some_and(|at| at.elapsed() < RETRY);
-        if t.loading.len() < MAX_LOADING && !recently_failed && t.loading.insert(*key) {
+        let recently_failed = s.failed.get(key).is_some_and(|at| at.elapsed() < RETRY);
+        if s.loading.len() < MAX_LOADING && !recently_failed && s.loading.insert(*key) {
             tauri::async_runtime::spawn(fetch(*key));
         }
     }
     missing.is_empty().then_some(out)
+}
+
+/// The graph of these tiles' tracks, if they are all here.
+fn graph_for(mut keys: Vec<Key>) -> Option<Arc<Graph>> {
+    keys.sort_unstable();
+    {
+        let mut s = store().lock().unwrap();
+        if let Some(i) = s.graphs.iter().position(|(k, _)| *k == keys) {
+            let hit = s.graphs.remove(i);
+            let g = hit.1.clone();
+            s.graphs.push(hit);
+            return Some(g);
+        }
+    }
+    let sets = tracks_of(&keys)?;
+    let g = Arc::new(Graph::build(&sets));
+    let mut s = store().lock().unwrap();
+    if s.graphs.len() >= MAX_GRAPHS {
+        s.graphs.remove(0);
+    }
+    s.graphs.push((keys, g.clone()));
+    Some(g)
 }
 
 /// The tiles covering the box round these points, padded by `pad` degrees.
@@ -308,29 +583,65 @@ fn tiles_for(points: &[(f64, f64)], pad: f64) -> Vec<Key> {
 
 // ------------------------------------------------------------------ graph
 
+#[derive(Clone, Copy, Debug)]
+struct Edge {
+    to: usize,
+    len: f64,
+    /// m/s.
+    speed: Option<f32>,
+    service: bool,
+    /// Index into `Graph::refs`.
+    track: Option<u32>,
+}
+
 struct Graph {
     nodes: Vec<(f64, f64)>,
-    adj: Vec<Vec<(usize, f64)>>,
+    adj: Vec<Vec<Edge>>,
+    refs: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+struct Attr {
+    speed: Option<f32>,
+    service: bool,
+    track: Option<u32>,
+}
+
+/// A track number as signed at the platform, without its sector ("4b": "4").
+fn track_number(s: &str) -> &str {
+    let s = s.trim();
+    let digits = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    if digits == 0 { s } else { &s[..digits] }
 }
 
 impl Graph {
-    fn build(sets: &[Arc<Vec<Line>>]) -> Graph {
-        let mut g = Graph { nodes: Vec::new(), adj: Vec::new() };
+    fn build(sets: &[Arc<Vec<Track>>]) -> Graph {
+        let mut g = Graph { nodes: Vec::new(), adj: Vec::new(), refs: Vec::new() };
         let mut index: HashMap<(i64, i64), usize> = HashMap::new();
-        let mut node = |g: &mut Graph, p: (f64, f64)| -> usize {
-            let k = ((p.0 * 1e6).round() as i64, (p.1 * 1e6).round() as i64);
-            *index.entry(k).or_insert_with(|| {
-                g.nodes.push(p);
-                g.adj.push(Vec::new());
-                g.nodes.len() - 1
-            })
-        };
-        for line in sets.iter().flat_map(|s| s.iter()) {
+        let mut refs: HashMap<String, u32> = HashMap::new();
+        for track in sets.iter().flat_map(|s| s.iter()) {
+            let track_index = track.track_ref.as_deref().map(|r| {
+                let r = track_number(r).to_owned();
+                *refs.entry(r.clone()).or_insert_with(|| {
+                    g.refs.push(r);
+                    (g.refs.len() - 1) as u32
+                })
+            });
+            let attr = Attr {
+                speed: track.maxspeed.map(|k| (k / 3.6) as f32),
+                service: track.service,
+                track: track_index,
+            };
             let mut prev: Option<usize> = None;
-            for &p in line {
-                let n = node(&mut g, p);
+            for &p in &track.points {
+                let k = ((p.0 * 1e6).round() as i64, (p.1 * 1e6).round() as i64);
+                let n = *index.entry(k).or_insert_with(|| {
+                    g.nodes.push(p);
+                    g.adj.push(Vec::new());
+                    g.nodes.len() - 1
+                });
                 if let Some(a) = prev.filter(|a| *a != n) {
-                    g.link(a, n);
+                    g.link(a, n, attr);
                 }
                 prev = Some(n);
             }
@@ -339,80 +650,173 @@ impl Graph {
         g
     }
 
-    fn link(&mut self, a: usize, b: usize) {
-        let d = distance(self.nodes[a], self.nodes[b]);
-        if !self.adj[a].iter().any(|(n, _)| *n == b) {
-            self.adj[a].push((b, d));
-            self.adj[b].push((a, d));
+    fn link(&mut self, a: usize, b: usize, attr: Attr) {
+        if a == b || self.adj[a].iter().any(|e| e.to == b) {
+            return;
+        }
+        let len = distance(self.nodes[a], self.nodes[b]);
+        let edge = |to| Edge { to, len, speed: attr.speed, service: attr.service, track: attr.track };
+        self.adj[a].push(edge(b));
+        self.adj[b].push(edge(a));
+    }
+
+    fn attr(e: &Edge) -> Attr {
+        Attr { speed: e.speed, service: e.service, track: e.track }
+    }
+
+    fn edge(&self, a: usize, b: usize) -> Option<&Edge> {
+        self.adj[a].iter().find(|e| e.to == b)
+    }
+
+    fn unlink(&mut self, a: usize, b: usize) {
+        self.adj[a].retain(|e| e.to != b);
+        self.adj[b].retain(|e| e.to != a);
+    }
+
+    /// `from`'s tracks run into `into` instead; `from` is left alone.
+    fn merge(&mut self, from: usize, into: usize) {
+        for e in std::mem::take(&mut self.adj[from]) {
+            self.adj[e.to].retain(|x| x.to != from);
+            self.link(into, e.to, Self::attr(&e));
         }
     }
 
-    /// Joins each loose end to the nearest other track within `STITCH_M`:
-    /// tiles cut lines at their edges, and the pieces don't quite meet.
+    /// A node at `q` on the segment `a`-`b`.
+    fn split(&mut self, a: usize, b: usize, q: (f64, f64)) -> Option<usize> {
+        let attr = Self::attr(self.edge(a, b)?);
+        self.unlink(a, b);
+        self.nodes.push(q);
+        self.adj.push(Vec::new());
+        let n = self.nodes.len() - 1;
+        self.link(a, n, attr);
+        self.link(n, b, attr);
+        Some(n)
+    }
+
+    /// Joins tracks where the tiles don't quite: pieces cut at a tile's edge,
+    /// and track ends running into another track between its nodes. Only
+    /// within a couple of metres: parallel tracks are 4.5 m apart and must
+    /// stay apart.
     fn stitch(&mut self) {
-        const CELL: f64 = 0.0005;
+        const CELL: f64 = 0.0002;
         let cell = |p: (f64, f64)| ((p.0 / CELL).floor() as i64, (p.1 / CELL).floor() as i64);
+        let around = |c: (i64, i64)| (c.0 - 1..=c.0 + 1).flat_map(move |x| (c.1 - 1..=c.1 + 1).map(move |y| (x, y)));
+
+        // seams: ends on a tile's edge meet the end across it
+        let seam_ends: Vec<usize> =
+            (0..self.nodes.len()).filter(|i| self.adj[*i].len() == 1 && on_tile_edge(self.nodes[*i])).collect();
         let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
-        for (i, p) in self.nodes.iter().enumerate() {
-            grid.entry(cell(*p)).or_default().push(i);
+        for &i in &seam_ends {
+            grid.entry(cell(self.nodes[i])).or_default().push(i);
+        }
+        for &a in &seam_ends {
+            if self.adj[a].len() != 1 {
+                continue;
+            }
+            let neighbour = self.adj[a][0].to;
+            let best = around(cell(self.nodes[a]))
+                .filter_map(|c| grid.get(&c))
+                .flatten()
+                .filter(|&&b| b != a && b != neighbour && self.adj[b].len() == 1)
+                .map(|&b| (b, distance(self.nodes[a], self.nodes[b])))
+                .filter(|(_, d)| *d <= SEAM_M)
+                .min_by(|x, y| x.1.total_cmp(&y.1));
+            if let Some((b, _)) = best {
+                self.merge(a, b);
+            }
+        }
+
+        // ends running into a track between its nodes
+        let mut segments: HashMap<(i64, i64), Vec<(usize, usize)>> = HashMap::new();
+        for a in 0..self.nodes.len() {
+            for e in &self.adj[a] {
+                if e.to < a {
+                    continue;
+                }
+                let (c1, c2) = (cell(self.nodes[a]), cell(self.nodes[e.to]));
+                for x in c1.0.min(c2.0)..=c1.0.max(c2.0) {
+                    for y in c1.1.min(c2.1)..=c1.1.max(c2.1) {
+                        segments.entry((x, y)).or_default().push((a, e.to));
+                    }
+                }
+            }
         }
         let ends: Vec<usize> = (0..self.nodes.len()).filter(|i| self.adj[*i].len() == 1).collect();
         for a in ends {
-            let (cx, cy) = cell(self.nodes[a]);
-            let neighbour = self.adj[a][0].0;
-            let best = (cx - 1..=cx + 1)
-                .flat_map(|x| (cy - 1..=cy + 1).map(move |y| (x, y)))
-                .filter_map(|c| grid.get(&c))
+            if self.adj[a].len() != 1 {
+                continue;
+            }
+            let p = self.nodes[a];
+            let neighbour = self.adj[a][0].to;
+            let mut seen = HashSet::new();
+            let best = around(cell(p))
+                .filter_map(|c| segments.get(&c))
                 .flatten()
-                .filter(|&&b| b != a && b != neighbour)
-                .map(|&b| (b, distance(self.nodes[a], self.nodes[b])))
-                .filter(|(_, d)| *d <= STITCH_M)
-                .min_by(|x, y| x.1.total_cmp(&y.1));
-            if let Some((b, _)) = best {
-                self.link(a, b);
+                .filter(|s| seen.insert(**s))
+                .filter(|(u, v)| ![*u, *v].contains(&a) && ![*u, *v].contains(&neighbour))
+                .filter(|(u, v)| self.edge(*u, *v).is_some())
+                .map(|&(u, v)| {
+                    let (q, _) = project(p, self.nodes[u], self.nodes[v]);
+                    (u, v, q, distance(p, q))
+                })
+                .filter(|s| s.3 <= JOIN_M)
+                .min_by(|x, y| x.3.total_cmp(&y.3));
+            if let Some((u, v, q, _)) = best {
+                // onto a node it nearly meets, else a new one on the segment
+                let into = if distance(q, self.nodes[u]) < 0.5 {
+                    Some(u)
+                } else if distance(q, self.nodes[v]) < 0.5 {
+                    Some(v)
+                } else {
+                    self.split(u, v, q)
+                };
+                if let Some(into) = into {
+                    self.merge(a, into);
+                }
             }
         }
     }
 
-    /// The nearest point on the track: the segment's ends, how far along, and how far off.
-    fn snap(&self, p: (f64, f64), within: f64) -> Option<(usize, usize, (f64, f64), f64)> {
-        let mut best: Option<(usize, usize, (f64, f64), f64)> = None;
-        let k = p.0.to_radians().cos();
+    /// Every track segment within `within` of `p`, nearest first: its ends,
+    /// the nearest point on it, and how far off that is.
+    fn snaps(&self, p: (f64, f64), within: f64) -> Vec<(usize, usize, (f64, f64), f64)> {
+        let mut out = Vec::new();
         for a in 0..self.nodes.len() {
-            for &(b, _) in &self.adj[a] {
-                if b < a {
+            for e in &self.adj[a] {
+                if e.to < a {
                     continue;
                 }
-                let (pa, pb) = (self.nodes[a], self.nodes[b]);
-                // flat projection: plenty for a segment of a few hundred metres
-                let (ax, ay, bx, by, px, py) = (pa.1 * k, pa.0, pb.1 * k, pb.0, p.1 * k, p.0);
-                let (dx, dy) = (bx - ax, by - ay);
-                let len2 = dx * dx + dy * dy;
-                let t = if len2 > 0.0 { (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
-                let q = (pa.0 + (pb.0 - pa.0) * t, pa.1 + (pb.1 - pa.1) * t);
+                let (q, _) = project(p, self.nodes[a], self.nodes[e.to]);
                 let d = distance(p, q);
-                if d <= within && best.is_none_or(|bst| d < bst.3) {
-                    best = Some((a, b, q, d));
+                if d <= within {
+                    out.push((a, e.to, q, d));
                 }
             }
         }
-        best
+        out.sort_by(|x, y| x.3.total_cmp(&y.3));
+        out
     }
 
-    fn nearest_node(&self, p: (f64, f64), within: f64) -> Option<usize> {
-        (0..self.nodes.len())
-            .filter(|i| !self.adj[*i].is_empty())
-            .map(|i| (i, distance(p, self.nodes[i])))
-            .filter(|(_, d)| *d <= within)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i)
+    fn snap(&self, p: (f64, f64), within: f64) -> Option<(usize, usize, (f64, f64), f64)> {
+        self.snaps(p, within).into_iter().next()
     }
 
-    /// The shortest way along the track from `from` to `to`, not leaving
-    /// `from` towards `not_via` (the way it came).
-    fn path(&self, from: usize, to: usize, not_via: Option<usize>) -> Option<Vec<usize>> {
+    /// Whether a train can go on from `from` through `at` to `to`.
+    fn turnable(&self, from: usize, at: usize, to: usize) -> bool {
+        let (f, a, t) = (self.nodes[from], self.nodes[at], self.nodes[to]);
+        distance(f, a) < SHORT_M || distance(a, t) < SHORT_M || turn(course(f, a), course(a, t)) <= MAX_TURN
+    }
+
+    fn cost(e: &Edge) -> f64 {
+        if e.service { e.len * SERVICE_COST } else { e.len }
+    }
+
+    /// The cheapest way on from standing at `at` having come from `came`, to
+    /// the segment `ta`-`tb`, entering it at either end. The nodes from `at`
+    /// to the end it enters by, and the cost.
+    fn path(&self, at: usize, came: usize, ta: usize, tb: usize) -> Option<(Vec<usize>, f64)> {
         #[derive(PartialEq)]
-        struct Item(f64, usize);
+        struct Item(f64, usize, usize);
         impl Eq for Item {}
         impl Ord for Item {
             fn cmp(&self, o: &Self) -> std::cmp::Ordering {
@@ -424,43 +828,46 @@ impl Graph {
                 Some(self.cmp(o))
             }
         }
-        let mut dist = vec![f64::INFINITY; self.nodes.len()];
-        let mut prev = vec![usize::MAX; self.nodes.len()];
+        // states: at a node, having come from another (trains can't turn back)
+        let mut dist: HashMap<(usize, usize), f64> = HashMap::new();
+        let mut prev: HashMap<(usize, usize), (usize, usize)> = HashMap::new();
         let mut heap = BinaryHeap::new();
-        dist[from] = 0.0;
-        heap.push(Item(0.0, from));
-        while let Some(Item(d, n)) = heap.pop() {
-            if n == to {
-                break;
-            }
-            if d > dist[n] {
+        dist.insert((at, came), 0.0);
+        heap.push(Item(0.0, at, came));
+        let mut end = None;
+        while let Some(Item(d, n, from)) = heap.pop() {
+            if dist.get(&(n, from)).is_some_and(|best| d > *best) {
                 continue;
             }
-            for &(m, w) in &self.adj[n] {
-                if n == from && Some(m) == not_via {
+            // at an end of the target segment, able to run onto it
+            if (n == ta || n == tb) && self.turnable(from, n, if n == ta { tb } else { ta }) {
+                end = Some(((n, from), d));
+                break;
+            }
+            for e in &self.adj[n] {
+                if e.to == from || !self.turnable(from, n, e.to) {
                     continue;
                 }
-                let nd = d + w;
-                if nd < dist[m] {
-                    dist[m] = nd;
-                    prev[m] = n;
-                    heap.push(Item(nd, m));
+                let nd = d + Self::cost(e);
+                if dist.get(&(e.to, n)).is_none_or(|best| nd < *best) {
+                    dist.insert((e.to, n), nd);
+                    prev.insert((e.to, n), (n, from));
+                    heap.push(Item(nd, e.to, n));
                 }
             }
         }
-        if !dist[to].is_finite() {
-            return None;
-        }
-        let mut out = vec![to];
-        while *out.last()? != from {
-            out.push(prev[*out.last()?]);
+        let (mut state, cost) = end?;
+        let mut out = vec![state.0];
+        while state != (at, came) {
+            state = *prev.get(&state)?;
+            out.push(state.0);
         }
         out.reverse();
-        Some(out)
+        Some((out, cost))
     }
 
     /// Onwards from `at`, having come from `came`, as straight as the track
-    /// allows, for `metres`.
+    /// allows and keeping to running lines, for `metres`.
     fn onwards(&self, mut came: usize, mut at: usize, metres: f64) -> Vec<usize> {
         let mut out = Vec::new();
         let mut left = metres;
@@ -469,18 +876,32 @@ impl Graph {
             let heading = course(self.nodes[came], self.nodes[at]);
             let next = self.adj[at]
                 .iter()
-                .filter(|(m, _)| !seen.contains(m))
-                .map(|&(m, w)| (m, w, turn(heading, course(self.nodes[at], self.nodes[m]))))
-                .filter(|(_, _, t)| *t <= MAX_TURN)
-                .min_by(|a, b| a.2.total_cmp(&b.2));
-            let Some((m, w, _)) = next else { break };
-            out.push(m);
-            seen.insert(m);
-            left -= w;
-            (came, at) = (at, m);
+                .filter(|e| !seen.contains(&e.to))
+                .map(|e| (e, turn(heading, course(self.nodes[at], self.nodes[e.to]))))
+                .filter(|(e, t)| *t <= MAX_TURN || e.len < SHORT_M)
+                .min_by(|a, b| {
+                    let score = |(e, t): &(&Edge, f64)| t + if e.service { 30.0 } else { 0.0 };
+                    score(a).total_cmp(&score(b))
+                });
+            let Some((e, _)) = next else { break };
+            out.push(e.to);
+            seen.insert(e.to);
+            left -= e.len;
+            (came, at) = (at, e.to);
         }
         out
     }
+}
+
+/// The nearest point to `p` on the segment `a`-`b`, and how far along it (0 to 1).
+fn project(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> ((f64, f64), f64) {
+    // flat projection: plenty for a segment of a few hundred metres
+    let k = p.0.to_radians().cos();
+    let (ax, ay, bx, by, px, py) = (a.1 * k, a.0, b.1 * k, b.0, p.1 * k, p.0);
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 { (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    ((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t), t)
 }
 
 fn turn(a: f64, b: f64) -> f64 {
@@ -488,11 +909,137 @@ fn turn(a: f64, b: f64) -> f64 {
     d.min(360.0 - d)
 }
 
-/// A way along the track: its points, and how far along it each target was reached.
+// ------------------------------------------------------------------ routes
+
+/// A way along the track: its points, how far along it each target was
+/// reached, and each segment's speed limit (m/s).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Route {
     pub points: Vec<(f64, f64)>,
     pub reached: Vec<f64>,
+    pub speeds: Vec<Option<f64>>,
+}
+
+/// Where a train is on the track: on the segment `behind`-`front`, at `on`, heading for `front`.
+#[derive(Clone, Copy)]
+struct Place {
+    on: (f64, f64),
+    behind: usize,
+    front: usize,
+}
+
+struct Builder {
+    route: Route,
+    length: f64,
+    cost: f64,
+}
+
+impl Builder {
+    fn push(&mut self, p: (f64, f64), speed: Option<f32>) {
+        let Some(&last) = self.route.points.last() else {
+            self.route.points.push(p);
+            return;
+        };
+        let d = distance(last, p);
+        if d < 0.01 {
+            return;
+        }
+        self.length += d;
+        self.route.points.push(p);
+        self.route.speeds.push(speed.map(f64::from));
+    }
+}
+
+/// From `place` through the targets in order, then on for `onwards_m`;
+/// as far as the track goes.
+fn route_from(g: &Graph, place: Place, targets: &[(f64, f64)], onwards_m: f64) -> Option<Builder> {
+    let mut b = Builder {
+        route: Route { points: vec![place.on], reached: Vec::new(), speeds: Vec::new() },
+        length: 0.0,
+        cost: 0.0,
+    };
+    let mut at = place;
+    for target in targets {
+        let Some((ta, tb, tq, _)) = g.snap(*target, STATION_SNAP_M) else { break };
+        let on_this = (at.behind, at.front) == (ta, tb) || (at.behind, at.front) == (tb, ta);
+        if on_this && distance(g.nodes[at.behind], tq) >= distance(g.nodes[at.behind], at.on) - 0.01 {
+            // further along the segment it is on
+            let speed = g.edge(at.behind, at.front).and_then(|e| e.speed);
+            b.cost += distance(at.on, tq);
+            b.push(tq, speed);
+            at.on = tq;
+        } else {
+            let first = *g.edge(at.behind, at.front)?;
+            let Some((nodes, cost)) = g.path(at.front, at.behind, ta, tb) else { break };
+            b.cost += distance(at.on, g.nodes[at.front]) * if first.service { SERVICE_COST } else { 1.0 };
+            b.push(g.nodes[at.front], first.speed);
+            for w in nodes.windows(2) {
+                b.push(g.nodes[w[1]], g.edge(w[0], w[1]).and_then(|e| e.speed));
+            }
+            b.cost += cost;
+            let entered = *nodes.last()?;
+            let other = if entered == ta { tb } else { ta };
+            b.push(tq, g.edge(entered, other).and_then(|e| e.speed));
+            b.cost += distance(g.nodes[entered], tq);
+            at = Place { on: tq, behind: entered, front: other };
+        }
+        b.route.reached.push(b.length);
+    }
+    if onwards_m > 0.0 {
+        b.push(g.nodes[at.front], g.edge(at.behind, at.front).and_then(|e| e.speed));
+        let mut prev = at.front;
+        for n in g.onwards(at.behind, at.front, onwards_m) {
+            b.push(g.nodes[n], g.edge(prev, n).and_then(|e| e.speed));
+            prev = n;
+        }
+    }
+    Some(b)
+}
+
+/// The ways a train at `start` could be on the track: the nearest segment
+/// and those just as likely (up to `spread` metres further), each way along
+/// it the heading allows.
+fn places(g: &Graph, start: (f64, f64), heading: Option<f64>, spread: f64) -> Vec<(Place, f64)> {
+    let snaps = g.snaps(start, SNAP_M);
+    let Some(nearest) = snaps.first().map(|s| s.3) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (a, b, on, d) in snaps.into_iter().take_while(|s| s.3 <= nearest + spread).take(6) {
+        let forward = Place { on, behind: a, front: b };
+        let backward = Place { on, behind: b, front: a };
+        match heading {
+            Some(h) => {
+                let toward_b = turn(h, course(g.nodes[a], g.nodes[b])) <= 90.0;
+                out.push((if toward_b { forward } else { backward }, d));
+            }
+            None => {
+                out.push((forward, d));
+                out.push((backward, d));
+            }
+        }
+    }
+    out
+}
+
+fn route_in(
+    g: &Graph,
+    start: (f64, f64),
+    heading: Option<f64>,
+    targets: &[(f64, f64)],
+    onwards_m: f64,
+    spread: f64,
+) -> Option<Route> {
+    // the likeliest: reaching the most targets, the cheapest way, near the report
+    let best = places(g, start, heading, spread)
+        .into_iter()
+        .filter_map(|(place, off)| {
+            let service = g.edge(place.behind, place.front).is_some_and(|e| e.service);
+            let b = route_from(g, place, targets, onwards_m)?;
+            let score = b.cost + off * 20.0 + if service && targets.is_empty() { 50.0 } else { 0.0 };
+            Some((b.route.reached.len(), score, b))
+        })
+        .min_by(|x, y| y.0.cmp(&x.0).then(x.1.total_cmp(&y.1)))?;
+    let route = best.2.route;
+    (route.points.len() >= 2).then_some(route)
 }
 
 /// A way along the known track from `start` (heading roughly `heading`)
@@ -515,74 +1062,132 @@ pub fn route(start: (f64, f64), heading: Option<f64>, targets: &[(f64, f64)], on
     if keys.len() > MAX_ROUTE_TILES {
         return None;
     }
-    let sets = lines_of(&keys)?;
-    let g = Graph::build(&sets);
-    route_in(&g, start, heading, &targets, onwards_m)
+    let g = graph_for(keys)?;
+    route_in(&g, start, heading, &targets, onwards_m, SNAP_SPREAD_M)
 }
 
-/// `route` in the shape the motion module takes (`motion::Router`).
-pub fn router(
-    start: (f64, f64),
-    heading: Option<f64>,
-    targets: &[(f64, f64)],
-    onwards_m: f64,
-) -> Option<crate::motion::Routed> {
-    route(start, heading, targets, onwards_m).map(|r| (r.points, r.reached))
+/// The nearest point on the track, if it is loaded and near.
+pub fn snap(p: (f64, f64)) -> Option<(f64, f64)> {
+    let g = graph_for(tiles_for(&[p], 0.005))?;
+    g.snap(p, SNAP_M).map(|s| s.2)
 }
 
-fn route_in(
-    g: &Graph,
-    start: (f64, f64),
-    heading: Option<f64>,
-    targets: &[(f64, f64)],
-    onwards_m: f64,
-) -> Option<Route> {
-    let (a, b, on, _) = g.snap(start, SNAP_M)?;
-    // which way along the segment it is going: the end nearer its heading,
-    // else towards the first target
-    let toward_b = match (heading, targets.first()) {
-        (Some(h), _) => turn(h, course(on, g.nodes[b])) <= turn(h, course(on, g.nodes[a])),
-        (None, Some(t)) => distance(g.nodes[b], *t) <= distance(g.nodes[a], *t),
-        (None, None) => true,
-    };
-    let (behind, front) = if toward_b { (a, b) } else { (b, a) };
-    let mut nodes = vec![front];
-    let mut reached = Vec::new();
-    let mut points = vec![on, g.nodes[front]];
-    let mut length = distance(on, g.nodes[front]);
-    let mut came = behind;
-    for target in targets {
-        let Some(to) = g.nearest_node(*target, STATION_SNAP_M) else { break };
-        let here = *nodes.last()?;
-        let Some(path) = g.path(here, to, Some(came)) else { break };
-        for w in path.windows(2) {
-            length += distance(g.nodes[w[0]], g.nodes[w[1]]);
-            points.push(g.nodes[w[1]]);
-        }
-        if path.len() >= 2 {
-            came = path[path.len() - 2];
-        }
-        nodes.push(to);
-        reached.push(length);
+/// Where a train stops at a station: on its announced track (`"4b"` is
+/// track 4), at the point nearest the station's; else on the nearest running
+/// line. None while the track there isn't loaded, or when there is none.
+pub fn platform(station: (f64, f64), track: Option<&str>) -> Option<(f64, f64)> {
+    let g = graph_for(tiles_for(&[station], 0.015))?;
+    platform_in(&g, station, track)
+}
+
+fn platform_in(g: &Graph, station: (f64, f64), track: Option<&str>) -> Option<(f64, f64)> {
+    let wanted = track.map(track_number).and_then(|t| g.refs.iter().position(|r| r == t)).map(|i| i as u32);
+    let near = g.snaps(station, PLATFORM_M);
+    if let Some(w) = wanted
+        && let Some(s) = near.iter().find(|s| g.edge(s.0, s.1).is_some_and(|e| e.track == Some(w)))
+    {
+        return Some(s.2);
     }
-    let last = *nodes.last()?;
-    for n in g.onwards(came, last, onwards_m) {
-        points.push(g.nodes[n]);
+    // no such track mapped: the nearest running line, else any track
+    near.iter()
+        .filter(|s| s.3 <= STATION_SNAP_M)
+        .find(|s| g.edge(s.0, s.1).is_some_and(|e| !e.service))
+        .or_else(|| near.first().filter(|s| s.3 <= STATION_SNAP_M))
+        .map(|s| s.2)
+}
+
+/// Where a train standing near `platform` is: its reported place moved onto
+/// the platform's track (it is at the platform, along it where it said).
+/// None while the track isn't loaded.
+pub fn hold(at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)> {
+    let g = graph_for(tiles_for(&[at, platform], 0.005))?;
+    hold_in(&g, at, platform)
+}
+
+fn hold_in(g: &Graph, at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)> {
+    let (a, b, _, _) = g.snap(platform, 1.0)?;
+    // the platform's track: from its segment on in both directions, as straight as it goes
+    let mut chain: Vec<usize> = g.onwards(b, a, 800.0);
+    chain.reverse();
+    chain.extend([a, b]);
+    chain.extend(g.onwards(a, b, 800.0));
+    chain
+        .windows(2)
+        .map(|w| project(at, g.nodes[w[0]], g.nodes[w[1]]).0)
+        .min_by(|p, q| distance(at, *p).total_cmp(&distance(at, *q)))
+}
+
+/// The way through a whole run's places (stations, the places it passes, and
+/// the train itself), leg by leg: its points and the index among them of each
+/// place. Legs whose track isn't loaded yet (it is sent for) are straight
+/// lines, and the answer is marked incomplete.
+pub fn way_through(places: &[(f64, f64)]) -> (Vec<(f64, f64)>, Vec<usize>, bool) {
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    let mut at = Vec::new();
+    let mut complete = true;
+    for (i, place) in places.iter().enumerate() {
+        if i > 0 {
+            let from = places[i - 1];
+            let heading = (points.len() >= 2).then(|| course(points[points.len() - 2], points[points.len() - 1]));
+            let keys = tiles_for(&[from, *place], 0.03);
+            let leg = if keys.len() > MAX_LEG_TILES {
+                None
+            } else {
+                match graph_for(keys) {
+                    Some(g) => route_in(&g, from, heading, &[*place], 0.0, 1.0)
+                        .filter(|r| r.reached.len() == 1)
+                        .or_else(|| route_in(&g, from, None, &[*place], 0.0, 1.0).filter(|r| r.reached.len() == 1)),
+                    None => {
+                        complete = false;
+                        None
+                    }
+                }
+            };
+            match leg {
+                Some(r) => points.extend(r.points.into_iter().skip(1)),
+                None => points.push(*place),
+            }
+        } else {
+            points.push(*place);
+        }
+        at.push(points.len() - 1);
     }
-    points.dedup();
-    (points.len() >= 2).then_some(Route { points, reached })
+    (points, at, complete)
+}
+
+/// The track, for the motion module.
+pub struct Rail;
+
+impl crate::motion::Track for Rail {
+    fn route(
+        &self,
+        start: (f64, f64),
+        heading: Option<f64>,
+        targets: &[(f64, f64)],
+        onwards_m: f64,
+    ) -> Option<crate::motion::Routed> {
+        route(start, heading, targets, onwards_m).map(|r| (r.points, r.reached, r.speeds))
+    }
+
+    fn hold(&self, at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)> {
+        hold(at, platform)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn graph(lines: Vec<Line>) -> Graph {
-        Graph::build(&[Arc::new(lines)])
+    fn track(points: Line) -> Track {
+        Track { points, ..Default::default() }
+    }
+
+    fn graph(tracks: Vec<Track>) -> Graph {
+        Graph::build(&[Arc::new(tracks)])
     }
 
     /// A line of points every 100 m from `from` on a course.
-    fn track(from: (f64, f64), course: f64, km: f64) -> Line {
+    fn line(from: (f64, f64), course: f64, km: f64) -> Line {
         (0..=(km * 10.0) as usize).map(|i| ahead(from, course, i as f64 * 100.0)).collect()
     }
 
@@ -590,11 +1195,11 @@ mod tests {
     fn it_follows_the_bend_rather_than_going_straight() {
         // east for 2 km, then north for 3 km
         let corner = ahead((57.0, 12.0), 90.0, 2_000.0);
-        let mut line = track((57.0, 12.0), 90.0, 2.0);
-        line.extend(track(corner, 0.0, 3.0).into_iter().skip(1));
-        let g = graph(vec![line]);
+        let mut l = line((57.0, 12.0), 90.0, 2.0);
+        l.extend(line(corner, 0.0, 3.0).into_iter().skip(1));
+        let g = graph(vec![track(l)]);
         let start = ahead((57.0, 12.0), 90.0, 500.0);
-        let r = route_in(&g, (start.0 + 0.0002, start.1), Some(90.0), &[], 3_000.0).unwrap();
+        let r = route_in(&g, (start.0 + 0.0002, start.1), Some(90.0), &[], 3_000.0, SNAP_SPREAD_M).unwrap();
         let end = *r.points.last().unwrap();
         assert!(end.0 > corner.0 + 0.005, "went round the corner northwards: {end:?}");
         assert!((end.1 - corner.1).abs() < 0.001, "stayed on the northbound track");
@@ -604,52 +1209,176 @@ mod tests {
     fn it_finds_the_way_to_a_station_through_a_junction() {
         // a junction: one branch north-east, one south-east; the station is on the southern one
         let junction = ahead((57.0, 12.0), 90.0, 1_000.0);
-        let main = track((57.0, 12.0), 90.0, 1.0);
-        let north = track(junction, 45.0, 4.0);
-        let south = track(junction, 135.0, 4.0);
         let station = ahead(junction, 135.0, 3_000.0);
-        let g = graph(vec![main, north, south]);
-        let r = route_in(&g, (57.0, 12.0005), Some(90.0), &[station], 500.0).unwrap();
+        let g = graph(vec![
+            track(line((57.0, 12.0), 90.0, 1.0)),
+            track(line(junction, 45.0, 4.0)),
+            track(line(junction, 135.0, 4.0)),
+        ]);
+        let r = route_in(&g, (57.0, 12.0005), Some(90.0), &[station], 500.0, SNAP_SPREAD_M).unwrap();
         assert_eq!(r.reached.len(), 1);
         assert!((r.reached[0] - 4_000.0).abs() < 150.0, "about 4 km along: {}", r.reached[0]);
         assert!(r.points.iter().all(|p| p.0 <= 57.0 + 1e-4), "never on the northern branch");
     }
 
     #[test]
-    fn tile_seams_are_stitched() {
-        // the same line cut in two with a 10 m gap
-        let a = track((57.0, 12.0), 90.0, 1.0);
-        let gap_start = ahead(*a.last().unwrap(), 90.0, 10.0);
-        let b = track(gap_start, 90.0, 1.0);
-        let g = graph(vec![a, b]);
-        let r = route_in(&g, (57.0, 12.0001), Some(90.0), &[], 1_800.0).unwrap();
-        assert!(distance(r.points[0], *r.points.last().unwrap()) > 1_500.0);
+    fn it_never_turns_back_at_a_switch() {
+        // a branch leaving the main line eastwards at 20°: a train on the main
+        // line heading west can't take it without reversing
+        let switch = ahead((57.0, 12.0), 90.0, 1_000.0);
+        let branch_end = ahead(switch, 70.0, 2_000.0);
+        let g = graph(vec![track(line((57.0, 12.0), 90.0, 3.0)), track(line(switch, 70.0, 2.0))]);
+        let start = ahead((57.0, 12.0), 90.0, 1_500.0);
+        let r = route_in(&g, start, Some(270.0), &[branch_end], 500.0, SNAP_SPREAD_M).unwrap();
+        assert!(r.reached.is_empty(), "no way there going west");
     }
 
     #[test]
-    fn tiles_and_geometry_decode() {
+    fn parallel_tracks_stay_apart_and_seams_join() {
+        // two tracks 4.5 m apart; the northern one cut at a tile edge, its pieces 1 m apart
+        let edge_lon = (2198.0 / f64::from(1u32 << ZOOM)) * 360.0 - 180.0;
+        let a = (55.70, edge_lon - 0.02);
+        let south = line(a, 90.0, 2.5);
+        let north_start = ahead(a, 0.0, 4.5);
+        let north: Line = line(north_start, 90.0, 2.5);
+        let west: Line = north.iter().copied().filter(|p| p.1 < edge_lon).chain([(north_start.0, edge_lon)]).collect();
+        let east: Line = [(north_start.0 + 0.000009, edge_lon)]
+            .into_iter()
+            .chain(north.iter().copied().filter(|p| p.1 > edge_lon))
+            .collect();
+        let g = graph(vec![track(south), track(west), track(east)]);
+        let end_north = *north.last().unwrap();
+        let r = route_in(&g, ahead(north_start, 90.0, 50.0), Some(90.0), &[end_north], 0.0, 0.5).unwrap();
+        assert_eq!(r.reached.len(), 1, "across the seam");
+        assert!(r.points.iter().all(|p| p.0 > a.0 + 0.00002), "never on the southern track");
+    }
+
+    #[test]
+    fn trains_stop_at_their_announced_track() {
+        let station = (57.0, 12.0);
+        let t1 = Track {
+            points: line(ahead(station, 0.0, 20.0), 90.0, 0.4),
+            track_ref: Some("1".into()),
+            ..Default::default()
+        };
+        let t2 = Track {
+            points: line(ahead(station, 0.0, 24.5), 90.0, 0.4),
+            track_ref: Some("2".into()),
+            service: true,
+            ..Default::default()
+        };
+        let g = graph(vec![t1, t2]);
+        let p2 = platform_in(&g, station, Some("2b")).unwrap();
+        assert!((distance(station, p2) - 24.5).abs() < 0.5, "on track 2: {}", distance(station, p2));
+        let p = platform_in(&g, station, Some("9")).unwrap();
+        assert!((distance(station, p) - 20.0).abs() < 0.5, "an unknown track: the nearest running line");
+        // a train reported between the tracks, standing at track 2, is put on track 2
+        let reported = ahead(ahead(station, 0.0, 21.0), 90.0, 150.0);
+        let held = hold_in(&g, reported, p2).unwrap();
+        let on_track_2 = ahead(ahead(station, 0.0, 24.5), 90.0, 150.0);
+        assert!(distance(held, on_track_2) < 1.0, "{} m off", distance(held, on_track_2));
+    }
+
+    #[test]
+    fn routes_carry_the_speed_limits() {
+        let a = Track { points: line((57.0, 12.0), 90.0, 1.0), maxspeed: Some(160.0), ..Default::default() };
+        let b = Track {
+            points: line(ahead((57.0, 12.0), 90.0, 1_000.0), 90.0, 1.0),
+            maxspeed: Some(80.0),
+            ..Default::default()
+        };
+        let g = graph(vec![a, b]);
+        let r = route_in(&g, (57.0, 12.0), Some(90.0), &[], 1_800.0, SNAP_SPREAD_M).unwrap();
+        assert_eq!(r.speeds.len(), r.points.len() - 1);
+        assert!((r.speeds[0].unwrap() - 160.0 / 3.6).abs() < 0.01);
+        assert!((r.speeds.last().unwrap().unwrap() - 80.0 / 3.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn lines_are_clipped_to_the_tile() {
+        let pieces = clip(&[(-64.0, 100.0), (100.0, 100.0), (5000.0, 100.0), (5000.0, 200.0), (100.0, 200.0)], 4096.0);
+        assert_eq!(
+            pieces,
+            vec![vec![(0.0, 100.0), (100.0, 100.0), (4096.0, 100.0)], vec![(4096.0, 200.0), (100.0, 200.0)]]
+        );
+    }
+
+    #[test]
+    fn tiles_and_tags_decode() {
         assert_eq!(tile_of(55.70, 13.19), (2198, 1281));
-        // one layer "transportation", extent 4096, keys ["class"], values ["rail"],
-        // a line feature from (0,0) to (4096,4096)
-        let value = [0x0a, 0x04, b'r', b'a', b'i', b'l'];
-        let geometry = [9, 0, 0, 10, 0x80, 0x40, 0x80, 0x40];
-        let mut feature = vec![0x12, 2, 0, 0, 0x18, 2, 0x22, geometry.len() as u8];
-        feature.extend(geometry);
-        let mut layer = vec![0x0a, 14];
-        layer.extend(b"transportation");
-        layer.extend([0x12, feature.len() as u8]);
-        layer.extend(&feature);
-        layer.extend([0x1a, 5]);
-        layer.extend(b"class");
-        layer.extend([0x22, value.len() as u8]);
-        layer.extend(value);
+        fn bytes(field: u8, b: &[u8]) -> Vec<u8> {
+            let mut v = vec![(field << 3) | 2, b.len() as u8];
+            v.extend(b);
+            v
+        }
+        // layer "railway_line_high", extent 4096, a line from (0,0) to (4096,4096)
+        // tagged feature=rail, maxspeed=160 (a double), track_ref="3"
+        let geometry = [9u8, 0, 0, 10, 0x80, 0x40, 0x80, 0x40];
+        let mut feature = bytes(2, &[0, 0, 1, 1, 2, 2]);
+        feature.extend([0x18, 2]);
+        feature.extend(bytes(4, &geometry));
+        let mut layer = bytes(1, b"railway_line_high");
+        layer.extend(bytes(2, &feature));
+        for k in ["feature", "maxspeed", "track_ref"] {
+            layer.extend(bytes(3, k.as_bytes()));
+        }
+        layer.extend(bytes(4, &bytes(1, b"rail")));
+        let mut double = vec![0x19];
+        double.extend(160.0f64.to_le_bytes());
+        layer.extend(bytes(4, &double));
+        layer.extend(bytes(4, &bytes(1, b"3")));
         layer.extend([0x28, 0x80, 0x20]);
-        let mut tile = vec![0x1a, layer.len() as u8];
-        tile.extend(&layer);
-        let lines = decode(&tile, 2198, 1281);
-        assert_eq!(lines.len(), 1);
-        let (nw, se) = (lines[0][0], lines[0][1]);
+        let tile = bytes(3, &layer);
+        let tracks = decode(&tile, ZOOM, 2198, 1281);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].maxspeed, Some(160.0));
+        assert_eq!(tracks[0].track_ref.as_deref(), Some("3"));
+        let (nw, se) = (tracks[0].points[0], tracks[0].points[1]);
         assert_eq!(tile_of(nw.0 - 1e-9, nw.1 + 1e-9), (2198, 1281));
         assert!(se.0 < nw.0 && se.1 > nw.1, "south-east of the corner");
+    }
+
+    /// A real tile (Lund, `RAIL_TILE` naming the file): tracks with speeds
+    /// and numbers, and the station's platforms.
+    #[test]
+    #[ignore]
+    fn a_real_tile() {
+        let bytes = std::fs::read(std::env::var("RAIL_TILE").unwrap()).unwrap();
+        let tracks = decode(&bytes, ZOOM, 2198, 1281);
+        assert!(tracks.len() > 30, "{}", tracks.len());
+        assert!(tracks.iter().any(|t| t.maxspeed.is_some()));
+        let g = Graph::build(&[Arc::new(tracks)]);
+        let lund = (55.7056, 13.1868);
+        // each of its tracks has its own place, a few metres apart
+        let platforms: Vec<(f64, f64)> =
+            ["1", "2", "3", "4", "5", "6"].iter().map(|t| platform_in(&g, lund, Some(t)).unwrap()).collect();
+        assert!(platforms.windows(2).all(|w| distance(w[0], w[1]) > 3.0), "{platforms:?}");
+    }
+
+    /// Real tiles from Lund to Malmö (`RAIL_TILES` naming a folder of
+    /// `{x}_{y}.pbf`): the way between the two stations, across tile seams.
+    #[test]
+    #[ignore]
+    fn lund_to_malmo() {
+        let dir = std::env::var("RAIL_TILES").unwrap();
+        let sets: Vec<Arc<Vec<Track>>> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.ok()?.file_name().into_string().ok()?;
+                let (x, y) = name.strip_suffix(".pbf")?.split_once('_')?;
+                let bytes = std::fs::read(format!("{dir}/{name}")).ok()?;
+                Some(Arc::new(decode(&bytes, ZOOM, x.parse().ok()?, y.parse().ok()?)))
+            })
+            .collect();
+        let g = Graph::build(&sets);
+        let lund = platform_in(&g, (55.7056, 13.1868), Some("2")).unwrap();
+        let malmo = platform_in(&g, (55.6094, 13.0006), Some("3")).unwrap();
+        eprintln!("{} nodes, Malmö C track 3 at {malmo:?}", g.nodes.len());
+        let r = route_in(&g, lund, None, &[malmo], 0.0, 1.0).unwrap();
+        let known = r.speeds.iter().filter(|s| s.is_some()).count();
+        eprintln!("reached {:?}, {} points, {known} with a limit, top {:?} km/h", r.reached, r.points.len(),
+            r.speeds.iter().flatten().fold(0.0f64, |a, b| a.max(*b * 3.6)));
+        assert_eq!(r.reached.len(), 1);
+        assert!((15_800.0..22_000.0).contains(&r.reached[0]), "{} m", r.reached[0]);
     }
 }

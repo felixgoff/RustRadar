@@ -58,6 +58,7 @@
     type LiveFlight,
     type Ship,
     type Train,
+    type TrainRoute,
   } from "./api";
   import { NorthUpGlobeController } from "./controller";
   import { aircraftModels, type AircraftModel } from "./aircraft";
@@ -95,7 +96,7 @@
   import { offsetEastNorth, shipMeshes, shipPlacement, type ShipClass } from "./ship-models";
   import { shipAtlas, shipColor, shipIcon, shipIconScale, shipIconSize, shipKindLabel } from "./ships";
   import { terrainLayers } from "./terrain-layer";
-  import { railLayers } from "./rail-layer";
+  import { RAIL_MIN_ZOOM, railLayers, SPEED_BANDS, SPEED_UNKNOWN } from "./rail-layer";
   import {
     delayText,
     headingAt,
@@ -144,6 +145,8 @@
     trains?: Train[];
     /** The selected train, ringed in the selection amber. */
     selectedTrain?: Train | null;
+    /** The selected train's whole way along the track. */
+    trainRoute?: TrainRoute | null;
     /** A train was clicked. */
     ontrainselect?: (train: Train) => void;
     /** A train to highlight, e.g. the one under the pointer in the sidebar's list. */
@@ -183,6 +186,7 @@
     railMap = false,
     trains = [],
     selectedTrain = null,
+    trainRoute = null,
     ontrainselect,
     hoveredTrainId = null,
     hoveredShipMmsi = null,
@@ -1825,6 +1829,50 @@
     ];
   }
 
+  /** The rail map is coloured by speed limit in the app (its tiles come through the backend). */
+  const railSpeeds = isTauri();
+  /** The zoom, for what the page shows over the map (the legend). */
+  let shownZoom = $state(0);
+
+  const TRAIN_ROUTE_AHEAD: [number, number, number, number] = [255, 196, 64, 235];
+  const TRAIN_ROUTE_BEHIND: [number, number, number, number] = [255, 196, 64, 90];
+  const TRAIN_ROUTE_STOP_FILL: [number, number, number, number] = [16, 18, 24, 240];
+  /** The way the selected train came (faint) and the way it goes (bright), with the stations it stops at. */
+  function trainRouteLayers(r: TrainRoute): Layer[] {
+    const at = r.trainAt ?? 0;
+    const behind = r.trainAt === null ? [] : r.path.slice(0, at + 1);
+    const ahead = r.path.slice(at);
+    const stations = r.stops.filter((s) => s.stops);
+    const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
+    return [
+      new PathLayer<[number, number][]>({
+        id: "train-route",
+        data: [behind, ahead].filter((p) => p.length > 1),
+        getPath: (p) => p,
+        getColor: (p) => (p === ahead ? TRAIN_ROUTE_AHEAD : TRAIN_ROUTE_BEHIND),
+        getWidth: 4,
+        widthUnits: "pixels",
+        capRounded: true,
+        jointRounded: true,
+        parameters: ground,
+        updateTriggers: { getColor: [at, r.path.length] },
+      }),
+      new ScatterplotLayer<(typeof stations)[number]>({
+        id: "train-route-stops",
+        data: stations,
+        getPosition: (s) => [s.lon, s.lat],
+        getRadius: 4,
+        radiusUnits: "pixels",
+        stroked: true,
+        getFillColor: TRAIN_ROUTE_STOP_FILL,
+        getLineColor: TRAIN_ROUTE_AHEAD,
+        getLineWidth: 2,
+        lineWidthUnits: "pixels",
+        parameters: ground,
+      }),
+    ];
+  }
+
   function buildLayers(): Layer[] {
     // the motion model's clock follows the feed's, not this machine's
     const now = motion.now();
@@ -1957,7 +2005,9 @@
       }
     }
     // the railway network: over the map, under the weather, ships, trains and aircraft
-    if (railMap) layers.push(...railLayers({ tileUrl, flat, zoom, workerUrl: mvtWorkerUrl }));
+    if (railMap) layers.push(...railLayers({ tileUrl, flat, zoom, workerUrl: mvtWorkerUrl, speeds: railSpeeds }));
+    // the selected train's way, on the track under the trains
+    if (trainRoute && selectedTrain) layers.push(...trainRouteLayers(trainRoute));
     if (weather) {
       if (Date.now() - radarCheckedAt > 600_000) refreshRadar();
       const lift = liftFor(pitch);
@@ -2668,6 +2718,7 @@
       onViewStateChange: ({ viewState }) => {
         const { longitude, latitude, zoom, bearing = 0, pitch = 0 } = viewState as Partial<ViewState>;
         view = { longitude: longitude!, latitude: latitude!, zoom: zoom!, bearing, pitch };
+        if (Math.floor(view.zoom * 2) !== Math.floor(shownZoom * 2)) shownZoom = view.zoom;
         // a gesture while locked on is re-aimed in the same frame, not on the next tick
         const locked = follow && selected && Date.now() > transitionUntil;
         if (locked) view = lockedView(view, selected!);
@@ -2712,7 +2763,7 @@
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
     void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
-    void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain];
+    void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain, trainRoute];
     void [hoveredTrainId, hoveredShipMmsi];
     render();
   });
@@ -2721,6 +2772,15 @@
 <div class="globe" bind:this={container} bind:clientWidth={areaWidth} bind:clientHeight={areaHeight}>
   {#if hoverCard}
     <HoverCard {...hoverCard} x={pointer.x} y={pointer.y} width={areaWidth} height={areaHeight} />
+  {/if}
+  {#if railMap && railSpeeds && shownZoom >= RAIL_MIN_ZOOM}
+    <div class="speed-legend" aria-label="Track speed limits, km/h">
+      <span class="unit">km/h</span>
+      {#each SPEED_BANDS as band (band.label)}
+        <span class="band" style:--c="rgb({band.color.slice(0, 3).join(' ')})">{band.upTo === Infinity ? `${band.label}+` : band.label}</span>
+      {/each}
+      <span class="band" style:--c="rgb({SPEED_UNKNOWN.slice(0, 3).join(' ')})" title="Limit not mapped">?</span>
+    </div>
   {/if}
   {#if mapError}
     <div class="map-error surface" role="alert">
@@ -2738,6 +2798,36 @@
   .globe {
     position: absolute;
     inset: 0;
+  }
+  /* the speed colours, small along the bottom: the lines say the rest close in */
+  .speed-legend {
+    position: absolute;
+    left: 50%;
+    bottom: calc(var(--sheet-h, 0px) + 26px);
+    z-index: 2;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px 6px;
+    border-radius: var(--radius-sm);
+    background: oklch(0.15 0 0 / 0.8);
+    font: 600 10px / 1 var(--font-data);
+    color: var(--text-2);
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  .speed-legend .unit {
+    margin-right: 4px;
+    color: var(--text-3);
+  }
+  .speed-legend .band {
+    min-width: 26px;
+    padding: 3px 4px;
+    border-radius: 2px;
+    background: var(--c);
+    color: oklch(0.16 0.01 260);
+    text-align: center;
   }
   .map-error {
     position: absolute;

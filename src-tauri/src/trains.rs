@@ -1040,6 +1040,18 @@ pub fn unfollow_train() {
     }
 }
 
+/// The whole way of a train along the track, for the sources that have its
+/// timetable. Made from the track loaded so far: while `complete` is false,
+/// ask again in a moment.
+#[tauri::command]
+pub async fn train_route(id: String) -> CmdResult<crate::trafikverket::TrainRoute> {
+    let key = crate::keys::current().trafikverket;
+    // a whole run is a few hundred kilometres of track: off the async threads
+    tauri::async_runtime::spawn_blocking(move || crate::trafikverket::route(&id, &key))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Every stop of a train, for the sources that have its timetable; none for the others.
 #[tauri::command]
 pub async fn train_stops(id: String) -> CmdResult<Vec<crate::trafikverket::Stop>> {
@@ -1080,7 +1092,7 @@ pub async fn trains_in_view(west: f64, south: f64, east: f64, north: f64, zoom: 
             t.heading.map(f64::from),
             &[],
             now,
-            Some(&crate::rail::router),
+            Some(&crate::rail::Rail),
         );
     }
     Ok(trains)

@@ -291,7 +291,7 @@ fn radar_area(view: &Area) -> Area {
 
 // ---------------------------------------------------------------- helpers
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
@@ -1011,6 +1011,33 @@ pub fn sources_for(view: &Area, zoom: f64) -> Vec<Source> {
         .into_iter()
         .filter(|s| zoom >= s.min_zoom() && s.covers(view) && (*s != Source::Trafikverket || keyed))
         .collect()
+}
+
+fn followed() -> &'static Mutex<Option<tauri::async_runtime::JoinHandle<()>>> {
+    static F: OnceLock<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> = OnceLock::new();
+    F.get_or_init(Default::default)
+}
+
+/// Streams live updates of a train (its position and its stops) until
+/// `unfollow_train` or another train is followed. Trafikverket's trains only:
+/// the other sources have no stream.
+#[tauri::command]
+pub fn follow_train(id: String, on_event: tauri::ipc::Channel<crate::trafikverket::TrainEvent>) -> CmdResult<()> {
+    let key = crate::keys::current().trafikverket;
+    let task = (id.starts_with("trafikverket:") && !key.is_empty())
+        .then(|| Ok::<_, String>(tauri::async_runtime::spawn(crate::trafikverket::follow(client()?.clone(), key, id, on_event))))
+        .transpose()?;
+    if let Some(previous) = std::mem::replace(&mut *followed().lock().unwrap_or_else(|e| e.into_inner()), task) {
+        previous.abort();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unfollow_train() {
+    if let Some(task) = followed().lock().unwrap_or_else(|e| e.into_inner()).take() {
+        task.abort();
+    }
 }
 
 /// Every stop of a train, for the sources that have its timetable; none for the others.

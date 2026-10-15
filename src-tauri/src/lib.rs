@@ -722,6 +722,8 @@ pub fn run() {
             ships::ship_details,
             trains::trains_in_view,
             trains::train_stops,
+            trains::follow_train,
+            trains::unfollow_train,
             train_media::train_media,
         ])
         .run(tauri::generate_context!())

@@ -768,7 +768,13 @@ pub async fn trains(http: &reqwest::Client, key: &str, now_ms: i64) -> Result<Ve
         eprintln!("trafikverket: delays: {e}");
         Default::default()
     });
-    Ok(reports.iter().map(|r| train(r, &services, &delays, &stations, now_ms)).collect())
+    let trains: Vec<Train> = reports.iter().map(|r| train(r, &services, &delays, &stations, now_ms)).collect();
+    // which operational number each train runs under, for following one
+    let mut numbers = operational_numbers().lock().unwrap();
+    numbers.clear();
+    numbers.extend(trains.iter().zip(&reports).map(|(t, r)| (t.id.clone(), r.lookup().to_owned())));
+    drop(numbers);
+    Ok(trains)
 }
 
 /// Every stop of a train, by the id `trains` gave it.
@@ -782,6 +788,184 @@ pub async fn stops(http: &reqwest::Client, key: &str, id: &str) -> Result<Vec<St
     let query = stops_query(ident, date);
     let (stations, body) = futures_util::future::join(stations(http, key), post(http, key, &query)).await;
     parse_stops(&body?, &stations.unwrap_or_default())
+}
+
+// --------------------------------------------------------------- following
+
+/// What the panel hears about the train it shows, as it happens.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TrainEvent {
+    /// A new position (and with it the way ahead).
+    Train { train: Box<Train> },
+    /// The stops with their times as they now stand.
+    Stops { stops: Vec<Stop> },
+}
+
+/// The operational number of each train on the map, by its id.
+fn operational_numbers() -> &'static Mutex<HashMap<String, String>> {
+    static N: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    N.get_or_init(Default::default)
+}
+
+/// A report older than this when it arrives is a replay, not news.
+const STALE_REPORT_MS: i64 = 15 * 60_000;
+/// Waiting before opening a stream again after it closed or failed.
+const RECONNECT: Duration = Duration::from_secs(3);
+
+/// The URL of a stream of changes to what one query asks for.
+async fn sse_url(http: &reqwest::Client, key: &str, query: &str) -> Result<String, String> {
+    let body = post(http, key, query).await?;
+    results(&body)?
+        .iter()
+        .find_map(|r| r["INFO"]["SSEURL"].as_str().map(str::to_owned))
+        .ok_or_else(|| "Trafikverket gave no stream".to_owned())
+}
+
+/// The data of each event in a chunk of an event stream; the rest (a part
+/// event) stays in `buf` for the next chunk.
+pub fn take_events(buf: &mut String) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Some(end) = buf.find("\n\n") {
+        let event: String = buf.drain(..end + 2).collect();
+        let data: Vec<&str> =
+            event.lines().filter_map(|l| l.strip_prefix("data:")).map(|d| d.strip_prefix(' ').unwrap_or(d)).collect();
+        if !data.is_empty() {
+            out.push(data.join("\n"));
+        }
+    }
+    out
+}
+
+/// Reads a stream until it ends, sending each event's data on.
+async fn read_stream(
+    http: &reqwest::Client,
+    url: &str,
+    kind: u8,
+    tx: &tokio::sync::mpsc::UnboundedSender<(u8, String)>,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+    let response = http.get(url).header("accept", "text/event-stream").send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("stream answered {}", response.status()));
+    }
+    let mut stream = response.bytes_stream();
+    let mut buf = String::new();
+    while let Some(chunk) = stream.next().await {
+        buf.push_str(&String::from_utf8_lossy(&chunk.map_err(|e| e.to_string())?).replace("\r\n", "\n"));
+        for data in take_events(&mut buf) {
+            if tx.send((kind, data)).is_err() {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How late the train runs by its stops: the latest actual time, else the next estimate.
+fn delay_of(stops: &[Stop]) -> Option<i32> {
+    let times = || stops.iter().flat_map(|s| [s.arrival.as_ref(), s.departure.as_ref()]).flatten();
+    let late = |t: &StopTime, at: Option<i64>| Some(((at? - t.planned?) as f64 / 60.0).round() as i32);
+    let actual: Vec<i32> = times().filter_map(|t| late(t, t.actual)).collect();
+    actual.last().copied().or_else(|| times().find_map(|t| late(t, t.estimated)))
+}
+
+/// Follows one train until dropped: its position from Trafikverket's stream
+/// of its position reports, its stops again whenever its announcements change.
+pub async fn follow(http: reqwest::Client, key: String, id: String, channel: tauri::ipc::Channel<TrainEvent>) {
+    let Some(rest) = id.strip_prefix("trafikverket:") else { return };
+    let (date, ident) = rest.split_once(':').unwrap_or_default();
+    let ident = ident.trim_start_matches('~').to_owned();
+    let number = operational_numbers().lock().unwrap().get(&id).cloned().unwrap_or_else(|| ident.clone());
+    let positions = format!(
+        "<QUERY sseurl=\"true\" objecttype=\"TrainPosition\" namespace=\"järnväg.trafikinfo\" schemaversion=\"1.1\" limit=\"0\">\
+         <FILTER><EQ name=\"Train.OperationalTrainNumber\" value=\"{}\"/></FILTER></QUERY>",
+        xml_escape(&number)
+    );
+    let announcements = format!(
+        "<QUERY sseurl=\"true\" objecttype=\"TrainAnnouncement\" schemaversion=\"1.9\" limit=\"0\">\
+         <FILTER><AND><EQ name=\"OperationalTrainNumber\" value=\"{}\"/>\
+         <GTE name=\"ScheduledDepartureDateTime\" value=\"{date}T00:00:00\"/>\
+         <LT name=\"ScheduledDepartureDateTime\" value=\"{date}T23:59:59\"/></AND></FILTER>\
+         <INCLUDE>ActivityId</INCLUDE></QUERY>",
+        xml_escape(&number)
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u8, String)>();
+    // each stream, opened again whenever it closes
+    let stream = |kind: u8, query: String| {
+        let (http, key, tx) = (http.clone(), key.clone(), tx.clone());
+        async move {
+            loop {
+                match sse_url(&http, &key, &query).await {
+                    Ok(url) => {
+                        if let Err(e) = read_stream(&http, &url, kind, &tx).await {
+                            eprintln!("trafikverket: train stream: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("trafikverket: train stream: {e}"),
+                }
+                if tx.is_closed() {
+                    return;
+                }
+                tokio::time::sleep(RECONNECT).await;
+            }
+        }
+    };
+    let streams = futures_util::future::join(stream(0, positions), stream(1, announcements));
+    let handle = async {
+        let mut delay = None;
+        let mut last = 0;
+        delay = push_stops(&http, &key, &id, &channel).await.or(delay);
+        while let Some((kind, data)) = rx.recv().await {
+            if kind == 1 {
+                // the timetable changed: the stops as they now stand
+                while let Ok((1, _)) = rx.try_recv() {}
+                delay = push_stops(&http, &key, &id, &channel).await.or(delay);
+                continue;
+            }
+            let now = crate::trains::now_ms();
+            let Ok(reports) = parse_positions(&data) else { continue };
+            let Some(report) = reports.into_iter().max_by_key(|r| r.at_ms) else { continue };
+            if report.at_ms <= last || now - report.at_ms > STALE_REPORT_MS {
+                continue;
+            }
+            last = report.at_ms;
+            let services = known_services(&key);
+            let stations = station_cache().lock().unwrap().clone().map(|(_, _, s)| s).unwrap_or_default();
+            let mut delays: HashMap<String, i32> = HashMap::new();
+            if let Some(d) = delay {
+                delays.insert(report.lookup().to_owned(), d);
+            }
+            let train = train(&report, &services, &delays, &stations, now);
+            if channel.send(TrainEvent::Train { train: Box::new(train) }).is_err() {
+                return;
+            }
+        }
+    };
+    // the streams run until the handler stops (the panel closed, or another train followed)
+    futures_util::future::select(Box::pin(streams), Box::pin(handle)).await;
+}
+
+/// Sends the train's stops as they stand; how late it runs by them.
+async fn push_stops(
+    http: &reqwest::Client,
+    key: &str,
+    id: &str,
+    channel: &tauri::ipc::Channel<TrainEvent>,
+) -> Option<i32> {
+    let stops = stops(http, key, id).await.ok()?;
+    let delay = delay_of(&stops);
+    let _ = channel.send(TrainEvent::Stops { stops });
+    delay
+}
+
+/// The runs known so far, by number.
+fn known_services(key: &str) -> HashMap<String, Vec<Service>> {
+    let cache = service_cache().lock().unwrap();
+    if cache.0 != key {
+        return HashMap::new();
+    }
+    cache.1.iter().map(|(k, (_, runs))| (k.clone(), runs.clone())).collect()
 }
 
 #[cfg(test)]
@@ -950,5 +1134,37 @@ mod tests {
         assert_eq!(t.operator.as_deref(), Some("Skånetrafiken"));
         assert_eq!(t.id, "trafikverket:2026-10-15:1065", "its stops are found by the advertised number");
         assert_eq!(t.delay_minutes, Some(3));
+    }
+
+    #[test]
+    fn event_streams_split_into_their_data() {
+        let mut buf = ":Connected\n\nid: 1\ndata: {\"a\":1}\n\nid: 2\ndata: {\"b\"".to_owned();
+        assert_eq!(take_events(&mut buf), vec![r#"{"a":1}"#.to_owned()], "the comment line carries no data");
+        assert_eq!(buf, "id: 2\ndata: {\"b\"", "the part event waits for the rest");
+        buf.push_str(":2}\n\n");
+        assert_eq!(take_events(&mut buf), vec![r#"{"b":2}"#.to_owned()]);
+    }
+
+    #[test]
+    fn the_delay_is_the_latest_actual_time_else_the_next_estimate() {
+        let at = |planned: i64, actual: Option<i64>, estimated: Option<i64>| Some(StopTime { planned: Some(planned), actual, estimated });
+        let stop = |arrival, departure| Stop {
+            name: String::new(),
+            lat: None,
+            lon: None,
+            arrival,
+            departure,
+            track: None,
+            canceled: false,
+            notes: vec![],
+        };
+        let stops = vec![
+            stop(None, at(0, Some(120), None)),
+            stop(at(600, Some(840), None), at(660, None, Some(900))),
+            stop(at(1200, None, Some(1500)), None),
+        ];
+        assert_eq!(delay_of(&stops), Some(4));
+        assert_eq!(delay_of(&stops[2..]), Some(5));
+        assert_eq!(delay_of(&[]), None);
     }
 }

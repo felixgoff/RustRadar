@@ -32,6 +32,9 @@
     type ShipDetails,
     type TopFlight,
     type Train,
+    type TrainStop,
+    followTrain,
+    unfollowTrain,
   } from "$lib/api";
   import AirportPanel from "$lib/AirportPanel.svelte";
   import FilterPanel from "$lib/FilterPanel.svelte";
@@ -509,10 +512,28 @@
   // The selected train: its position and report follow the list as the map
   // refreshes, and stay where they were last seen if the list drops it.
   let pickedTrain = $state.raw<Train | null>(null);
+  /** The selected train as its live stream last reported it, and its stops (Trafikverket's trains). */
+  let liveTrain = $state.raw<Train | null>(null);
+  let liveStops = $state.raw<TrainStop[] | null>(null);
   const selectedTrain = $derived.by<Train | null>(() => {
     if (!pickedTrain) return null;
     const id = pickedTrain.id;
-    return trains.find((t) => t.id === id) ?? pickedTrain;
+    const listed = trains.find((t) => t.id === id) ?? pickedTrain;
+    // the stream's report is newer than the list's more often than not
+    return liveTrain?.id === id && liveTrain.positionUnix >= listed.positionUnix ? liveTrain : listed;
+  });
+  // follow the selected train live while its panel is open
+  const followedId = $derived(pickedTrain?.id ?? null);
+  $effect(() => {
+    const id = followedId;
+    liveTrain = null;
+    liveStops = null;
+    if (!id || !isTauri()) return;
+    followTrain(id, (e) => {
+      if (e.kind === "train" && e.train.id === id) liveTrain = e.train;
+      else if (e.kind === "stops") liveStops = e.stops;
+    }).catch(() => {});
+    return () => void unfollowTrain().catch(() => {});
   });
   $effect(() => {
     const live = selectedTrain;
@@ -553,9 +574,16 @@
     const sort = trainFilters.sort;
     return sortTrains(q ? trainsFiltered.filter((t) => trainMatches(t, q)) : trainsFiltered, sort, sort === "distance" ? listCentre : ORIGIN);
   });
-  const trainsOnMap = $derived(
-    selectedTrain && !trainsFiltered.some((t) => t.id === selectedTrain.id) ? [...trainsFiltered, selectedTrain] : trainsFiltered,
-  );
+  const trainsOnMap = $derived.by(() => {
+    if (!selectedTrain) return trainsFiltered;
+    const at = trainsFiltered.findIndex((t) => t.id === selectedTrain.id);
+    if (at === -1) return [...trainsFiltered, selectedTrain];
+    // drawn from its live report rather than the list's
+    if (trainsFiltered[at] === selectedTrain) return trainsFiltered;
+    const list = trainsFiltered.slice();
+    list[at] = selectedTrain;
+    return list;
+  });
   const shipsFiltered = $derived(ships.filter(shipFilter(shipFilters)));
   const shipsListed = $derived.by(() => {
     const q = shipQuery.trim();
@@ -1376,6 +1404,7 @@
         globe.flyTo(selectedTrain.lon, selectedTrain.lat, Math.max(view.zoom, 12));
       }}
       onclose={() => selectTrain(null)}
+      {liveStops}
     />
   {/if}
 

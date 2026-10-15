@@ -678,5 +678,17 @@ export interface TrainMedia {
 export const trainMedia = (source: string, product: string | null, operator: string | null) =>
   invoke<TrainMedia>("train_media", { source, product, operator });
 
+/** Live news of the followed train: a new position (with the way ahead), or its stops as they now stand. */
+export type TrainEvent = { kind: "train"; train: Train } | { kind: "stops"; stops: TrainStop[] };
+
+/** Streams live updates of a train until {@link unfollowTrain} or another is followed (Trafikverket's trains). */
+export function followTrain(id: string, onEvent: (e: TrainEvent) => void) {
+  const channel = new Channel<TrainEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("follow_train", { id, onEvent: channel });
+}
+
+export const unfollowTrain = () => invoke<void>("unfollow_train");
+
 /** Every stop of a train, in order, for sources with its timetable (Trafikverket); empty for the others. */
 export const trainStops = (id: string) => invoke<TrainStop[]>("train_stops", { id });

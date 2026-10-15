@@ -28,9 +28,11 @@
     /** Fly the camera to the train. */
     oncentre: () => void;
     onclose: () => void;
+    /** The stops as the live stream last sent them; they win over the ones fetched here. */
+    liveStops?: TrainStop[] | null;
   }
 
-  let { train, now, oncentre, onclose }: Props = $props();
+  let { train, now, oncentre, onclose, liveStops = null }: Props = $props();
 
   const kind = $derived(trainLabel(train.kind));
   /** Names run long ("Amtrak 171 Northeast Regional"): those wrap to a second line instead of losing their end. */
@@ -50,7 +52,8 @@
   /** Refreshed with the stops' live times every minute while the panel is open. */
   const STOPS_REFRESH_MS = 60_000;
   /** The train's run, for the sources that have its timetable; null while loading or without one. */
-  let stops = $state.raw<TrainStop[] | null>(null);
+  let fetchedStops = $state.raw<TrainStop[] | null>(null);
+  const stops = $derived(liveStops ?? fetchedStops);
   let stopsFailed = $state(false);
   // the id alone, so the map's refreshes of the same train don't ask again
   const id = $derived(train.id);
@@ -58,14 +61,14 @@
 
   $effect(() => {
     const which = id;
-    stops = null;
+    fetchedStops = null;
     stopsFailed = false;
     if (!timetabled || !isTauri()) return;
     let live = true;
     const load = () =>
       trainStops(which).then(
-        (s) => live && ((stops = s), (stopsFailed = false)),
-        () => live && (stopsFailed = stops === null),
+        (s) => live && ((fetchedStops = s), (stopsFailed = false)),
+        () => live && (stopsFailed = fetchedStops === null),
       );
     load();
     const timer = setInterval(load, STOPS_REFRESH_MS);

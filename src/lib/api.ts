@@ -714,6 +714,8 @@ export type TrainRoute = {
   complete: boolean;
 };
 export const trainRoute = (id: string) => invoke<TrainRoute>("train_route", { id });
+/** The trains the map shows close up, streamed live like a followed one (an empty list stops it). */
+export const watchTrains = (ids: string[]) => invoke<void>("watch_trains", { ids });
 
 /** Every stop of a train, in order, for sources with its timetable (Trafikverket); empty for the others. */
 export const trainStops = (id: string) => invoke<TrainStop[]>("train_stops", { id });

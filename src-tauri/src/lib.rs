@@ -672,6 +672,8 @@ pub fn run() {
             }
             // every Swedish train's position as it comes, while the map shows them
             trafikverket::start_national(app.handle().clone());
+            // and the trains in view, close up, as live as a followed one
+            trafikverket::start_view_streams(app.handle().clone());
             // the main window starts hidden: update first, then open it
             #[cfg(desktop)]
             tauri::async_runtime::spawn(updater::run(app.handle().clone()));
@@ -738,6 +740,7 @@ pub fn run() {
             trains::trains_in_view,
             trains::train_stops,
             trains::train_route,
+            trains::watch_trains,
             devlog::dev_log,
             devlog::dev_log_clear,
             trafikverket::product_codes,

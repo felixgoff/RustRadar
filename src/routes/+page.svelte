@@ -36,6 +36,7 @@
     type TrainStop,
     type TrainRoute,
     trainRoute,
+    watchTrains,
     followTrain,
     unfollowTrain,
   } from "$lib/api";
@@ -463,7 +464,30 @@
   // once the camera settles and then every 30 s while the window is visible.
   // An answer for a view since left behind is dropped.
   const TRAINS_SETTLE_MS = 600;
-  const TRAINS_REFRESH_MS = 30_000;
+  const TRAINS_REFRESH_MS = 10_000;
+  /** Zoomed in this far, the trains in view come live, every few seconds, like a followed one. */
+  const LIVE_ZOOM = 9;
+  /** At most this many of them, nearest the centre first. */
+  const MAX_LIVE = 40;
+  /** The ids last sent, to send again only when they change. */
+  let watchedKey = "";
+  function watchInView(list: Train[], v: ViewState) {
+    if (!isTauri()) return;
+    const close = trainsOn && v.zoom >= LIVE_ZOOM;
+    const ids = close
+      ? list
+          .filter((t) => t.source === "trafikverket")
+          .map((t) => ({ id: t.id, d: cosAngle(v.longitude, v.latitude, t.lon, t.lat) }))
+          .sort((a, b) => b.d - a.d)
+          .slice(0, MAX_LIVE)
+          .map((t) => t.id)
+          .sort()
+      : [];
+    const key = ids.join(",");
+    if (key === watchedKey) return;
+    watchedKey = key;
+    watchTrains(ids).catch(() => {});
+  }
   let trains = $state.raw<Train[]>([]);
   /** When the latest answer since the trains came on arrived (ms); 0 before the first. */
   let trainsAt = $state(0);
@@ -492,6 +516,7 @@
       trains = list;
       trainsAt = Date.now();
       trainsFailed = false;
+      watchInView(list, v);
     } catch {
       // every source failed or is resting: the trains on show stay
       if (request === trainsRequest) trainsFailed = true;
@@ -533,6 +558,8 @@
         if (trains.length) trains = [];
         if (trainsAt) trainsAt = 0;
         if (trainsFailed) trainsFailed = false;
+        // no more live trains in view
+        watchInView([], view);
       });
       return;
     }

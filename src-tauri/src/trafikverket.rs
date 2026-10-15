@@ -991,34 +991,70 @@ fn remember(trains: &[Train], reports: &[Report], now_ms: i64, all: bool) {
 
 // ---------------------------------------------------- the whole country, live
 
-/// Every train's position report as it comes, for the whole country: one
-/// stream, only what the map needs.
-fn national_query() -> String {
+/// The fields a live stream of positions needs.
+const POSITION_STREAM_FIELDS: &[&str] = &[
+    "Train.AdvertisedTrainNumber",
+    "Train.OperationalTrainNumber",
+    "Train.JourneyPlanDepartureDate",
+    "Position.WGS84",
+    "Bearing",
+    "Speed",
+    "TimeStamp",
+];
+
+fn position_stream(filter: &str, include: bool) -> String {
     format!(
-        "<QUERY sseurl=\"true\" objecttype=\"TrainPosition\" namespace=\"järnväg.trafikinfo\" schemaversion=\"1.1\" limit=\"0\">\
-         <FILTER><EQ name=\"Status.Active\" value=\"true\"/></FILTER>{}</QUERY>",
-        includes(&[
-            "Train.AdvertisedTrainNumber",
-            "Train.OperationalTrainNumber",
-            "Train.JourneyPlanDepartureDate",
-            "Position.WGS84",
-            "Bearing",
-            "Speed",
-            "TimeStamp",
-        ])
+        "<QUERY sseurl=\"true\" objecttype=\"TrainPosition\" namespace=\"järnväg.trafikinfo\" schemaversion=\"1.1\" limit=\"0\">{filter}{}</QUERY>",
+        if include { includes(POSITION_STREAM_FIELDS) } else { String::new() }
     )
+}
+
+/// The ways of asking for every train's positions as they come, tried in
+/// turn until one works: the shape of a single train's stream (known to
+/// work) without its number, then narrower ones.
+fn national_queries() -> [String; 3] {
+    [
+        position_stream("", true),
+        position_stream("<FILTER><EQ name=\"Status.Active\" value=\"true\"/></FILTER>", true),
+        position_stream("<FILTER><GT name=\"TimeStamp\" value=\"$dateadd(-0.00:15:00)\"/></FILTER>", false),
+    ]
+}
+
+/// A stream of these trains' positions (by operational number), in the shape
+/// a single train's stream has.
+pub fn trains_query(numbers: &[String]) -> String {
+    let eqs: String = numbers
+        .iter()
+        .map(|n| format!("<EQ name=\"Train.OperationalTrainNumber\" value=\"{}\"/>", xml_escape(n)))
+        .collect();
+    position_stream(&format!("<FILTER><OR>{eqs}</OR></FILTER>"), true)
 }
 
 /// Reports gathered this long before the trains they move are worked out.
 const NATIONAL_BATCH: Duration = Duration::from_millis(1000);
 /// How often the stream checks it is still wanted, and with the same key.
 const NATIONAL_CHECK: Duration = Duration::from_secs(5);
+/// A country stream that sends nothing for this long isn't working.
+const NATIONAL_SILENT: Duration = Duration::from_secs(60);
+/// The country stream counts as live while it sent something this recently.
+const LIVE_FOR_MS: i64 = 60_000;
+
+/// When the country stream last brought a report (Unix ms), and the shape that worked.
+static NATIONAL_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static NATIONAL_SHAPE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether the country stream is bringing reports.
+pub fn national_live() -> bool {
+    crate::trains::now_ms() - NATIONAL_AT.load(std::sync::atomic::Ordering::Relaxed) < LIVE_FOR_MS
+}
 
 /// Streams the whole country's train positions while the map shows
 /// Trafikverket's trains (`trains::trafikverket_wanted`): each report moves
 /// its train in the trains' cache at once, and the page is told
-/// (`trains-changed`) to show it.
+/// (`trains-changed`) to show it. A query shape Trafikverket rejects, or that
+/// brings nothing, gives way to the next.
 pub fn start_national(app: tauri::AppHandle) {
+    use std::sync::atomic::Ordering::Relaxed;
     tauri::async_runtime::spawn(async move {
         loop {
             let key = crate::keys::current().trafikverket;
@@ -1026,44 +1062,92 @@ pub fn start_national(app: tauri::AppHandle) {
                 tokio::time::sleep(NATIONAL_CHECK).await;
                 continue;
             }
-            national(&app, &key).await;
-            tokio::time::sleep(RECONNECT).await;
+            let shapes = national_queries();
+            let shape = NATIONAL_SHAPE.load(Relaxed) % shapes.len();
+            let wanted = {
+                let key = key.clone();
+                move || crate::keys::current().trafikverket == key && crate::trains::trafikverket_wanted()
+            };
+            let heard = |_: usize| NATIONAL_AT.store(crate::trains::now_ms(), Relaxed);
+            let end = stream_positions(&app, &key, &shapes[shape], "country", wanted, heard, Some(NATIONAL_SILENT)).await;
+            if end == StreamEnd::Failed {
+                // the next shape next time
+                NATIONAL_SHAPE.store(shape + 1, Relaxed);
+                tokio::time::sleep(RECONNECT * 4).await;
+            } else {
+                tokio::time::sleep(RECONNECT).await;
+            }
         }
     });
 }
 
-/// One stream, until it ends, isn't wanted any more, or the key changes.
-async fn national(app: &tauri::AppHandle, key: &str) {
-    let Ok(http) = stream_client() else { return };
-    let url = match sse_url(http, key, &national_query()).await {
+/// How a stream of positions ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamEnd {
+    /// Rejected, or silent too long: that query doesn't work.
+    Failed,
+    /// It closed, or isn't wanted any more.
+    Closed,
+}
+
+/// One stream of positions, until it ends, `wanted` turns false, or (with
+/// `silent`) nothing comes for that long. Reports move their trains
+/// (`move_trains`); `heard` is told how many came.
+async fn stream_positions(
+    app: &tauri::AppHandle,
+    key: &str,
+    query: &str,
+    label: &str,
+    wanted: impl Fn() -> bool,
+    heard: impl Fn(usize),
+    silent: Option<Duration>,
+) -> StreamEnd {
+    let Ok(http) = stream_client() else { return StreamEnd::Failed };
+    let url = match sse_url(http, key, query).await {
         Ok(url) => url,
         Err(e) => {
-            eprintln!("trafikverket: country stream: {e}");
-            return;
+            eprintln!("trafikverket: {label} stream: {e}");
+            return StreamEnd::Failed;
         }
     };
+    if crate::devlog::ENABLED {
+        eprintln!("[stream] {label}: open");
+    }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u8, String)>();
     let read = async {
         if let Err(e) = read_stream(&url, 2, &tx).await {
-            eprintln!("trafikverket: country stream: {e}");
+            eprintln!("trafikverket: {label} stream: {e}");
         }
+        StreamEnd::Closed
     };
     let still_wanted = async {
         loop {
             tokio::time::sleep(NATIONAL_CHECK).await;
-            if crate::keys::current().trafikverket != key || !crate::trains::trafikverket_wanted() {
-                return;
+            if !wanted() {
+                return StreamEnd::Closed;
             }
         }
     };
     let handle = async {
         let mut pending: HashMap<String, Report> = HashMap::new();
         let mut tick = tokio::time::interval(NATIONAL_BATCH);
+        let mut last = Instant::now();
+        let mut first = true;
         loop {
             tokio::select! {
                 got = rx.recv() => {
-                    let Some((_, data)) = got else { return };
-                    for r in parse_positions(&data).unwrap_or_default() {
+                    let Some((_, data)) = got else { return StreamEnd::Closed };
+                    let reports = parse_positions(&data).unwrap_or_default();
+                    if reports.is_empty() {
+                        continue;
+                    }
+                    last = Instant::now();
+                    heard(reports.len());
+                    if first && crate::devlog::ENABLED {
+                        eprintln!("[stream] {label}: live");
+                    }
+                    first = false;
+                    for r in reports {
                         let k = r.lookup().to_owned();
                         if pending.get(&k).is_none_or(|old| old.at_ms < r.at_ms) {
                             pending.insert(k, r);
@@ -1075,15 +1159,86 @@ async fn national(app: &tauri::AppHandle, key: &str) {
                         let reports: Vec<Report> = pending.drain().map(|(_, r)| r).collect();
                         move_trains(app, http, key, reports).await;
                     }
+                    if silent.is_some_and(|s| last.elapsed() > s) {
+                        eprintln!("trafikverket: {label} stream: nothing for {} s", last.elapsed().as_secs());
+                        return StreamEnd::Failed;
+                    }
                 }
             }
         }
     };
     tokio::select! {
-        _ = read => {}
-        _ = still_wanted => {}
-        _ = handle => {}
+        end = read => end,
+        end = still_wanted => end,
+        end = handle => end,
     }
+}
+
+// ------------------------------------------------------- the trains in view
+
+/// At most this many trains in view are streamed.
+pub const MAX_WATCHED: usize = 40;
+/// A new set of trains in view is streamed once it has held this long.
+const WATCH_SETTLE: Duration = Duration::from_secs(2);
+
+/// The trains the page shows close up (operational numbers), and since when.
+fn watched() -> &'static Mutex<(Vec<String>, Instant)> {
+    static W: OnceLock<Mutex<(Vec<String>, Instant)>> = OnceLock::new();
+    W.get_or_init(|| Mutex::new((Vec::new(), Instant::now())))
+}
+
+/// The operational numbers of these trains (by the ids `trains` gave them),
+/// sorted, without repeats, at most `MAX_WATCHED`.
+fn numbers_of(ids: &[String]) -> Vec<String> {
+    let known = operational_numbers().lock().unwrap();
+    let mut numbers: Vec<String> = ids.iter().filter_map(|id| known.get(id).cloned()).take(MAX_WATCHED).collect();
+    numbers.sort();
+    numbers.dedup();
+    numbers
+}
+
+/// The trains the page shows close up: streamed live, like a followed one.
+pub fn watch(ids: &[String]) {
+    let numbers = numbers_of(ids);
+    let mut w = watched().lock().unwrap();
+    if w.0 != numbers {
+        *w = (numbers, Instant::now());
+    }
+}
+
+/// Keeps one live stream for the trains in view (`watch`), reopened when
+/// the set changes (once it settles) and closed when it empties.
+pub fn start_view_streams(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut running: Option<(Vec<String>, tauri::async_runtime::JoinHandle<()>)> = None;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let key = crate::keys::current().trafikverket;
+            let (numbers, since) = watched().lock().unwrap().clone();
+            let wanted = if key.is_empty() || !crate::trains::trafikverket_wanted() { Vec::new() } else { numbers };
+            if running.as_ref().is_some_and(|(n, _)| *n == wanted) || since.elapsed() < WATCH_SETTLE {
+                continue;
+            }
+            if let Some((_, task)) = running.take() {
+                task.abort();
+            }
+            if wanted.is_empty() {
+                continue;
+            }
+            if crate::devlog::ENABLED {
+                eprintln!("[stream] view: {} trains", wanted.len());
+            }
+            let (app, query, key) = (app.clone(), trains_query(&wanted), key.clone());
+            let task = tauri::async_runtime::spawn(async move {
+                loop {
+                    let still = || crate::keys::current().trafikverket == key;
+                    stream_positions(&app, &key, &query, "view", still, |_| {}, None).await;
+                    tokio::time::sleep(RECONNECT).await;
+                }
+            });
+            running = Some((wanted, task));
+        }
+    });
 }
 
 /// The trains these reports move, worked out and put in the trains' cache.
@@ -1706,5 +1861,32 @@ mod tests {
         assert_eq!(delay_of(&stops), Some(4));
         assert_eq!(delay_of(&stops[2..]), Some(5));
         assert_eq!(delay_of(&[]), None);
+    }
+
+    #[test]
+    fn the_trains_in_view_are_one_stream() {
+        let q = trains_query(&["1061".into(), "2<3".into()]);
+        assert!(q.contains(r#"sseurl="true""#) && q.contains(r#"limit="0""#));
+        assert!(q.contains(r#"<OR><EQ name="Train.OperationalTrainNumber" value="1061"/>"#));
+        assert!(q.contains("2&lt;3"), "escaped");
+        assert!(q.contains("<INCLUDE>Position.WGS84</INCLUDE>"));
+        // ids to their numbers: known ones only, sorted, no repeats, capped
+        {
+            let mut n = operational_numbers().lock().unwrap();
+            n.insert("trafikverket:2026-10-15:540".into(), "540".into());
+            n.insert("trafikverket:2026-10-15:88".into(), "98".into());
+            for i in 0..60 {
+                n.insert(format!("trafikverket:t:{i}"), format!("9{i:03}"));
+            }
+        }
+        let ids: Vec<String> =
+            ["trafikverket:2026-10-15:88", "trafikverket:2026-10-15:540", "trafikverket:2026-10-15:540", "unknown"]
+                .map(String::from)
+                .to_vec();
+        assert_eq!(numbers_of(&ids), vec!["540".to_string(), "98".to_string()]);
+        let many: Vec<String> = (0..60).map(|i| format!("trafikverket:t:{i}")).collect();
+        assert_eq!(numbers_of(&many).len(), MAX_WATCHED);
+        // the country stream's ways of asking all ask for positions as they come
+        assert!(national_queries().iter().all(|q| q.contains(r#"sseurl="true""#) && q.contains("TrainPosition")));
     }
 }

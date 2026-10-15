@@ -263,6 +263,10 @@ impl Source {
     }
 
     fn ttl(self) -> Duration {
+        // Trafikverket's trains come live from its stream; while that brings nothing, asked for often
+        if self == Source::Trafikverket && !crate::trafikverket::national_live() {
+            return Duration::from_secs(10);
+        }
         Duration::from_secs(if self.whole() { 30 } else { 20 })
     }
 
@@ -1147,6 +1151,14 @@ pub async fn train_route(id: String) -> CmdResult<crate::trafikverket::TrainRout
     tauri::async_runtime::spawn_blocking(move || crate::trafikverket::route(&id, &key))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// The trains the map shows close up (by id): streamed live, every few
+/// seconds, like a followed one. Trafikverket's only; an empty list stops it.
+#[tauri::command]
+pub fn watch_trains(ids: Vec<String>) {
+    let ids: Vec<String> = ids.into_iter().filter(|id| id.starts_with("trafikverket:")).collect();
+    crate::trafikverket::watch(&ids);
 }
 
 /// Every stop of a train, for the sources that have its timetable; none for the others.

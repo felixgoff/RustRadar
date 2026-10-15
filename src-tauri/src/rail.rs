@@ -1435,9 +1435,15 @@ fn platforms_in(
             .collect();
         fits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
         if let Some(best) = fits.first().map(|f| f.0) {
-            // that track only: one place on it
-            if let Some(f) = fits.iter().find(|f| f.0 == best) {
-                add(f.2, &mut out);
+            // that track only: one place on it, by the middle of a platform serving it, else nearest the station's point
+            let fits_best = |s: &Snap| {
+                g.edge(s.0, s.1).and_then(|e| e.track).and_then(|r| track_fit(announced, &g.refs[r as usize])) == Some(best)
+            };
+            let by_platform = platform_middles(announced, mapped)
+                .into_iter()
+                .find_map(|mid| g.snaps(mid, BESIDE_M).into_iter().find(|s| fits_best(s)).map(|s| s.2));
+            if let Some(p) = by_platform.or_else(|| fits.iter().find(|f| f.0 == best).map(|f| f.2)) {
+                add(p, &mut out);
             }
         } else {
             // not numbered in the map: beside the platforms that serve it
@@ -1461,6 +1467,21 @@ fn platforms_in(
     out
 }
 
+/// The platforms mapped as serving the announced track, with their middles.
+fn serving<'a>(
+    announced: &str,
+    mapped: &'a [crate::osm_platforms::Platform],
+) -> impl Iterator<Item = (&'a crate::osm_platforms::Platform, (f64, f64))> {
+    mapped.iter().filter(|p| !p.line.is_empty() && p.tracks.iter().any(|t| track_fit(announced, t).is_some())).map(|p| {
+        let n = p.line.len() as f64;
+        (p, p.line.iter().fold((0.0, 0.0), |a, q| (a.0 + q.0 / n, a.1 + q.1 / n)))
+    })
+}
+
+fn platform_middles(announced: &str, mapped: &[crate::osm_platforms::Platform]) -> Vec<(f64, f64)> {
+    serving(announced, mapped).map(|(_, mid)| mid).collect()
+}
+
 /// Where the announced track is by the platforms mapped as serving it: the
 /// track beside a platform serving it alone; of one serving it and others (an
 /// island platform), the track on each side, one numbered otherwise in the
@@ -1473,9 +1494,7 @@ fn beside_platforms(
     way: &dyn Fn(&Snap) -> u8,
 ) -> Vec<(f64, f64)> {
     let mut out = Vec::new();
-    for p in mapped.iter().filter(|p| p.tracks.iter().any(|t| track_fit(announced, t).is_some())) {
-        let n = p.line.len() as f64;
-        let mid = p.line.iter().fold((0.0, 0.0), |a, q| (a.0 + q.0 / n, a.1 + q.1 / n));
+    for (p, mid) in serving(announced, mapped) {
         let beside: Vec<_> =
             g.snaps(mid, BESIDE_M).into_iter().filter(|s| g.edge(s.0, s.1).is_some_and(|e| !e.yard)).collect();
         let Some(first) = beside.first() else {

@@ -135,9 +135,6 @@ const PLATFORM_BRAKE: f64 = 0.8;
 /// Slower than this and braking at least this hard (m/s, m/s²), a train is coming to a stop.
 const STOPPING_V: f64 = 11.0;
 const STOPPING_BRAKE: f64 = 0.25;
-/// The drawn train waits this far short of a station's point until a report
-/// shows where the train stops (its trains often stop well short of it), metres.
-const STATION_SHORT_M: f64 = 150.0;
 /// Braking seen between two reports this close together counts, ms,
 const BRAKING_SEEN_MS: i64 = 60_000;
 /// and this hard, m/s² (gentler is slowing down, harder a glitch).
@@ -1018,7 +1015,8 @@ fn predict(layout: &Layout, real: &Real, stops: &[Stop], until: i64, top: f64, c
         s: vec![s],
         v: vec![v],
         hold: hold.map(|h| h.0),
-        short: if hold.is_some_and(|h| h.1) { STATION_SHORT_M } else { 0.0 },
+        // in to the stop itself (the platform's middle), not waiting short of it
+        short: 0.0,
         stood_ms: None,
     };
     let stop_at = hold.map_or(end, |h| h.0);
@@ -1549,7 +1547,7 @@ mod tests {
         // drawn, it waits short of it (until a report shows where it stops), and stays
         let f = &s.frames;
         let xs = trace(f, NOW);
-        let waits = 1_500.0 - STATION_SHORT_M;
+        let waits = 1_500.0;
         let arrived = xs.iter().position(|(_, x)| (x - waits).abs() < 0.5).expect("gets there");
         assert!(xs[arrived..].iter().all(|(_, x)| (x - waits).abs() < 0.5), "stays");
         assert!(jerkiest(f) <= DRAWN_BRAKE + 0.1, "brakes gently: {}", jerkiest(f));
@@ -1575,7 +1573,7 @@ mod tests {
         assert!((end - 1_500.0).abs() < 5.0, "stops there: {end}");
         let xs = trace(&s.frames, NOW);
         let drawn = xs.last().unwrap().1;
-        assert!((drawn - (1_500.0 - STATION_SHORT_M)).abs() < 5.0, "drawn, short of it: {drawn}");
+        assert!((drawn - 1_500.0).abs() < 5.0, "drawn, short of it: {drawn}");
     }
 
     #[test]
@@ -1821,13 +1819,13 @@ mod tests {
         let stops = [call(500.0, NOW + 30_000), far()];
         let first = sim(None, &fix(0.0, NOW, Some(15.0)), None, &stops, NOW, &track);
         let xs = trace(&first, NOW);
-        let arrived = xs.iter().find(|(_, x)| (x - (500.0 - STATION_SHORT_M)).abs() < 0.5).unwrap().0;
+        let arrived = xs.iter().find(|(_, x)| (x - 500.0).abs() < 0.5).unwrap().0;
         let later = arrived + 30_000;
         let d = drawn_at(&first, later).unwrap();
         assert_eq!((d.v, d.still_since), (0.0, Some(arrived)));
         assert!(d.heading.is_some_and(|h| turn(h, 0.0) < 1.0));
         // carried on through a new simulation
-        let again = sim(Some(&first[..]), &fix(500.0 - STATION_SHORT_M, later, Some(0.0)), None, &stops, later, &track);
+        let again = sim(Some(&first[..]), &fix(500.0, later, Some(0.0)), None, &stops, later, &track);
         assert_eq!(drawn_at(&again, later + 10_000).and_then(|d| d.still_since), Some(arrived));
         assert!(
             drawn_at(&again, later).and_then(|d| d.heading).is_some_and(|h| turn(h, 0.0) < 1.0),

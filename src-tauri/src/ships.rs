@@ -348,7 +348,7 @@ fn client() -> Result<&'static reqwest::Client, String> {
     if let Some(c) = CLIENT.get() {
         return Ok(c);
     }
-    let c = reqwest::Client::builder()
+    let c = fr24::client_builder()
         .user_agent(USER_AGENT)
         .timeout(REQUEST_TIMEOUT)
         .gzip(true)

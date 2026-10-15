@@ -1137,7 +1137,7 @@ pub async fn trains_in_view(west: f64, south: f64, east: f64, north: f64, zoom: 
             t.heading.map(f64::from),
             &[],
             now,
-            Some(&crate::rail::Rail),
+            Some(&crate::rail::Rail { class: None }),
         );
     }
     Ok(trains)

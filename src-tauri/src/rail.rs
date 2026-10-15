@@ -604,6 +604,23 @@ struct Edge {
     yard: bool,
     /// Index into `Graph::refs`.
     track: Option<u32>,
+    /// Trafikverket's limits going this way (km/h per train category), where known.
+    sth: Option<crate::sth::Limits>,
+}
+
+/// The limit on a piece of track for a train: Trafikverket's for its
+/// category where known, else OpenRailwayMap's; never above its top speed.
+/// m/s.
+fn speed_of(e: &Edge, class: Option<&crate::train_class::TrainClass>) -> Option<f32> {
+    let track = match (e.sth, class) {
+        (Some(limits), Some(c)) => Some(f32::from(limits[c.category as usize]) / 3.6),
+        (Some(limits), None) => Some(f32::from(limits[0]) / 3.6),
+        (None, _) => e.speed,
+    };
+    match class {
+        Some(c) => track.map(|v| v.min(c.top() as f32)),
+        None => track,
+    }
 }
 
 struct Graph {
@@ -686,7 +703,25 @@ impl Graph {
             }
         }
         g.stitch();
+        g.add_limits();
         g
+    }
+
+    /// Trafikverket's limits on each piece, each way, where it has them.
+    fn add_limits(&mut self) {
+        let (mut s, mut w, mut n, mut e) = (90.0f64, 180.0f64, -90.0f64, -180.0f64);
+        for p in &self.nodes {
+            (s, n, w, e) = (s.min(p.0), n.max(p.0), w.min(p.1), e.max(p.1));
+        }
+        if self.nodes.is_empty() || !crate::sth::covers(s, w, n, e) {
+            return;
+        }
+        for a in 0..self.nodes.len() {
+            for i in 0..self.adj[a].len() {
+                let b = self.adj[a][i].to;
+                self.adj[a][i].sth = crate::sth::along(self.nodes[a], self.nodes[b]);
+            }
+        }
     }
 
     fn link(&mut self, a: usize, b: usize, attr: Attr) {
@@ -694,7 +729,8 @@ impl Graph {
             return;
         }
         let len = distance(self.nodes[a], self.nodes[b]);
-        let edge = |to| Edge { to, len, speed: attr.speed, service: attr.service, yard: attr.yard, track: attr.track };
+        let edge =
+            |to| Edge { to, len, speed: attr.speed, service: attr.service, yard: attr.yard, track: attr.track, sth: None };
         self.adj[a].push(edge(b));
         self.adj[b].push(edge(a));
     }
@@ -967,13 +1003,21 @@ struct Place {
     front: usize,
 }
 
-struct Builder {
+struct Builder<'a> {
     route: Route,
     length: f64,
     cost: f64,
+    /// The train's class: which limits apply, and its top speed.
+    class: Option<&'a crate::train_class::TrainClass>,
 }
 
-impl Builder {
+impl Builder<'_> {
+    /// On to `p` along a piece of track (its limit for the segment).
+    fn on(&mut self, p: (f64, f64), e: Option<&Edge>) {
+        let speed = e.and_then(|e| speed_of(e, self.class));
+        self.push(p, speed);
+    }
+
     fn push(&mut self, p: (f64, f64), speed: Option<f32>) {
         let Some(&last) = self.route.points.last() else {
             self.route.points.push(p);
@@ -991,11 +1035,18 @@ impl Builder {
 
 /// From `place` through the targets in order, then on for `onwards_m`;
 /// as far as the track goes.
-fn route_from(g: &Graph, place: Place, targets: &[(f64, f64)], onwards_m: f64) -> Option<Builder> {
+fn route_from<'a>(
+    g: &Graph,
+    place: Place,
+    targets: &[(f64, f64)],
+    onwards_m: f64,
+    class: Option<&'a crate::train_class::TrainClass>,
+) -> Option<Builder<'a>> {
     let mut b = Builder {
         route: Route { points: vec![place.on], reached: Vec::new(), speeds: Vec::new() },
         length: 0.0,
         cost: 0.0,
+        class,
     };
     let mut at = place;
     for target in targets {
@@ -1003,32 +1054,31 @@ fn route_from(g: &Graph, place: Place, targets: &[(f64, f64)], onwards_m: f64) -
         let on_this = (at.behind, at.front) == (ta, tb) || (at.behind, at.front) == (tb, ta);
         if on_this && distance(g.nodes[at.behind], tq) >= distance(g.nodes[at.behind], at.on) - 0.01 {
             // further along the segment it is on
-            let speed = g.edge(at.behind, at.front).and_then(|e| e.speed);
             b.cost += distance(at.on, tq);
-            b.push(tq, speed);
+            b.on(tq, g.edge(at.behind, at.front));
             at.on = tq;
         } else {
             let first = *g.edge(at.behind, at.front)?;
             let Some((nodes, cost)) = g.path(at.front, at.behind, ta, tb) else { break };
             b.cost += distance(at.on, g.nodes[at.front]) * if first.service { SERVICE_COST } else { 1.0 };
-            b.push(g.nodes[at.front], first.speed);
+            b.on(g.nodes[at.front], Some(&first));
             for w in nodes.windows(2) {
-                b.push(g.nodes[w[1]], g.edge(w[0], w[1]).and_then(|e| e.speed));
+                b.on(g.nodes[w[1]], g.edge(w[0], w[1]));
             }
             b.cost += cost;
             let entered = *nodes.last()?;
             let other = if entered == ta { tb } else { ta };
-            b.push(tq, g.edge(entered, other).and_then(|e| e.speed));
+            b.on(tq, g.edge(entered, other));
             b.cost += distance(g.nodes[entered], tq);
             at = Place { on: tq, behind: entered, front: other };
         }
         b.route.reached.push(b.length);
     }
     if onwards_m > 0.0 {
-        b.push(g.nodes[at.front], g.edge(at.behind, at.front).and_then(|e| e.speed));
+        b.on(g.nodes[at.front], g.edge(at.behind, at.front));
         let mut prev = at.front;
         for n in g.onwards(at.behind, at.front, onwards_m) {
-            b.push(g.nodes[n], g.edge(prev, n).and_then(|e| e.speed));
+            b.on(g.nodes[n], g.edge(prev, n));
             prev = n;
         }
     }
@@ -1067,12 +1117,25 @@ fn route_in(
     onwards_m: f64,
     spread: f64,
 ) -> Option<Route> {
+    route_in_as(g, start, heading, targets, onwards_m, spread, None)
+}
+
+/// `route_in`, with the speed limits for a train of this class.
+fn route_in_as(
+    g: &Graph,
+    start: (f64, f64),
+    heading: Option<f64>,
+    targets: &[(f64, f64)],
+    onwards_m: f64,
+    spread: f64,
+    class: Option<&crate::train_class::TrainClass>,
+) -> Option<Route> {
     // the likeliest: reaching the most targets, the cheapest way, near the report
     let best = places(g, start, heading, spread)
         .into_iter()
         .filter_map(|(place, off)| {
             let service = g.edge(place.behind, place.front).is_some_and(|e| e.service);
-            let b = route_from(g, place, targets, onwards_m)?;
+            let b = route_from(g, place, targets, onwards_m, class)?;
             let score = b.cost + off * 20.0 + if service && targets.is_empty() { 50.0 } else { 0.0 };
             Some((b.route.reached.len(), score, b))
         })
@@ -1086,6 +1149,17 @@ fn route_in(
 /// track for `onwards_m`. None while the track there isn't loaded (it is sent
 /// for), or when `start` isn't on a track.
 pub fn route(start: (f64, f64), heading: Option<f64>, targets: &[(f64, f64)], onwards_m: f64) -> Option<Route> {
+    route_as(start, heading, targets, onwards_m, None)
+}
+
+/// `route`, with the speed limits for a train of this class.
+pub fn route_as(
+    start: (f64, f64),
+    heading: Option<f64>,
+    targets: &[(f64, f64)],
+    onwards_m: f64,
+    class: Option<&crate::train_class::TrainClass>,
+) -> Option<Route> {
     let mut targets = targets.to_vec();
     let mut keys = tiles_for(&[start, ahead(start, heading.unwrap_or(0.0), onwards_m.min(5_000.0))], 0.01);
     if !targets.is_empty() {
@@ -1102,7 +1176,7 @@ pub fn route(start: (f64, f64), heading: Option<f64>, targets: &[(f64, f64)], on
         return None;
     }
     let g = graph_for(keys)?;
-    route_in(&g, start, heading, &targets, onwards_m, SNAP_SPREAD_M)
+    route_in_as(&g, start, heading, &targets, onwards_m, SNAP_SPREAD_M, class)
 }
 
 /// The nearest point on the track, if it is loaded and near.
@@ -1284,8 +1358,11 @@ pub fn way_through(places: &[Vec<(f64, f64)>]) -> (Vec<Line>, bool) {
     (stretches, complete)
 }
 
-/// The track, for the motion module.
-pub struct Rail;
+/// The track, for the motion module, as a train of a class runs on it
+/// (none: OpenRailwayMap's limits and Trafikverket's base ones).
+pub struct Rail {
+    pub class: Option<crate::train_class::TrainClass>,
+}
 
 impl crate::motion::Track for Rail {
     fn route(
@@ -1295,7 +1372,11 @@ impl crate::motion::Track for Rail {
         targets: &[(f64, f64)],
         onwards_m: f64,
     ) -> Option<crate::motion::Routed> {
-        route(start, heading, targets, onwards_m).map(|r| (r.points, r.reached, r.speeds))
+        route_as(start, heading, targets, onwards_m, self.class.as_ref()).map(|r| (r.points, r.reached, r.speeds))
+    }
+
+    fn top(&self) -> Option<f64> {
+        self.class.map(|c| c.top())
     }
 
     fn hold(&self, at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)> {

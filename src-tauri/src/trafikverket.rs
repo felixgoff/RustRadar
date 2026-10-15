@@ -190,6 +190,10 @@ fn description(v: &Value) -> Option<String> {
     v.as_array()?.iter().find_map(|x| text(&x["Description"]))
 }
 
+fn product_code(v: &Value) -> Option<String> {
+    v.as_array()?.iter().find_map(|x| text(&x["Code"]))
+}
+
 /// The destination's signature: the last of the "to" locations.
 fn last_location(v: &Value) -> Option<String> {
     let list = v.as_array()?;
@@ -229,6 +233,8 @@ pub struct Service {
     /// The advertised number, the one travellers see (and the stops are looked up by).
     pub ident: String,
     pub product: Option<String>,
+    /// The product's code ("PNA044"), for its kind of train (`train_class`).
+    pub product_code: Option<String>,
     pub owner: Option<String>,
     /// Destination's signature.
     pub to: Option<String>,
@@ -297,6 +303,7 @@ pub fn parse_services(body: &str) -> Result<HashMap<String, Vec<Service>>, Strin
                 runs.push(Service {
                     ident,
                     product: description(&row["ProductInformation"]),
+                    product_code: product_code(&row["ProductInformation"]),
                     owner: text(&row["InformationOwner"]).or_else(|| text(&row["Operator"])),
                     to: last_location(&row["ToLocation"]),
                     date,
@@ -308,6 +315,7 @@ pub fn parse_services(body: &str) -> Result<HashMap<String, Vec<Service>>, Strin
         // the rows of places it only passes carry no product, owner or destination
         let run = &mut runs[at];
         run.product = run.product.take().or_else(|| description(&row["ProductInformation"]));
+        run.product_code = run.product_code.take().or_else(|| product_code(&row["ProductInformation"]));
         run.owner = run.owner.take().or_else(|| text(&row["InformationOwner"])).or_else(|| text(&row["Operator"]));
         run.to = run.to.take().or_else(|| last_location(&row["ToLocation"]));
         let (Some(station), Some(time)) =
@@ -335,8 +343,135 @@ pub fn parse_services(body: &str) -> Result<HashMap<String, Vec<Service>>, Strin
     }
     for run in services.values_mut().flatten() {
         run.calls.sort_by_key(|c| c.arrive.or(c.depart).unwrap_or(0));
+        products_seen(run);
     }
     Ok(with_aliases(services, aliases))
+}
+
+/// A product as the API names it, and the kind of train taken for it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductSeen {
+    pub code: Option<String>,
+    pub name: Option<String>,
+    pub class: crate::train_class::TrainClass,
+    /// Whether the table knows it; else the default class is taken.
+    pub known: bool,
+    /// Runs seen with it.
+    pub runs: usize,
+}
+
+type Products = Mutex<HashMap<(Option<String>, Option<String>), usize>>;
+
+fn products() -> &'static Products {
+    static P: OnceLock<Products> = OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// Dev builds: remember each product seen (and say so the first time).
+fn products_seen(run: &Service) {
+    if !crate::devlog::ENABLED {
+        return;
+    }
+    let key = (run.product_code.clone(), run.product.clone());
+    let mut seen = products().lock().unwrap();
+    let count = seen.entry(key).or_insert(0);
+    if *count == 0 {
+        let class = crate::train_class::class_of(run.product_code.as_deref(), run.product.as_deref());
+        eprintln!(
+            "[product] {} {:?} → {} ({} km/h, {:?}){}",
+            run.product_code.as_deref().unwrap_or("-"),
+            run.product.as_deref().unwrap_or("-"),
+            class.vehicle,
+            class.top_kmh,
+            class.category,
+            if crate::train_class::known(run.product_code.as_deref(), run.product.as_deref()) { "" } else { "  ← not in the table" },
+        );
+    }
+    *count += 1;
+}
+
+/// Dev builds: every product seen so far, with the class taken for it.
+#[tauri::command]
+pub fn product_codes() -> Vec<ProductSeen> {
+    let seen = products().lock().unwrap();
+    let mut out: Vec<ProductSeen> = seen
+        .iter()
+        .map(|((code, name), runs)| ProductSeen {
+            code: code.clone(),
+            name: name.clone(),
+            class: crate::train_class::class_of(code.as_deref(), name.as_deref()),
+            known: crate::train_class::known(code.as_deref(), name.as_deref()),
+            runs: *runs,
+        })
+        .collect();
+    out.sort_by(|a, b| a.code.cmp(&b.code).then(a.name.cmp(&b.name)));
+    out
+}
+
+/// The way a train is drawn, kept per train so the next report carries it
+/// on from where it is drawn instead of starting it anew.
+struct Drawn {
+    /// The report the frames were made for.
+    at_ms: i64,
+    frames: Vec<(f64, f64, i64)>,
+    /// How far apart its reports come, smoothed: ms.
+    interval_ms: f64,
+}
+
+type Plans = Mutex<HashMap<String, Drawn>>;
+
+fn plans() -> &'static Plans {
+    static P: OnceLock<Plans> = OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// Report spacing taken until a train's own is known: ms.
+const INTERVAL_MS: f64 = 20_000.0;
+/// Reports further apart than this start the train anew.
+const CONTINUE_MS: i64 = 180_000;
+
+/// The frames a train is drawn along. The same report gives the same
+/// frames (the map refreshing doesn't move it); a newer one carries it on
+/// from where it is drawn, along the track, paced to reach the newest
+/// position in about a report's time: no jump when reports come unevenly.
+/// The first report it is seen with (or after a long gap) starts it a
+/// report behind, from the one before (`motion::frames_between`).
+fn frames_for(
+    report: &Report,
+    prev: Option<&Report>,
+    stops: &[motion::Stop],
+    now_ms: i64,
+    rail: &crate::rail::Rail,
+) -> Vec<(f64, f64, i64)> {
+    let latest = report.fix();
+    let fresh = || motion::frames_between(&latest, prev.map(Report::fix).as_ref(), stops, now_ms, Some(rail));
+    // tests share no state between them
+    if cfg!(test) {
+        return fresh();
+    }
+    let key = report.lookup().to_owned();
+    let old = plans().lock().unwrap().get(&key).map(|d| (d.at_ms, d.frames.clone(), d.interval_ms));
+    if let Some((at, frames, _)) = &old
+        && *at == report.at_ms
+    {
+        return frames.clone();
+    }
+    let interval = old.as_ref().map_or(INTERVAL_MS, |o| o.2);
+    let carried = old.as_ref().filter(|(at, _, _)| (1..=CONTINUE_MS).contains(&(report.at_ms - at))).and_then(
+        |(at, frames, interval)| {
+            let (from, v, heading) = motion::sample(frames, now_ms)?;
+            let interval = interval * 0.6 + (report.at_ms - at) as f64 * 0.4;
+            let arrive = now_ms + interval as i64;
+            let frames = motion::frames_chasing(from, v, heading, &latest, arrive, stops, now_ms, Some(rail));
+            (!frames.is_empty()).then_some((frames, interval))
+        },
+    );
+    let (frames, interval) = carried.unwrap_or_else(|| (fresh(), interval));
+    let mut plans = plans().lock().unwrap();
+    plans.retain(|_, d| now_ms - d.at_ms < 6 * 3_600_000);
+    plans.insert(key, Drawn { at_ms: report.at_ms, frames: frames.clone(), interval_ms: interval });
+    frames
 }
 
 /// The run a position belongs to: the day the position names, else the latest.
@@ -501,7 +636,10 @@ pub fn train(
     let delay = delays.get(report.lookup()).or_else(|| delays.get(advertised.as_deref()?)).copied();
     let stops = service.map(|s| stops_ahead(s, delay, stations, report.at_ms)).unwrap_or_default();
     // drawn a report behind: from the one before along the track through this one
-    let frames = motion::frames_between(&report.fix(), prev.map(Report::fix).as_ref(), &stops, now_ms, Some(&crate::rail::Rail));
+    // on the track's limits for its kind of train
+    let class = service.map(|s| crate::train_class::class_of(s.product_code.as_deref(), s.product.as_deref()));
+    let rail = crate::rail::Rail { class };
+    let frames = frames_for(report, prev, &stops, now_ms, &rail);
     let place = frames
         .first()
         .map(|f| (f.0, f.1))

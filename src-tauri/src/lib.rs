@@ -19,8 +19,10 @@ mod reference;
 mod runways;
 mod session;
 mod ships;
+mod sth;
 mod taxiways;
 mod trafikverket;
+mod train_class;
 mod train_media;
 mod trains;
 #[cfg(desktop)]
@@ -734,6 +736,7 @@ pub fn run() {
             trains::train_route,
             devlog::dev_log,
             devlog::dev_log_clear,
+            trafikverket::product_codes,
             trains::follow_train,
             trains::unfollow_train,
             train_media::train_media,

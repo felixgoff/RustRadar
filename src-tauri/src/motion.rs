@@ -100,6 +100,10 @@ pub trait Track {
     -> Option<Routed>;
     /// Where a train reported at `at`, standing at `platform`, is on the platform's track.
     fn hold(&self, at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)>;
+    /// The train's top speed, m/s, when known.
+    fn top(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// The fastest a train is taken to run where the track's limit is higher
@@ -302,8 +306,8 @@ pub fn way(latest: &Fix, prev: Option<&Fix>, stops: &[Stop]) -> Option<Way> {
 /// The fastest it may go `s` metres along: the limit there, every lower
 /// limit ahead no closer than it can slow for, and the stop at `stop_at`
 /// (metres along) it brakes for.
-fn allowed(path: &Path, s: f64, v: f64, dt: f64, cruise: f64, stop_at: Option<f64>) -> f64 {
-    let target = |limit: Option<f64>| limit.unwrap_or(cruise).min(TOP);
+fn allowed(path: &Path, s: f64, v: f64, dt: f64, cruise: f64, stop_at: Option<f64>, top: f64) -> f64 {
+    let target = |limit: Option<f64>| limit.unwrap_or(cruise).min(top);
     let (section, limit) = path.limit(s);
     let mut allowed = target(limit);
     let look = v.max(allowed).powi(2) / (2.0 * BRAKE) + v * dt + 50.0;
@@ -360,10 +364,82 @@ pub fn frames_between(
         let at = track.and_then(|tr| tr.hold(pos, platform)).unwrap_or(pos);
         return vec![(at.0, at.1, t0_ms), (at.0, at.1, until)];
     };
+    run(&way, t0_ms, stops, now_ms, track, None)
+}
+
+/// How much faster than the track allows a train drawn behind may go to
+/// catch up with where it was last seen.
+const CATCH_UP: f64 = 1.35;
+
+/// Where a vehicle drawn along `frames` is at `t`: its place, speed (m/s)
+/// and heading. None before the first frame or without two.
+pub fn sample(frames: &[(f64, f64, i64)], t: i64) -> Option<((f64, f64), f64, Option<f64>)> {
+    let first = frames.first()?;
+    if frames.len() < 2 || t < first.2 {
+        return None;
+    }
+    let i = frames.partition_point(|f| f.2 <= t).clamp(1, frames.len() - 1);
+    let (a, b) = (frames[i - 1], frames[i]);
+    let span = (b.2 - a.2) as f64;
+    let k = if span > 0.0 { ((t - a.2) as f64 / span).clamp(0.0, 1.0) } else { 1.0 };
+    let at = (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k);
+    let metres = distance((a.0, a.1), (b.0, b.1));
+    let speed = if span > 0.0 { metres / (span / 1000.0) } else { 0.0 };
+    let heading = (metres > 0.5).then(|| course((a.0, a.1), (b.0, b.1)));
+    Some((at, speed, heading))
+}
+
+/// Frames for a train already drawn moving, on a new report: on from where
+/// it is drawn (`from`, at `v0` m/s, heading so) along the track through the
+/// newest position, paced to get there about `arrive_ms`, then on as usual.
+/// No jump, and no new start a report behind.
+#[allow(clippy::too_many_arguments)]
+pub fn frames_chasing(
+    from: (f64, f64),
+    v0: f64,
+    heading: Option<f64>,
+    latest: &Fix,
+    arrive_ms: i64,
+    stops: &[Stop],
+    now_ms: i64,
+    track: Option<&dyn Track>,
+) -> Vec<(f64, f64, i64)> {
+    if now_ms - latest.t_ms > MAX_AGE_MS || !from.0.is_finite() || !from.1.is_finite() {
+        return Vec::new();
+    }
+    let pos = (latest.lat, latest.lon);
+    let way = match plan(pos, latest.speed, latest.heading, stops, latest.t_ms) {
+        // it has stopped at the platform: in to it from where it is drawn
+        Plan::Standing => {
+            Way { from, heading, targets: vec![(stops[0].lat, stops[0].lon)], lead: false, next: 0, speed: Some(v0) }
+        }
+        Plan::Moving { next } => {
+            let ahead = &stops[next.min(stops.len())..];
+            let mut targets = vec![pos];
+            targets.extend(ahead.iter().take(route_targets(ahead)).map(|s| (s.lat, s.lon)));
+            Way { from, heading, targets, lead: true, next, speed: Some(v0) }
+        }
+    };
+    run(&way, now_ms, stops, now_ms, track, Some(arrive_ms))
+}
+
+/// The frames along a way from `t0_ms`; with `chase`, paced to reach the
+/// way's lead (the newest report) by then.
+fn run(
+    way: &Way,
+    t0_ms: i64,
+    stops: &[Stop],
+    now_ms: i64,
+    track: Option<&dyn Track>,
+    chase: Option<i64>,
+) -> Vec<(f64, f64, i64)> {
+    let until = now_ms.max(t0_ms) + HORIZON_MS;
     if stops.is_empty() && !way.lead && (way.heading.is_none() || way.speed.unwrap_or(0.0) <= 0.5) {
         return Vec::new();
     }
     let pos = way.from;
+    // as fast as the train goes, at most
+    let top = track.and_then(|tr| tr.top()).unwrap_or(TOP).min(TOP);
     let ahead_stops = &stops[way.next.min(stops.len())..];
     let mut t = t0_ms;
     // as far as it could go by the horizon, and a little more
@@ -400,16 +476,22 @@ pub fn frames_between(
     let paced = first_stop.map(|m| pace(m.at, m.arrive_ms, t));
     // not saying how fast: as fast as the track lets it go here
     let mut v = way.speed.unwrap_or_else(|| {
-        let cruise = paced.unwrap_or(22.0).min(TOP);
+        let cruise = paced.unwrap_or(22.0).min(top);
         let at = first_stop.map(|m| m.at);
-        allowed(&path, 0.0, path.limit(0.0).1.unwrap_or(cruise), STEP_MS as f64 / 1000.0, cruise, at)
+        allowed(&path, 0.0, path.limit(0.0).1.unwrap_or(cruise), STEP_MS as f64 / 1000.0, cruise, at, top)
     });
     let mut cruise = match paced {
         Some(p) if v > 3.0 => v.max(p.min(v * 1.2)),
         Some(p) => p,
         None => v,
     }
-    .min(TOP);
+    .min(top);
+
+    // catching up: the pace that gets it to the newest report by then
+    let chase_pace = chase.zip(way.lead.then(|| marks.first().map(|m| m.at)).flatten()).map(|(arrive, lead_at)| {
+        let secs = ((arrive - t0_ms) as f64 / 1000.0).max(1.0);
+        (lead_at, (lead_at / secs).min(top * CATCH_UP))
+    });
 
     let mut s = 0.0;
     let mut mark = 0;
@@ -439,7 +521,14 @@ pub fn frames_between(
         if end - s <= 0.5 {
             break;
         }
-        let limit = allowed(&path, s, v, dt, cruise, stop.map(|(_, m)| m.at));
+        let limit = match chase_pace {
+            // catching up with the newest report: its pace, braking only for a stop
+            Some((lead_at, pace)) if s < lead_at => match stop {
+                Some((_, m)) => pace.min((2.0 * BRAKE * (m.at - s - ARRIVED_M).max(0.0)).sqrt().max(CREEP)),
+                None => pace,
+            },
+            _ => allowed(&path, s, v, dt, cruise, stop.map(|(_, m)| m.at), top),
+        };
         v = if v > limit { limit.max(v - 2.0 * BRAKE * dt) } else { (v + ACCEL * dt).min(limit) };
         s += (v * dt).min(end - s);
         // past the stop it was timed for, the next one sets the pace
@@ -448,7 +537,7 @@ pub fn frames_between(
             && m.at < s + 1.0
             && let Some(n) = stop_after(i + 1).map(|j| &marks[j])
         {
-            cruise = pace(n.at - s, n.arrive_ms, t).min(TOP);
+            cruise = pace(n.at - s, n.arrive_ms, t).min(top);
         }
         if steps % FRAME_EVERY == 0 {
             push(&mut out, path.point(s), t);
@@ -647,5 +736,34 @@ mod tests {
         // the way the route is drawn starts there too
         let w = way(&latest, Some(&prev), &[far_stop(a)]).unwrap();
         assert_eq!((w.from, w.lead, w.targets[0]), (a, true, b));
+    }
+
+    #[test]
+    fn a_new_report_carries_it_on_from_where_it_is_drawn() {
+        // drawn at A going north at 50 m/s; the newest report puts it 900 m on, at B
+        let a = (59.0, 18.0);
+        let b = ahead(a, 0.0, 900.0);
+        let latest = Fix { lat: b.0, lon: b.1, t_ms: NOW - 2_000, speed: Some(55.0), heading: Some(0.0) };
+        let track = Fixed((vec![a, b, ahead(a, 0.0, 20_000.0)], vec![900.0], vec![Some(200.0 / 3.6), Some(200.0 / 3.6)]));
+        let f = frames_chasing(a, 50.0, Some(0.0), &latest, NOW + 15_000, &[far_stop(a)], NOW, Some(&track));
+        assert!(distance((f[0].0, f[0].1), a) < 1.0 && f[0].2 == NOW, "on from where it is, now");
+        let first = speed_between(f[0], f[1]);
+        assert!((first - 50.0).abs() < 8.0, "about the speed it had: {first:.1} m/s");
+        let at_b = f.iter().find(|p| distance((p.0, p.1), a) >= 900.0).expect("reaches B");
+        assert!((at_b.2 - (NOW + 15_000)).abs() <= 5_000, "about when asked: {} ms", at_b.2 - NOW);
+        let jumps = f.windows(2).map(|w| speed_between(w[0], w[1])).fold(0.0, f64::max);
+        assert!(jumps < 200.0 / 3.6 * CATCH_UP + 1.0, "never faster than it may catch up: {jumps:.1}");
+    }
+
+    #[test]
+    fn frames_are_sampled_with_their_speed() {
+        let a = (59.0, 18.0);
+        let b = ahead(a, 0.0, 100.0);
+        let f = [(a.0, a.1, NOW), (b.0, b.1, NOW + 4_000)];
+        let (at, v, heading) = sample(&f, NOW + 2_000).unwrap();
+        assert!((distance(at, a) - 50.0).abs() < 0.5);
+        assert!((v - 25.0).abs() < 0.1);
+        assert!(heading.unwrap() < 1.0 || heading.unwrap() > 359.0);
+        assert!(sample(&f, NOW - 1).is_none());
     }
 }

@@ -5,11 +5,12 @@ src-tauri/data/sth.json.
 
     python3 scripts/sth.py path/to/download.gpkg [more.gpkg ...]
 
-Each piece of track becomes [direction, [speeds], [[lon, lat], ...]]:
+Each piece of track becomes [direction, [A, B, C, S], [[lon, lat], ...]]:
 direction 0 both ways, 1 along the line as drawn ("Med"), 2 against it
-("Mot"); speeds in km/h, the base limit (Sth_bas) then one per cant
-deficiency category (Sth_rfb_130 ... Sth_rfb_300). Coordinates to six
-decimals (about 10 cm). Only the standard library is needed.
+("Mot"); the limits in km/h for Trafikverket's train categories by approved
+cant deficiency: A under 150 mm (Sth_bas), B 150 mm (Sth_rfb_150), C 180 mm
+(Sth_rfb_180), S 245 mm, tilting (Sth_rfb_245). Coordinates to six decimals
+(about 10 cm). Only the standard library is needed.
 """
 
 import json
@@ -17,7 +18,9 @@ import sqlite3
 import struct
 import sys
 
-CATEGORIES = [130, 150, 165, 180, 210, 225, 245, 275, 300]
+CATEGORIES = ["A", "B", "C", "S"]
+# each category's column
+COLUMNS = ["Sth_bas", "Sth_rfb_150", "Sth_rfb_180", "Sth_rfb_245"]
 DIRECTIONS = {"Med och mot": 0, "Med": 1, "Mot": 2}
 
 
@@ -45,13 +48,19 @@ def main(paths):
             srs = db.execute("select srs_id from gpkg_geometry_columns where table_name = ?", (table,)).fetchone()[0]
             if srs != 4326:
                 sys.exit(f"{table}: coordinates in EPSG:{srs}; export it in WGS 84 (EPSG:4326)")
-            columns = ["geom", "DIRECTION", "Sth_bas"] + [f"Sth_rfb_{c}" for c in CATEGORIES]
+            names = {row[1] for row in db.execute(f'pragma table_info("{table}")')}
+            if not set(COLUMNS) <= names:
+                continue  # another layer (the reference network, say)
+            columns = ["geom", "DIRECTION"] + COLUMNS
             query = f'select {",".join(chr(34) + c + chr(34) for c in columns)} from "{table}"'
-            for geom, direction, base, *rfb in db.execute(query):
+            for geom, direction, base, *more in db.execute(query):
                 points = line(geom)
                 if len(points) < 2 or base is None:
                     continue
-                speeds = [base] + [v if v is not None else base for v in rfb]
+                # a category without its own limit keeps the one below it
+                speeds = [base]
+                for v in more:
+                    speeds.append(v if v is not None else speeds[-1])
                 coords = [[round(x, 6), round(y, 6)] for x, y in points]
                 pieces.append([DIRECTIONS.get(direction, 0), speeds, coords])
     out = "src-tauri/data/sth.json"

@@ -602,6 +602,16 @@ export type TrainSource = "trafikverket" | "digitraffic" | "amtrak" | "entur" | 
 export type TrainKind = "highSpeed" | "intercity" | "regional" | "suburban" | "metro" | "freight" | "other";
 
 /** A train on the move, merged from regional public feeds (no global one exists). */
+/** A position report as the dev map marks it. */
+export interface Sighting {
+  lat: number;
+  lon: number;
+  unixMs: number;
+  speedKmh: number | null;
+  /** The newest report; else the one before it, the train is drawn from. */
+  latest: boolean;
+}
+
 export interface Train {
   /** Source-prefixed and stable while the train runs, e.g. `digitraffic:2026-10-13:2`. */
   id: string;
@@ -626,6 +636,8 @@ export interface Train {
    * `positionAt` in trains.ts.
    */
   frames: [number, number, number][];
+  /** Dev builds: the reports it is drawn from, the one before the latest first. */
+  reports?: Sighting[];
 }
 
 /**

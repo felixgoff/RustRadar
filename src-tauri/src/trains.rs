@@ -114,6 +114,22 @@ pub struct Train {
     /// Expected positions ahead, `(lat, lon, unix_ms)` in time order, the
     /// first at the report; empty when the source has none.
     pub frames: Vec<(f64, f64, i64)>,
+    /// Dev builds: the reports it is drawn from (the one before the latest,
+    /// then the latest), for the map to mark. Empty in release builds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reports: Vec<Sighting>,
+}
+
+/// A position report as the dev map marks it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sighting {
+    pub lat: f64,
+    pub lon: f64,
+    pub unix_ms: i64,
+    pub speed_kmh: Option<f32>,
+    /// The newest report; else the one before it, the train is drawn from.
+    pub latest: bool,
 }
 
 /// Degrees; `west > east` crosses the antimeridian.
@@ -447,6 +463,7 @@ fn digitraffic_train(t: &Value) -> Option<Train> {
         delay_minutes: num(&t["done"][0]["differenceInMinutes"]).map(|d| d.round() as i32),
         position_unix: latest["timestamp"].as_str().and_then(unix_ms).map(|ms| ms / 1000)?,
         frames: Vec::new(),
+        reports: Vec::new(),
     })
 }
 
@@ -512,6 +529,7 @@ fn amtraker_train(t: &Value) -> Option<Train> {
         delay_minutes: delay,
         position_unix: position_ms / 1000,
         frames: Vec::new(),
+        reports: Vec::new(),
     })
 }
 
@@ -578,6 +596,7 @@ fn entur_train(v: &Value) -> Option<Train> {
         delay_minutes: num(&v["delay"]).map(|s| (s / 60.0).round() as i32),
         position_unix: v["lastUpdated"].as_str().and_then(unix_ms)? / 1000,
         frames: Vec::new(),
+        reports: Vec::new(),
     })
 }
 
@@ -648,6 +667,7 @@ fn irishrail_train(block: &str, now_ms: i64) -> Option<Train> {
         delay_minutes: delay,
         position_unix: now_ms / 1000,
         frames: Vec::new(),
+        reports: Vec::new(),
     })
 }
 
@@ -729,6 +749,7 @@ fn radar_train(m: &Value, source: &'static str, now_ms: i64) -> Option<Train> {
         delay_minutes: delay.map(|s| (s / 60.0).round() as i32),
         position_unix: now_ms / 1000,
         frames,
+        reports: Vec::new(),
     })
 }
 

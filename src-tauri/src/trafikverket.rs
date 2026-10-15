@@ -528,6 +528,18 @@ pub fn train(
         delay_minutes: delay,
         position_unix: report.at_ms / 1000,
         frames,
+        reports: if crate::devlog::ENABLED {
+            let sight = |r: &Report, latest| crate::trains::Sighting {
+                lat: r.lat,
+                lon: r.lon,
+                unix_ms: r.at_ms,
+                speed_kmh: r.speed,
+                latest,
+            };
+            prev.map(|p| sight(p, false)).into_iter().chain([sight(report, true)]).collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 

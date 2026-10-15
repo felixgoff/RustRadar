@@ -59,6 +59,7 @@
     type Ship,
     type Train,
     type TrainRoute,
+    type Sighting,
   } from "./api";
   import { NorthUpGlobeController } from "./controller";
   import { aircraftModels, type AircraftModel } from "./aircraft";
@@ -1925,6 +1926,68 @@
     ];
   }
 
+  const SIGHT_LATEST: [number, number, number, number] = [240, 60, 60, 255];
+  const SIGHT_PREV: [number, number, number, number] = [255, 165, 40, 255];
+  const SIGHT_LABEL_BG: [number, number, number, number] = [12, 14, 20, 225];
+  /**
+   * Dev builds: each train's latest report (red) and the one before it,
+   * which it is drawn from (an orange ring), joined; the selected train's
+   * with their age and speed.
+   */
+  function sightingLayers(list: Train[], selected: Train | null, nowMs: number): Layer[] {
+    const sighted = list.filter((t) => t.reports?.length);
+    const sel = selected?.reports?.length ? selected : null;
+    if (sel && !sighted.some((t) => t.id === sel.id)) sighted.push(sel);
+    const points: Sighting[] = sighted.flatMap((t) => t.reports ?? []);
+    const pairs = sighted.filter((t) => t.reports!.length === 2).map((t) => t.reports!);
+    const age = (s: Sighting) => `${Math.max(0, Math.round((nowMs - s.unixMs) / 1000))} s`;
+    const speed = (s: Sighting) => (s.speedKmh === null ? "no speed" : `${Math.round(s.speedKmh)} km/h`);
+    const labels = (sel?.reports ?? []).map((s) => ({ s, text: `${s.latest ? "live" : "Δ"} ${age(s)} · ${speed(s)}` }));
+    const top = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
+    return [
+      new PathLayer<Sighting[]>({
+        id: "dev-sighting-links",
+        data: pairs,
+        getPath: (p) => p.map((s) => [s.lon, s.lat] as [number, number]),
+        getColor: SIGHT_PREV,
+        getWidth: 1.5,
+        widthUnits: "pixels",
+        parameters: top,
+      }),
+      new ScatterplotLayer<Sighting>({
+        id: "dev-sightings",
+        data: points,
+        getPosition: (s) => [s.lon, s.lat],
+        getRadius: (s) => (s.latest ? 4 : 5),
+        radiusUnits: "pixels",
+        filled: true,
+        stroked: true,
+        getFillColor: (s) => (s.latest ? SIGHT_LATEST : [0, 0, 0, 0]),
+        getLineColor: (s) => (s.latest ? [255, 255, 255, 255] : SIGHT_PREV),
+        getLineWidth: 2,
+        lineWidthUnits: "pixels",
+        parameters: top,
+      }),
+      new TextLayer<(typeof labels)[number]>({
+        id: "dev-sighting-labels",
+        data: labels,
+        getPosition: (l) => [l.s.lon, l.s.lat],
+        getText: (l) => l.text,
+        getColor: (l) => (l.s.latest ? SIGHT_LATEST : SIGHT_PREV),
+        getSize: 11,
+        sizeUnits: "pixels",
+        getPixelOffset: (l) => [0, l.s.latest ? -14 : 14],
+        fontFamily: "ui-monospace, monospace",
+        background: true,
+        getBackgroundColor: SIGHT_LABEL_BG,
+        backgroundPadding: [4, 2],
+        billboard: true,
+        parameters: top,
+        updateTriggers: { getText: Math.floor(nowMs / 1000) },
+      }),
+    ];
+  }
+
   function buildLayers(): Layer[] {
     // the motion model's clock follows the feed's, not this machine's
     const now = motion.now();
@@ -2089,6 +2152,8 @@
     if (trainRoute && selectedTrain) layers.push(...trainRouteLayers(trainRoute, selectedTrain));
     if (trainRing) layers.push(trainRing.halo);
     layers.push(...trainsDrawn);
+    // dev builds: the reports each train is drawn from
+    if (import.meta.env.DEV) layers.push(...sightingLayers(trains, selectedTrain, Date.now()));
     if (trainRing) layers.push(trainRing.ring);
     if (tileUrl && labels && fontsReady) {
       const marked = [airport, ...(selected && route ? [route.origin, route.destination] : [])]

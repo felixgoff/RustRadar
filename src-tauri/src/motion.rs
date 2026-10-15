@@ -173,42 +173,57 @@ struct Mark {
     at: f64,
     arrive_ms: Option<i64>,
     pass: bool,
+    /// Stops this long, then goes on; none: stands there until a report moves it.
+    dwell_ms: Option<i64>,
 }
 
 /// What a train does next, by its report and its stops ahead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plan {
-    /// At the platform of `stops[0]`, until a report shows it moving.
-    Standing,
+    /// At the platform of `stops[at]`, until a report shows it moving.
+    Standing { at: usize },
     /// On its way to `stops[next]` (the ones before it are behind it already).
     Moving { next: usize },
 }
 
-/// Whether a train is standing at its first stop or on its way, and to which
-/// stop: a stop behind it was passed already (the timetable runs a little
-/// late or early).
+/// A station further than this from a train it has passed, metres.
+const PASSED_M: f64 = 300.0;
+/// A train reported moving this far beyond a station, away from it, has left it, metres.
+const LEFT_M: f64 = 50.0;
+
+/// Whether a train is standing at a stop or on its way, and to which stop.
+/// A stop is behind it when it is past it on the way to the one after
+/// (nearer that one than the stop is), or, moving, when it lies behind it
+/// close by: by where it is, not by the clock, so a late train still stops
+/// at the station it hasn't reached.
 pub fn plan(pos: (f64, f64), speed: Option<f64>, heading: Option<f64>, stops: &[Stop], t0_ms: i64) -> Plan {
-    let Some(first) = stops.first() else { return Plan::Moving { next: 0 } };
     let speed = speed.filter(|s| s.is_finite() && *s >= 0.0);
+    let moving = speed.is_none_or(|s| s > 3.0);
+    let mut next = 0;
+    while next + 1 < stops.len() {
+        let (here, then) = ((stops[next].lat, stops[next].lon), (stops[next + 1].lat, stops[next + 1].lon));
+        let near = distance(pos, here);
+        let past = near > PASSED_M && distance(pos, then) + PASSED_M < distance(here, then);
+        // seen moving away from it: it has left (a reported speed says so sooner)
+        let left_m = if speed.is_some() { LEFT_M } else { PASSED_M };
+        let behind = moving
+            && near > left_m
+            && near < 5_000.0
+            && heading.filter(|h| h.is_finite()).is_some_and(|h| turn(bearing(pos, here), h) > 120.0);
+        if past || behind {
+            next += 1;
+        } else {
+            break;
+        }
+    }
+    let Some(first) = stops.get(next) else { return Plan::Moving { next } };
     // still, or (not saying) due there already
     let standing = match speed {
         Some(s) => s < STILL,
         None => first.arrive_ms.is_none_or(|a| a <= t0_ms),
     };
     if !first.pass && standing && distance(pos, (first.lat, first.lon)) < AT_STOP_M {
-        return Plan::Standing;
-    }
-    let mut next = 0;
-    if let Some(h) = heading.filter(|h| h.is_finite() && speed.unwrap_or(0.0) > 3.0) {
-        while next + 1 < stops.len() {
-            let s = &stops[next];
-            let off = (bearing(pos, (s.lat, s.lon)) - h).rem_euclid(360.0);
-            if (120.0..=240.0).contains(&off) && distance(pos, (s.lat, s.lon)) < 5_000.0 {
-                next += 1;
-            } else {
-                break;
-            }
-        }
+        return Plan::Standing { at: next };
     }
     Plan::Moving { next }
 }
@@ -251,6 +266,62 @@ const MAX_LAG_MS: i64 = 180_000;
 /// A train that moved less than this between two reports is drawn from the latest, metres.
 const MOVED_M: f64 = 5.0;
 
+/// A place on a train's way, and what it does there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Target {
+    pub at: (f64, f64),
+    /// It only passes it: no slowing.
+    pub pass: bool,
+    /// When it is due there (sets the pace where the track's limit is unknown).
+    pub arrive_ms: Option<i64>,
+    /// It stops this long, then goes on (a station the real train has already
+    /// left); none: it stands there until a report shows it moving.
+    pub dwell_ms: Option<i64>,
+    /// Which of the train's stops it is; none for a report.
+    pub stop: Option<usize>,
+}
+
+/// A stop at a station the real train has already called at, as drawn, ms:
+/// its timetabled stop, within reason.
+const DWELL_MS: (i64, i64, i64) = (15_000, 20_000, 45_000);
+
+fn target_of(stops: &[Stop], i: usize, left_already: bool) -> Target {
+    let s = &stops[i];
+    let dwell = match (s.arrive_ms, s.depart_ms) {
+        (Some(a), Some(d)) => (d - a).clamp(DWELL_MS.0, DWELL_MS.2),
+        _ => DWELL_MS.1,
+    };
+    Target {
+        at: (s.lat, s.lon),
+        pass: s.pass,
+        arrive_ms: if left_already { None } else { s.arrive_ms },
+        dwell_ms: (left_already && !s.pass).then_some(dwell),
+        stop: Some(i),
+    }
+}
+
+/// The newest report as a place on the way: passed, never stopped at.
+fn report_target(at: (f64, f64)) -> Target {
+    Target { at, pass: true, arrive_ms: None, dwell_ms: None, stop: None }
+}
+
+/// The stops from `next` the way along the track is found through.
+fn stop_targets(stops: &[Stop], next: usize) -> Vec<Target> {
+    let next = next.min(stops.len());
+    (next..next + route_targets(&stops[next..])).map(|i| target_of(stops, i, false)).collect()
+}
+
+/// The stops between a train drawn at `from` and where it was last seen (on
+/// its way to `stops[next]`): ones the real train has passed already, or
+/// called at and left. The drawn train still calls at them, briefly.
+fn between(from: (f64, f64), heading: Option<f64>, speed: Option<f64>, stops: &[Stop], next: usize, t: i64) -> Vec<Target> {
+    let first = match plan(from, speed, heading, stops, t) {
+        Plan::Standing { at } => at,
+        Plan::Moving { next } => next,
+    };
+    (first..next.min(stops.len())).map(|i| target_of(stops, i, true)).collect()
+}
+
 /// Where a train's way starts and what it goes through: what its frames and
 /// its drawn route are both made from.
 #[derive(Clone, Debug, PartialEq)]
@@ -260,15 +331,21 @@ pub struct Way {
     /// it was last seen; else the latest.
     pub from: (f64, f64),
     pub heading: Option<f64>,
-    /// The places it goes through: the latest report (when coming from the
-    /// one before), then its next stops.
-    pub targets: Vec<(f64, f64)>,
-    /// Whether `targets[0]` is the latest report.
-    pub lead: bool,
-    /// The first of the stops it is on its way to.
+    /// The places it goes through, in order: stations the real train has
+    /// already called at (it calls at them too), the newest report, its next stops.
+    pub targets: Vec<Target>,
+    /// Which target is the newest report, when it comes from behind it.
+    pub lead: Option<usize>,
+    /// The first of the stops the real train is on its way to.
     pub next: usize,
     /// Its speed at the start, if known: m/s.
     pub speed: Option<f64>,
+}
+
+impl Way {
+    pub fn points(&self) -> Vec<(f64, f64)> {
+        self.targets.iter().map(|t| t.at).collect()
+    }
 }
 
 /// The way of a train by its latest report (and the one before), or none
@@ -276,8 +353,7 @@ pub struct Way {
 pub fn way(latest: &Fix, prev: Option<&Fix>, stops: &[Stop]) -> Option<Way> {
     let pos = (latest.lat, latest.lon);
     let Plan::Moving { next } = plan(pos, latest.speed, latest.heading, stops, latest.t_ms) else { return None };
-    let ahead = &stops[next.min(stops.len())..];
-    let mut targets: Vec<(f64, f64)> = ahead.iter().take(route_targets(ahead)).map(|s| (s.lat, s.lon)).collect();
+    let ahead = stop_targets(stops, next);
     let valid = |v: &f64| v.is_finite() && *v >= 0.0;
     let from_prev = prev.filter(|p| {
         let lag = latest.t_ms - p.t_ms;
@@ -287,22 +363,20 @@ pub fn way(latest: &Fix, prev: Option<&Fix>, stops: &[Stop]) -> Option<Way> {
         Some(p) => {
             let from = (p.lat, p.lon);
             let lag_s = (latest.t_ms - p.t_ms) as f64 / 1000.0;
-            targets.insert(0, pos);
-            Way {
-                from,
-                // the way it went
-                heading: Some(course(from, pos)),
-                targets,
-                lead: true,
-                next,
-                speed: p.speed.filter(valid).or(Some(distance(from, pos) / lag_s)),
-            }
+            // the way it went
+            let heading = Some(course(from, pos));
+            let speed = p.speed.filter(valid).or(Some(distance(from, pos) / lag_s));
+            let mut targets = between(from, heading, speed, stops, next, p.t_ms);
+            let lead = targets.len();
+            targets.push(report_target(pos));
+            targets.extend(ahead);
+            Way { from, heading, targets, lead: Some(lead), next, speed }
         }
         None => Way {
             from: pos,
             heading: latest.heading.filter(|h| h.is_finite()),
-            targets,
-            lead: false,
+            targets: ahead,
+            lead: None,
             next,
             speed: latest.speed.filter(valid),
         },
@@ -366,20 +440,25 @@ pub fn frames_between(
     let until = now_ms.max(t0_ms) + HORIZON_MS;
     let Some(way) = way(latest, prev, stops) else {
         // at the platform: there until a report shows it on its way
-        let (pos, platform) = ((latest.lat, latest.lon), (stops[0].lat, stops[0].lon));
+        let pos = (latest.lat, latest.lon);
+        let at = match plan(pos, latest.speed, latest.heading, stops, t0_ms) {
+            Plan::Standing { at } => at,
+            Plan::Moving { next } => next,
+        };
+        let platform = stops.get(at).map_or(pos, |s| (s.lat, s.lon));
         let at = track.and_then(|tr| tr.hold(pos, platform)).unwrap_or(pos);
         return vec![(at.0, at.1, t0_ms), (at.0, at.1, until)];
     };
     // reported standing, away from a platform (at a signal, say): there until it moves
-    if !way.lead && !stops.is_empty() && latest.speed.is_some_and(|v| v < STILL) {
+    if way.lead.is_none() && !stops.is_empty() && latest.speed.is_some_and(|v| v < STILL) {
         let pos = (latest.lat, latest.lon);
         let at = track.and_then(|tr| tr.route(pos, way.heading, &[], 0.0)).and_then(|r| r.0.first().copied()).unwrap_or(pos);
         return vec![(at.0, at.1, t0_ms), (at.0, at.1, until)];
     }
     // with nothing to come from, it starts where it was seen, now: never
     // ahead of it by however late the report came
-    let start = if way.lead { t0_ms } else { now_ms.max(t0_ms) };
-    run(&way, start, stops, now_ms, track, None)
+    let start = if way.lead.is_some() { t0_ms } else { now_ms.max(t0_ms) };
+    run(&way, start, now_ms, track, None)
 }
 
 /// How a train drawn apart from its newest report is brought back to it.
@@ -400,6 +479,9 @@ const EASE_FLOOR: f64 = 0.4;
 /// How much faster than the track allows a train drawn behind may go to
 /// catch up with where it was last seen.
 const CATCH_UP: f64 = 1.35;
+/// Braking into a station and pulling away again takes about this much
+/// longer than running through it, seconds.
+const STATION_TIME_S: f64 = 20.0;
 
 /// Where a vehicle drawn along `frames` is at `t`: its place, speed (m/s)
 /// and heading. None before the first frame or without two.
@@ -439,11 +521,13 @@ pub fn frames_chasing(
     }
     let pos = (latest.lat, latest.lon);
     let next = match plan(pos, latest.speed, latest.heading, stops, latest.t_ms) {
-        // it has stopped at the platform: in to it from where it is drawn
-        Plan::Standing => {
-            let way =
-                Way { from, heading, targets: vec![(stops[0].lat, stops[0].lon)], lead: false, next: 0, speed: Some(v0) };
-            return run(&way, now_ms, stops, now_ms, track, None);
+        // it has stopped at the platform: in to it from where it is drawn (calling
+        // at any station on the way the real train has already called at)
+        Plan::Standing { at } => {
+            let mut targets = between(from, heading, Some(v0), stops, at, now_ms);
+            targets.push(target_of(stops, at, false));
+            let way = Way { from, heading, targets, lead: None, next: at, speed: Some(v0) };
+            return run(&way, now_ms, now_ms, track, None);
         }
         Plan::Moving { next } => next,
     };
@@ -456,12 +540,12 @@ pub fn frames_chasing(
             let at = track.and_then(|tr| tr.route(pos, travel, &[], 0.0)).and_then(|r| r.0.first().copied()).unwrap_or(pos);
             return vec![(at.0, at.1, now_ms), (at.0, at.1, until)];
         }
-        let here = [Stop { lat: pos.0, lon: pos.1, arrive_ms: None, depart_ms: None, pass: false }];
-        let way = Way { from, heading, targets: vec![pos], lead: false, next: 0, speed: Some(v0) };
-        return run(&way, now_ms, &here, now_ms, track, None);
+        let here = Target { at: pos, pass: false, arrive_ms: None, dwell_ms: None, stop: None };
+        let mut targets = between(from, heading, Some(v0), stops, next, now_ms);
+        targets.push(here);
+        let way = Way { from, heading, targets, lead: None, next, speed: Some(v0) };
+        return run(&way, now_ms, now_ms, track, None);
     }
-    let ahead_stops = &stops[next.min(stops.len())..];
-    let stop_targets = ahead_stops.iter().take(route_targets(ahead_stops)).map(|s| (s.lat, s.lon));
     // drawn ahead of where it was seen: on more slowly, for the real train to catch up
     let gap = distance(pos, from);
     let travel = latest.heading.filter(|h| h.is_finite()).or(heading);
@@ -472,59 +556,50 @@ pub fn frames_chasing(
         let reported = latest.speed.filter(|v| v.is_finite()).unwrap_or(v0).max(0.0);
         let secs = ((arrive_ms - now_ms) as f64 / 1000.0).max(1.0);
         let pace = ((reported * secs - gap) / secs).clamp(reported * EASE_FLOOR, reported.max(0.1));
-        let way = Way { from, heading, targets: stop_targets.collect(), lead: false, next, speed: Some(v0) };
-        return run(&way, now_ms, stops, now_ms, track, Some(Chase::Ease(pace, arrive_ms)));
+        let way = Way { from, heading, targets: stop_targets(stops, next), lead: None, next, speed: Some(v0) };
+        return run(&way, now_ms, now_ms, track, Some(Chase::Ease(pace, arrive_ms)));
     }
-    let mut targets = vec![pos];
-    targets.extend(stop_targets);
-    let way = Way { from, heading, targets, lead: true, next, speed: Some(v0) };
-    run(&way, now_ms, stops, now_ms, track, Some(Chase::Reach(arrive_ms)))
+    // behind it: on through the stations the real train has called at since, to it, and on
+    let mut targets = between(from, heading, Some(v0), stops, next, now_ms);
+    let lead = targets.len();
+    targets.push(report_target(pos));
+    targets.extend(stop_targets(stops, next));
+    let way = Way { from, heading, targets, lead: Some(lead), next, speed: Some(v0) };
+    run(&way, now_ms, now_ms, track, Some(Chase::Reach(arrive_ms)))
 }
 
 /// The frames along a way from `t0_ms`; with `chase`, paced to reach the
 /// way's lead (the newest report) by then.
-fn run(
-    way: &Way,
-    t0_ms: i64,
-    stops: &[Stop],
-    now_ms: i64,
-    track: Option<&dyn Track>,
-    chase: Option<Chase>,
-) -> Vec<(f64, f64, i64)> {
+fn run(way: &Way, t0_ms: i64, now_ms: i64, track: Option<&dyn Track>, chase: Option<Chase>) -> Vec<(f64, f64, i64)> {
     let until = now_ms.max(t0_ms) + HORIZON_MS;
-    if stops.is_empty() && !way.lead && (way.heading.is_none() || way.speed.unwrap_or(0.0) <= 0.5) {
+    if way.targets.is_empty() && (way.heading.is_none() || way.speed.unwrap_or(0.0) <= 0.5) {
         return Vec::new();
     }
     let pos = way.from;
     // as fast as the train goes, at most
     let top = track.and_then(|tr| tr.top()).unwrap_or(TOP).min(TOP);
-    let ahead_stops = &stops[way.next.min(stops.len())..];
     let mut t = t0_ms;
     // as far as it could go by the horizon, and a little more
     let reach = way.speed.unwrap_or(0.0).max(TOP) * (until - t) as f64 / 1000.0 + 500.0;
 
     // the way: along the track through the places ahead, else straight to them
-    let routed = track.and_then(|tr| tr.route(pos, way.heading, &way.targets, reach)).filter(|(p, _, _)| p.len() >= 2);
+    let targets = way.points();
+    let routed = track.and_then(|tr| tr.route(pos, way.heading, &targets, reach)).filter(|(p, _, _)| p.len() >= 2);
     let (points, reached, speeds) = match routed {
         Some(r) => r,
-        None if !way.targets.is_empty() => {
+        None if !targets.is_empty() => {
             let mut points = vec![pos];
-            points.extend(&way.targets);
-            if way.targets.len() < ahead_stops.len() + usize::from(way.lead) {
-                points.extend(ahead_stops.iter().skip(way.targets.len() - usize::from(way.lead)).map(|s| (s.lat, s.lon)));
-            }
+            points.extend(&targets);
             let at = Path::new(points.clone(), &[]).at;
             (points, at[1..].to_vec(), Vec::new())
         }
         None => (vec![pos, ahead(pos, way.heading.unwrap_or(0.0), reach)], Vec::new(), Vec::new()),
     };
     let path = Path::new(points, &speeds);
-    // the latest report is a place it passes: it doesn't slow there
-    let lead = way.lead.then_some(Mark { at: 0.0, arrive_ms: None, pass: true });
     let marks: Vec<Mark> = reached
         .iter()
-        .zip(lead.into_iter().chain(ahead_stops.iter().map(|s| Mark { at: 0.0, arrive_ms: s.arrive_ms, pass: s.pass })))
-        .map(|(at, m)| Mark { at: *at, ..m })
+        .zip(&way.targets)
+        .map(|(at, t)| Mark { at: *at, arrive_ms: t.arrive_ms, pass: t.pass, dwell_ms: t.dwell_ms })
         .collect();
     // where it next stops: places it only passes don't slow it
     let stop_after = |from: usize| (from..marks.len()).find(|i| !marks[*i].pass);
@@ -550,8 +625,15 @@ fn run(
         Some(Chase::Reach(arrive)) => Some(arrive),
         _ => None,
     };
-    let chase_pace = reach.zip(way.lead.then(|| marks.first().map(|m| m.at)).flatten()).map(|(arrive, lead_at)| {
-        let secs = ((arrive - t0_ms) as f64 / 1000.0).max(1.0);
+    let chase_pace = reach.zip(way.lead.and_then(|i| marks.get(i)).map(|m| m.at)).map(|(arrive, lead_at)| {
+        // less the time it stands at stations on the way, and braking and pulling away there
+        let calls: f64 = marks
+            .iter()
+            .filter(|m| m.at < lead_at)
+            .filter_map(|m| m.dwell_ms)
+            .map(|d| d as f64 / 1000.0 + STATION_TIME_S)
+            .sum();
+        let secs = ((arrive - t0_ms) as f64 / 1000.0 - calls).max(5.0);
         (lead_at, (lead_at / secs).min(top * CATCH_UP))
     });
     // ahead of the newest report: held back a while
@@ -567,22 +649,43 @@ fn run(
         (p.0, p.1, t0_ms)
     }];
     let mut steps = 0;
+    // standing at a station until then, before going on
+    let mut dwell_until: Option<i64> = None;
     while t < until {
         t += STEP_MS;
         steps += 1;
         let dt = STEP_MS as f64 / 1000.0;
+        if let Some(leave) = dwell_until {
+            if t < leave {
+                if steps % FRAME_EVERY == 0 {
+                    push(&mut out, path.point(s), t);
+                }
+                continue;
+            }
+            dwell_until = None;
+            push(&mut out, path.point(s), t);
+        }
         // the places passed by now
         while marks.get(mark).is_some_and(|m| m.pass && m.at <= s) {
             mark += 1;
         }
         let stop = stop_after(mark).map(|i| (i, &marks[i]));
-        if let Some((_, m)) = stop
+        if let Some((i, m)) = stop
             && m.at - s <= ARRIVED_M
         {
-            // in: it stands at the platform from here on, until a report says otherwise
             s = m.at;
+            v = 0.0;
             push(&mut out, path.point(s), t);
-            break;
+            match m.dwell_ms {
+                // a station the real train has left: a while there, then on
+                Some(d) => {
+                    dwell_until = Some(t + d);
+                    mark = i + 1;
+                    continue;
+                }
+                // in: it stands at the platform from here on, until a report says otherwise
+                None => break,
+            }
         }
         let end = stop.map_or(path.len(), |(_, m)| m.at);
         if end - s <= 0.5 {
@@ -808,7 +911,7 @@ mod tests {
         assert!(speeds.windows(2).all(|w| w[1] >= w[0] - 0.5), "never slows for the report: {speeds:?}");
         // the way the route is drawn starts there too
         let w = way(&latest, Some(&prev), &[far_stop(a)]).unwrap();
-        assert_eq!((w.from, w.lead, w.targets[0]), (a, true, b));
+        assert_eq!((w.from, w.lead, w.targets[0].at), (a, Some(0), b));
     }
 
     #[test]
@@ -872,5 +975,42 @@ mod tests {
         assert!((250.0..600.0).contains(&went), "eased: {went:.0} m in 20 s");
         assert!(f.windows(2).all(|w| w[1].0 >= w[0].0 - 1e-9), "never backwards");
         assert!(f.windows(2).skip(1).all(|w| speed_between(w[0], w[1]) > 40.0 * EASE_FLOOR - 1.0), "never stops");
+    }
+
+    fn station(at: (f64, f64), arrive_ms: i64) -> Stop {
+        Stop { lat: at.0, lon: at.1, arrive_ms: Some(arrive_ms), depart_ms: Some(arrive_ms + 60_000), pass: false }
+    }
+
+    #[test]
+    fn a_late_train_still_calls_at_the_station_ahead() {
+        // due at the station 3 minutes ago, but still 2 km short of it: it stops there
+        let here = (59.0, 18.0);
+        let st = ahead(here, 0.0, 2_000.0);
+        let after = ahead(here, 0.0, 12_000.0);
+        let stops = [station(st, NOW - 180_000), station(after, NOW + 600_000)];
+        assert_eq!(plan(here, Some(30.0), Some(0.0), &stops, NOW), Plan::Moving { next: 0 });
+        let f = frames(here.0, here.1, NOW, Some(30.0), Some(0.0), &stops, NOW);
+        assert!(f.iter().any(|p| distance((p.0, p.1), st) < 1.0), "stops at the station");
+        // and past it (300 m on, nearer the next), it is behind
+        let past = ahead(st, 0.0, 400.0);
+        assert_eq!(plan(past, None, None, &stops, NOW), Plan::Moving { next: 1 });
+    }
+
+    #[test]
+    fn drawn_behind_a_station_the_train_has_left_it_still_calls_there() {
+        // drawn 1 km before a station; the newest report is 1 km beyond it
+        let drawn = (59.0, 18.0);
+        let st = ahead(drawn, 0.0, 1_000.0);
+        let seen = ahead(drawn, 0.0, 2_000.0);
+        let after = ahead(drawn, 0.0, 20_000.0);
+        let stops = [station(st, NOW - 60_000), station(after, NOW + 900_000)];
+        let latest = Fix { lat: seen.0, lon: seen.1, t_ms: NOW - 2_000, speed: Some(25.0), heading: Some(0.0) };
+        let f = frames_chasing(drawn, 25.0, Some(0.0), &latest, NOW + 90_000, &stops, NOW, None);
+        let at_station: Vec<_> = f.iter().filter(|p| distance((p.0, p.1), st) < 1.0).collect();
+        assert!(at_station.len() >= 2, "stands at the station a while");
+        let stood = at_station.last().unwrap().2 - at_station[0].2;
+        assert!((DWELL_MS.0..=DWELL_MS.2 + 5_000).contains(&stood), "{stood} ms");
+        let end = f.last().unwrap();
+        assert!(distance((end.0, end.1), drawn) > 1_020.0, "then on, away from the station");
     }
 }

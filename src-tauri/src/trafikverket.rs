@@ -695,6 +695,9 @@ pub fn train(
 
 /// The run's stops still ahead at `at_ms`, with places, at the times now
 /// expected: the timetable's shifted by the delay (never leaving early).
+/// A stop due this long before a report is behind the train whatever its place says.
+const PASSED_BY_CLOCK_MS: i64 = 30 * 60_000;
+
 fn stops_ahead(
     run: &Service,
     delay: Option<i32>,
@@ -728,8 +731,9 @@ fn calls_ahead<'a>(
             };
             Some((c, station, stop))
         })
-        // a couple of minutes' grace: the delay is the one at its last report
-        .skip_while(|(_, _, s)| s.depart_ms.or(s.arrive_ms).is_none_or(|t| t < at_ms - 120_000))
+        // by the clock only long gone ones: which it has passed is told by where
+        // it is (`motion::plan`), so a late train still calls at the next one
+        .skip_while(|(_, _, s)| s.depart_ms.or(s.arrive_ms).is_none_or(|t| t < at_ms - PASSED_BY_CLOCK_MS))
         .collect()
 }
 
@@ -1588,9 +1592,20 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
     // where the train is drawn from and the way it goes: as its motion has it
     // (standing at a platform, or not seen: from its next stop)
     let way = seen.and_then(|s| motion::way(&s.latest, s.prev.as_ref(), &stops));
-    let first = way.as_ref().map_or(0, |w| w.next).min(stops.len());
+    let standing_at = seen.and_then(|s| {
+        match motion::plan((s.latest.lat, s.latest.lon), s.latest.speed, s.latest.heading, &stops, s.latest.t_ms) {
+            motion::Plan::Standing { at } => Some(at),
+            motion::Plan::Moving { .. } => None,
+        }
+    });
+    // the first station on its way: one the drawn train still calls at, else the real one's next
+    let first = way
+        .as_ref()
+        .map(|w| w.targets.iter().find_map(|t| t.stop).unwrap_or(w.next))
+        .or(standing_at)
+        .unwrap_or(0)
+        .min(stops.len());
     let ahead_calls = &calls[first..];
-    let places: Vec<(f64, f64)> = ahead_calls.iter().map(|c| (c.2.lat, c.2.lon)).collect();
     // each place's possible spots: the one the train's motion heads for first
     let spots: Vec<Vec<(f64, f64)>> = ahead_calls
         .iter()
@@ -1605,21 +1620,22 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
         })
         .collect();
     let (segments, complete) = match way {
-        Some(w) => match crate::rail::route(w.from, w.heading, &w.targets, 0.0) {
+        Some(w) => match crate::rail::route(w.from, w.heading, &w.points(), 0.0) {
             // the stretch the train is moving along, then on from the last stop it reached
             Some(r) => {
-                let k = r.reached.len().saturating_sub(usize::from(w.lead));
-                let mut rest_places = spots[k.saturating_sub(1)..].to_vec();
-                if k > 0
+                let reached_stop = w.targets[..r.reached.len().min(w.targets.len())].iter().rev().find_map(|t| t.stop);
+                let from = reached_stop.unwrap_or(w.next).max(first);
+                let mut rest_places = spots[(from - first).min(spots.len())..].to_vec();
+                if reached_stop.is_some()
                     && let Some(reached) = rest_places.first_mut()
                 {
                     // where its motion stops there
-                    *reached = vec![places[k - 1]];
+                    *reached = vec![(stops[from].lat, stops[from].lon)];
                 }
                 let (mut rest, complete) = crate::rail::way_through(&rest_places);
                 match rest.first_mut() {
                     Some(next)
-                        if k > 0
+                        if reached_stop.is_some()
                             && next.first().zip(r.points.last()).is_some_and(|(a, b)| motion::distance(*a, *b) < 1.0) =>
                     {
                         let mut joined = r.points;

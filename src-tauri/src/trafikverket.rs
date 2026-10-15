@@ -412,8 +412,9 @@ pub fn product_codes() -> Vec<ProductSeen> {
 /// The way a train is drawn, kept per train so the next report carries it
 /// on from where it is drawn instead of starting it anew.
 struct Drawn {
-    /// The report the frames were made for.
+    /// The report the frames were made for: when, and where it put the train.
     at_ms: i64,
+    place: (f64, f64),
     frames: Vec<(f64, f64, i64)>,
     /// How far apart its reports come, smoothed: ms.
     interval_ms: f64,
@@ -430,6 +431,10 @@ fn plans() -> &'static Plans {
 const INTERVAL_MS: f64 = 20_000.0;
 /// Reports further apart than this start the train anew.
 const CONTINUE_MS: i64 = 180_000;
+/// A train catching up is paced to reach its newest report this many report
+/// intervals on: a little later than the next report usually comes, so it
+/// isn't drawn past where it was seen.
+const ARRIVE_LATER: f64 = 1.15;
 
 /// The frames a train is drawn along. The same report gives the same
 /// frames (the map refreshing doesn't move it); a newer one carries it on
@@ -451,18 +456,22 @@ fn frames_for(
         return fresh();
     }
     let key = report.lookup().to_owned();
-    let old = plans().lock().unwrap().get(&key).map(|d| (d.at_ms, d.frames.clone(), d.interval_ms));
-    if let Some((at, frames, _)) = &old
-        && *at == report.at_ms
+    let old = plans().lock().unwrap().get(&key).map(|d| (d.at_ms, d.frames.clone(), d.interval_ms, d.place));
+    // the same report, or one that puts it where that one did: the same way
+    // (unless it now says it has stopped there: then it is brought to a stand)
+    let stopped = report.speed.is_some_and(|v| v < 1.0);
+    if let Some((at, frames, _, place)) = &old
+        && (*at == report.at_ms || (!stopped && motion::distance(*place, (report.lat, report.lon)) < SAME_PLACE_M))
     {
         return frames.clone();
     }
     let interval = old.as_ref().map_or(INTERVAL_MS, |o| o.2);
-    let carried = old.as_ref().filter(|(at, _, _)| (1..=CONTINUE_MS).contains(&(report.at_ms - at))).and_then(
-        |(at, frames, interval)| {
+    let carried = old.as_ref().filter(|(at, _, _, _)| (1..=CONTINUE_MS).contains(&(report.at_ms - at))).and_then(
+        |(at, frames, interval, _)| {
             let (from, v, heading) = motion::sample(frames, now_ms)?;
             let interval = interval * 0.6 + (report.at_ms - at) as f64 * 0.4;
-            let arrive = now_ms + interval as i64;
+            // a little later than the reports usually come: it gets there as the next one does
+            let arrive = now_ms + (interval * ARRIVE_LATER) as i64;
             let frames = motion::frames_chasing(from, v, heading, &latest, arrive, stops, now_ms, Some(rail));
             (!frames.is_empty()).then_some((frames, interval))
         },
@@ -470,7 +479,10 @@ fn frames_for(
     let (frames, interval) = carried.unwrap_or_else(|| (fresh(), interval));
     let mut plans = plans().lock().unwrap();
     plans.retain(|_, d| now_ms - d.at_ms < 6 * 3_600_000);
-    plans.insert(key, Drawn { at_ms: report.at_ms, frames: frames.clone(), interval_ms: interval });
+    plans.insert(
+        key,
+        Drawn { at_ms: report.at_ms, place: (report.lat, report.lon), frames: frames.clone(), interval_ms: interval },
+    );
     frames
 }
 
@@ -1334,12 +1346,23 @@ fn history() -> &'static History {
     H.get_or_init(Default::default)
 }
 
+/// Reports this close to the one before are the same place: the train
+/// hasn't moved (or the report repeats itself), metres.
+const SAME_PLACE_M: f64 = 2.0;
+
+/// Whether a report puts the train where the one before did.
+fn same_place(a: &Report, b: &Report) -> bool {
+    motion::distance((a.lat, a.lon), (b.lat, b.lon)) < SAME_PLACE_M
+}
+
 /// The report before this one of the same train; this one is remembered.
+/// One that puts it where the last one did changes nothing: the last one
+/// stays the newest, the one before it stays.
 fn previous(report: &Report) -> Option<Report> {
     let mut h = history().lock().unwrap();
     let key = report.lookup().to_owned();
     match h.get(&key) {
-        Some((latest, prev)) if latest.at_ms == report.at_ms => prev.clone(),
+        Some((latest, prev)) if latest.at_ms == report.at_ms || same_place(latest, report) => prev.clone(),
         Some((latest, _)) if latest.at_ms < report.at_ms => {
             let prev = latest.clone();
             h.insert(key, (report.clone(), Some(prev.clone())));

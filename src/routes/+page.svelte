@@ -41,6 +41,8 @@
   import ModeBar from "$lib/ModeBar.svelte";
   import BottomSheet, { type Detent } from "$lib/BottomSheet.svelte";
   import { layout } from "$lib/phone.svelte";
+  import { pushState } from "$app/navigation";
+  import { page } from "$app/state";
   import SearchBox, { type LocalSearch } from "$lib/SearchBox.svelte";
   import ShipFilterPanel from "$lib/ShipFilterPanel.svelte";
   import ShipList from "$lib/ShipList.svelte";
@@ -144,6 +146,8 @@
   let filtersOpen = $state(false);
   let helpOpen = $state(false);
   let keysOpen = $state(false);
+  /** The map controls' open menu. */
+  let menu = $state<"layers" | "settings" | null>(null);
   /** On a phone: how far up the list sheet is, and its height in px. */
   let sheetDetent = $state<Detent>("peek");
   let sheetHeight = $state(0);
@@ -872,6 +876,61 @@
     keysOpen = true;
   }
 
+  /** Closes whatever is on top (Escape, or Android's back gesture); false when nothing is open. */
+  function closeTop(): boolean {
+    if (keysOpen) closeKeys();
+    else if (helpOpen) helpOpen = false;
+    else if (menu) menu = null;
+    else if (place) place = null;
+    else if (selectedId !== null) select(null);
+    else if (pickedShip) selectShip(null);
+    else if (pickedTrain) selectTrain(null);
+    else if (boardCode) boardCode = null;
+    else if (filtersOpen) filtersOpen = false;
+    else if (layout.phone && sheetDetent !== "peek") sheetDetent = "peek";
+    else return false;
+    return true;
+  }
+
+  // Android's back gesture goes back in the page's history, and leaves the app
+  // when there is none. While something is open, a history entry is kept for
+  // it to take instead, which closes that thing.
+  const android = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+  const closable = $derived(
+    keysOpen ||
+      helpOpen ||
+      menu !== null ||
+      place !== null ||
+      selectedId !== null ||
+      pickedShip !== null ||
+      pickedTrain !== null ||
+      boardCode !== null ||
+      filtersOpen ||
+      (layout.phone && sheetDetent !== "peek"),
+  );
+  /** Whether the entry on top is ours, and whether we took it away ourselves. */
+  let backArmed = false;
+  let unarming = false;
+  $effect(() => {
+    if (!android) return;
+    const armed = Boolean(page.state.back);
+    // the gesture took our entry: close the top thing (the next effect arms again if more is open)
+    if (backArmed && !armed) {
+      if (unarming) unarming = false;
+      else closeTop();
+    }
+    backArmed = armed;
+  });
+  $effect(() => {
+    if (!android) return;
+    const armed = Boolean(page.state.back);
+    if (closable && !armed) pushState("", { back: true });
+    else if (!closable && armed) {
+      unarming = true;
+      history.back();
+    }
+  });
+
   function closeKeys() {
     keysOpen = false;
     const back = keysPrompt;
@@ -925,13 +984,7 @@
     // the keys page is modal: it handles its own keys, Escape included
     if (typing || keysOpen || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === "Escape") {
-      if (helpOpen) helpOpen = false;
-      else if (place) place = null;
-      else if (selectedId !== null) select(null);
-      else if (pickedShip) selectShip(null);
-      else if (pickedTrain) selectTrain(null);
-      else if (boardCode) boardCode = null;
-      else if (filtersOpen) filtersOpen = false;
+      closeTop();
       return;
     }
     if (helpOpen && e.key !== "?") return;
@@ -1347,6 +1400,7 @@
     onzoom={(d) => globe.zoomBy(d)}
     onreset={() => globe.resetOrientation()}
     ontilt={(p) => globe.setPitch(p)}
+    bind:menu
     onkeys={() => (keysOpen = true)}
     onhelp={() => (helpOpen = true)}
   />

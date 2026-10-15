@@ -75,18 +75,67 @@ fn push(out: &mut Vec<(f64, f64, i64)>, pos: (f64, f64), t: i64) {
     out.push((pos.0, pos.1, t));
 }
 
-/// The pace to make `to` by its arrival from `from` at `t`, m/s; a default without one.
-fn pace(from: (f64, f64), to: &Stop, t: i64) -> f64 {
-    let d = distance(from, (to.lat, to.lon));
-    match to.arrive_ms {
-        Some(arrive) => (d / ((arrive - t).max(60_000) as f64 / 1000.0)).clamp(PACE.0, PACE.1),
+/// The pace to cover `metres` by `arrive` from `t`, m/s; a default without a time.
+fn pace(metres: f64, arrive: Option<i64>, t: i64) -> f64 {
+    match arrive {
+        Some(arrive) => (metres / ((arrive - t).max(60_000) as f64 / 1000.0)).clamp(PACE.0, PACE.1),
         None => 22.0,
     }
 }
 
+/// A route along the track: its points and how far along it each target is
+/// reached. See `rail::route`.
+pub type Routed = (Vec<(f64, f64)>, Vec<f64>);
+
+/// Finds the way from a point (heading roughly so) through these targets in
+/// order and on for so many metres; none to go straight instead.
+pub type Router<'a> = &'a dyn Fn((f64, f64), Option<f64>, &[(f64, f64)], f64) -> Option<Routed>;
+
+/// A line to move along, measured.
+struct Path {
+    points: Vec<(f64, f64)>,
+    /// Distance from the start to each point, metres.
+    at: Vec<f64>,
+}
+
+impl Path {
+    fn new(points: Vec<(f64, f64)>) -> Path {
+        let mut at = Vec::with_capacity(points.len());
+        let mut total = 0.0;
+        for (i, p) in points.iter().enumerate() {
+            if i > 0 {
+                total += distance(points[i - 1], *p);
+            }
+            at.push(total);
+        }
+        Path { points, at }
+    }
+
+    fn len(&self) -> f64 {
+        self.at.last().copied().unwrap_or(0.0)
+    }
+
+    /// The point `s` metres along.
+    fn point(&self, s: f64) -> (f64, f64) {
+        let i = self.at.partition_point(|d| *d <= s).clamp(1, self.points.len().max(2) - 1);
+        let (a, b) = (self.points[i - 1], self.points[i]);
+        let span = self.at[i] - self.at[i - 1];
+        let k = if span > 0.0 { ((s - self.at[i - 1]) / span).clamp(0.0, 1.0) } else { 0.0 };
+        (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k)
+    }
+}
+
+/// A stop on the path: how far along, and when it is due.
+struct Mark {
+    at: f64,
+    arrive_ms: Option<i64>,
+    depart_ms: Option<i64>,
+}
+
 /// Frames `(lat, lon, unix_ms)` from a report at `t0_ms` up to `now_ms` plus
-/// the horizon. `speed` in m/s; `heading` in degrees. Empty when there is
-/// nothing to move: no speed and no stops, or a report too old.
+/// the horizon, in straight lines. `speed` in m/s; `heading` in degrees.
+/// Empty when there is nothing to move: no speed and no stops, or a report
+/// too old.
 pub fn frames(
     lat: f64,
     lon: f64,
@@ -96,57 +145,95 @@ pub fn frames(
     stops: &[Stop],
     now_ms: i64,
 ) -> Vec<(f64, f64, i64)> {
+    frames_with(lat, lon, t0_ms, speed, heading, stops, now_ms, None)
+}
+
+/// As `frames`, along the way `router` finds (the track) where it finds one.
+#[allow(clippy::too_many_arguments)]
+pub fn frames_with(
+    lat: f64,
+    lon: f64,
+    t0_ms: i64,
+    speed: Option<f64>,
+    heading: Option<f64>,
+    stops: &[Stop],
+    now_ms: i64,
+    router: Option<Router>,
+) -> Vec<(f64, f64, i64)> {
     if now_ms - t0_ms > MAX_AGE_MS || !lat.is_finite() || !lon.is_finite() {
         return Vec::new();
     }
     let until = now_ms.max(t0_ms) + HORIZON_MS;
     let mut v = speed.filter(|s| s.is_finite() && *s >= 0.0).unwrap_or(0.0);
-    let start = (lat, lon);
-
-    if stops.is_empty() {
-        // no timetable: straight on at its speed
-        return match heading.filter(|h| h.is_finite()) {
-            Some(h) if v > 0.5 => {
-                vec![(lat, lon, t0_ms), {
-                    let (la, lo) = ahead(start, h, v * (until - t0_ms) as f64 / 1000.0);
-                    (la, lo, until)
-                }]
-            }
-            _ => Vec::new(),
-        };
-    }
-
-    let mut pos = start;
+    let heading = heading.filter(|h| h.is_finite());
+    let mut pos = (lat, lon);
     let mut t = t0_ms;
     let mut next = 0;
-    let mut out = vec![(lat, lon, t0_ms)];
     // waiting at a stop until then
     let mut dwell: Option<i64> = None;
 
-    // standing at the first stop: it is waiting there
-    let first = &stops[0];
-    if v < 1.5 && distance(pos, (first.lat, first.lon)) < AT_STOP_M {
-        pos = (first.lat, first.lon);
-        dwell = Some(first.depart_ms.unwrap_or(i64::MAX));
-        next = 1;
-    } else if let Some(h) = heading.filter(|_| v > 3.0) {
-        // a stop behind it was passed already: the timetable runs a little late or early
-        while next + 1 < stops.len() {
-            let s = &stops[next];
-            let off = (bearing(pos, (s.lat, s.lon)) - h).rem_euclid(360.0);
-            if (120.0..=240.0).contains(&off) && distance(pos, (s.lat, s.lon)) < 5_000.0 {
-                next += 1;
-            } else {
-                break;
+    if stops.is_empty() && (heading.is_none() || v <= 0.5) {
+        return Vec::new();
+    }
+    if let Some(first) = stops.first() {
+        if v < 1.5 && distance(pos, (first.lat, first.lon)) < AT_STOP_M {
+            // standing at the first stop: it is waiting there
+            pos = (first.lat, first.lon);
+            dwell = Some(first.depart_ms.unwrap_or(i64::MAX));
+            next = 1;
+        } else if let Some(h) = heading.filter(|_| v > 3.0) {
+            // a stop behind it was passed already: the timetable runs a little late or early
+            while next + 1 < stops.len() {
+                let s = &stops[next];
+                let off = (bearing(pos, (s.lat, s.lon)) - h).rem_euclid(360.0);
+                if (120.0..=240.0).contains(&off) && distance(pos, (s.lat, s.lon)) < 5_000.0 {
+                    next += 1;
+                } else {
+                    break;
+                }
             }
         }
     }
-    let mut cruise = match stops.get(next) {
-        Some(s) if v > 3.0 => v.max(pace(pos, s, t).min(v * 1.2)),
-        Some(s) => pace(pos, s, t),
+    let ahead_stops = &stops[next.min(stops.len())..];
+    // as far as it could go by the horizon, and a little more
+    let reach = v.max(PACE.1 / 2.0) * (until - t) as f64 / 1000.0 + 500.0;
+
+    // the way: along the track through the next stops, else straight to them
+    let targets: Vec<(f64, f64)> = ahead_stops.iter().take(2).map(|s| (s.lat, s.lon)).collect();
+    let routed = router.and_then(|r| r(pos, heading, &targets, reach)).filter(|(p, _)| p.len() >= 2);
+    let (points, reached) = match routed {
+        // standing at a station, the route starts where it snapped to the track
+        Some((points, reached)) => (points, reached),
+        None if !ahead_stops.is_empty() => {
+            let mut points = vec![pos];
+            points.extend(ahead_stops.iter().map(|s| (s.lat, s.lon)));
+            let at = Path::new(points.clone()).at;
+            (points, at[1..].to_vec())
+        }
+        None => (vec![pos, ahead(pos, heading.unwrap_or(0.0), reach)], Vec::new()),
+    };
+    if dwell.is_some() {
+        pos = points[0];
+    }
+    let path = Path::new(points);
+    let marks: Vec<Mark> = reached
+        .iter()
+        .zip(ahead_stops)
+        .map(|(at, s)| Mark { at: *at, arrive_ms: s.arrive_ms, depart_ms: s.depart_ms })
+        .collect();
+
+    let mut s = 0.0;
+    let mut mark = 0;
+    let unreached = |t: i64| match ahead_stops.first() {
+        Some(st) => pace(distance(pos, (st.lat, st.lon)), st.arrive_ms, t),
         None => v,
     };
-
+    let mut cruise = match marks.first() {
+        Some(m) if v > 3.0 => v.max(pace(m.at, m.arrive_ms, t).min(v * 1.2)),
+        Some(m) => pace(m.at, m.arrive_ms, t),
+        None => v.max(unreached(t)),
+    };
+    let mut out = vec![(pos.0, pos.1, t0_ms)];
     let mut steps = 0;
     while t < until {
         t += STEP_MS;
@@ -155,46 +242,51 @@ pub fn frames(
         if let Some(leave) = dwell {
             if t < leave {
                 if steps % FRAME_EVERY == 0 {
-                    push(&mut out, pos, t);
+                    push(&mut out, path.point(s), t);
                 }
                 continue;
             }
             dwell = None;
-            if let Some(s) = stops.get(next) {
-                cruise = pace(pos, s, t);
+            cruise = match marks.get(mark) {
+                Some(m) => pace(m.at - s, m.arrive_ms, t),
+                None => pace(path.len() - s, None, t),
+            };
+            push(&mut out, path.point(s), t);
+        }
+        match marks.get(mark) {
+            Some(m) => {
+                let d = m.at - s;
+                if d <= ARRIVED_M {
+                    s = m.at;
+                    v = 0.0;
+                    dwell = Some(m.depart_ms.unwrap_or(i64::MAX));
+                    mark += 1;
+                    push(&mut out, path.point(s), t);
+                    continue;
+                }
+                // brake when the stopping distance reaches the station, else pull up to pace
+                if v * v / (2.0 * BRAKE) >= d - v * dt {
+                    v = (v - BRAKE * dt).max(CREEP);
+                } else {
+                    v = (v + ACCEL * dt).min(cruise.max(CREEP));
+                }
+                s += (v * dt).min(d);
             }
-            push(&mut out, pos, t);
+            None => {
+                // no stop ahead on the way it knows: on at its pace, to the end of it
+                let d = path.len() - s;
+                if d <= 0.5 {
+                    break;
+                }
+                v = (v + ACCEL * dt).min(cruise.max(CREEP));
+                s += (v * dt).min(d);
+            }
         }
-        let Some(target) = stops.get(next) else {
-            // past its last stop
-            push(&mut out, pos, until);
-            break;
-        };
-        let goal = (target.lat, target.lon);
-        let d = distance(pos, goal);
-        if d <= ARRIVED_M {
-            pos = goal;
-            v = 0.0;
-            dwell = Some(target.depart_ms.unwrap_or(i64::MAX));
-            next += 1;
-            push(&mut out, pos, t);
-            continue;
-        }
-        // brake when the stopping distance reaches the station, else pull up to pace
-        if v * v / (2.0 * BRAKE) >= d - v * dt {
-            v = (v - BRAKE * dt).max(CREEP);
-        } else {
-            v = (v + ACCEL * dt).min(cruise.max(CREEP));
-        }
-        let step = (v * dt).min(d);
-        pos = ahead(pos, bearing(pos, goal), step);
         if steps % FRAME_EVERY == 0 {
-            push(&mut out, pos, t);
+            push(&mut out, path.point(s), t);
         }
     }
-    if out.last().is_some_and(|f| f.2 < until) {
-        push(&mut out, pos, until);
-    }
+    push(&mut out, path.point(s), until);
     out
 }
 
@@ -211,10 +303,10 @@ mod tests {
     #[test]
     fn without_stops_it_carries_on_at_its_speed() {
         let f = frames(59.0, 18.0, NOW - 10_000, Some(20.0), Some(90.0), &[], NOW);
-        assert_eq!(f.len(), 2);
-        assert_eq!(f[1].2, NOW + HORIZON_MS);
-        assert!((speed_between(f[0], f[1]) - 20.0).abs() < 0.1);
-        assert!(f[1].1 > 18.0 && (f[1].0 - 59.0).abs() < 0.01, "east");
+        let (first, last) = (f[0], *f.last().unwrap());
+        assert_eq!(last.2, NOW + HORIZON_MS);
+        assert!((speed_between(first, last) - 20.0).abs() < 0.1);
+        assert!(last.1 > 18.0 && (last.0 - 59.0).abs() < 0.01, "east");
         assert!(frames(59.0, 18.0, NOW, Some(0.0), Some(90.0), &[], NOW).is_empty(), "standing still");
         assert!(frames(59.0, 18.0, NOW - 20 * 60_000, Some(20.0), Some(90.0), &[], NOW).is_empty(), "too old");
     }
@@ -264,5 +356,28 @@ mod tests {
         ];
         let f = frames(here.0, here.1, NOW, Some(25.0), Some(0.0), &stops, NOW);
         assert!(f.last().unwrap().0 > here.0, "still heading north");
+    }
+
+    #[test]
+    fn with_a_route_it_follows_the_track() {
+        // the track bends: 2 km east, then north to the station 2 km on
+        let start = (59.0, 18.0);
+        let corner = ahead(start, 90.0, 2_000.0);
+        let station = ahead(corner, 0.0, 2_000.0);
+        let router = |_: (f64, f64), _: Option<f64>, _: &[(f64, f64)], _: f64| -> Option<Routed> {
+            Some((vec![start, corner, station], vec![4_000.0]))
+        };
+        let stop = Stop { lat: station.0, lon: station.1, arrive_ms: Some(NOW + 200_000), depart_ms: None };
+        let f = frames_with(start.0, start.1, NOW, Some(30.0), Some(90.0), &[stop], NOW, Some(&router));
+        // halfway through the horizon it has gone round the corner, not cut across
+        let mid = f.iter().find(|p| p.2 >= NOW + 100_000).unwrap();
+        let off_track = distance((mid.0, mid.1), corner).min(
+            // on the second leg: due north of the corner
+            if mid.0 >= corner.0 { distance((mid.0, mid.1), (mid.0, corner.1)) } else { f64::MAX },
+        );
+        assert!(off_track < 20.0, "{off_track} m off the track at {mid:?}");
+        let end = f.last().unwrap();
+        assert!(end.0 > corner.0 && end.0 <= station.0 + 1e-9, "on the northern leg, short of the station: {end:?}");
+        assert!((end.1 - corner.1).abs() < 1e-6, "on the track");
     }
 }

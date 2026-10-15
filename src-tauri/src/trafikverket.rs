@@ -472,7 +472,7 @@ pub fn train(
     let number = advertised.clone().unwrap_or_else(|| report.lookup().to_owned());
     let delay = delays.get(report.lookup()).or_else(|| delays.get(advertised.as_deref()?)).copied();
     let stops = service.map(|s| stops_ahead(s, delay, stations, report.at_ms)).unwrap_or_default();
-    let frames = motion::frames(
+    let frames = motion::frames_with(
         report.lat,
         report.lon,
         report.at_ms,
@@ -480,6 +480,7 @@ pub fn train(
         report.bearing.map(f64::from),
         &stops,
         now_ms,
+        Some(&crate::rail::router),
     );
     Train {
         // the advertised number and its day are what the stops are looked up by

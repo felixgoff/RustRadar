@@ -13,6 +13,7 @@ mod motion;
 mod mrms;
 mod opensky;
 mod radar;
+mod rail;
 mod reference;
 mod runways;
 mod session;

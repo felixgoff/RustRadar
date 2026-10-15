@@ -111,6 +111,7 @@
     trainPositionAge,
   } from "./trains";
   import { type RouteCursor, routeAhead, wayToStop } from "./train-route";
+  import { isTrackpadScroll, pinched, type PinchEvent, wheelPixels, wrapBearing } from "./trackpad";
 
   interface Props {
     flights: LiveFlight[];
@@ -2898,6 +2899,9 @@
       reportMapError(e);
       return;
     }
+    // trackpads as in Apple Maps: ahead of deck.gl's own handling (capture), which zooms on any wheel
+    container.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    for (const [type, handler] of PINCH_HANDLERS) container.addEventListener(type, handler as EventListener, { capture: true });
     // a lost WebGL context draws nothing until it's restored
     container.querySelector("canvas")?.addEventListener("webglcontextlost", () =>
       reportMapError(new Error("The graphics context was lost (WebGL context lost)")),
@@ -2919,6 +2923,88 @@
       })
       .catch(() => {}); // labels and buildings are optional extras
   });
+
+  /** The view as deck.gl draws it: the flat projection above zoom 12, else the globe. */
+  function viewportOf(v: ViewState) {
+    const [width, height] = [container.clientWidth, container.clientHeight];
+    return v.zoom > FLAT_ABOVE_ZOOM ? new WebMercatorViewport({ ...v, width, height }) : new GlobeViewport({ ...v, width, height });
+  }
+  /** Where a point on screen is on the map, `[lon, lat]`; none off the globe. */
+  function mapAt(v: ViewState, at: [number, number]): [number, number] | null {
+    const p = viewportOf(v).unproject(at) as number[] | null;
+    return p && Number.isFinite(p[0]) && Number.isFinite(p[1]) ? [p[0], p[1]] : null;
+  }
+  /** Locked on to an aircraft, train or ship: the camera only zooms and turns about it. */
+  const cameraLocked = () => Boolean((follow && selected) || vehicleLocked);
+  /** The camera moved by a gesture of ours (deck.gl hears only its own). */
+  function moveView(next: ViewState) {
+    const lim = limits();
+    view = {
+      ...next,
+      zoom: Math.max(lim.minZoom, Math.min(lim.maxZoom, next.zoom)),
+      latitude: Math.max(-85, Math.min(85, next.latitude)),
+      bearing: wrapBearing(next.bearing),
+    };
+    if (follow && selected) view = lockedView(view, selected);
+    if (Math.floor(view.zoom * 2) !== Math.floor(shownZoom * 2)) shownZoom = view.zoom;
+    onviewchange?.(view);
+    deck?.setProps({ initialViewState: { ...view, ...lim } });
+    render();
+  }
+  /** Zoomed and turned, keeping the place under `at` (on screen) where it is. */
+  function zoomAbout(zoom: number, bearing: number, at: [number, number]) {
+    let next = { ...view, zoom, bearing };
+    const before = cameraLocked() ? null : mapAt(view, at);
+    const after = before && mapAt(next, at);
+    if (before && after) next = { ...next, longitude: next.longitude + before[0] - after[0], latitude: next.latitude + before[1] - after[1] };
+    moveView(next);
+  }
+  /** Two fingers moved together on a trackpad: the map moves with them. A mouse wheel is left to deck.gl (zoom). */
+  function onWheel(e: WheelEvent) {
+    // a pinch while WebKit's own pinch events come: those zoom
+    if (e.ctrlKey && pinch) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (!isTrackpadScroll(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (cameraLocked() || Date.now() < transitionUntil) return;
+    const [dx, dy] = wheelPixels(e, container.clientHeight);
+    const centre: [number, number] = [container.clientWidth / 2 + dx, container.clientHeight / 2 + dy];
+    const p = mapAt(view, centre);
+    if (p) moveView({ ...view, longitude: p[0], latitude: p[1] });
+  }
+  /** A pinch under way (WebKit): the view it started from, and where between the fingers. */
+  let pinch: { zoom: number; bearing: number; at: [number, number] } | null = null;
+  const PINCH_HANDLERS: [string, (e: PinchEvent) => void][] = [
+    [
+      "gesturestart",
+      (e) => {
+        e.preventDefault();
+        const box = container.getBoundingClientRect();
+        pinch = { zoom: view.zoom, bearing: view.bearing, at: [e.clientX - box.left, e.clientY - box.top] };
+      },
+    ],
+    [
+      "gesturechange",
+      (e) => {
+        e.preventDefault();
+        if (!pinch) return;
+        const { zoom, bearing } = pinched(pinch, e);
+        const at: [number, number] = cameraLocked() ? [container.clientWidth / 2, container.clientHeight / 2] : pinch.at;
+        zoomAbout(zoom, bearing, at);
+      },
+    ],
+    [
+      "gestureend",
+      (e) => {
+        e.preventDefault();
+        pinch = null;
+      },
+    ],
+  ];
 
   function createDeck() {
     deck = new Deck<GlobeView>({
@@ -2975,6 +3061,8 @@
   }
 
   onDestroy(() => {
+    container?.removeEventListener("wheel", onWheel, { capture: true });
+    for (const [type, handler] of PINCH_HANDLERS) container?.removeEventListener(type, handler as EventListener, { capture: true });
     cancelAnimationFrame(frame);
     freeArenas();
     deck?.finalize();

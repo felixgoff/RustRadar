@@ -123,9 +123,9 @@
     positionAt,
     trainAtlas,
     trainColorOf,
+    trainIcon,
+    trainIconScale,
     trainIconSize,
-    trainCarIcon,
-    CAR_ICON_CELL,
     trainLabel,
     trainPositionAge,
   } from "./trains";
@@ -1880,86 +1880,48 @@
     }
     trainMoves++;
   }
-  /** A train is drawn as its cars at every zoom: icons on the ground, and from this zoom (the flat projection) 3D cars. */
-  const TRAINS_3D_ZOOM = 13;
-  /** However far out, a car is drawn at least this long on the screen (px): shorter far out, where trains are many. */
-  const minCarPx = (zoom: number) => 5 + 5 * clamp01((zoom - 5) / 6);
-  /** ... and a 3D car this wide (and a little taller). */
+  /**
+   * Close in, a train is its cars in 3D, true to scale along the track behind
+   * it. Further out a car would be shorter than this on the screen (px): drawn
+   * any larger, the cars would run off the track known behind the train, so
+   * there a train is one icon lying on the ground along its way.
+   */
+  const CARS_MIN_PX = 9;
+  /** A 3D car is never thinner than this (px), and a little taller. */
   const MIN_CAR_WIDTH_PX = 3;
-  /** The gap drawn between cars drawn larger than life, as a share of a car. */
-  const CAR_GAP = 0.1;
   const CAR_MESH_MATERIAL = { ambient: 0.45, diffuse: 0.6, shininess: 40, specularColor: [70, 70, 70] as [number, number, number] };
 
   /** A car on the map, of the train at `train` in the trains' list. */
-  type DrawnCar = CarPlace & { train: number; lead: boolean; icon: string };
+  type DrawnCar = CarPlace & { train: number; lead: boolean };
 
   /**
    * The cars of the trains in view, as many as their operator says (else
-   * four), along the track behind each train: true to scale, or further out,
-   * where that would be too small to see, each `minLength` metres long. A
-   * train whose way isn't known has them in a row back along its heading.
+   * four), along the track behind each train; a train whose way isn't known
+   * has them in a row back along its heading.
    */
-  function drawnCars(data: TrainData, nowMs: number, minLength: number): DrawnCar[] {
+  function drawnCars(data: TrainData, nowMs: number): DrawnCar[] {
     const b = viewBounds();
-    const [west, south, east, north] = b ?? [-180, -90, 180, 90];
-    const pad = b ? Math.max(0.01, (minLength * 12) / METRES_PER_DEGREE) : 0;
-    // the way each car takes up, with the gap to the next
-    const carM = Math.max(CAR_M, minLength * (1 + CAR_GAP));
+    if (!b) return [];
+    const [west, south, east, north] = b;
     const cars: DrawnCar[] = [];
     data.list.forEach((train, i) => {
       const [lon, lat] = data.positions[i];
-      if (lon < west - pad || lon > east + pad || lat < south - pad || lat > north + pad) return;
+      if (lon < west - 0.01 || lon > east + 0.01 || lat < south - 0.01 || lat > north + 0.01) return;
       const count = Math.max(1, train.cars ?? DEFAULT_CARS);
-      const icon = (k: number) => trainCarIcon(train.kind, train.operator, k === 0);
-      const places = carPlaces(carLines(train.frames ?? [], train.tail ?? [], count, nowMs, carM));
-      if (places.length === count) {
-        places.forEach((place, k) => cars.push({ ...place, train: i, lead: k === 0, icon: icon(k) }));
-        return;
+      let places = carPlaces(carLines(train.frames ?? [], train.tail ?? [], count, nowMs));
+      if (places.length !== count) {
+        const h = (data.headings[i] ?? 0) * DEGREES;
+        const behind: [number, number] = [lat - Math.cos(h) / 1000, lon - Math.sin(h) / 1000 / (Math.cos(lat * DEGREES) || 1e-6)];
+        places = carPlaces(carLines([[lat, lon, nowMs]], [[lat, lon], behind], count, nowMs));
       }
-      const heading = data.headings[i] ?? 0;
-      const [dn, de] = [Math.cos(heading * DEGREES), Math.sin(heading * DEGREES)];
-      const k0 = Math.cos(lat * DEGREES) || 1e-6;
-      for (let k = 0; k < count; k++) {
-        const back = (k + 0.5) * carM;
-        const at: [number, number] = [lon - (de * back) / (METRES_PER_DEGREE * k0), lat - (dn * back) / METRES_PER_DEGREE];
-        cars.push({ at, heading, length: carM / (1 + CAR_GAP), train: i, lead: k === 0, icon: icon(k) });
-      }
+      places.forEach((place, k) => cars.push({ ...place, train: i, lead: k === 0 }));
     });
     return cars;
   }
 
-  /** The trains as their cars: icons lying on the ground, and close in (the flat projection) 3D cars. */
-  function carLayers(data: TrainData, nowMs: number): Layer[] {
-    const { zoom, latitude } = view;
-    const mpp = metersPerPixel(zoom, latitude);
-    const cars = drawnCars(data, nowMs, minCarPx(zoom) * mpp);
-    if (zoom < TRAINS_3D_ZOOM) {
-      // (the globe's ground turns icons half round from the flat projection's, as it does the ship models)
-      const yaw0 = zoom > FLAT_ABOVE_ZOOM ? 0 : 180;
-      // a train hovered in the sidebar's list: its first car marked
-      const hovered = hoveredTrainId !== null ? data.byId.get(hoveredTrainId) : undefined;
-      const hoveredCar = hovered !== undefined ? cars.findIndex((c) => c.train === hovered) : -1;
-      return [
-        new IconLayer<DrawnCar>({
-          id: "train-car-icons",
-          data: cars,
-          highlightedObjectIndex: hoveredCar,
-          highlightColor: [55, 142, 240, 200],
-          getPosition: (c) => c.at,
-          getIcon: (c) => c.icon,
-          iconAtlas: trainAtlasData!.atlas as never,
-          iconMapping: trainAtlasData!.mapping as never,
-          // the cell's height, a little more than the car's length
-          getSize: (c) => c.length * CAR_ICON_CELL,
-          sizeUnits: "meters",
-          getAngle: (c) => yaw0 - c.heading,
-          billboard: false,
-          pickable: true,
-          parameters: TRAIN_PARAMETERS,
-          updateTriggers: { getPosition: trainMoves, getAngle: [trainMoves, yaw0], getSize: [trainMoves, zoom] },
-        }),
-      ];
-    }
+  /** The trains as their cars in 3D, close in (the flat projection), `mpp` metres to a pixel. */
+  function carLayers(data: TrainData, nowMs: number, mpp: number): Layer[] {
+    const cars = drawnCars(data, nowMs);
     // never thinner than a few pixels, so a train far off is still seen whole
     const width = Math.max(CAR_WIDTH_M, MIN_CAR_WIDTH_PX * mpp);
     const height = Math.max(CAR_HEIGHT_M, MIN_CAR_WIDTH_PX * 1.3 * mpp);
@@ -1985,13 +1947,44 @@
   }
 
   function trainLayers(list: Train[], nowMs: number): Layer[] {
+    const { zoom, latitude } = view;
     const data = trainsFor(list, nowMs);
     if (!list.length) return [];
     trainAtlasData ??= trainAtlas();
     if (!trainAtlasData) return [];
     moveTrains(data, nowMs);
-    // every train as its cars, however far out
-    return carLayers(data, nowMs);
+    // close in, the cars; further out, a train is an icon lying on the ground along its way
+    const mpp = metersPerPixel(zoom, latitude);
+    if (zoom > FLAT_ABOVE_ZOOM && CAR_M / mpp >= CARS_MIN_PX) return carLayers(data, nowMs, mpp);
+    // (the globe's ground turns icons half round from the flat projection's, as it does the ship models)
+    const yaw0 = zoom > FLAT_ABOVE_ZOOM ? 0 : 180;
+    return [
+      new IconLayer<number>({
+        id: "train-icons",
+        data: data.all,
+        // a train hovered in the sidebar's list
+        highlightedObjectIndex: hoveredTrainId !== null ? (data.byId.get(hoveredTrainId) ?? -1) : -1,
+        highlightColor: [55, 142, 240, 200],
+        getPosition: (i) => data.positions[i],
+        getIcon: (i) => trainIcon(list[i].kind, data.headings[i], list[i].operator),
+        iconAtlas: trainAtlasData.atlas as never,
+        iconMapping: trainAtlasData.mapping as never,
+        getSize: (i) => trainIconSize(list[i].kind, data.headings[i], zoom),
+        // on the ground, turned to the way it goes (degrees anticlockwise from north)
+        getAngle: (i) => yaw0 - (data.headings[i] ?? 0),
+        getColor: (i) => data.colors[i],
+        sizeUnits: "pixels",
+        billboard: false,
+        pickable: true,
+        parameters: TRAIN_PARAMETERS,
+        updateTriggers: {
+          getPosition: trainMoves,
+          getIcon: trainMoves,
+          getAngle: [trainMoves, yaw0],
+          getSize: [trainIconScale(zoom), trainMoves],
+        },
+      }),
+    ];
   }
 
   /** The rail map is coloured by speed limit in the app (its tiles come through the backend). */
@@ -3096,6 +3089,7 @@
   /** The train a pick landed on. */
   function pickedTrain(info: PickingInfo): Train | null {
     const list = trainData?.list ?? trains;
+    if (info.layer?.id === "train-icons" && typeof info.object === "number") return list[info.object] ?? null;
     // one of its cars
     const car = info.layer?.id.startsWith("train-car-") ? (info.object as DrawnCar | undefined) : undefined;
     return car ? (list[car.train] ?? null) : null;

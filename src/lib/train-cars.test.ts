@@ -34,18 +34,6 @@ describe("carLines", () => {
     expect(lonM(cars[1][0][0])).toBeCloseTo(-2 * CAR_M + 2.5, 0);
   });
 
-  test("drawn larger than life, the cars still follow the track behind, then straight on back", () => {
-    const cars = carLines(frames, tail, 4, 0, 80);
-    expect(cars.length).toBe(4);
-    // each car 80 m of the way, less a gap in proportion
-    const gap = 2.5 * (80 / CAR_M);
-    expect(lonM(cars[1][cars[1].length - 1][0])).toBeCloseTo(-80, 0);
-    expect(lonM(cars[1][0][0])).toBeCloseTo(-160 + gap, 0);
-    // past the 200 m of track known behind it, on in the same line
-    expect(lonM(cars[3][0][0])).toBeCloseTo(-320 + gap, 0);
-    expect(cars[3][0][1]).toBeCloseTo(60, 9);
-  });
-
   test("no frames, no cars", () => {
     expect(carLines([], tail, 3, 0)).toEqual([]);
   });

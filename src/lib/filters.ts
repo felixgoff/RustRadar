@@ -119,6 +119,8 @@ export interface Settings {
   adsb: boolean;
   /** Railway lines from OpenRailwayMap. */
   railMap: boolean;
+  /** Signal blocks close in: free, or taken by the train drawn in them. */
+  trainBlocks: boolean;
   /** Relief from the AWS Terrain Tiles (Mapzen). */
   terrain: boolean;
   exaggeration: number;
@@ -136,6 +138,7 @@ export const DEFAULT_SETTINGS: Settings = {
   weather: false,
   adsb: true,
   railMap: false,
+  trainBlocks: false,
   terrain: false,
   exaggeration: 10,
 };

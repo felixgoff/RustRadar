@@ -59,6 +59,8 @@
     type Ship,
     type Train,
     type TrainRoute,
+    type TrainBlock,
+    trainBlocks as fetchTrainBlocks,
     type Sighting,
   } from "./api";
   import { NorthUpGlobeController } from "./controller";
@@ -150,6 +152,8 @@
     selectedTrain?: Train | null;
     /** The selected train's whole way along the track. */
     trainRoute?: TrainRoute | null;
+    /** Signal blocks close in: free, or taken by the train drawn in them. */
+    trainBlocks?: boolean;
     /** The selected train isn't on its route (it is out of date): ask for it again. */
     ontrainrouteoff?: () => void;
     /** A train was clicked. */
@@ -194,6 +198,7 @@
     trains = [],
     selectedTrain = null,
     trainRoute = null,
+    trainBlocks = false,
     ontrainrouteoff,
     ontrainselect,
     hoveredTrainId = null,
@@ -1951,6 +1956,131 @@
     ];
   }
 
+  /** Signal blocks show from this zoom (the signals are only mapped close in). */
+  const BLOCKS_MIN_ZOOM = 13;
+  /** A train drawn this near a block's track is in it, metres. */
+  const IN_BLOCK_M = 12;
+  const BLOCK_FREE: [number, number, number, number] = [60, 200, 110, 220];
+  const BLOCK_TAKEN: [number, number, number, number] = [235, 64, 52, 240];
+  /** The blocks fetched, for the area asked (padded round the view), and whether all of it was there. */
+  let blockSet: { west: number; south: number; east: number; north: number; list: TrainBlock[]; complete: boolean } | null = null;
+  let blocksAsking = false;
+  let blocksAskedAt = 0;
+  /** Which train is in each block (by block id), worked out now and then. */
+  let blocksTaken: { at: number; by: Map<string, string>; version: number } = { at: 0, by: new Map(), version: 0 };
+
+  /** The view's bounds, close in (the flat projection), `[west, south, east, north]`. */
+  function viewBounds(): [number, number, number, number] | null {
+    if (view.zoom <= FLAT_ABOVE_ZOOM) return null;
+    const [width, height] = [container.clientWidth, container.clientHeight];
+    const b = new WebMercatorViewport({ ...view, width, height }).getBounds();
+    return [b[0], b[1], b[2], b[3]];
+  }
+
+  /** Asks for the blocks round the view when it has left those fetched, or they were still loading. */
+  function refreshBlocks() {
+    const b = viewBounds();
+    if (!trainBlocks || !b || view.zoom < BLOCKS_MIN_ZOOM || blocksAsking) return;
+    const [west, south, east, north] = b;
+    const inside = blockSet && west >= blockSet.west && east <= blockSet.east && south >= blockSet.south && north <= blockSet.north;
+    const now = Date.now();
+    if (inside && (blockSet!.complete || now - blocksAskedAt < 2_500)) return;
+    if (!inside && now - blocksAskedAt < 700) return;
+    const [dx, dy] = [(east - west) * 0.15, (north - south) * 0.15];
+    const area = { west: west - dx, south: south - dy, east: east + dx, north: north + dy };
+    blocksAsking = true;
+    blocksAskedAt = now;
+    fetchTrainBlocks(area)
+      .then((r) => {
+        blockSet = { ...area, list: r.blocks, complete: r.complete };
+        blocksTaken.at = 0;
+      })
+      .catch(() => {})
+      .finally(() => (blocksAsking = false));
+  }
+
+  /** The nearest a point is to a line of `[lon, lat]` points, metres (flat). */
+  function metresToLine(p: [number, number], line: [number, number][]): number {
+    const k = Math.cos((p[1] * Math.PI) / 180);
+    let best = Infinity;
+    for (let i = 1; i < line.length; i++) {
+      const [ax, ay] = [(line[i - 1][0] - p[0]) * k, line[i - 1][1] - p[1]];
+      const [dx, dy] = [(line[i][0] - line[i - 1][0]) * k, line[i][1] - line[i - 1][1]];
+      const len2 = dx * dx + dy * dy;
+      const t = len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+      best = Math.min(best, Math.hypot(ax + dx * t, ay + dy * t) * 111_320);
+    }
+    return best;
+  }
+
+  /** Each block a train is drawn in: the nearest block's track to it, if near enough. */
+  function takenBlocks(list: TrainBlock[]): Map<string, string> {
+    const by = new Map<string, string>();
+    const b = viewBounds();
+    if (!trainData || !b) return by;
+    const [west, south, east, north] = b;
+    trainData.list.forEach((train, i) => {
+      const p: [number, number] = [trainData!.positions[i][0], trainData!.positions[i][1]];
+      if (p[0] < west || p[0] > east || p[1] < south || p[1] > north) return;
+      let best: { id: string; d: number } | null = null;
+      for (const block of list) {
+        for (const line of block.lines) {
+          const d = metresToLine(p, line);
+          if (d <= IN_BLOCK_M && (!best || d < best.d)) best = { id: block.id, d };
+        }
+      }
+      if (best) by.set(best.id, by.has(best.id) ? `${by.get(best.id)}, ${train.name}` : train.name);
+    });
+    return by;
+  }
+
+  /** The signal blocks round the view: green free, red taken, with the train taking each. */
+  function blockLayers(): Layer[] {
+    refreshBlocks();
+    if (!trainBlocks || !blockSet || view.zoom < BLOCKS_MIN_ZOOM) return [];
+    const list = blockSet.list;
+    const now = Date.now();
+    if (now - blocksTaken.at > 500) {
+      blocksTaken = { at: now, by: takenBlocks(list), version: blocksTaken.version + 1 };
+    }
+    const taken = blocksTaken.by;
+    const lines = list.flatMap((b) => b.lines.map((line) => ({ line, taken: taken.has(b.id) })));
+    // each taken block named once, halfway along its first stretch
+    const labels = list
+      .filter((b) => taken.has(b.id))
+      .map((b) => ({ text: taken.get(b.id)!, at: b.lines[0][Math.floor(b.lines[0].length / 2)] }));
+    const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
+    return [
+      new PathLayer<(typeof lines)[number]>({
+        id: "train-blocks",
+        data: lines,
+        getPath: (l) => l.line,
+        getColor: (l) => (l.taken ? BLOCK_TAKEN : BLOCK_FREE),
+        getWidth: (l) => (l.taken ? 4 : 2.5),
+        widthUnits: "pixels",
+        capRounded: true,
+        parameters: ground,
+        updateTriggers: { getColor: blocksTaken.version, getWidth: blocksTaken.version },
+      }),
+      new TextLayer<(typeof labels)[number]>({
+        id: "train-block-labels",
+        data: labels,
+        getPosition: (l) => l.at,
+        getText: (l) => l.text,
+        getColor: [255, 255, 255, 255],
+        getSize: 11,
+        sizeUnits: "pixels",
+        fontFamily: "ui-monospace, monospace",
+        background: true,
+        getBackgroundColor: [150, 30, 24, 230],
+        backgroundPadding: [4, 2],
+        billboard: true,
+        parameters: ground,
+        updateTriggers: { getText: blocksTaken.version, getPosition: blocksTaken.version },
+      }),
+    ];
+  }
+
   /** Metres between two places (flat: fine over a few km). */
   function metresBetween(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
     const k = Math.cos((a.lat * Math.PI) / 180);
@@ -2216,6 +2346,8 @@
     // trains' frames are timed on this machine's clock, not the flight feed's
     const trainRing = selectedTrain ? trainSelectionLayers(selectedTrain, zoom, cLon, cLat) : null;
     const trainsDrawn = trainLayers(trains, flat, mpp, Date.now());
+    // the signal blocks, free or taken, under the route and the trains
+    layers.push(...blockLayers());
     // the selected train's way ahead, from where it is drawn now, under the trains
     if (trainRoute && selectedTrain) layers.push(...trainRouteLayers(trainRoute, selectedTrain));
     if (trainRing) layers.push(trainRing.halo);
@@ -3072,7 +3204,7 @@
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
     void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
-    void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain, trainRoute];
+    void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain, trainRoute, trainBlocks];
     void [hoveredTrainId, hoveredShipMmsi];
     render();
   });

@@ -743,6 +743,7 @@ pub fn run() {
             trains::train_stops,
             trains::train_route,
             trains::watch_trains,
+            trains::train_blocks,
             trains::hide_train_operators,
             devlog::dev_log,
             devlog::dev_log_clear,

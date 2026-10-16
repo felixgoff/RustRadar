@@ -23,6 +23,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::motion::{ahead, course, distance};
 
+#[path = "blocks.rs"]
+pub mod blocks;
+
 const TILES: &str = "https://openrailwaymap.app/railway_line_high,railway_text_km";
 const REFERER: &str = "https://github.com/felixgoff/RustRadar";
 /// The zoom routing uses, and the deepest the map draws (it scales the

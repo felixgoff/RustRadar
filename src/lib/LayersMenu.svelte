@@ -10,6 +10,7 @@
     buildings: boolean;
     labels: boolean;
     railMap: boolean;
+    trainBlocks: boolean;
     /** The aircraft are on the map (the focus or shown with it): their own layers apply. */
     aircraftShown: boolean;
     aircraftLabels: boolean;
@@ -23,6 +24,7 @@
     buildings = $bindable(),
     labels = $bindable(),
     railMap = $bindable(),
+    trainBlocks = $bindable(),
     aircraftShown,
     aircraftLabels = $bindable(),
     weather = $bindable(),
@@ -42,6 +44,7 @@
   <ToggleRow label="3D buildings" hint="Appear at street level" key="B" bind:checked={buildings} />
   <ToggleRow label="Place names" key="L" bind:checked={labels} />
   <ToggleRow label="Rail map" hint="Railway lines from OpenStreetMap" key="R" bind:checked={railMap} />
+  <ToggleRow label="Signal blocks" hint="Free or taken, and by which train (zoom in)" bind:checked={trainBlocks} />
 </section>
 
 <!-- which traffic is on the map is the mode bar's: only the aircraft have a layer of their own, offered while they are on it -->

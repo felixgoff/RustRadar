@@ -716,6 +716,11 @@ export type TrainRoute = {
   complete: boolean;
 };
 export const trainRoute = (id: string) => invoke<TrainRoute>("train_route", { id });
+/** A signal block: from a main signal to the next its trains meet, `[lon, lat]` stretches (branching where the track does). */
+export type TrainBlock = { id: string; signal: string | null; lines: [number, number][][] };
+/** The blocks starting in an area, close in; while `complete` is false the track or signals are still loading. */
+export const trainBlocks = (area: { west: number; south: number; east: number; north: number }) =>
+  invoke<{ blocks: TrainBlock[]; complete: boolean }>("train_blocks", area);
 /** The trains the map shows close up, streamed live like a followed one (an empty list stops it). */
 export const watchTrains = (ids: string[]) => invoke<void>("watch_trains", { ids });
 

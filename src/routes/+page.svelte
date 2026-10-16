@@ -1234,6 +1234,7 @@
     {hoveredTrainId}
     {hoveredShipMmsi}
     railMap={settings.railMap}
+    trainBlocks={settings.trainBlocks && isTauri()}
     terrain={settings.terrain}
     follow={following}
     followVehicle={followingVehicle}
@@ -1550,6 +1551,7 @@
     bind:weather={settings.weather}
     bind:adsb={settings.adsb}
     bind:railMap={settings.railMap}
+    bind:trainBlocks={settings.trainBlocks}
     bind:terrain={settings.terrain}
     bind:exaggeration={settings.exaggeration}
     {session}

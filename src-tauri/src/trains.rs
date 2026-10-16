@@ -1163,6 +1163,24 @@ pub async fn train_route(id: String) -> CmdResult<crate::trafikverket::TrainRout
         .map_err(|e| e.to_string())?
 }
 
+/// The signal blocks starting in an area (close in: the signals are only
+/// mapped at street level), and whether its track and signals are all here.
+#[tauri::command]
+pub async fn train_blocks(west: f64, south: f64, east: f64, north: f64) -> CmdResult<TrainBlocks> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (blocks, complete) = crate::rail::blocks::blocks_in(south, west, north, east);
+        TrainBlocks { blocks, complete }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct TrainBlocks {
+    blocks: Vec<crate::rail::blocks::Block>,
+    complete: bool,
+}
+
 /// The trains the map shows close up (by id): streamed live, every few
 /// seconds, like a followed one. Trafikverket's only; an empty list stops it.
 #[tauri::command]

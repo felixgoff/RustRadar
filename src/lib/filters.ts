@@ -121,6 +121,8 @@ export interface Settings {
   railMap: boolean;
   /** Signal blocks close in: free, or taken by the train drawn in them. */
   trainBlocks: boolean;
+  /** Streets GL's realistic 3D city over the map, where it was looking. */
+  realistic: boolean;
   /** Relief from the AWS Terrain Tiles (Mapzen). */
   terrain: boolean;
   exaggeration: number;
@@ -139,6 +141,7 @@ export const DEFAULT_SETTINGS: Settings = {
   adsb: true,
   railMap: false,
   trainBlocks: false,
+  realistic: false,
   terrain: false,
   exaggeration: 10,
 };

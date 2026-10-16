@@ -514,6 +514,12 @@
   }
   async function loadTrains() {
     stopTrains();
+    // dev builds in a plain browser, `#demo` in the address: made-up trains in the middle of the view
+    if (import.meta.env.DEV && !isTauri() && trainsOn && location.hash.includes("demo")) {
+      const { demoTrains } = await import("$lib/demo-trains");
+      trains = demoTrains(view, Date.now());
+      return;
+    }
     if (!trainsOn || !isTauri()) return;
     trainsRefresh = setTimeout(loadTrains, TRAINS_REFRESH_MS);
     if (document.visibilityState === "hidden") return;
@@ -1198,6 +1204,12 @@
 
   let timers: ReturnType<typeof setInterval>[] = [];
   onMount(() => {
+    // dev builds: `#@lat,lon,zoom,pitch,bearing` opens the map there
+    const at = import.meta.env.DEV ? location.hash.match(/^#@(-?[\d.]+),(-?[\d.]+),([\d.]+)(?:,([\d.]+))?(?:,(-?[\d.]+))?/) : null;
+    if (at) {
+      const [lat, lon, zoom, pitch, bearing] = at.slice(1).map((v) => (v === undefined ? undefined : Number(v)));
+      globe.jumpTo({ latitude: lat, longitude: lon, zoom, pitch: pitch ?? 0, bearing: bearing ?? 0 });
+    }
     if (!isTauri()) {
       feedError = "RustRadar needs its Rust backend. Start it with `bun tauri dev`.";
       return;

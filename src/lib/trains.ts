@@ -180,9 +180,25 @@ export const TRAIN_SOURCE_NAMES: Record<TrainSource, string> = {
 
 /** A train with a direction is a carriage with a nose; one without, a rounded square. Coloured by operator when it has a colour. */
 export function trainIcon(kind: TrainKind, heading: number | null, operator?: string | null): string {
-  const i = operatorIndex(operator);
-  return `${heading === null ? "box" : "car"}-${i >= 0 ? `op${i}` : kind in KINDS ? kind : "other"}`;
+  return `${heading === null ? "box" : "car"}-${colourKey(kind, operator)}`;
 }
+
+/** The atlas row a train's colour is in: its operator's, else its kind's. */
+function colourKey(kind: TrainKind, operator?: string | null): string {
+  const i = operatorIndex(operator);
+  return i >= 0 ? `op${i}` : kind in KINDS ? kind : "other";
+}
+
+/** One car of a train seen from above, lying on the ground: the leading one with a nose. */
+export function trainCarIcon(kind: TrainKind, operator: string | null | undefined, lead: boolean): string {
+  return `${lead ? "cab" : "coach"}-${colourKey(kind, operator)}`;
+}
+
+/**
+ * A car's icon's height in its atlas cell to the car's own length: the
+ * cell has a little room round the car (IconLayer sizes the cell).
+ */
+export const CAR_ICON_CELL = 64 / 60;
 
 /** Base icon length in pixels per kind: long-distance trains a little longer, metros shorter. */
 const ICON_PX: Record<TrainKind, number> = {
@@ -205,6 +221,9 @@ export function trainIconSize(kind: TrainKind, heading: number | null, zoom: num
 
 /** Cell size of the atlas, pixels; glyphs are drawn at about three times their usual size for sharpness. */
 const CELL = 64;
+/** A car from above: its cell's width, and its own (a car is about 3.1 m wide and 24 m long; 60 px here). */
+const CAR_CELL_W = 12;
+const CAR_W = 8;
 /** The app's navy ink, as the glyphs' border and the carriage joints. */
 const INK = "rgba(8, 12, 20, 0.9)";
 
@@ -217,7 +236,8 @@ const INK = "rgba(8, 12, 20, 0.9)";
 export function trainAtlas(): { atlas: HTMLCanvasElement; mapping: Record<string, object> } | null {
   if (typeof document === "undefined") return null;
   const canvas = document.createElement("canvas");
-  canvas.width = CELL * 2;
+  // the carriage and the square, then a car and a leading car from above, narrow
+  canvas.width = CELL * 2 + CAR_CELL_W * 2;
   // a row per kind's colour, then one per operator's
   const rows: [string, RGB][] = [
     ...TRAIN_KINDS.map((kind): [string, RGB] => [kind, trainColor(kind)]),
@@ -263,6 +283,35 @@ export function trainAtlas(): { atlas: HTMLCanvasElement; mapping: Record<string
     ctx.stroke();
     ctx.fill();
     mapping[`box-${kind}`] = { x: CELL, y, width: CELL, height: CELL, mask: false };
+    // a car from above, 60 long: its body, a lighter roof along it, and dark ends; the leading one with a nose
+    for (const lead of [false, true]) {
+      const x = CELL * 2 + (lead ? CAR_CELL_W : 0);
+      const [l, r, t, b] = [x + (CAR_CELL_W - CAR_W) / 2, x + (CAR_CELL_W + CAR_W) / 2, y + 2, y + 62];
+      ctx.beginPath();
+      if (lead) {
+        ctx.moveTo(l, b);
+        ctx.lineTo(l, t + 9);
+        ctx.quadraticCurveTo(l, t, (l + r) / 2, t);
+        ctx.quadraticCurveTo(r, t, r, t + 9);
+        ctx.lineTo(r, b);
+        ctx.closePath();
+      } else {
+        ctx.roundRect(l, t, CAR_W, b - t, 1.5);
+      }
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fill();
+      // the roof: a lighter stripe down the middle
+      ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+      ctx.fillRect((l + r) / 2 - 1, t + (lead ? 10 : 4), 2, b - t - (lead ? 14 : 8));
+      if (lead) {
+        // the windscreen
+        ctx.fillStyle = INK;
+        ctx.fillRect(l + 1.5, t + 4, CAR_W - 3, 3);
+      }
+      ctx.fillStyle = `rgb(${rows[row][1].join(", ")})`;
+      mapping[`${lead ? "cab" : "coach"}-${kind}`] = { x, y, width: CAR_CELL_W, height: CELL, mask: false };
+    }
   });
   return { atlas: canvas, mapping };
 }

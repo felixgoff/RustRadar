@@ -109,11 +109,14 @@
     trainIcon,
     trainIconScale,
     trainIconSize,
+    trainCarIcon,
+    CAR_ICON_CELL,
     trainLabel,
     trainPositionAge,
   } from "./trains";
   import { type RouteCursor, routeAhead, wayToStop } from "./train-route";
   import { carLines, DEFAULT_CARS } from "./train-cars";
+  import { CAR_HEIGHT_M, CAR_WIDTH_M, carMeshes, type CarPlace, carPlaces } from "./train-models";
   import { isTrackpadScroll, pinched, type PinchEvent, wheelPixels, wrapBearing } from "./trackpad";
 
   interface Props {
@@ -1804,89 +1807,87 @@
     }
     trainMoves++;
   }
-  /** The icons' angles on screen: all redone when the camera moves, only the moving trains' otherwise. */
-  let trainAngles: { key: string; list: Train[] | null; angles: Float32Array; version: number } = {
-    key: "",
-    list: null,
-    angles: new Float32Array(0),
-    version: 0,
-  };
-  /** Close in, trains are drawn as their cars along the track. */
-  const CARS_MIN_ZOOM = 14;
-  /** How wide a car is drawn, metres. */
-  const CAR_WIDTH_M = 3.2;
-  const CAR_EDGE: [number, number, number, number] = [20, 22, 28, 230];
+  /** Close in, each car of a train is drawn: an icon on the ground from this zoom, ... */
+  const CAR_ICONS_ZOOM = 15.5;
+  /** ... and from this one only as a 3D car. */
+  const TRAINS_3D_ZOOM = 16.5;
+  const CAR_MESH_MATERIAL = { ambient: 0.45, diffuse: 0.6, shininess: 40, specularColor: [70, 70, 70] as [number, number, number] };
 
-  /** The cars of the trains in view, under their icons: as many as their operator says, else three. */
-  function carLayers(data: TrainData, nowMs: number): Layer[] {
-    const b = view.zoom >= CARS_MIN_ZOOM ? viewBounds() : null;
+  /** A car on the map, of the train at `train` in the trains' list. */
+  type DrawnCar = CarPlace & { train: number; lead: boolean; icon: string };
+
+  /** The cars of the trains in view: as many as their operator says, else three, along the track behind them. */
+  function drawnCars(data: TrainData, nowMs: number): DrawnCar[] {
+    const b = viewBounds();
     if (!b) return [];
     const [west, south, east, north] = b;
-    const cars: { line: [number, number][]; color: [number, number, number, number] }[] = [];
+    const cars: DrawnCar[] = [];
     data.list.forEach((train, i) => {
       const [lon, lat] = data.positions[i];
       if (lon < west - 0.01 || lon > east + 0.01 || lat < south - 0.01 || lat > north + 0.01) return;
-      for (const line of carLines(train.frames ?? [], train.tail ?? [], train.cars ?? DEFAULT_CARS, nowMs)) {
-        cars.push({ line, color: data.colors[i] });
-      }
+      const lines = carLines(train.frames ?? [], train.tail ?? [], train.cars ?? DEFAULT_CARS, nowMs);
+      carPlaces(lines).forEach((place, k) => {
+        cars.push({ ...place, train: i, lead: k === 0, icon: trainCarIcon(train.kind, train.operator, k === 0) });
+      });
     });
-    const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
-    // each car a body of its own: a dark edge round it, and the gap to the next
-    return [
-      new PathLayer<(typeof cars)[number]>({
-        id: "train-car-edges",
-        data: cars,
-        getPath: (c) => c.line,
-        getColor: CAR_EDGE,
-        getWidth: CAR_WIDTH_M + 1.2,
-        widthUnits: "meters",
-        widthMinPixels: 3,
-        capRounded: false,
-        jointRounded: true,
-        parameters: ground,
-      }),
-      new PathLayer<(typeof cars)[number]>({
-        id: "train-cars",
-        data: cars,
-        getPath: (c) => c.line,
-        getColor: (c) => c.color,
-        getWidth: CAR_WIDTH_M,
-        widthUnits: "meters",
-        widthMinPixels: 2,
-        capRounded: false,
-        jointRounded: true,
-        parameters: ground,
-      }),
-    ];
+    return cars;
   }
 
-  function trainLayers(list: Train[], flat: boolean, mpp: number, nowMs: number): Layer[] {
-    const { zoom, bearing, pitch, longitude, latitude } = view;
+  /** Close in, the trains as their cars: icons lying on the ground, then (closer) 3D cars only. */
+  function carLayers(data: TrainData, nowMs: number, threeD: boolean): Layer[] {
+    const cars = drawnCars(data, nowMs);
+    if (!threeD) {
+      return [
+        new IconLayer<DrawnCar>({
+          id: "train-car-icons",
+          data: cars,
+          getPosition: (c) => c.at,
+          getIcon: (c) => c.icon,
+          iconAtlas: trainAtlasData!.atlas as never,
+          iconMapping: trainAtlasData!.mapping as never,
+          // the cell's height, a little more than the car's length
+          getSize: (c) => c.length * CAR_ICON_CELL,
+          sizeUnits: "meters",
+          getAngle: (c) => -c.heading,
+          billboard: false,
+          pickable: true,
+          parameters: TRAIN_PARAMETERS,
+          updateTriggers: { getPosition: trainMoves, getAngle: trainMoves, getSize: trainMoves },
+        }),
+      ];
+    }
+    const meshes = carMeshes();
+    return ([true, false] as const).map(
+      (lead) =>
+        new SimpleMeshLayer<DrawnCar>({
+          id: `train-car-meshes-${lead ? "cab" : "coach"}`,
+          data: cars.filter((c) => c.lead === lead),
+          mesh: lead ? meshes.cab : meshes.coach,
+          getPosition: (c) => c.at,
+          getOrientation: (c) => [0, -c.heading, 0],
+          getScale: (c) => [CAR_WIDTH_M, c.length, CAR_HEIGHT_M],
+          getColor: (c) => data.colors[c.train],
+          material: CAR_MESH_MATERIAL,
+          pickable: true,
+          autoHighlight: true,
+          highlightColor: [55, 142, 240, 110],
+          parameters: NO_CULL,
+          updateTriggers: { getPosition: trainMoves, getOrientation: trainMoves, getScale: trainMoves },
+        }),
+    );
+  }
+
+  function trainLayers(list: Train[], nowMs: number): Layer[] {
+    const { zoom } = view;
     const data = trainsFor(list, nowMs);
     if (!list.length) return [];
     trainAtlasData ??= trainAtlas();
     if (!trainAtlasData) return [];
     moveTrains(data, nowMs);
-    const key = `${zoom},${bearing},${pitch},${longitude},${latitude}`;
-    const whole = trainAngles.key !== key || trainAngles.list !== list;
-    if (whole || data.moving.length) {
-      const width = container.clientWidth;
-      const height = container.clientHeight;
-      const viewport = flat
-        ? new WebMercatorViewport({ ...view, width, height })
-        : new GlobeViewport({ ...view, width, height });
-      const step = ICON_HEADING_STEP_PX * mpp;
-      const angles = whole ? new Float32Array(list.length) : trainAngles.angles;
-      const minCos = Math.cos((visibleRadius(zoom, pitch, width, height) * Math.PI) / 180);
-      for (const i of whole ? data.all : data.moving) {
-        const heading = data.headings[i];
-        const [lon, lat] = data.positions[i];
-        if (heading === null || cosAngle(lon, lat, longitude, latitude) <= minCos) continue;
-        angles[i] = screenAngle(viewport, data.positions[i], heading, step) ?? bearing - heading;
-      }
-      trainAngles = { key, list, angles, version: trainAngles.version + 1 };
-    }
-    const angles = trainAngles.angles;
+    // close in, the cars; further out, a train is an icon lying on the ground along its way
+    if (zoom >= CAR_ICONS_ZOOM) return carLayers(data, nowMs, zoom >= TRAINS_3D_ZOOM);
+    // (the globe's ground turns icons half round from the flat projection's, as it does the ship models)
+    const yaw0 = zoom > FLAT_ABOVE_ZOOM ? 0 : 180;
     return [
       new IconLayer<number>({
         id: "train-icons",
@@ -1899,16 +1900,17 @@
         iconAtlas: trainAtlasData.atlas as never,
         iconMapping: trainAtlasData.mapping as never,
         getSize: (i) => trainIconSize(list[i].kind, data.headings[i], zoom),
-        getAngle: (i) => angles[i],
+        // on the ground, turned to the way it goes (degrees anticlockwise from north)
+        getAngle: (i) => yaw0 - (data.headings[i] ?? 0),
         getColor: (i) => data.colors[i],
         sizeUnits: "pixels",
-        billboard: true,
+        billboard: false,
         pickable: true,
         parameters: TRAIN_PARAMETERS,
         updateTriggers: {
           getPosition: trainMoves,
           getIcon: trainMoves,
-          getAngle: trainAngles.version,
+          getAngle: [trainMoves, yaw0],
           getSize: [trainIconScale(zoom), trainMoves],
         },
       }),
@@ -2395,14 +2397,12 @@
     // on land, like the ships under the labels and every aircraft; the
     // trains' frames are timed on this machine's clock, not the flight feed's
     const trainRing = selectedTrain ? trainSelectionLayers(selectedTrain, zoom, cLon, cLat) : null;
-    const trainsDrawn = trainLayers(trains, flat, mpp, Date.now());
+    const trainsDrawn = trainLayers(trains, Date.now());
     // the signal blocks, free or taken, under the route and the trains
     layers.push(...blockLayers());
     // the selected train's way ahead, from where it is drawn now, under the trains
     if (trainRoute && selectedTrain) layers.push(...trainRouteLayers(trainRoute, selectedTrain));
     if (trainRing) layers.push(trainRing.halo);
-    // close in, their cars along the track, under the icons
-    if (trainData && trains.length) layers.push(...carLayers(trainData, Date.now()));
     layers.push(...trainsDrawn);
     // dev builds: the reports each train is drawn from
     if (import.meta.env.DEV) layers.push(...sightingLayers(trains, selectedTrain, Date.now()));
@@ -2894,6 +2894,14 @@
     goTo(target, 1500, ["longitude", "latitude", "zoom"]);
   }
 
+  /** Straight to a view, no flight (dev builds' `#@lat,lon,zoom,pitch,bearing` address). */
+  export function jumpTo(target: Partial<ViewState>) {
+    view = { ...view, ...target };
+    onviewchange?.(view);
+    deck?.setProps({ initialViewState: { ...view, ...limits() } });
+    render();
+  }
+
   export function zoomBy(delta: number) {
     const zoom = Math.min(maxZoomNow(), Math.max(LIMITS.minZoom, view.zoom + delta));
     goTo({ zoom }, 250, ["zoom"]);
@@ -2975,8 +2983,11 @@
 
   /** The train a pick landed on. */
   function pickedTrain(info: PickingInfo): Train | null {
-    if (info.layer?.id !== "train-icons" || typeof info.object !== "number") return null;
-    return (trainData?.list ?? trains)[info.object] ?? null;
+    const list = trainData?.list ?? trains;
+    if (info.layer?.id === "train-icons" && typeof info.object === "number") return list[info.object] ?? null;
+    // one of its cars
+    const car = info.layer?.id.startsWith("train-car-") ? (info.object as DrawnCar | undefined) : undefined;
+    return car ? (list[car.train] ?? null) : null;
   }
 
   /** The ship a pick landed on, whichever of the ship layers drew it. */

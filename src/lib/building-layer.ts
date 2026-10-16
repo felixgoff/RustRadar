@@ -11,6 +11,7 @@ import { MVTLayer } from "@deck.gl/geo-layers";
 import { SolidPolygonLayer } from "@deck.gl/layers";
 import type { BinaryFeatureCollection } from "@loaders.gl/schema";
 import { BUILDING_SHADOW_ALPHA, buildingShadows, shadowStep } from "./building-shadow";
+import { wallColour } from "./realistic";
 import { localSun, SHADOW_MIN_ALPHA, sunlight } from "./shadow";
 
 const DEG = Math.PI / 180;
@@ -100,13 +101,39 @@ export type BuildingLayerProps = {
   shadowColor: [number, number, number];
   /** GPU parameters of the shadow layers, which keep overlapping shadows from darkening twice. */
   shadowParameters: object;
+  /** Extensions for the shadow layers (the buildings' own are the `extensions` prop). */
+  shadowExtensions: unknown[];
+  /** Each building its own wall colour (`wallColour`), in place of `getFillColor`. */
+  wallColours: boolean;
 };
 
 const defaultProps: DefaultProps<BuildingLayerProps> = {
   sun: { type: "array", value: null, compare: false },
   shadowColor: { type: "color", value: [0, 0, 0] },
   shadowParameters: { type: "object", value: {}, compare: false },
+  shadowExtensions: { type: "array", value: [], compare: true },
+  wallColours: false,
 };
+
+type BinaryPolygons = { startIndices: ArrayLike<number>; attributes: { getPolygon: { value: ArrayLike<number>; size: number } } };
+
+/**
+ * Each building's wall colour in a tile, picked by where its outline starts in
+ * the world (in the tile grid's own units). A building on a tile's edge is in
+ * both tiles whole (the tiles overlap a little), so it is the same colour in
+ * each, and so is every building each time it is loaded.
+ */
+function wallColoursOf(tile: { index: { x: number; y: number; z: number } }) {
+  const { x, y } = tile.index;
+  return (feature: { properties: Properties } | null, info: { index: number; data: BinaryPolygons }) => {
+    const { startIndices, attributes } = info.data;
+    const { value, size } = attributes.getPolygon;
+    const vertex = startIndices[info.index] * size;
+    const gx = Math.round((x + value[vertex]) * 4096);
+    const gy = Math.round((y + value[vertex + 1]) * 4096);
+    return wallColour(Math.imul(gx, 73_856_093) ^ Math.imul(gy, 19_349_663), feature?.properties.colour);
+  };
+}
 
 /**
  * Main-thread time (ms) a frame may spend recasting shadows when the sun has
@@ -156,9 +183,10 @@ export class BuildingLayer extends MVTLayer<Properties, BuildingLayerProps> {
   }
 
   renderSubLayers(props: Parameters<MVTLayer["renderSubLayers"]>[0]): Layer | null | LayersList {
+    if (this.props.wallColours) (props as unknown as { getFillColor: unknown }).getFillColor = wallColoursOf(props.tile as never);
     // sets the tile's model matrix and coordinate system on `props`
     const buildings = super.renderSubLayers(props);
-    const { sun, shadowColor, shadowParameters } = this.props;
+    const { sun, shadowColor, shadowParameters, shadowExtensions } = this.props;
     const content = props.data as BinaryFeatureCollection | unknown[] | null;
     if (!sun || !content || Array.isArray(content)) return buildings;
     const tile = props.tile as TileProps["tile"];
@@ -182,6 +210,7 @@ export class BuildingLayer extends MVTLayer<Properties, BuildingLayerProps> {
         coordinateOrigin: tileProps.coordinateOrigin,
         coordinateSystem: tileProps.coordinateSystem as never,
         parameters: shadowParameters,
+        extensions: shadowExtensions as never,
         pickable: false,
       }),
       buildings,

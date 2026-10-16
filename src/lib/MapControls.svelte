@@ -30,7 +30,6 @@
     adsb: boolean;
     railMap: boolean;
     trainBlocks: boolean;
-    realistic: boolean;
     terrain: boolean;
     exaggeration: number;
     session: SessionInfo | null;
@@ -60,7 +59,6 @@
     adsb = $bindable(),
     railMap = $bindable(),
     trainBlocks = $bindable(),
-    realistic = $bindable(),
     terrain = $bindable(),
     exaggeration = $bindable(),
     session,
@@ -136,7 +134,6 @@
           bind:labels
           bind:railMap
           bind:trainBlocks
-          bind:realistic
           {aircraftShown}
           bind:aircraftLabels
           bind:weather

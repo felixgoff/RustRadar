@@ -2,7 +2,8 @@ import type { LiveFlight } from "./api";
 
 export type RGB = [number, number, number];
 
-export type Basemap = "dark" | "satellite";
+/** The dark map, the satellite imagery (darkened, so the traffic stands out), or a realistic 3D world on the imagery. */
+export type Basemap = "dark" | "satellite" | "realistic";
 
 const DEG = Math.PI / 180;
 const EARTH_RADIUS_M = 6_371_000;

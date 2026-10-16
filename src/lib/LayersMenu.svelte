@@ -11,7 +11,6 @@
     labels: boolean;
     railMap: boolean;
     trainBlocks: boolean;
-    realistic: boolean;
     /** The aircraft are on the map (the focus or shown with it): their own layers apply. */
     aircraftShown: boolean;
     aircraftLabels: boolean;
@@ -26,7 +25,6 @@
     labels = $bindable(),
     railMap = $bindable(),
     trainBlocks = $bindable(),
-    realistic = $bindable(),
     aircraftShown,
     aircraftLabels = $bindable(),
     weather = $bindable(),
@@ -36,6 +34,7 @@
   const BASEMAPS = [
     ["dark", "Dark", "1"],
     ["satellite", "Satellite", "2"],
+    ["realistic", "Realistic", "3"],
   ] as const;
 </script>
 
@@ -47,7 +46,6 @@
   <ToggleRow label="Place names" key="L" bind:checked={labels} />
   <ToggleRow label="Rail map" hint="Railway lines from OpenStreetMap" key="R" bind:checked={railMap} />
   <ToggleRow label="Signal blocks" hint="Free or taken, and by which train (zoom in)" bind:checked={trainBlocks} />
-  <ToggleRow label="Realistic 3D" hint="Streets GL's city where the map is; no live traffic in it" bind:checked={realistic} />
 </section>
 
 <!-- which traffic is on the map is the mode bar's: only the aircraft have a layer of their own, offered while they are on it -->

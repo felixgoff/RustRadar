@@ -92,6 +92,9 @@
   import { screenAngle } from "./screen";
   import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection, sunlight } from "./shadow";
   import { BuildingLayer, buildingHeight } from "./building-layer";
+  import { FACADE, HAZE, HAZE_FADE, hazeFor, look, NIGHT, nightness, skyBackground, skyColours } from "./realistic";
+  import { GROUND as GROUND_TEXTURE, groundLayer, landLayer as realisticLandLayer, POLES } from "./realistic-ground";
+  import { treeLayers } from "./tree-layer";
   import HoverCard from "./HoverCard.svelte";
   import { flightDetails, isRateLimited } from "./api";
   import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
@@ -409,8 +412,8 @@
   // reference (meshes, callbacks, option objects) is created once so props
   // compare equal between renders.
   const EARTH_MESH = new SphereGeometry({ radius: 6.3e6, nlat: 36, nlong: 72 });
-  // the dark map's land is the globe itself; under imagery it only shows at the poles
-  const GROUND: Record<Basemap, [number, number, number]> = { dark: [50, 50, 50], satellite: [6, 16, 34] };
+  // the dark map's land is the globe itself; under imagery or the realistic ground it only shows at the poles
+  const GROUND: Record<Basemap, [number, number, number]> = { dark: [50, 50, 50], satellite: [6, 16, 34], realistic: POLES };
   const earthLayer = (kind: Basemap) =>
     new SimpleMeshLayer({
       id: "earth",
@@ -974,6 +977,46 @@
       sun,
       shadowColor: SHADOW_COLOR,
       shadowParameters: SHADOW_PARAMETERS,
+    });
+
+  // The realistic map: its ground drawn from the map's data (realistic-ground.ts),
+  // buildings each in their own colour with façades and roofs (realistic.ts),
+  // trees (tree-layer.ts), all hazing into the distance.
+  /** Light walls even in shade, as the sky lights them. */
+  const REALISTIC_BUILDING_MATERIAL = {
+    ambient: 0.6,
+    diffuse: 0.48,
+    shininess: 16,
+    specularColor: [24, 25, 28] as [number, number, number],
+  };
+  const REALISTIC_BUILDINGS_ZOOM = 13.5;
+  /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
+  const TREES_ZOOM = 14.5;
+  const FACADED = [FACADE, HAZE];
+  const HAZE_FADED = [HAZE_FADE];
+  const TREED = [NIGHT, HAZE];
+  const GROUNDED = [GROUND_TEXTURE, HAZE];
+  /** Only the deepest tiles, so a building is the same colour in each tile it is in (see `wallColoursOf`). */
+  const realisticBuildingLayer = (url: string, sun: readonly number[]) =>
+    new BuildingLayer({
+      id: "buildings-realistic",
+      data: url,
+      minZoom: 14,
+      maxZoom: 14,
+      loadOptions: BUILDING_LOAD_OPTIONS,
+      extruded: true,
+      filled: true,
+      stroked: false,
+      getElevation: buildingElevation,
+      wallColours: true,
+      material: REALISTIC_BUILDING_MATERIAL,
+      parameters: NO_CULL,
+      _subLayerProps: BUILDING_SUBLAYER_PROPS,
+      extensions: FACADED,
+      sun,
+      shadowColor: SHADOW_COLOR,
+      shadowParameters: SHADOW_PARAMETERS,
+      shadowExtensions: HAZE_FADED,
     });
 
   // Night shading, recomputed each minute: four nested bands (sunset and the
@@ -2239,6 +2282,7 @@
   }
 
   function buildLayers(): Layer[] {
+    updateLook();
     // the motion model's clock follows the feed's, not this machine's
     const now = motion.now();
     const { longitude: cLon, latitude: cLat, zoom, bearing, pitch } = view;
@@ -2356,10 +2400,17 @@
     }
 
     const layers: Layer[] = [earthLayer(basemap)];
+    const realistic = basemap === "realistic";
     // shaded relief goes on the ground, under the map's water, borders, roads and runways
     if (basemap === "satellite") {
       layers.push(imageryLayer());
       if (terrain) layers.push(...terrainLayers({ flat, zoom, basemap }));
+    } else if (realistic) {
+      // drawn from the map's data, as Streets GL does: grass, woods, fields, water, roads and rails
+      layers.push(realisticLandLayer(GROUNDED, SURFACE));
+      if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
+      // and always in relief: the lie of the land
+      layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
     } else {
       layers.push(landLayer());
       if (terrain) layers.push(...terrainLayers({ flat, zoom, basemap }));
@@ -2383,8 +2434,23 @@
       for (const volume of measured) layers.push(...measuredLayers(volume, ex, lift));
     } else freeArenas();
     if (daylight) layers.push(nightLayer(now));
-    const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= 13);
-    if (showBuildings) layers.push(buildingLayer(tileUrl!, shadowSun(now)));
+    const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= (realistic ? REALISTIC_BUILDINGS_ZOOM : 13));
+    if (showBuildings) layers.push((realistic ? realisticBuildingLayer : buildingLayer)(tileUrl!, shadowSun(now)));
+    if (realistic && tileUrl && flat && zoom >= TREES_ZOOM) {
+      // out to about as far as the camera is from the point it looks at, the nearest in full detail
+      const distance = CAMERA_HEIGHTS * container.clientHeight * mpp;
+      layers.push(
+        ...treeLayers({
+          url: tileUrl,
+          centre: [cLon, cLat],
+          radius: Math.min(3200, Math.max(700, 1.2 * distance)),
+          detailRadius: Math.min(1000, Math.max(300, 0.45 * distance)),
+          date: new Date(now),
+          extensions: TREED,
+          onLoad: render,
+        }),
+      );
+    }
     // close in over buildings, the key light comes from the real sun (fading
     // back to its usual direction as the sun sets), so walls and shadows agree
     const toSunHere = localSun(sunDirection(now), cLat, cLon);
@@ -3201,6 +3267,43 @@
     ],
   ];
 
+  /** The sky shown behind the map, as last set (the realistic map's), to set it only when it changes. */
+  let shownSky = "";
+  /**
+   * The realistic map's light for this frame, from the view and the sun over
+   * it: the haze (thickening beyond about the point the camera looks at), the
+   * sky behind the map and in the windows, and how dark it is. Before every
+   * frame deck.gl draws, so the haze keeps up with a zoom.
+   */
+  function updateLook() {
+    const realistic = basemap === "realistic";
+    if (realistic && container) {
+      const { latitude, longitude, zoom, pitch } = view;
+      // without day and night, always a fine day
+      const toSun = daylight ? localSun(sunDirection(Date.now()), latitude, longitude) : [0.35, -0.5, 0.79];
+      const sunUp = toSun[2];
+      const { horizon, top } = skyColours(sunUp);
+      look.haze = [horizon[0] / 255, horizon[1] / 255, horizon[2] / 255];
+      look.sky = [(top[0] + horizon[0]) / 510, (top[1] + horizon[1]) / 510, (top[2] + horizon[2]) / 510];
+      look.night = nightness(sunUp);
+      // the ground darkens with the night only close in, where the view is all one place's
+      look.groundNight = look.night * clamp01(zoom - 9);
+      look.sun = [toSun[0], toSun[1], toSun[2]];
+      const distance = CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude);
+      const { start, density } = hazeFor(distance);
+      look.hazeStart = start;
+      look.hazeDensity = density;
+      // the horizon's height on screen: deck.gl's camera sees 2·atan(1/3) top to bottom
+      const tilt = Math.max(1, pitch) * DEGREES;
+      const horizonAt = (1 - 3 / Math.tan(tilt)) / 2;
+      // far out, the globe hangs in space
+      const sky = skyBackground(sunUp, horizonAt, clamp01((11.5 - zoom) / 2.5));
+      if (sky !== shownSky) container.style.background = shownSky = sky;
+    } else if (shownSky && container) {
+      container.style.background = shownSky = "";
+    }
+  }
+
   function createDeck() {
     deck = new Deck<GlobeView>({
       parent: container,
@@ -3212,6 +3315,7 @@
       deviceProps: { webgl: { stencil: true } },
       pickingRadius: 6,
       onDeviceInitialized: (d) => (device = d),
+      onBeforeRender: updateLook,
       // a layer that fails (a shader the GPU driver rejects, say) is reported, not just logged
       onError: (error) => reportMapError(error),
       onViewStateChange: ({ viewState }) => {

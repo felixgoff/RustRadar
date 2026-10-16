@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { streetsGlUrl } from "$lib/streetsgl";
   import { onDestroy, onMount, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
@@ -167,15 +166,6 @@
   let session = $state.raw<SessionInfo | null>(null);
   /** The camera follows the selected aircraft. */
   let following = $state(false);
-  /** Streets GL's address where the map was looking when Realistic 3D came on (not moved after, or it would reload). */
-  let realisticUrl = $state<string | null>(null);
-  $effect(() => {
-    if (!settings.realistic) {
-      realisticUrl = null;
-      return;
-    }
-    untrack(() => (realisticUrl ??= streetsGlUrl(view, window.innerHeight)));
-  });
   /** The camera follows the selected train or ship. */
   let followingVehicle = $state(false);
   /** IATA code of the airport whose board is open. */
@@ -1120,6 +1110,7 @@
     "-": () => globe.zoomBy(-1),
     "1": () => (settings.basemap = "dark"),
     "2": () => (settings.basemap = "satellite"),
+    "3": () => (settings.basemap = "realistic"),
     l: () => (settings.labels = !settings.labels),
     b: () => (settings.buildings = !settings.buildings),
     // the focus: Planes, traIns (T tilts), Ships; with Shift, that kind also shown on the map or not
@@ -1284,10 +1275,6 @@
     onairport={openAirport}
     onviewchange={(v) => (view = v)}
   />
-  <!-- Streets GL's realistic city, opened where the map was looking (it has none of the live traffic) -->
-  {#if settings.realistic && realisticUrl}
-    <iframe class="realistic" src={realisticUrl} title="Streets GL: realistic 3D" allow="fullscreen; xr-spatial-tracking"></iframe>
-  {/if}
 
   {#snippet modeBar()}
     <ModeBar
@@ -1578,7 +1565,6 @@
     bind:adsb={settings.adsb}
     bind:railMap={settings.railMap}
     bind:trainBlocks={settings.trainBlocks}
-    bind:realistic={settings.realistic}
     bind:terrain={settings.terrain}
     bind:exaggeration={settings.exaggeration}
     {session}
@@ -1617,15 +1603,6 @@
     position: fixed;
     inset: 0;
     background: var(--ink);
-  }
-  /* over the map, under the panels and controls (they come after it) */
-  .realistic {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    border: 0;
-    z-index: 0;
   }
   .sidebar {
     position: absolute;

@@ -323,8 +323,10 @@ const groundInject = {
           layer += floor(pick * 2.999);
           if (fract(pick * 7.0) > 0.5) uv = uv.yx;
         }
-        vec4 c = texture(rground_color, vec3(uv, layer));
-        vec3 nm = texture(rground_normal, vec3(uv, layer)).xyz * 2.0 - 1.0;
+        // (the images are stored top row first: v runs up them)
+        vec3 at = vec3(uv.x, -uv.y, layer);
+        vec4 c = texture(rground_color, at);
+        vec3 nm = texture(rground_normal, at).xyz * 2.0 - 1.0;
         n = normalize(vec3(nm.xy, max(nm.z, 0.3)));
         // a little unevenness over tens of metres, so the repeats don't show (gone where it would only speckle)
         float grain = 1.0 - smoothstep(0.25, 1.0, rl_cells(rl_t * 32.0));

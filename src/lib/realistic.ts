@@ -511,6 +511,7 @@ const rbuildModule = {
 uniform mediump sampler2DArray rbuild_color;
 uniform mediump sampler2DArray rbuild_normal;
 uniform mediump sampler2DArray rbuild_mask;
+uniform mediump sampler2DArray rbuild_glow;
 ${rbuildVaryings("in")}`,
 } as const;
 
@@ -586,10 +587,13 @@ const rbuildInject = {
         : which < 0.88 ? vec3(0.06, 0.06, 0.07) : vec3(0.1, 0.24, 0.17);
       tint = (roof > 1.5 && roof < 3.5) ? roofTint : vec3(0.55);
     }
-    vec4 c = texture(rbuild_color, vec3(uv, layer));
-    vec3 nm = texture(rbuild_normal, vec3(uv, layer)).xyz * 2.0 - 1.0;
-    vec3 m = texture(rbuild_mask, vec3(uv, layer)).rgb;
-    vec3 albedo = c.rgb * mix(vec3(1.0), tint, m.b);
+    // (the images are stored top row first: v runs up them)
+    vec3 at = vec3(uv.x, -uv.y, layer);
+    vec3 c = texture(rbuild_color, at).rgb;
+    vec3 nm = texture(rbuild_normal, at).xyz * 2.0 - 1.0;
+    vec3 m = texture(rbuild_mask, at).rgb;
+    float glow = texture(rbuild_glow, at).r;
+    vec3 albedo = c * mix(vec3(1.0), tint, m.b);
     if (!wall) albedo = mix(albedo, vec3(0.8), rlight.snow * 0.92);
     // the texture's u runs along the wall (or east), its v up the wall (or north)
     vec3 N = normalize(rb_n);
@@ -603,7 +607,7 @@ const rbuildInject = {
     vec3 lit = rl_shade(albedo, n, v, roughness, m.g, ao, rl_sunVisible());
     // at night about half the windows are lit, warm, some brighter
     float pick = rl_hash(floor(uv) + rb_tint.xy * 41.0, 1021.0);
-    lit += c.a * step(0.48, pick) * rlight.night * mix(vec3(1.0, 0.62, 0.3), vec3(1.0, 0.84, 0.62), step(0.85, pick)) * 0.28;
+    lit += glow * step(0.48, pick) * rlight.night * mix(vec3(1.0, 0.62, 0.3), vec3(1.0, 0.84, 0.62), step(0.85, pick)) * 0.28;
     color = vec4(rl_display(rl_aerial(lit)), 1.0);
   }
   `,
@@ -629,7 +633,7 @@ export class BuildingExtension extends LayerExtension {
     const textures = realisticTextures(this.context.device).buildings;
     this.setShaderModuleProps({
       rlight: rlightProps(params),
-      rbuild: { rbuild_color: textures.color, rbuild_normal: textures.normal, rbuild_mask: textures.mask },
+      rbuild: { rbuild_color: textures.color, rbuild_normal: textures.normal, rbuild_mask: textures.mask, rbuild_glow: textures.glow },
     });
   }
 }

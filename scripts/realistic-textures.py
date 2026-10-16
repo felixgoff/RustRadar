@@ -8,12 +8,15 @@ Builds the realistic map's textures (static/realistic/) from Streets GL's
 Each texture becomes one layer of a texture array in the map's shaders
 (src/lib/realistic-textures.ts lists them in the same order):
 
-- `<name>.color.webp`: the colour, and in its alpha the window glow (lit at night)
+- `<name>.color.webp`: the colour
 - `<name>.normal.webp`: the normal map
-- `<name>.mask.webp`: roughness (red), metalness (green) and where the
-  building's own colour tints it (blue)
+- `<name>.mask.webp` (buildings): roughness (red), metalness (green) and where
+  the building's own colour tints it (blue)
+- `<name>.glow.webp` (buildings): where windows light up at night, smaller
 
-Needs Pillow. 512 px, as Streets GL draws them.
+Every image is opaque: a browser may premultiply an image's colour by its
+alpha as it decodes it (Safari does), which would lose the colour wherever
+the alpha is 0. Needs Pillow. 512 px, as Streets GL draws them.
 """
 
 import shutil
@@ -23,6 +26,8 @@ from pathlib import Path
 from PIL import Image
 
 SIZE = 512
+# a glow is a soft shape: it needs far fewer pixels
+GLOW_SIZE = 128
 
 # (name, colour, normal, mask, glow): paths under src/resources/textures
 F = "buildings/facades/"
@@ -68,22 +73,21 @@ GROUND = [
 ]
 
 
-def load(root: Path, name: str, mode: str) -> Image.Image:
+def load(root: Path, name: str, mode: str, size: int = SIZE) -> Image.Image:
     image = Image.open(root / f"{name}.png").convert(mode)
-    return image.resize((SIZE, SIZE), Image.LANCZOS) if image.size != (SIZE, SIZE) else image
+    return image.resize((size, size), Image.LANCZOS) if image.size != (size, size) else image
 
 
-def build(root: Path, out: Path, sets) -> None:
+def build(root: Path, out: Path, sets, masks: bool) -> None:
     for name, colour, normal, mask, glow in sets:
-        rgb = load(root, colour, "RGB")
-        # the window glow in the colour's alpha (0 where nothing lights up)
-        alpha = load(root, glow, "L") if glow else Image.new("L", (SIZE, SIZE), 0)
-        rgba = rgb.copy()
-        rgba.putalpha(alpha)
-        # `exact` keeps the colour under transparent pixels: the alpha is a glow mask, not transparency
-        rgba.save(out / f"{name}.color.webp", "WEBP", quality=88, alpha_quality=100, exact=True, method=6)
+        load(root, colour, "RGB").save(out / f"{name}.color.webp", "WEBP", quality=88, method=6)
         load(root, normal, "RGB").save(out / f"{name}.normal.webp", "WEBP", quality=90, method=6)
+        if not masks:
+            continue
         load(root, mask, "RGB").save(out / f"{name}.mask.webp", "WEBP", quality=90, method=6)
+        # the glow, grey (0 where nothing lights up)
+        lit = load(root, glow, "L", GLOW_SIZE) if glow else Image.new("L", (GLOW_SIZE, GLOW_SIZE), 0)
+        lit.convert("RGB").save(out / f"{name}.glow.webp", "WEBP", quality=85, method=6)
 
 
 def main() -> None:
@@ -93,8 +97,11 @@ def main() -> None:
     root = repo / "src/resources/textures"
     out = Path(__file__).resolve().parent.parent / "static" / "realistic"
     out.mkdir(parents=True, exist_ok=True)
-    build(root, out, BUILDINGS)
-    build(root, out, GROUND)
+    # the ground's roughness is its surface's (realistic-ground.ts), so it needs no masks
+    for old in out.glob("*.webp"):
+        old.unlink()
+    build(root, out, BUILDINGS, masks=True)
+    build(root, out, GROUND, masks=False)
     Image.open(root / "surfaces/water_normal.png").convert("RGB").save(out / "water.normal.webp", "WEBP", quality=90, method=6)
     shutil.copyfile(repo / "LICENSE", out / "LICENSE-streets-gl.txt")
     total = sum(f.stat().st_size for f in out.iterdir())

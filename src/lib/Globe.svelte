@@ -92,9 +92,23 @@
   import { screenAngle } from "./screen";
   import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection, sunlight } from "./shadow";
   import { BuildingLayer, buildingHeight } from "./building-layer";
-  import { FACADE, HAZE, HAZE_FADE, hazeFor, look, NIGHT, nightness, skyBackground, skyColours } from "./realistic";
-  import { GROUND as GROUND_TEXTURE, groundLayer, landLayer as realisticLandLayer, POLES } from "./realistic-ground";
+  import {
+    BUILDINGS as REALISTIC_BUILDINGS,
+    FOOT_SHADE,
+    fromLocal,
+    HAZE_FADE,
+    look,
+    lookFor,
+    sceneSun,
+    setLook,
+    skyCss,
+    TREES as REALISTIC_TREES,
+    UNLIT,
+  } from "./realistic";
+  import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES } from "./realistic-ground";
+  import { onTexturesReady } from "./realistic-textures";
   import { treeLayers } from "./tree-layer";
+  import { PRESETS, type Conditions } from "./weather";
   import HoverCard from "./HoverCard.svelte";
   import { flightDetails, isRateLimited } from "./api";
   import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
@@ -139,6 +153,8 @@
     /** Place-name size, as a multiple of the default (a setting). */
     labelScale: number;
     buildings: boolean;
+    /** The realistic map's weather, as it lights it (live, or chosen). */
+    sky?: Conditions | null;
     /** Draw the aircraft at all; off, none of them nor anything of the selected one's. */
     aircraft?: boolean;
     /** Write each aircraft's callsign beside it. */
@@ -194,6 +210,7 @@
     labels,
     labelScale,
     buildings,
+    sky = null,
     aircraft: showAircraft = true,
     aircraftLabels = false,
     daylight,
@@ -228,6 +245,8 @@
   /** GlobeView switches to a flat Web Mercator projection above this zoom. */
   const FLAT_ABOVE_ZOOM = 12;
   const LIMITS = { minZoom: 0.5, maxZoom: 18, maxPitch: 60 };
+  /** The realistic map tilts further, to look along the streets to the horizon and the sky over it. */
+  const REALISTIC_LIMITS = { ...LIMITS, maxPitch: 75 };
   /** Following an aircraft, the camera can come down nearly level with it and circle it. */
   const FOLLOW_MAX_PITCH = 85;
   /** ...and close in until the camera is this many of its lengths away, so it can't end up inside it. */
@@ -253,7 +272,7 @@
    * look at it from any side.
    */
   function limits() {
-    if (!(follow && selected)) return LIMITS;
+    if (!(follow && selected)) return basemap === "realistic" ? REALISTIC_LIMITS : LIMITS;
     // GlobeController shifts its zoom limits by latitude (its zoomAdjust); undo
     // that so the aircraft's limit is the zoom actually reached
     const shift = Math.log2(Math.max(0.05, Math.cos(selected.lat * DEGREES)));
@@ -977,24 +996,38 @@
       shadowParameters: SHADOW_PARAMETERS,
     });
 
-  // The realistic map: its ground drawn from the map's data (realistic-ground.ts),
-  // buildings each in their own colour with façades and roofs (realistic.ts),
-  // trees (tree-layer.ts), all hazing into the distance.
-  /** Light walls even in shade, as the sky lights them. */
-  const REALISTIC_BUILDING_MATERIAL = {
-    ambient: 0.6,
-    diffuse: 0.48,
-    shininess: 16,
-    specularColor: [24, 25, 28] as [number, number, number],
-  };
+  // The realistic map, as Streets GL draws a city: its ground from the map's
+  // data (realistic-ground.ts), buildings with façades and roofs (realistic.ts),
+  // trees (tree-layer.ts), lit by the sun and the sky through the weather, the
+  // distance fading into the air. Their own shaders light them, so deck.gl's
+  // light is kept off them (UNLIT).
   const REALISTIC_BUILDINGS_ZOOM = 13.5;
   /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
   const TREES_ZOOM = 14.5;
-  const FACADED = [FACADE, HAZE];
+  const FACADED = [REALISTIC_BUILDINGS];
   const HAZE_FADED = [HAZE_FADE];
-  const TREED = [NIGHT, HAZE];
-  const GROUNDED = [GROUND_TEXTURE, HAZE];
-  /** Only the deepest tiles, so a building is the same colour in each tile it is in (see `wallColoursOf`). */
+  const FOOT_SHADED = [FOOT_SHADE];
+  const TREED = [REALISTIC_TREES];
+  const GROUNDED = [GROUND_SURFACES];
+  /** Shadows in sunshine: a deep blue, the sky's light being all that is left in them. */
+  const REALISTIC_SHADOW_COLOR: [number, number, number] = [6, 12, 28];
+  /** How dark a building's shadow gets in full sun, against its usual (BUILDING_SHADOW_ALPHA). */
+  const REALISTIC_SHADOW_STRENGTH = 1.55;
+  /** How dark the ground gets at the foot of a wall. */
+  const FOOT_SHADE_ALPHA = 0.42;
+  /** The sun the realistic buildings' shadows were last cast with, kept until it moves about a quarter of a degree. */
+  let realisticSun: [number, number, number] | null = null;
+  function realisticShadowSun(now: number, lat: number, lon: number): readonly number[] {
+    if (daylight) return shadowSun(now);
+    const sun = fromLocal(sceneSun(false, [0, 0, 1]), lat, lon);
+    if (!realisticSun || sun[0] * realisticSun[0] + sun[1] * realisticSun[1] + sun[2] * realisticSun[2] < SHADOW_SUN_STEP) {
+      realisticSun = sun;
+    }
+    return realisticSun;
+  }
+  /** How much of the sun gets through now, 0 to 1. */
+  const sunStrength = () => Math.max(...look.sunColor) / 3.2;
+  /** Only the deepest tiles, so a building looks the same in each tile it is in (see `wallColoursOf`). */
   const realisticBuildingLayer = (url: string, sun: readonly number[]) =>
     new BuildingLayer({
       id: "buildings-realistic",
@@ -1007,14 +1040,18 @@
       stroked: false,
       getElevation: buildingElevation,
       wallColours: true,
-      material: REALISTIC_BUILDING_MATERIAL,
+      material: UNLIT,
       parameters: NO_CULL,
       _subLayerProps: BUILDING_SUBLAYER_PROPS,
       extensions: FACADED,
       sun,
-      shadowColor: SHADOW_COLOR,
+      // in steps, so the tiles aren't redrawn for every flicker of the light
+      shadowStrength: Math.round(sunStrength() * REALISTIC_SHADOW_STRENGTH * 20) / 20,
+      shadowColor: REALISTIC_SHADOW_COLOR,
       shadowParameters: SHADOW_PARAMETERS,
       shadowExtensions: HAZE_FADED,
+      footShade: FOOT_SHADE_ALPHA,
+      footShadeExtensions: FOOT_SHADED,
     });
 
   // Night shading, recomputed each minute: four nested bands (sunset and the
@@ -2432,7 +2469,9 @@
     } else freeArenas();
     if (daylight) layers.push(nightLayer(now));
     const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= (realistic ? REALISTIC_BUILDINGS_ZOOM : 13));
-    if (showBuildings) layers.push((realistic ? realisticBuildingLayer : buildingLayer)(tileUrl!, shadowSun(now)));
+    if (showBuildings) {
+      layers.push(realistic ? realisticBuildingLayer(tileUrl!, realisticShadowSun(now, cLat, cLon)) : buildingLayer(tileUrl!, shadowSun(now)));
+    }
     if (realistic && tileUrl && flat && zoom >= TREES_ZOOM) {
       // out to about as far as the camera is from the point it looks at, the nearest in full detail
       const distance = CAMERA_HEIGHTS * container.clientHeight * mpp;
@@ -2444,6 +2483,16 @@
           detailRadius: Math.min(1000, Math.max(300, 0.45 * distance)),
           date: new Date(now),
           extensions: TREED,
+          material: UNLIT,
+          shadow:
+            sunStrength() > 0.05
+              ? {
+                  sun: look.sunDir,
+                  color: [...REALISTIC_SHADOW_COLOR, Math.round(Math.min(0.6, 0.55 * sunStrength()) * 255)],
+                  parameters: SHADOW_PARAMETERS,
+                  extensions: HAZE_FADED,
+                }
+              : null,
           onLoad: render,
         }),
       );
@@ -3156,6 +3205,8 @@
       reportMapError(e);
       return;
     }
+    // the realistic map's textures arrive after its first frames
+    stopTextures = onTexturesReady(() => deck?.redraw("realistic textures"));
     // trackpads as in Apple Maps: ahead of deck.gl's own handling (capture), which zooms on any wheel
     container.addEventListener("wheel", onWheel, { capture: true, passive: false });
     for (const [type, handler] of PINCH_HANDLERS) container.addEventListener(type, handler as EventListener, { capture: true });
@@ -3266,38 +3317,42 @@
   /** The sky shown behind the map, as last set (the realistic map's), to set it only when it changes. */
   let shownSky = "";
   /**
-   * The realistic map's light for this frame, from the view and the sun over
-   * it: the haze (thickening beyond about the point the camera looks at), the
-   * sky behind the map and in the windows, and how dark it is. Before every
-   * frame deck.gl draws, so the haze keeps up with a zoom.
+   * The realistic map's light for this frame, from the weather and the sun over
+   * the view (the real one, or with day and night off always a fine
+   * afternoon): set before every frame deck.gl draws, so the light and the air
+   * keep up with the camera. With it the sky behind the map: its gradient to
+   * the horizon wherever the tilt puts that, the sun's glow when it is in view.
    */
   function updateLook() {
-    const realistic = basemap === "realistic";
-    if (realistic && container) {
-      const { latitude, longitude, zoom, pitch } = view;
-      // without day and night, always a fine day
-      const toSun = daylight ? localSun(sunDirection(Date.now()), latitude, longitude) : [0.35, -0.5, 0.79];
-      const sunUp = toSun[2];
-      const { horizon, top } = skyColours(sunUp);
-      look.haze = [horizon[0] / 255, horizon[1] / 255, horizon[2] / 255];
-      look.sky = [(top[0] + horizon[0]) / 510, (top[1] + horizon[1]) / 510, (top[2] + horizon[2]) / 510];
-      look.night = nightness(sunUp);
-      // the ground darkens with the night only close in, where the view is all one place's
-      look.groundNight = look.night * clamp01(zoom - 9);
-      look.sun = [toSun[0], toSun[1], toSun[2]];
-      const distance = CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude);
-      const { start, density } = hazeFor(distance);
-      look.hazeStart = start;
-      look.hazeDensity = density;
-      // the horizon's height on screen: deck.gl's camera sees 2·atan(1/3) top to bottom
-      const tilt = Math.max(1, pitch) * DEGREES;
-      const horizonAt = (1 - 3 / Math.tan(tilt)) / 2;
-      // far out, the globe hangs in space
-      const sky = skyBackground(sunUp, horizonAt, clamp01((11.5 - zoom) / 2.5));
-      if (sky !== shownSky) container.style.background = shownSky = sky;
-    } else if (shownSky && container) {
-      container.style.background = shownSky = "";
+    if (basemap !== "realistic" || !container) {
+      if (shownSky && container) container.style.background = shownSky = "";
+      return;
     }
+    const { latitude, longitude, zoom, pitch, bearing } = view;
+    const sun = sceneSun(daylight, localSun(sunDirection(Date.now()), latitude, longitude));
+    // the haze is set against how far the camera is from the middle of the view
+    setLook(lookFor(sky ?? PRESETS.sunny, sun, CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude)));
+    // deck.gl's camera sees 2·atan(1/3) (about 37°) top to bottom
+    const halfFov = Math.atan(1 / 3) / DEGREES;
+    const tilt = Math.max(1, pitch);
+    const horizonAt = (1 - 3 / Math.tan(tilt * DEGREES)) / 2;
+    // the sun on the screen, when it is in front of the camera
+    let sunAt: [number, number] | null = null;
+    if (zoom > FLAT_ABOVE_ZOOM && sun[2] > -0.02) {
+      const [sb, cb, sp, cp] = [Math.sin(bearing * DEGREES), Math.cos(bearing * DEGREES), Math.sin(pitch * DEGREES), Math.cos(pitch * DEGREES)];
+      // the camera's forward, right and up, as east, north, up
+      const forward = [sb * sp, cb * sp, -cp];
+      const right = [cb, -sb, 0];
+      const up = [sb * cp, cb * cp, sp];
+      const dot = (a: number[], b: readonly number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      const ahead = dot(forward, sun);
+      if (ahead > 0.05) {
+        const f = 3 * (container.clientHeight / 2);
+        sunAt = [container.clientWidth / 2 + (dot(right, sun) / ahead) * f, container.clientHeight / 2 - (dot(up, sun) / ahead) * f];
+      }
+    }
+    const background = skyCss(look, tilt + halfFov - 90, horizonAt, sunAt, clamp01((11.5 - zoom) / 2.5));
+    if (background !== shownSky) container.style.background = shownSky = background;
   }
 
   function createDeck() {
@@ -3308,7 +3363,8 @@
       controller: controllerFor(false),
       effects: [lighting],
       // the shadows mark it (SHADOW_PARAMETERS); deck.gl clears it each frame
-      deviceProps: { webgl: { stencil: true } },
+      // dev builds: a shader the driver rejects shows its compiler's errors
+      deviceProps: { webgl: { stencil: true }, ...(import.meta.env.DEV ? { debugShaders: "errors" } : {}) } as never,
       pickingRadius: 6,
       onDeviceInitialized: (d) => (device = d),
       onBeforeRender: updateLook,
@@ -3355,7 +3411,21 @@
     });
   }
 
+  let stopTextures: (() => void) | null = null;
+  // The realistic map tilts further than the others; leaving it tilted past
+  // their limit, the camera eases back within it.
+  $effect(() => {
+    void basemap;
+    untrack(() => {
+      if (!deck || (follow && selected)) return;
+      const { maxPitch } = limits();
+      if (view.pitch > maxPitch) goTo({ pitch: maxPitch }, 600, ["pitch"]);
+      else deck.setProps({ initialViewState: { ...view, ...limits() } });
+    });
+  });
+
   onDestroy(() => {
+    stopTextures?.();
     container?.removeEventListener("wheel", onWheel, { capture: true });
     for (const [type, handler] of PINCH_HANDLERS) container?.removeEventListener(type, handler as EventListener, { capture: true });
     cancelAnimationFrame(frame);
@@ -3366,7 +3436,7 @@
 
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
-    void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
+    void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings, sky];
     void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain, trainRoute, trainBlocks];
     void [hoveredTrainId, hoveredShipMmsi];
     render();

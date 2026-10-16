@@ -4,6 +4,7 @@ import type { Basemap } from "./geo";
 import { airlineIcao } from "./reference.svelte";
 import { mergeShipFilters, type ShipFilters } from "./ship-list";
 import { mergeTrainFilters, type TrainFilters } from "./train-list";
+import { SKIES, type Sky } from "./weather";
 
 /** Flightradar24's aircraft categories (`Service`), filtered server-side. */
 export const CATEGORIES: { id: number; label: string }[] = [
@@ -121,6 +122,8 @@ export interface Settings {
   railMap: boolean;
   /** Signal blocks close in: free, or taken by the train drawn in them. */
   trainBlocks: boolean;
+  /** The realistic map's weather: live where the map is looking, or one chosen. */
+  sky: Sky;
   /** Relief from the AWS Terrain Tiles (Mapzen). */
   terrain: boolean;
   exaggeration: number;
@@ -139,6 +142,7 @@ export const DEFAULT_SETTINGS: Settings = {
   adsb: true,
   railMap: false,
   trainBlocks: false,
+  sky: "live",
   terrain: false,
   exaggeration: 10,
 };
@@ -166,6 +170,7 @@ export function mergeSettings(saved: unknown): Settings {
   merged.alsoShow = Array.isArray(old.alsoShow)
     ? MODES.filter((m) => (old.alsoShow as unknown[]).includes(m))
     : [];
+  if (!SKIES.includes(merged.sky)) merged.sky = DEFAULT_SETTINGS.sky;
   if (!MODES.includes(old.mode as Mode)) {
     merged.mode = DEFAULT_SETTINGS.mode;
     // the old switches defaulted to on: missing counts as on

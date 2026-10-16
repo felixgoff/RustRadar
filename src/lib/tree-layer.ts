@@ -15,6 +15,7 @@ import type { Layer } from "@deck.gl/core";
 import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { load } from "@loaders.gl/core";
 import { MVTLoader } from "@loaders.gl/mvt";
+import { Geometry } from "@luma.gl/engine";
 import { treeMeshes } from "./tree-models";
 
 /** Tiles are planted from this zoom's data, OpenFreeMap's deepest. */
@@ -382,7 +383,9 @@ const TREE_LAYERS = ["landcover", "landuse", "water", "building", "transportatio
 
 /** A tile's trees as layer data, made once so the layers' data compares equal from frame to frame. */
 type TileData = Record<keyof TileTrees, { length: number; attributes: object }>;
-type Entry = { data: TileData | null; failed?: boolean; used: number };
+/** A tile's trees' shadows for one sun (`key`: its direction to half a degree). */
+type TileShadows = { key: string; data: { length: number; attributes: object } };
+type Entry = { trees: TileTrees | null; data: TileData | null; shadows: TileShadows | null; failed?: boolean; used: number };
 /** Planted tiles, by `z/x/y`; the least recently used go once there are more than this. */
 const cache = new Map<string, Entry>();
 const MAX_CACHED = 48;
@@ -406,6 +409,7 @@ async function plant(url: string, tile: Tile, date: Date, entry: Entry, onLoad: 
         getColor: { value: t.colors, size: 4 },
       },
     });
+    entry.trees = trees;
     entry.data = { conifers: data(trees.conifers), broadleaves: data(trees.broadleaves) };
   } catch {
     // tried again once it has been dropped from the cache
@@ -437,7 +441,72 @@ export function tilesAround(lon: number, lat: number, radius: number): { tile: T
   return out.sort((a, b) => a.distance - b.distance);
 }
 
+/** A shadow's colour as it is given: lit by nothing. */
+const SHADOW_MATERIAL = { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] as [number, number, number] };
 const TREE_MATERIAL = { ambient: 0.55, diffuse: 0.55, shininess: 4, specularColor: [12, 14, 10] as [number, number, number] };
+
+// --------------------------------------------------------------- shadows
+
+/** A flat disc on the ground, 1 across, for a tree's shadow. */
+let discMesh: Geometry | null = null;
+function disc(): Geometry {
+  if (discMesh) return discMesh;
+  const positions: number[] = [];
+  const SIDES = 14;
+  for (let i = 0; i < SIDES; i++) {
+    const [a, b] = [(i / SIDES) * 2 * Math.PI, ((i + 1) / SIDES) * 2 * Math.PI];
+    positions.push(0, 0, 0.05, Math.cos(a) * 0.5, Math.sin(a) * 0.5, 0.05, Math.cos(b) * 0.5, Math.sin(b) * 0.5, 0.05);
+  }
+  const n = positions.length / 3;
+  return (discMesh = new Geometry({
+    topology: "triangle-list",
+    attributes: {
+      positions: { size: 3, value: new Float32Array(positions) },
+      normals: { size: 3, value: new Float32Array(Array.from({ length: n }, () => [0, 0, 1]).flat()) },
+      colors: { size: 3, value: new Float32Array(n * 3).fill(1) },
+    },
+  }));
+}
+
+/**
+ * Where each tree's crown throws its shadow with the sun towards `sun`
+ * (east, north, up): an ellipse on the ground, away from the sun, as long as
+ * the low sun stretches it (no longer than three times its width).
+ */
+export function treeShadows(trees: TileTrees, sun: readonly number[]): { length: number; positions: Float64Array; matrices: Float32Array } {
+  const across = Math.hypot(sun[0], sun[1]) || 1e-6;
+  const [de, dn] = [-sun[0] / across, -sun[1] / across];
+  const sinAlt = Math.max(Math.min(sun[2], 1), 0.3);
+  const cot = Math.sqrt(1 - sinAlt * sinAlt) / sinAlt;
+  const length = trees.conifers.length + trees.broadleaves.length;
+  const positions = new Float64Array(length * 3);
+  const matrices = new Float32Array(length * 12);
+  let k = 0;
+  for (const [kind, crown, centre] of [
+    [trees.conifers, 0.23, 0.5],
+    [trees.broadleaves, 0.3, 0.64],
+  ] as const) {
+    for (let i = 0; i < kind.length; i++, k++) {
+      positions.set(kind.positions.subarray(i * 3, i * 3 + 3), k * 3);
+      const m = kind.matrices.subarray(i * 12, i * 12 + 12);
+      const width = Math.hypot(m[0], m[1]);
+      const height = m[8];
+      const r = crown * width;
+      const [minor, major] = [2 * r, (2 * r) / sinAlt];
+      const shift = centre * height * cot;
+      matrices.set([de * major, dn * major, 0, -dn * minor, de * minor, 0, 0, 0, 1, de * shift, dn * shift, 0], k * 12);
+    }
+  }
+  return { length, positions, matrices };
+}
+
+export type TreeShadowOptions = {
+  /** Towards the sun: east, north, up. */
+  sun: readonly number[];
+  color: [number, number, number, number];
+  parameters: object;
+  extensions: unknown[];
+};
 
 export type TreeOptions = {
   /** OpenFreeMap's tile URL template, `{z}/{x}/{y}`. */
@@ -449,14 +518,17 @@ export type TreeOptions = {
   detailRadius: number;
   /** The day, for the leaves' colours. */
   date: Date;
-  /** Extensions for the trees' layers (the haze). */
+  /** Extensions for the trees' layers (their light), and their material. */
   extensions: unknown[];
+  material?: object;
+  /** Their shadows, in sunshine. */
+  shadow?: TreeShadowOptions | null;
   /** Asked for when a tile has been planted. */
   onLoad: () => void;
 };
 
 /** The trees around the view, one layer per tile and kind of tree. */
-export function treeLayers({ url, centre, radius, detailRadius, date, extensions, onLoad }: TreeOptions): Layer[] {
+export function treeLayers({ url, centre, radius, detailRadius, date, extensions, material, shadow, onLoad }: TreeOptions): Layer[] {
   const meshes = treeMeshes();
   const layers: Layer[] = [];
   const now = performance.now();
@@ -465,14 +537,43 @@ export function treeLayers({ url, centre, radius, detailRadius, date, extensions
     let entry = cache.get(key);
     if (!entry) {
       if (loading >= MAX_LOADING) continue;
-      entry = { data: null, used: now };
+      entry = { trees: null, data: null, shadows: null, used: now };
       cache.set(key, entry);
       const tileUrl = url.replace("{z}", String(tile.z)).replace("{x}", String(tile.x)).replace("{y}", String(tile.y));
       void plant(tileUrl, tile, date, entry, onLoad);
     }
     entry.used = now;
-    if (!entry.data) continue;
+    if (!entry.data || !entry.trees) continue;
     const detail = distance <= detailRadius ? 1 : 0;
+    if (shadow && shadow.sun[2] > 0.02) {
+      const az = Math.round((Math.atan2(shadow.sun[0], shadow.sun[1]) * 180) / Math.PI * 2);
+      const alt = Math.round((Math.asin(Math.min(1, shadow.sun[2])) * 180) / Math.PI * 2);
+      const sunKey = `${az},${alt}`;
+      if (entry.shadows?.key !== sunKey) {
+        const cast = treeShadows(entry.trees, shadow.sun);
+        entry.shadows = {
+          key: sunKey,
+          data: {
+            length: cast.length,
+            attributes: { getPosition: { value: cast.positions, size: 3 }, instanceModelMatrix: { value: cast.matrices, size: 12 } },
+          },
+        };
+      }
+      if (entry.shadows.data.length) {
+        layers.push(
+          new SimpleMeshLayer({
+            id: `trees-${key}-shadows`,
+            data: entry.shadows.data as never,
+            mesh: disc(),
+            getColor: shadow.color,
+            material: SHADOW_MATERIAL,
+            parameters: shadow.parameters,
+            extensions: shadow.extensions as never,
+            pickable: false,
+          }),
+        );
+      }
+    }
     for (const kind of ["conifers", "broadleaves"] as const) {
       const data = entry.data[kind];
       if (!data.length) continue;
@@ -481,7 +582,7 @@ export function treeLayers({ url, centre, radius, detailRadius, date, extensions
           id: `trees-${key}-${kind}-${detail}`,
           data: data as never,
           mesh: (kind === "conifers" ? meshes.conifer : meshes.broadleaf)[detail],
-          material: TREE_MATERIAL,
+          material: material ?? TREE_MATERIAL,
           extensions: extensions as never,
           pickable: false,
         }),

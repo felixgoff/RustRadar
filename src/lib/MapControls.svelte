@@ -13,6 +13,7 @@
   import SettingsMenu from "./SettingsMenu.svelte";
   import type { SessionInfo } from "./api";
   import type { Basemap } from "./geo";
+  import type { Sky } from "./weather";
 
   interface Props {
     zoom: number;
@@ -30,6 +31,7 @@
     adsb: boolean;
     railMap: boolean;
     trainBlocks: boolean;
+    sky: Sky;
     terrain: boolean;
     exaggeration: number;
     session: SessionInfo | null;
@@ -59,6 +61,7 @@
     adsb = $bindable(),
     railMap = $bindable(),
     trainBlocks = $bindable(),
+    sky = $bindable(),
     terrain = $bindable(),
     exaggeration = $bindable(),
     session,
@@ -134,6 +137,7 @@
           bind:labels
           bind:railMap
           bind:trainBlocks
+          bind:sky
           {aircraftShown}
           bind:aircraftLabels
           bind:weather

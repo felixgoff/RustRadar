@@ -18,13 +18,16 @@ function metres(a: LatLon, b: LatLon): number {
  * Each car of a train as a `[lon, lat]` line, front first: back from where
  * it is drawn at `nowMs` along its frames (`[lat, lon, ms]`), then along
  * `tail` (the track behind where its frames start, `[lat, lon]`), and
- * straight on back where that runs out.
+ * straight on back where that runs out. Each car takes `carM` metres of it
+ * (more than a car's own far out, where one true to scale would be too small
+ * to see), less the gap to the next.
  */
 export function carLines(
   frames: [number, number, number][],
   tail: LatLon[],
   cars: number,
   nowMs: number,
+  carM = CAR_M,
 ): [number, number][][] {
   if (!frames.length) return [];
   // the way it has come and goes: the tail reversed, up to the frames' start, then the frames
@@ -59,9 +62,10 @@ export function carLines(
     const k = span > 0 ? Math.min(1, (s - at[i - 1]) / span) : 1;
     return [path[i - 1][0] + (path[i][0] - path[i - 1][0]) * k, path[i - 1][1] + (path[i][1] - path[i - 1][1]) * k];
   };
+  const gap = GAP_M * (carM / CAR_M);
   const out: [number, number][][] = [];
   for (let c = 0; c < Math.max(1, cars); c++) {
-    const [front, back] = [head - c * CAR_M, head - (c + 1) * CAR_M + GAP_M];
+    const [front, back] = [head - c * carM, head - (c + 1) * carM + gap];
     const line: LatLon[] = [point(back)];
     for (let i = 0; i < path.length; i++) if (at[i] > back && at[i] < front) line.push(path[i]);
     line.push(point(front));

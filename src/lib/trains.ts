@@ -194,12 +194,6 @@ export function trainCarIcon(kind: TrainKind, operator: string | null | undefine
   return `${lead ? "cab" : "coach"}-${colourKey(kind, operator)}`;
 }
 
-/**
- * A car's icon's height in its atlas cell to the car's own length: the
- * cell has a little room round the car (IconLayer sizes the cell).
- */
-export const CAR_ICON_CELL = 64 / 60;
-
 /** Base icon length in pixels per kind: long-distance trains a little longer, metros shorter. */
 const ICON_PX: Record<TrainKind, number> = {
   highSpeed: 24,
@@ -221,9 +215,20 @@ export function trainIconSize(kind: TrainKind, heading: number | null, zoom: num
 
 /** Cell size of the atlas, pixels; glyphs are drawn at about three times their usual size for sharpness. */
 const CELL = 64;
-/** A car from above: its cell's width, and its own (a car is about 3.1 m wide and 24 m long; 60 px here). */
-const CAR_CELL_W = 12;
-const CAR_W = 8;
+/**
+ * A car as the map draws it further out, where it is a few pixels long: a
+ * short, fat dash, so a train reads as its cars. Its cell's width, its own
+ * width and length, and the room round it.
+ */
+const CAR_CELL_W = 18;
+const CAR_W = 14;
+const CAR_LEN = 36;
+const CAR_PAD = 2;
+/**
+ * A car's icon's height in its atlas cell to the car's own length: the
+ * cell has a little room round the car (IconLayer sizes the cell).
+ */
+export const CAR_ICON_CELL = (CAR_LEN + 2 * CAR_PAD) / CAR_LEN;
 /** The app's navy ink, as the glyphs' border and the carriage joints. */
 const INK = "rgba(8, 12, 20, 0.9)";
 
@@ -236,7 +241,7 @@ const INK = "rgba(8, 12, 20, 0.9)";
 export function trainAtlas(): { atlas: HTMLCanvasElement; mapping: Record<string, object> } | null {
   if (typeof document === "undefined") return null;
   const canvas = document.createElement("canvas");
-  // the carriage and the square, then a car and a leading car from above, narrow
+  // the carriage and the square, then a car and a leading car
   canvas.width = CELL * 2 + CAR_CELL_W * 2;
   // a row per kind's colour, then one per operator's
   const rows: [string, RGB][] = [
@@ -283,34 +288,24 @@ export function trainAtlas(): { atlas: HTMLCanvasElement; mapping: Record<string
     ctx.stroke();
     ctx.fill();
     mapping[`box-${kind}`] = { x: CELL, y, width: CELL, height: CELL, mask: false };
-    // a car from above, 60 long: its body, a lighter roof along it, and dark ends; the leading one with a nose
+    // a car: a short, fat dash with a dark edge, the leading one round at its front
     for (const lead of [false, true]) {
       const x = CELL * 2 + (lead ? CAR_CELL_W : 0);
-      const [l, r, t, b] = [x + (CAR_CELL_W - CAR_W) / 2, x + (CAR_CELL_W + CAR_W) / 2, y + 2, y + 62];
+      const [l, r, t, b] = [x + (CAR_CELL_W - CAR_W) / 2, x + (CAR_CELL_W + CAR_W) / 2, y + CAR_PAD, y + CAR_PAD + CAR_LEN];
       ctx.beginPath();
       if (lead) {
         ctx.moveTo(l, b);
-        ctx.lineTo(l, t + 9);
-        ctx.quadraticCurveTo(l, t, (l + r) / 2, t);
-        ctx.quadraticCurveTo(r, t, r, t + 9);
+        ctx.lineTo(l, t + CAR_W / 2);
+        ctx.arc((l + r) / 2, t + CAR_W / 2, CAR_W / 2, Math.PI, 0);
         ctx.lineTo(r, b);
         ctx.closePath();
       } else {
-        ctx.roundRect(l, t, CAR_W, b - t, 1.5);
+        ctx.roundRect(l, t, CAR_W, CAR_LEN, 2);
       }
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 3;
       ctx.stroke();
       ctx.fill();
-      // the roof: a lighter stripe down the middle
-      ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
-      ctx.fillRect((l + r) / 2 - 1, t + (lead ? 10 : 4), 2, b - t - (lead ? 14 : 8));
-      if (lead) {
-        // the windscreen
-        ctx.fillStyle = INK;
-        ctx.fillRect(l + 1.5, t + 4, CAR_W - 3, 3);
-      }
-      ctx.fillStyle = `rgb(${rows[row][1].join(", ")})`;
-      mapping[`${lead ? "cab" : "coach"}-${kind}`] = { x, y, width: CAR_CELL_W, height: CELL, mask: false };
+      mapping[`${lead ? "cab" : "coach"}-${kind}`] = { x, y, width: CAR_CELL_W, height: CAR_LEN + 2 * CAR_PAD, mask: false };
     }
   });
   return { atlas: canvas, mapping };

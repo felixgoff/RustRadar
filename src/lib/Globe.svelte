@@ -3360,6 +3360,7 @@
       parent: container,
       views: new GlobeView({ resolution: 5 }),
       initialViewState: { ...view, ...LIMITS },
+      useDevicePixels: pixelRatio(),
       controller: controllerFor(false),
       effects: [lighting],
       // the shadows mark it (SHADOW_PARAMETERS); deck.gl clears it each frame
@@ -3412,11 +3413,18 @@
   }
 
   let stopTextures: (() => void) | null = null;
+  /**
+   * The realistic map's shading costs per pixel drawn: on a sharp screen it is
+   * drawn at 1.5 pixels to the CSS pixel, not 2 or 3 (half the work or less).
+   * shortcut: read when the basemap is set, so a window moved to a sharper screen keeps the old ratio; listen for ratio changes if that matters.
+   */
+  const pixelRatio = () => (basemap === "realistic" ? Math.min(devicePixelRatio, 1.5) : true);
   // The realistic map tilts further than the others; leaving it tilted past
   // their limit, the camera eases back within it.
   $effect(() => {
     void basemap;
     untrack(() => {
+      deck?.setProps({ useDevicePixels: pixelRatio() });
       if (!deck || (follow && selected)) return;
       const { maxPitch } = limits();
       if (view.pitch > maxPitch) goTo({ pitch: maxPitch }, 600, ["pitch"]);

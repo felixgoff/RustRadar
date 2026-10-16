@@ -747,7 +747,7 @@ pub fn train(
 }
 
 /// A train's cars where its operator doesn't say how many.
-const DEFAULT_CARS: u32 = 3;
+const DEFAULT_CARS: u32 = 4;
 /// How long a car is drawn, metres (a coach is about 25 m, with its coupling).
 pub const CAR_M: f64 = 26.0;
 /// The track behind a train reaches this much further than its cars, metres.
@@ -2225,7 +2225,7 @@ mod tests {
                 let t = Instant::now();
                 let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
                 if std::env::var("NO_TAIL").is_err() {
-                    tail_of(&sim.frames, r, 3.0 * CAR_M + TAIL_SPARE_M);
+                    tail_of(&sim.frames, r, f64::from(DEFAULT_CARS) * CAR_M + TAIL_SPARE_M);
                 }
                 if t.elapsed() > slowest.0 {
                     slowest = (t.elapsed(), r.lookup().to_owned());

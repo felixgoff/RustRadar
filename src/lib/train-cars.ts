@@ -5,7 +5,7 @@ export const CAR_M = 26;
 /** The gap drawn between cars, metres. */
 const GAP_M = 2.5;
 /** A train's cars where its operator doesn't say how many. */
-export const DEFAULT_CARS = 3;
+export const DEFAULT_CARS = 4;
 
 type LatLon = [number, number];
 

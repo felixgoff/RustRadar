@@ -113,6 +113,7 @@
     trainPositionAge,
   } from "./trains";
   import { type RouteCursor, routeAhead, wayToStop } from "./train-route";
+  import { carLines, DEFAULT_CARS } from "./train-cars";
   import { isTrackpadScroll, pinched, type PinchEvent, wheelPixels, wrapBearing } from "./trackpad";
 
   interface Props {
@@ -1810,6 +1811,55 @@
     angles: new Float32Array(0),
     version: 0,
   };
+  /** Close in, trains are drawn as their cars along the track. */
+  const CARS_MIN_ZOOM = 14;
+  /** How wide a car is drawn, metres. */
+  const CAR_WIDTH_M = 3.2;
+  const CAR_EDGE: [number, number, number, number] = [20, 22, 28, 230];
+
+  /** The cars of the trains in view, under their icons: as many as their operator says, else three. */
+  function carLayers(data: TrainData, nowMs: number): Layer[] {
+    const b = view.zoom >= CARS_MIN_ZOOM ? viewBounds() : null;
+    if (!b) return [];
+    const [west, south, east, north] = b;
+    const cars: { line: [number, number][]; color: [number, number, number, number] }[] = [];
+    data.list.forEach((train, i) => {
+      const [lon, lat] = data.positions[i];
+      if (lon < west - 0.01 || lon > east + 0.01 || lat < south - 0.01 || lat > north + 0.01) return;
+      for (const line of carLines(train.frames ?? [], train.tail ?? [], train.cars ?? DEFAULT_CARS, nowMs)) {
+        cars.push({ line, color: data.colors[i] });
+      }
+    });
+    const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
+    // each car a body of its own: a dark edge round it, and the gap to the next
+    return [
+      new PathLayer<(typeof cars)[number]>({
+        id: "train-car-edges",
+        data: cars,
+        getPath: (c) => c.line,
+        getColor: CAR_EDGE,
+        getWidth: CAR_WIDTH_M + 1.2,
+        widthUnits: "meters",
+        widthMinPixels: 3,
+        capRounded: false,
+        jointRounded: true,
+        parameters: ground,
+      }),
+      new PathLayer<(typeof cars)[number]>({
+        id: "train-cars",
+        data: cars,
+        getPath: (c) => c.line,
+        getColor: (c) => c.color,
+        getWidth: CAR_WIDTH_M,
+        widthUnits: "meters",
+        widthMinPixels: 2,
+        capRounded: false,
+        jointRounded: true,
+        parameters: ground,
+      }),
+    ];
+  }
+
   function trainLayers(list: Train[], flat: boolean, mpp: number, nowMs: number): Layer[] {
     const { zoom, bearing, pitch, longitude, latitude } = view;
     const data = trainsFor(list, nowMs);
@@ -2351,6 +2401,8 @@
     // the selected train's way ahead, from where it is drawn now, under the trains
     if (trainRoute && selectedTrain) layers.push(...trainRouteLayers(trainRoute, selectedTrain));
     if (trainRing) layers.push(trainRing.halo);
+    // close in, their cars along the track, under the icons
+    if (trainData && trains.length) layers.push(...carLayers(trainData, Date.now()));
     layers.push(...trainsDrawn);
     // dev builds: the reports each train is drawn from
     if (import.meta.env.DEV) layers.push(...sightingLayers(trains, selectedTrain, Date.now()));

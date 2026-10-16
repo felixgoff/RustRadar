@@ -123,6 +123,12 @@ pub struct Train {
     /// map to mark. Empty in release builds.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub predicted: Vec<(f64, f64, i64)>,
+    /// How many cars (and locomotives) it runs with, where its operator says.
+    pub cars: Option<u32>,
+    /// The track it has come along, `(lat, lon)` back from the start of
+    /// `frames`, for its cars to be drawn on; empty when not known.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tail: Vec<(f64, f64)>,
 }
 
 /// A position report as the dev map marks it.
@@ -474,6 +480,8 @@ fn digitraffic_train(t: &Value) -> Option<Train> {
         frames: Vec::new(),
         reports: Vec::new(),
         predicted: Vec::new(),
+        cars: None,
+        tail: Vec::new(),
     })
 }
 
@@ -541,6 +549,8 @@ fn amtraker_train(t: &Value) -> Option<Train> {
         frames: Vec::new(),
         reports: Vec::new(),
         predicted: Vec::new(),
+        cars: None,
+        tail: Vec::new(),
     })
 }
 
@@ -609,6 +619,8 @@ fn entur_train(v: &Value) -> Option<Train> {
         frames: Vec::new(),
         reports: Vec::new(),
         predicted: Vec::new(),
+        cars: None,
+        tail: Vec::new(),
     })
 }
 
@@ -681,6 +693,8 @@ fn irishrail_train(block: &str, now_ms: i64) -> Option<Train> {
         frames: Vec::new(),
         reports: Vec::new(),
         predicted: Vec::new(),
+        cars: None,
+        tail: Vec::new(),
     })
 }
 
@@ -764,6 +778,8 @@ fn radar_train(m: &Value, source: &'static str, now_ms: i64) -> Option<Train> {
         frames,
         reports: Vec::new(),
         predicted: Vec::new(),
+        cars: None,
+        tail: Vec::new(),
     })
 }
 
@@ -1492,6 +1508,8 @@ mod tests {
             frames: Vec::new(),
             reports: Vec::new(),
             predicted: Vec::new(),
+            cars: None,
+            tail: Vec::new(),
         };
         let source = Source::Trafikverket;
         let (key, _) = source.request(&Area::WORLD);

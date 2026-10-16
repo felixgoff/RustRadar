@@ -640,6 +640,10 @@ export interface Train {
   reports?: Sighting[];
   /** Dev builds: where the real train most likely is, as `frames`. */
   predicted?: [number, number, number][];
+  /** How many cars (and locomotives) it runs with, where its operator says. */
+  cars?: number | null;
+  /** The track it has come along, `[lat, lon]` back from the start of `frames`, for its cars. */
+  tail?: [number, number][];
 }
 
 /**

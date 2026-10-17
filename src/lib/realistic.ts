@@ -678,11 +678,11 @@ const rtreeInject = {
       ? leaf * rl_linear(color.rgb) / max(textureLod(rtree_color, vec3(0.5, 0.5, layer), 16.0).rgb, vec3(1e-3))
       : leaf * pow(color.r / 0.8627, 2.2);
     vec3 v = normalize(rl_eye);
-    // the card's face towards the camera, across it and up it
+    // the card's face towards the camera, across it and up it (up the picture: north, on the crown's level card)
     vec3 card = normalize(rt_n);
     if (dot(card, v) < 0.0) card = -card;
-    vec3 up = vec3(0.0, 0.0, 1.0);
-    vec3 across = normalize(cross(up, card) + vec3(1e-6, 0.0, 0.0));
+    vec3 across = normalize(cross(abs(card.z) > 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0), card));
+    vec3 up = cross(card, across);
     // reoriented normal mapping: the leaves' normals on the crown's
     vec3 t = texture(rtree_volume, geometry.uv).xyz * 2.0 - 1.0 + vec3(0.0, 0.0, 1.0);
     vec3 u = (texture(rtree_normal, at).xyz * 2.0 - 1.0) * vec3(-1.0, -1.0, 1.0);

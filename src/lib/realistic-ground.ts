@@ -10,6 +10,7 @@ import { type Layer, LayerExtension } from "@deck.gl/core";
 import { MVTLayer } from "@deck.gl/geo-layers";
 import { GeoJsonLayer, PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import type { Device } from "@luma.gl/core";
+import { bridgeParts, omtDeck, type Lines, type TileIndex } from "./bridges";
 import { realisticLight } from "./realistic";
 import { type GROUND_TEXTURES, realisticTextures, textureLayer } from "./realistic-textures";
 
@@ -268,6 +269,7 @@ export function lineOf({ properties: p }: Feature): Line {
 }
 
 const linePaint = (f: Feature) => lineOf(f).paint;
+const onRails = ({ properties: p }: Feature) => p.class === "rail" || p.class === "transit";
 const lineWidth = (f: Feature) => lineOf(f).width;
 const edgePaint = (f: Feature) => lineOf(f).edgePaint;
 const edgeWidth = (f: Feature) => {
@@ -493,9 +495,13 @@ function split(tile: Binary): { areas: Binary; lines: Binary } {
   return p;
 }
 
+/** The shade a bridge throws on what it crosses (not lit: a shadow). */
+const BRIDGE_SHADE: RGBA = [16, 20, 14, 70];
+
 /**
  * One tile of ground: a GeoJsonLayer to MVTLayer (which expects one), drawn
- * by the three passes rather than by GeoJsonLayer's own state.
+ * by the three passes rather than by GeoJsonLayer's own state; close in, its
+ * bridges raised to their decks over their shade.
  */
 class GroundTile extends GeoJsonLayer {
   static layerName = "GroundTile";
@@ -512,11 +518,46 @@ class GroundTile extends GeoJsonLayer {
     if (!data) return [];
     // binary in the flat projection; on the globe, GeoJSON features
     const { areas, lines } = Array.isArray(data) ? splitFeatures(data) : split(data);
-    return [
+    const tile = (this.props as { tile?: { index: TileIndex } }).tile?.index;
+    const bridges = !Array.isArray(data) && tile ? bridgeParts((lines as Binary).lines as unknown as Lines, tile, omtDeck) : null;
+    const onGround = bridges ? { ...(lines as Binary), lines: bridges.ground } : lines;
+    const layers = [
       new GeoJsonLayer({ ...own, id: `${id}-areas`, data: areas, filled: true, stroked: false } as never),
-      new GeoJsonLayer({ ...own, id: `${id}-edges`, data: lines, filled: false, getLineColor: edgePaint, getLineWidth: edgeWidth } as never),
-      new GeoJsonLayer({ ...own, id: `${id}-lines`, data: lines, filled: false } as never),
+      new GeoJsonLayer({ ...own, id: `${id}-edges`, data: onGround, filled: false, getLineColor: edgePaint, getLineWidth: edgeWidth } as never),
+      new GeoJsonLayer({ ...own, id: `${id}-lines`, data: onGround, filled: false } as never),
     ];
+    if (bridges) {
+      const raised = { ...(lines as Binary), lines: bridges.raised };
+      // (the shade plain: not one of the ground's surfaces, but kept to the tile)
+      const unlit = (own.extensions as unknown[]).filter((e) => !(e instanceof GroundExtension));
+      layers.push(
+        new GeoJsonLayer({
+          ...own,
+          id: `${id}-bridge-shade`,
+          data: { ...(lines as Binary), lines: bridges.under },
+          filled: false,
+          getLineColor: BRIDGE_SHADE,
+          getLineWidth: (f: Feature) => Math.max(lineWidth(f), edgeWidth(f)) + 2,
+          extensions: unlit,
+        } as never),
+        new GeoJsonLayer({ ...own, id: `${id}-bridge-edges`, data: raised, filled: false, getLineColor: edgePaint, getLineWidth: edgeWidth } as never),
+        new GeoJsonLayer({ ...own, id: `${id}-bridge-lines`, data: raised, filled: false } as never),
+        // and in the depth buffer, for what is drawn after to pass under them: the
+        // roads' bridges only (the railways' carry the rail map, signal blocks and
+        // trains, drawn after on the same deck, which would fight with it)
+        new GeoJsonLayer({
+          ...own,
+          id: `${id}-bridge-decks`,
+          data: raised,
+          filled: false,
+          getLineColor: NONE,
+          getLineWidth: (f: Feature) => (onRails(f) ? 0 : Math.max(lineWidth(f), edgeWidth(f))),
+          extensions: unlit,
+          parameters: { ...(own.parameters as object), depthWriteEnabled: true },
+        } as never),
+      );
+    }
+    return layers;
   }
 }
 

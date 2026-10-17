@@ -79,6 +79,10 @@ pub struct Train {
     /// `frames`, for its cars to be drawn on; empty when not known.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tail: Vec<(f64, f64)>,
+    /// The bridges and tunnels on the track along `tail` and `frames`, for
+    /// its cars to be drawn up on or down in.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub structures: Vec<crate::rail::Structure>,
 }
 
 /// A position report as the dev map marks it.
@@ -510,7 +514,10 @@ pub async fn train_route(id: String) -> CmdResult<crate::trafikverket::TrainRout
 pub async fn train_blocks(west: f64, south: f64, east: f64, north: f64) -> CmdResult<TrainBlocks> {
     tauri::async_runtime::spawn_blocking(move || {
         let (blocks, complete) = crate::rail::blocks::blocks_in(south, west, north, east);
-        TrainBlocks { blocks, complete }
+        // and the bridges and tunnels their track runs over and through
+        let pad = 0.03;
+        let structures = crate::rail::structures_in(south - pad, west - pad, north + pad, east + pad);
+        TrainBlocks { blocks, structures, complete }
     })
     .await
     .map_err(|e| e.to_string())
@@ -519,6 +526,7 @@ pub async fn train_blocks(west: f64, south: f64, east: f64, north: f64) -> CmdRe
 #[derive(serde::Serialize)]
 pub struct TrainBlocks {
     blocks: Vec<crate::rail::blocks::Block>,
+    structures: Vec<crate::rail::Structure>,
     complete: bool,
 }
 
@@ -640,6 +648,7 @@ mod tests {
             predicted: Vec::new(),
             cars: None,
             tail: Vec::new(),
+            structures: Vec::new(),
         };
         let source = Source::Trafikverket;
         let (key, _) = source.request(&Area::WORLD);
@@ -703,6 +712,7 @@ mod tests {
             predicted: Vec::new(),
             cars: Some(6),
             tail: Vec::new(),
+            structures: Vec::new(),
         };
         let json = serde_json::to_value(&t).unwrap();
         for key in ["speedKmh", "delayMinutes", "positionUnix", "frames", "heading", "destination", "operator"] {

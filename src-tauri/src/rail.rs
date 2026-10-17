@@ -97,6 +97,8 @@ pub struct Track {
     pub service: bool,
     /// A yard track or a spur: never where a passenger train is guessed to stop.
     pub yard: bool,
+    pub bridge: bool,
+    pub tunnel: bool,
 }
 
 struct Store {
@@ -381,6 +383,7 @@ pub fn decode(pbf: &[u8], z: u32, x: u32, y: u32) -> Vec<Track> {
             let track_ref = text("track_ref").map(str::to_owned);
             let service = text("service").is_some();
             let yard = matches!(text("service"), Some("yard" | "spur"));
+            let flag = |k: &str| matches!(tags.get(k), Some(Val::Bool(true)));
 
             // MoveTo starts a line, LineTo goes on; coordinates are zigzag deltas
             let commands = packed(geometry);
@@ -417,6 +420,8 @@ pub fn decode(pbf: &[u8], z: u32, x: u32, y: u32) -> Vec<Track> {
                     track_ref: track_ref.clone(),
                     service,
                     yard,
+                    bridge: flag("bridge"),
+                    tunnel: flag("tunnel"),
                 });
             }
         }
@@ -1369,6 +1374,71 @@ pub fn track_from(start: (f64, f64), heading: f64, metres: f64) -> Option<Vec<(f
     Some(out)
 }
 
+/// A bridge or a tunnel on the track: its line (`[lon, lat]`), and whether
+/// it goes on as one past each end (cut by a tile's edge, or mapped in pieces).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct Structure {
+    pub tunnel: bool,
+    pub line: Vec<[f64; 2]>,
+    pub joined: [bool; 2],
+}
+
+/// The bridges and tunnels of these tiles' tracks that `keep` keeps.
+fn structures_of(sets: &[Arc<Vec<Track>>], keep: impl Fn(&Track) -> bool) -> Vec<Structure> {
+    let all: Vec<&Track> = sets.iter().flat_map(|s| s.iter()).filter(|t| (t.bridge || t.tunnel) && t.points.len() >= 2).collect();
+    let ends = |t: &Track| [t.points[0], t.points[t.points.len() - 1]];
+    all.iter()
+        .filter(|t| keep(t))
+        .map(|t| {
+            let joined = |p| all.iter().any(|o| !std::ptr::eq(*o, *t) && o.tunnel == t.tunnel && ends(o).iter().any(|q| distance(*q, p) < SEAM_M));
+            let [start, end] = ends(t);
+            Structure { tunnel: t.tunnel, line: t.points.iter().map(|p| [p.1, p.0]).collect(), joined: [joined(start), joined(end)] }
+        })
+        .collect()
+}
+
+/// Whether a line's box and an area (south, west, north, east) overlap.
+fn overlaps(line: &[(f64, f64)], (south, west, north, east): (f64, f64, f64, f64)) -> bool {
+    let (mut s, mut w, mut n, mut e) = (90.0f64, 180.0f64, -90.0f64, -180.0f64);
+    for &(lat, lon) in line {
+        (s, n, w, e) = (s.min(lat), n.max(lat), w.min(lon), e.max(lon));
+    }
+    s <= north && n >= south && w <= east && e >= west
+}
+
+/// The bridges and tunnels on the track in an area (degrees); none while its tiles aren't all here.
+pub fn structures_in(south: f64, west: f64, north: f64, east: f64) -> Vec<Structure> {
+    let Some(sets) = tracks_of(&tiles_for(&[(south, west), (north, east)], 0.0)) else { return Vec::new() };
+    structures_of(&sets, |t| overlaps(&t.points, (south, west, north, east)))
+}
+
+/// The bridges and tunnels the track has along a way (`(lat, lon)`, in
+/// order: where a train is drawn), within `within` metres of it; none while
+/// its tiles aren't all here.
+pub fn structures_along(way: &[(f64, f64)], within: f64) -> Vec<Structure> {
+    if way.len() < 2 {
+        return Vec::new();
+    }
+    let Some(sets) = tracks_of(&tiles_for(way, 0.0)) else { return Vec::new() };
+    structures_near(&sets, way, within)
+}
+
+fn structures_near(sets: &[Arc<Vec<Track>>], way: &[(f64, f64)], within: f64) -> Vec<Structure> {
+    let near = |p: (f64, f64), line: &[(f64, f64)]| line.windows(2).any(|w| distance(p, project(p, w[0], w[1]).0) <= within);
+    // (a box round the way first: most of the tiles' tracks are nowhere near it)
+    let pad = within / 100_000.0 + 1e-4;
+    let (mut s, mut w, mut n, mut e) = (90.0f64, 180.0f64, -90.0f64, -180.0f64);
+    for &(lat, lon) in way {
+        (s, n, w, e) = (s.min(lat), n.max(lat), w.min(lon), e.max(lon));
+    }
+    let k = s.abs().max(n.abs()).to_radians().cos().max(0.1);
+    let area = (s - pad, w - pad / k, n + pad, e + pad / k);
+    structures_of(sets, |t| {
+        overlaps(&t.points, area)
+            && (t.points.iter().any(|p| near(*p, way)) || way.iter().any(|p| near(*p, &t.points)))
+    })
+}
+
 /// The nearest point on the track, if it is loaded and near.
 pub fn snap(p: (f64, f64)) -> Option<(f64, f64)> {
     let g = graph_for(tiles_for(&[p], 0.005))?;
@@ -1817,6 +1887,30 @@ mod tests {
     }
 
     #[test]
+    fn bridges_and_tunnels_along_a_way() {
+        // east: 1 km on the ground, a bridge in two pieces (cut by a tile's edge), 1 km on; a tunnel on the track 4.5 m north
+        let a = (59.0, 18.0);
+        let at = |m: f64| ahead(a, 90.0, m);
+        let beside = |m: f64| ahead(at(m), 0.0, 4.5);
+        let tracks = vec![
+            track(vec![at(0.0), at(1_000.0)]),
+            Track { points: vec![at(1_000.0), at(1_060.0)], bridge: true, ..Default::default() },
+            Track { points: vec![at(1_060.0), at(1_100.0)], bridge: true, ..Default::default() },
+            track(vec![at(1_100.0), at(2_100.0)]),
+            Track { points: vec![beside(1_500.0), beside(1_900.0)], tunnel: true, ..Default::default() },
+        ];
+        let sets = [Arc::new(tracks)];
+        // a train's way: frames every 90 m, none on the bridge itself
+        let way: Vec<(f64, f64)> = (0..12).map(|i| at(500.0 + 90.0 * i as f64 + 15.0)).collect();
+        let found = structures_near(&sets, &way, 4.0);
+        assert_eq!(found.len(), 2, "both pieces of the bridge, not the tunnel beside: {found:?}");
+        assert!(found.iter().all(|s| !s.tunnel));
+        let first = found.iter().find(|s| distance((s.line[0][1], s.line[0][0]), at(1_000.0)) < 1.0).unwrap();
+        assert_eq!(first.joined, [false, true], "goes on as a bridge at its end only");
+        assert_eq!(structures_near(&sets, &[at(0.0), at(400.0)], 4.0), vec![], "nothing on the way");
+    }
+
+    #[test]
     fn trains_stop_at_their_announced_track() {
         let station = (57.0, 12.0);
         let t1 = Track {
@@ -2055,14 +2149,14 @@ mod tests {
             v
         }
         // layer "railway_line_high", extent 4096, a line from (0,0) to (4096,4096)
-        // tagged feature=rail, maxspeed=160 (a double), track_ref="3"
+        // tagged feature=rail, maxspeed=160 (a double), track_ref="3", tunnel=true
         let geometry = [9u8, 0, 0, 10, 0x80, 0x40, 0x80, 0x40];
-        let mut feature = bytes(2, &[0, 0, 1, 1, 2, 2]);
+        let mut feature = bytes(2, &[0, 0, 1, 1, 2, 2, 3, 3]);
         feature.extend([0x18, 2]);
         feature.extend(bytes(4, &geometry));
         let mut layer = bytes(1, b"railway_line_high");
         layer.extend(bytes(2, &feature));
-        for k in ["feature", "maxspeed", "track_ref"] {
+        for k in ["feature", "maxspeed", "track_ref", "tunnel"] {
             layer.extend(bytes(3, k.as_bytes()));
         }
         layer.extend(bytes(4, &bytes(1, b"rail")));
@@ -2070,12 +2164,14 @@ mod tests {
         double.extend(160.0f64.to_le_bytes());
         layer.extend(bytes(4, &double));
         layer.extend(bytes(4, &bytes(1, b"3")));
+        layer.extend(bytes(4, &[0x38, 1]));
         layer.extend([0x28, 0x80, 0x20]);
         let tile = bytes(3, &layer);
         let tracks = decode(&tile, ZOOM, 2198, 1281);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].maxspeed, Some(160.0));
         assert_eq!(tracks[0].track_ref.as_deref(), Some("3"));
+        assert!(tracks[0].tunnel && !tracks[0].bridge);
         let (nw, se) = (tracks[0].points[0], tracks[0].points[1]);
         assert_eq!(tile_of(nw.0 - 1e-9, nw.1 + 1e-9), (2198, 1281));
         assert!(se.0 < nw.0 && se.1 > nw.1, "south-east of the corner");

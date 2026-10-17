@@ -702,6 +702,8 @@ pub fn train(
     // the track behind it, as long as its cars (three where not known), for them to be drawn on
     let cars = service.and_then(|s| s.cars).unwrap_or(DEFAULT_CARS);
     let tail = tail_of(&frames, report, f64::from(cars) * CAR_M + TAIL_SPARE_M);
+    let way: Vec<(f64, f64)> = tail.iter().rev().copied().chain(frames.iter().map(|f| (f.0, f.1))).collect();
+    let structures = crate::rail::structures_along(&way, STRUCTURE_M);
     let place = frames
         .first()
         .map(|f| (f.0, f.1))
@@ -743,6 +745,7 @@ pub fn train(
         predicted: if crate::devlog::ENABLED { predicted } else { Vec::new() },
         cars: service.and_then(|s| s.cars),
         tail,
+        structures,
     }
 }
 
@@ -752,6 +755,9 @@ const DEFAULT_CARS: u32 = 4;
 pub const CAR_M: f64 = 26.0;
 /// The track behind a train reaches this much further than its cars, metres.
 const TAIL_SPARE_M: f64 = 40.0;
+/// A bridge or tunnel this near the way a train is drawn is on it, metres
+/// (the frames cut corners a little; the map matches each car to its own).
+const STRUCTURE_M: f64 = 4.0;
 
 /// The track behind where a train's frames start, back the way it came
 /// (its drawn heading, else its report's), `length` metres; empty where the
@@ -2100,6 +2106,7 @@ mod tests {
             predicted: Vec::new(),
             cars: None,
             tail: Vec::new(),
+            structures: Vec::new(),
         };
         let report = |n: &str| Report {
             advertised: None,

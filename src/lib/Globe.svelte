@@ -132,6 +132,7 @@
   import { type RouteCursor, routeAhead, wayToStop } from "./train-route";
   import { CAR_M, carLines, DEFAULT_CARS } from "./train-cars";
   import { CAR_HEIGHT_M, CAR_WIDTH_M, carMeshes, type CarPlace, carPlaces } from "./train-models";
+  import { GROUND as ON_THE_GROUND, levelAt, onStructures, type Level, type Structure } from "./bridges";
   import { isTrackpadScroll, pinched, type PinchEvent, wheelPixels, wrapBearing } from "./trackpad";
 
   interface Props {
@@ -1822,12 +1823,18 @@
   // (expected positions ahead) move along them, and their cars with them.
   const TRAIN_ALPHA = 240;
   const TRAIN_PARAMETERS = { ...NO_CULL, depthWriteEnabled: false } as const;
+  // A train in a tunnel is seen through the ground (and what stands on it), faint.
+  const TUNNEL_TRAIN_ALPHA = 90;
+  const THROUGH_GROUND = { ...NO_CULL, depthWriteEnabled: false, depthCompare: "always" } as const;
+  const inTunnel = (c: ShipColor): ShipColor => [c[0], c[1], c[2], TUNNEL_TRAIN_ALPHA];
   type TrainData = {
     list: Train[];
     positions: [number, number, number][];
     /** Direction of travel as drawn, degrees; null when unknown. */
     headings: (number | null)[];
     colors: ShipColor[];
+    /** On the ground, on a bridge or in a tunnel, where it is drawn. */
+    levels: Level[];
     /** Indices of all trains. */
     all: number[];
     /** Indices of the trains with frames to move along. */
@@ -1848,6 +1855,7 @@
       positions: [],
       headings: [],
       colors: [],
+      levels: [],
       all: [],
       moving: [],
       byId: new Map(),
@@ -1860,6 +1868,7 @@
       data.positions.push([train.lon, train.lat, 0]);
       data.headings.push(train.heading);
       data.colors.push([...trainColorOf(train), TRAIN_ALPHA]);
+      data.levels.push(train.structures?.length ? levelAt([train.lon, train.lat], train.heading, train.structures) : ON_THE_GROUND);
       data.all.push(i);
       data.byId.set(train.id, i);
       if ((train.frames?.length ?? 0) > 1 || data.blends.has(i)) data.moving.push(i);
@@ -1877,6 +1886,7 @@
       const heading = headingAt(train, nowMs);
       data.positions[i] = [lon, lat, 0];
       data.headings[i] = heading;
+      if (train.structures?.length) data.levels[i] = levelAt([lon, lat], heading, train.structures);
     }
     trainMoves++;
   }
@@ -1891,8 +1901,8 @@
   const MIN_CAR_WIDTH_PX = 3;
   const CAR_MESH_MATERIAL = { ambient: 0.45, diffuse: 0.6, shininess: 40, specularColor: [70, 70, 70] as [number, number, number] };
 
-  /** A car on the map, of the train at `train` in the trains' list. */
-  type DrawnCar = CarPlace & { train: number; lead: boolean };
+  /** A car on the map, of the train at `train` in the trains' list; on the ground, a bridge or in a tunnel. */
+  type DrawnCar = CarPlace & { train: number; lead: boolean; level: Level };
 
   /**
    * The cars of the trains in view, as many as their operator says (else
@@ -1914,7 +1924,10 @@
         const behind: [number, number] = [lat - Math.cos(h) / 1000, lon - Math.sin(h) / 1000 / (Math.cos(lat * DEGREES) || 1e-6)];
         places = carPlaces(carLines([[lat, lon, nowMs]], [[lat, lon], behind], count, nowMs));
       }
-      places.forEach((place, k) => cars.push({ ...place, train: i, lead: k === 0 }));
+      const structures: Structure[] = train.structures ?? [];
+      places.forEach((place, k) =>
+        cars.push({ ...place, train: i, lead: k === 0, level: structures.length ? levelAt(place.at, place.heading, structures) : ON_THE_GROUND }),
+      );
     });
     return cars;
   }
@@ -1926,23 +1939,26 @@
     const width = Math.max(CAR_WIDTH_M, MIN_CAR_WIDTH_PX * mpp);
     const height = Math.max(CAR_HEIGHT_M, MIN_CAR_WIDTH_PX * 1.3 * mpp);
     const meshes = carMeshes();
-    return ([true, false] as const).map(
-      (lead) =>
-        new SimpleMeshLayer<DrawnCar>({
-          id: `train-car-meshes-${lead ? "cab" : "coach"}`,
-          data: cars.filter((c) => c.lead === lead),
-          mesh: lead ? meshes.cab : meshes.coach,
-          getPosition: (c) => c.at,
-          getOrientation: (c) => [0, -c.heading, 0],
-          getScale: (c) => [width, c.length, height],
-          getColor: (c) => data.colors[c.train],
-          material: CAR_MESH_MATERIAL,
-          pickable: true,
-          autoHighlight: true,
-          highlightColor: [55, 142, 240, 110],
-          parameters: NO_CULL,
-          updateTriggers: { getPosition: trainMoves, getOrientation: trainMoves, getScale: [trainMoves, width, height] },
-        }),
+    // on the ground and up on bridges; and in tunnels, faint, through the ground
+    return ([true, false] as const).flatMap((lead) =>
+      ([false, true] as const).map(
+        (tunnel) =>
+          new SimpleMeshLayer<DrawnCar>({
+            id: `train-car-meshes-${lead ? "cab" : "coach"}${tunnel ? "-tunnel" : ""}`,
+            data: cars.filter((c) => c.lead === lead && c.level.tunnel === tunnel),
+            mesh: lead ? meshes.cab : meshes.coach,
+            getPosition: (c) => [c.at[0], c.at[1], c.level.height],
+            getOrientation: (c) => [0, -c.heading, 0],
+            getScale: (c) => [width, c.length, height],
+            getColor: (c) => (tunnel ? inTunnel(data.colors[c.train]) : data.colors[c.train]),
+            material: CAR_MESH_MATERIAL,
+            pickable: true,
+            autoHighlight: true,
+            highlightColor: [55, 142, 240, 110],
+            parameters: tunnel ? THROUGH_GROUND : NO_CULL,
+            updateTriggers: { getPosition: trainMoves, getOrientation: trainMoves, getScale: [trainMoves, width, height] },
+          }),
+      ),
     );
   }
 
@@ -1972,7 +1988,7 @@
         getSize: (i) => trainIconSize(list[i].kind, data.headings[i], zoom),
         // on the ground, turned to the way it goes (degrees anticlockwise from north)
         getAngle: (i) => yaw0 - (data.headings[i] ?? 0),
-        getColor: (i) => data.colors[i],
+        getColor: (i) => (data.levels[i].tunnel ? inTunnel(data.colors[i]) : data.colors[i]),
         sizeUnits: "pixels",
         billboard: false,
         pickable: true,
@@ -1980,6 +1996,7 @@
         updateTriggers: {
           getPosition: trainMoves,
           getIcon: trainMoves,
+          getColor: trainMoves,
           getAngle: [trainMoves, yaw0],
           getSize: [trainIconScale(zoom), trainMoves],
         },
@@ -2084,8 +2101,23 @@
   const IN_BLOCK_M = 12;
   const BLOCK_FREE: [number, number, number, number] = [60, 200, 110, 220];
   const BLOCK_TAKEN: [number, number, number, number] = [235, 64, 52, 240];
+  /** A block's track in a tunnel: at this much of its colour's alpha, dashed. */
+  const BLOCK_TUNNEL_ALPHA = 0.5;
+  const BLOCK_TUNNEL_DASHES: [number, number] = [2.5, 2];
   /** The blocks fetched, for the area asked (padded round the view), and whether all of it was there. */
-  let blockSet: { west: number; south: number; east: number; north: number; list: TrainBlock[]; complete: boolean } | null = null;
+  let blockSet: {
+    west: number;
+    south: number;
+    east: number;
+    north: number;
+    list: TrainBlock[];
+    structures: Structure[];
+    complete: boolean;
+  } | null = null;
+  /** A stretch of a block's track as drawn: in a tunnel or not, up on the bridges along it (`[lon, lat, metres]`). */
+  type BlockRun = { block: string; path: [number, number, number][] };
+  /** The fetched blocks' track as drawn, worked out once for each set. */
+  let blockRuns: { of: TrainBlock[]; above: BlockRun[]; below: BlockRun[] } = { of: [], above: [], below: [] };
   let blocksAsking = false;
   let blocksAskedAt = 0;
   /** Which train is in each block (by block id), worked out now and then. */
@@ -2120,7 +2152,7 @@
           blockSet.complete = false;
           return;
         }
-        blockSet = { ...area, list: r.blocks, complete: r.complete };
+        blockSet = { ...area, list: r.blocks, structures: r.structures ?? [], complete: r.complete };
         blocksTaken.at = 0;
       })
       .catch(() => {})
@@ -2172,22 +2204,53 @@
       blocksTaken = { at: now, by: takenBlocks(list), version: blocksTaken.version + 1 };
     }
     const taken = blocksTaken.by;
-    const lines = list.flatMap((b) => b.lines.map((line) => ({ line, taken: taken.has(b.id) })));
+    if (blockRuns.of !== list) {
+      const structures = blockSet.structures;
+      blockRuns = { of: list, above: [], below: [] };
+      for (const b of list) {
+        for (const line of b.lines) {
+          for (const run of onStructures(line, structures)) (run.tunnel ? blockRuns.below : blockRuns.above).push({ block: b.id, path: run.path });
+        }
+      }
+    }
     // each taken block named once, halfway along its first stretch
     const labels = list
       .filter((b) => taken.has(b.id))
       .map((b) => ({ text: taken.get(b.id)!, at: b.lines[0][Math.floor(b.lines[0].length / 2)] }));
-    const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
+    // on the ground and bridges, under buildings (and road bridges) in front; in
+    // tunnels, faint and dashed, seen through the ground and what stands on it
+    const ground = { cullMode: "none", depthWriteEnabled: false } as const;
+    const top = { ...ground, depthCompare: "always" } as const;
+    const color = (r: BlockRun) => (taken.has(r.block) ? BLOCK_TAKEN : BLOCK_FREE);
+    const width = (r: BlockRun) => (taken.has(r.block) ? 4 : 2.5);
     return [
-      new PathLayer<(typeof lines)[number]>({
+      new PathLayer<BlockRun>({
         id: "train-blocks",
-        data: lines,
-        getPath: (l) => l.line,
-        getColor: (l) => (l.taken ? BLOCK_TAKEN : BLOCK_FREE),
-        getWidth: (l) => (l.taken ? 4 : 2.5),
+        data: blockRuns.above,
+        getPath: (r) => r.path,
+        getColor: color,
+        getWidth: width,
         widthUnits: "pixels",
         capRounded: true,
         parameters: ground,
+        // at its true depth (deck.gl draws each layer a little nearer than the last), for the buildings to hide
+        getPolygonOffset: null,
+        updateTriggers: { getColor: blocksTaken.version, getWidth: blocksTaken.version },
+      }),
+      new PathLayer<BlockRun, PathStyleExtensionProps<BlockRun>>({
+        id: "train-blocks-tunnels",
+        data: blockRuns.below,
+        getPath: (r) => r.path,
+        getColor: (r) => {
+          const c = color(r);
+          return [c[0], c[1], c[2], Math.round(c[3] * BLOCK_TUNNEL_ALPHA)];
+        },
+        getWidth: width,
+        widthUnits: "pixels",
+        extensions: [dashed],
+        getDashArray: BLOCK_TUNNEL_DASHES,
+        dashJustified: true,
+        parameters: top,
         updateTriggers: { getColor: blocksTaken.version, getWidth: blocksTaken.version },
       }),
       new TextLayer<(typeof labels)[number]>({
@@ -2203,7 +2266,7 @@
         getBackgroundColor: [150, 30, 24, 230],
         backgroundPadding: [4, 2],
         billboard: true,
-        parameters: ground,
+        parameters: top,
         updateTriggers: { getText: blocksTaken.version, getPosition: blocksTaken.version },
       }),
     ];

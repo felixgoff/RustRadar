@@ -1,5 +1,6 @@
 // Typed wrappers around the Tauri commands in `src-tauri/src/lib.rs`.
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { Structure } from "./bridges";
 
 export interface LiveFlight {
   id: number;
@@ -644,6 +645,8 @@ export interface Train {
   cars?: number | null;
   /** The track it has come along, `[lat, lon]` back from the start of `frames`, for its cars. */
   tail?: [number, number][];
+  /** The bridges and tunnels along `tail` and `frames`, for its cars to be drawn up on or down in. */
+  structures?: Structure[];
 }
 
 /**
@@ -719,9 +722,9 @@ export type TrainRoute = {
 export const trainRoute = (id: string) => invoke<TrainRoute>("train_route", { id });
 /** A signal block: from a main signal to the next its trains meet, `[lon, lat]` stretches (branching where the track does). */
 export type TrainBlock = { id: string; signal: string | null; lines: [number, number][][] };
-/** The blocks starting in an area, close in; while `complete` is false the track or signals are still loading. */
+/** The blocks starting in an area, close in, and the bridges and tunnels round it; while `complete` is false the track or signals are still loading. */
 export const trainBlocks = (area: { west: number; south: number; east: number; north: number }) =>
-  invoke<{ blocks: TrainBlock[]; complete: boolean }>("train_blocks", area);
+  invoke<{ blocks: TrainBlock[]; structures: Structure[]; complete: boolean }>("train_blocks", area);
 /** The trains the map shows close up, streamed live like a followed one (an empty list stops it). */
 export const watchTrains = (ids: string[]) => invoke<void>("watch_trains", { ids });
 

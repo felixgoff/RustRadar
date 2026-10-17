@@ -42,15 +42,21 @@ const SURFACES: Record<number, Surface> = {
   13: { texture: "cobblestone", metres: 3, rough: 0.75, snow: 0.5, paved: true },
   // glaciers and ice caps: snow, whatever the weather
   14: { texture: "sand", metres: 10, rough: 0.6, snow: 1 },
+  // a pitch (one for every game: the map doesn't say which), and wooden planks
+  15: { texture: "pitch", metres: 20, rough: 0.9, snow: 1 },
+  16: { texture: "wood", metres: 4, rough: 0.8, snow: 1 },
   // lines: laid along them
   32: { texture: "road", metres: 0, rough: 0.8, snow: 0.5, paved: true },
   33: { texture: "road-unmarked", metres: 0, rough: 0.8, snow: 0.5, paved: true },
   34: { texture: "dirt", metres: 0, rough: 0.95, snow: 1 },
   35: { texture: "railway", metres: 0, rough: 0.8, snow: 0.5 },
+  39: { texture: "tram", metres: 0, rough: 0.8, snow: 0.5, paved: true },
+  40: { texture: "wood", metres: 0, rough: 0.8, snow: 1 },
   // lines with a texture of the world's
   36: { texture: "pavement", metres: 3, rough: 0.8, snow: 0.5, paved: true },
   37: { texture: "asphalt", metres: 6, rough: 0.8, snow: 0.5, paved: true },
   38: { texture: "gravel", metres: 3, rough: 0.9, snow: 1 },
+  41: { texture: "cycleway", metres: 8, rough: 0.8, snow: 0.5, paved: true },
 };
 const FARMLAND = 3;
 const WATER_ID = 11;
@@ -89,7 +95,7 @@ const AREAS: Record<string, RGBA> = {
   industrial: paint(10, [236, 236, 236]),
   railway: paint(12),
   cemetery: paint(1, [228, 236, 222]),
-  pitch: paint(1, [228, 255, 214]),
+  pitch: paint(15),
   athletics: paint(8, [255, 150, 120]),
   playground: paint(6),
   quarry: paint(8, [236, 228, 214]),
@@ -99,7 +105,7 @@ const AREAS: Record<string, RGBA> = {
   taxiway: paint(10, [214, 214, 218]),
   square: paint(13),
   platform: paint(9),
-  pier: paint(36, [196, 150, 112]),
+  pier: paint(16),
   bridge: paint(9),
 };
 
@@ -223,11 +229,11 @@ const ROADS: Record<string, Line> = {
   // the track itself, rails on sleepers, on its ballast
   rail: { width: 2.6, paint: paint(35), edge: 1, edgePaint: BALLAST },
   transit: { width: 2.2, paint: paint(35), edge: 0.6, edgePaint: BALLAST },
-  pier: { width: 3, paint: AREAS.pier, edge: 0, edgePaint: NONE },
+  pier: { width: 3, paint: paint(40), edge: 0, edgePaint: NONE },
 };
 const PATHS: Record<string, Line> = {
   footway: { width: 2, paint: paint(36), edge: 0, edgePaint: NONE },
-  cycleway: { width: 2.5, paint: paint(37, [214, 196, 190]), edge: 0, edgePaint: NONE },
+  cycleway: { width: 2.5, paint: paint(41), edge: 0, edgePaint: NONE },
   pedestrian: { width: 5, paint: paint(36), edge: 0, edgePaint: NONE },
   path: { width: 1.6, paint: paint(38, [236, 226, 206]), edge: 0, edgePaint: NONE },
 };
@@ -236,6 +242,7 @@ const AEROWAYS: Record<string, Line> = {
   runway: { width: 45, paint: paint(37, [180, 180, 186]), edge: 0, edgePaint: NONE },
   taxiway: { width: 18, paint: paint(37, [214, 214, 218]), edge: 0, edgePaint: NONE },
 };
+const TRAM: Line = { width: 2.2, paint: paint(39), edge: 0, edgePaint: NONE };
 const NO_LINE: Line = { width: 0, paint: NONE, edge: 0, edgePaint: NONE };
 
 /** How a line is drawn on the ground: a road, railway, path, river or runway (tunnels and ferries not at all). */
@@ -245,6 +252,8 @@ export function lineOf({ properties: p }: Feature): Line {
     case "transportation":
       if (p.brunnel === "tunnel" || cls === "ferry" || cls.endsWith("_construction")) return NO_LINE;
       if (cls === "path") return PATHS[sub] ?? PATHS[sub === "steps" || sub === "platform" ? "footway" : "path"];
+      // a tram's rails are set in the street; light rail runs on its own ballast, as a railway
+      if (cls === "transit" && sub === "tram") return TRAM;
       return ROADS[cls] ?? NO_LINE;
     case "waterway": {
       if (p.brunnel === "tunnel") return NO_LINE;

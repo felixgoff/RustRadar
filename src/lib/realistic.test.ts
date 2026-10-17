@@ -158,5 +158,11 @@ describe("realistic map: the ground", () => {
     expect(lineOf(f({ layerName: "transportation", class: "ferry" })).width).toBe(0);
     expect(lineOf(f({ layerName: "transportation", class: "path", subclass: "footway" })).width).toBe(2);
     expect(surface(lineOf(f({ layerName: "waterway", class: "river" })).paint)).toBe(11);
+    // trams' rails in the street, light rail on ballast; piers of planks; cycleways and pitches their own
+    expect(surface(lineOf(f({ layerName: "transportation", class: "transit", subclass: "tram" })).paint)).toBe(39);
+    expect(surface(lineOf(f({ layerName: "transportation", class: "transit", subclass: "light_rail" })).edgePaint)).toBe(38);
+    expect(surface(lineOf(f({ layerName: "transportation", class: "pier" })).paint)).toBe(40);
+    expect(surface(lineOf(f({ layerName: "transportation", class: "path", subclass: "cycleway" })).paint)).toBe(41);
+    expect(surface(areaPaint(f({ layerName: "landuse", class: "pitch" })))).toBe(15);
   });
 });

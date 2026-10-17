@@ -69,7 +69,13 @@ GROUND = [
     ("gravel", S + "gravel_diffuse", S + "gravel_normal", S + "gravel_mask", None),
     ("railway", S + "railway_diffuse", S + "railway_normal", S + "railway_mask", None),
     ("cobblestone", S + "cobblestone_diffuse", S + "cobblestone_normal", S + "common_mask", None),
-    ("dirt", S + "dirt_road_diffuse", S + "dirt_road_normal", S + "dirt_road_mask", None),
+    # its edges fade into the grass
+    ("dirt", [S + "grass_diffuse", S + "dirt_road_diffuse"], S + "dirt_road_normal", S + "dirt_road_mask", None),
+    ("pitch", S + "pitch_generic_diffuse", S + "pitch_generic_normal", S + "common_mask", None),
+    ("cycleway", S + "cycleway_diffuse", S + "common_normal", S + "common_mask", None),
+    ("wood", S + "wood_road_diffuse", S + "wood_road_normal", S + "wood_road_mask", None),
+    # a tramway's rails, set in the street
+    ("tram", [S + "asphalt_diffuse", S + "rail_diffuse"], S + "asphalt_normal", S + "common_mask", None),
 ]
 
 
@@ -78,9 +84,19 @@ def load(root: Path, name: str, mode: str, size: int = SIZE) -> Image.Image:
     return image.resize((size, size), Image.LANCZOS) if image.size != (size, size) else image
 
 
+def layered(root: Path, names) -> Image.Image:
+    """A colour: one image, or several laid one over the next (by their alpha), opaque."""
+    if isinstance(names, str):
+        return load(root, names, "RGB")
+    image = load(root, names[0], "RGBA")
+    for over in names[1:]:
+        image = Image.alpha_composite(image, load(root, over, "RGBA"))
+    return image.convert("RGB")
+
+
 def build(root: Path, out: Path, sets, masks: bool) -> None:
     for name, colour, normal, mask, glow in sets:
-        load(root, colour, "RGB").save(out / f"{name}.color.webp", "WEBP", quality=88, method=6)
+        layered(root, colour).save(out / f"{name}.color.webp", "WEBP", quality=88, method=6)
         load(root, normal, "RGB").save(out / f"{name}.normal.webp", "WEBP", quality=90, method=6)
         if not masks:
             continue

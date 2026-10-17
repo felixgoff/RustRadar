@@ -52,6 +52,10 @@ export const GROUND_TEXTURES = [
   "railway",
   "cobblestone",
   "dirt",
+  "pitch",
+  "cycleway",
+  "wood",
+  "tram",
 ] as const;
 
 export const textureLayer = {

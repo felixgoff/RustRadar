@@ -8,9 +8,10 @@
 
 import type { DefaultProps, Layer, LayersList } from "@deck.gl/core";
 import { MVTLayer } from "@deck.gl/geo-layers";
-import { SolidPolygonLayer } from "@deck.gl/layers";
+import { PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import type { BinaryFeatureCollection } from "@loaders.gl/schema";
 import { BUILDING_SHADOW_ALPHA, buildingShadows, shadowStep } from "./building-shadow";
+import { buildingStyle } from "./realistic";
 import { localSun, SHADOW_MIN_ALPHA, sunlight } from "./shadow";
 
 const DEG = Math.PI / 180;
@@ -100,13 +101,48 @@ export type BuildingLayerProps = {
   shadowColor: [number, number, number];
   /** GPU parameters of the shadow layers, which keep overlapping shadows from darkening twice. */
   shadowParameters: object;
+  /** Extensions for the shadow layers (the buildings' own are the `extensions` prop). */
+  shadowExtensions: unknown[];
+  /** How dark the shadows are, against their own (the sun's height): the weather's say, 0 to 1. */
+  shadowStrength: number;
+  /** Each building its own look (`buildingStyle`: its colour, and its façade and roof), in place of `getFillColor`. */
+  wallColours: boolean;
+  /** How dark the ground is at the foot of the walls (0: not drawn), and the extensions it is drawn with. */
+  footShade: number;
+  footShadeExtensions: unknown[];
 };
 
 const defaultProps: DefaultProps<BuildingLayerProps> = {
   sun: { type: "array", value: null, compare: false },
   shadowColor: { type: "color", value: [0, 0, 0] },
   shadowParameters: { type: "object", value: {}, compare: false },
+  shadowExtensions: { type: "array", value: [], compare: true },
+  shadowStrength: 1,
+  wallColours: false,
+  footShade: 0,
+  footShadeExtensions: { type: "array", value: [], compare: true },
 };
+
+type BinaryPolygons = { startIndices: ArrayLike<number>; attributes: { getPolygon: { value: ArrayLike<number>; size: number } } };
+
+/**
+ * Each building's look in a tile, picked by where its outline starts in the
+ * world (in the tile grid's own units). A building on a tile's edge is in both
+ * tiles whole (the tiles overlap a little), so it looks the same in each, and
+ * so does every building each time it is loaded.
+ */
+function wallColoursOf(tile: { index: { x: number; y: number; z: number } }) {
+  const { x, y } = tile.index;
+  return (feature: { properties: Properties } | null, info: { index: number; data: BinaryPolygons }) => {
+    const { startIndices, attributes } = info.data;
+    const { value, size } = attributes.getPolygon;
+    const vertex = startIndices[info.index] * size;
+    const gx = Math.round((x + value[vertex]) * 4096);
+    const gy = Math.round((y + value[vertex + 1]) * 4096);
+    const properties = feature?.properties ?? {};
+    return buildingStyle(Math.imul(gx, 73_856_093) ^ Math.imul(gy, 19_349_663), buildingHeight(properties), properties.colour);
+  };
+}
 
 /**
  * Main-thread time (ms) a frame may spend recasting shadows when the sun has
@@ -114,6 +150,8 @@ const defaultProps: DefaultProps<BuildingLayerProps> = {
  * dense city tile takes a few milliseconds, and at least one is done each frame.
  */
 const RECAST_BUDGET_MS = 4;
+/** The band of shade along the foot of a wall, metres across (half under the building). */
+const FOOT_SHADE_M = 5;
 
 type CastTile = { content: unknown; layers: unknown[] | null; isVisible: boolean };
 
@@ -156,35 +194,66 @@ export class BuildingLayer extends MVTLayer<Properties, BuildingLayerProps> {
   }
 
   renderSubLayers(props: Parameters<MVTLayer["renderSubLayers"]>[0]): Layer | null | LayersList {
+    if (this.props.wallColours) (props as unknown as { getFillColor: unknown }).getFillColor = wallColoursOf(props.tile as never);
     // sets the tile's model matrix and coordinate system on `props`
     const buildings = super.renderSubLayers(props);
-    const { sun, shadowColor, shadowParameters } = this.props;
+    const { sun, shadowColor, shadowParameters, shadowExtensions, shadowStrength, footShade, footShadeExtensions } = this.props;
     const content = props.data as BinaryFeatureCollection | unknown[] | null;
-    if (!sun || !content || Array.isArray(content)) return buildings;
+    if (!content || Array.isArray(content)) return buildings;
     const tile = props.tile as TileProps["tile"];
-    const shadow = (this.shadowsOf(content, tile, sun) ?? shadowCache.get(content))?.shadow;
-    if (!shadow) return buildings;
+    const shadow = sun && shadowStrength > 0 ? (this.shadowsOf(content, tile, sun) ?? shadowCache.get(content))?.shadow : null;
     const tileProps = props as unknown as TileProps;
-    return [
+    const ground: Layer[] = [];
+    if (footShade > 0 && content.polygons && content.polygons.primitivePolygonIndices.value.length > 1) {
+      // A soft dark band along the foot of every wall, half of it under the
+      // building: where the walls meet the ground, little of the sky's light
+      // reaches (Streets GL's ambient occlusion).
+      const polygons = content.polygons;
+      ground.push(
+        new PathLayer({
+          id: `${props.id}-foot`,
+          data: {
+            length: polygons.primitivePolygonIndices.value.length - 1,
+            startIndices: polygons.primitivePolygonIndices.value,
+            attributes: { getPath: polygons.positions },
+          } as never,
+          _pathType: "open",
+          positionFormat: "XY",
+          getColor: [...shadowColor, Math.round(footShade * 255)],
+          getWidth: FOOT_SHADE_M,
+          widthUnits: "meters",
+          modelMatrix: tileProps.modelMatrix as never,
+          coordinateOrigin: tileProps.coordinateOrigin,
+          coordinateSystem: tileProps.coordinateSystem as never,
+          parameters: shadowParameters,
+          extensions: footShadeExtensions as never,
+          pickable: false,
+        }),
+      );
+    }
+    if (shadow) {
       // Under the tile's buildings, on the ground. Not clipped to the tile: a
       // shadow reaches into the next one, whose own copy of a building on the
       // border only ever casts part of the same shadow.
-      new SolidPolygonLayer({
-        id: `${props.id}-shadow`,
-        data: shadow.data as never,
-        _normalize: false,
-        positionFormat: "XY",
-        filled: true,
-        extruded: false,
-        material: false,
-        getFillColor: [...shadowColor, Math.round(shadow.alpha * 255)],
-        modelMatrix: tileProps.modelMatrix as never,
-        coordinateOrigin: tileProps.coordinateOrigin,
-        coordinateSystem: tileProps.coordinateSystem as never,
-        parameters: shadowParameters,
-        pickable: false,
-      }),
-      buildings,
-    ];
+      ground.push(
+        new SolidPolygonLayer({
+          id: `${props.id}-shadow`,
+          data: shadow.data as never,
+          _normalize: false,
+          positionFormat: "XY",
+          filled: true,
+          extruded: false,
+          material: false,
+          getFillColor: [...shadowColor, Math.round(Math.min(1, shadow.alpha * shadowStrength) * 255)],
+          modelMatrix: tileProps.modelMatrix as never,
+          coordinateOrigin: tileProps.coordinateOrigin,
+          coordinateSystem: tileProps.coordinateSystem as never,
+          parameters: shadowParameters,
+          extensions: shadowExtensions as never,
+          pickable: false,
+        }),
+      );
+    }
+    return ground.length ? [...ground, buildings] : buildings;
   }
 }

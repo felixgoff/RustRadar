@@ -238,8 +238,8 @@ const renderHillshadeTile = (props: any) => {
 
 const unloadHillshadeTile = (tile: { content?: ImageBitmap | null }) => tile.content?.close?.();
 
-/** Hillshade strength per basemap: the imagery has its own sunlit relief and needs less. */
-const HILLSHADE_OPACITY = { dark: 1, satellite: 0.45 } as const;
+/** Hillshade strength per basemap: the imagery has its own sunlit relief and needs less; the realistic ground's light colours need less to show it. */
+const HILLSHADE_OPACITY = { dark: 1, satellite: 0.45, realistic: 0.6 } as const;
 
 export type TerrainBasemap = keyof typeof HILLSHADE_OPACITY;
 
@@ -259,6 +259,8 @@ export type TerrainOptions = {
   opacity?: number;
   /** URL template of the satellite imagery, `{z}/{y}/{x}`, to texture the mesh with. */
   imageryUrl?: string;
+  /** Layer extensions for the hillshade (the realistic map's haze). */
+  extensions?: unknown[];
   /**
    * The bundled `@loaders.gl/terrain` worker (`@loaders.gl/terrain/terrain-worker.js?url`):
    * deck.gl's TerrainLayer only parses in a worker, which would otherwise come from a CDN. No mesh without it.
@@ -285,8 +287,10 @@ export function hillshadeFade(zoom: number): number {
   return 1 - 0.4 * Math.min(1, Math.max(0, (zoom - 11) / 3));
 }
 
+const NO_EXTENSIONS: never[] = [];
+
 /** The shaded relief raster: one layer and tile cache for both projections. */
-export const hillshadeLayer = (opacity: number) =>
+export const hillshadeLayer = (opacity: number, extensions: unknown[] = NO_EXTENSIONS) =>
   new TileLayer<ImageBitmap | null>({
     id: "terrain-hillshade",
     data: TERRARIUM_URL,
@@ -301,6 +305,7 @@ export const hillshadeLayer = (opacity: number) =>
     renderSubLayers: renderHillshadeTile,
     opacity,
     parameters: SURFACE,
+    extensions: extensions as never,
   });
 
 const meshLoadOptions = new Map<string, object>();
@@ -345,13 +350,13 @@ export const terrainMeshLayer = (imageryUrl: string | undefined, workerUrl: stri
  * With `mesh`, in the flat projection, the result is the 3D surface instead of
  * the hillshade, and `terrainNeedsGroundElevation` says so: see there.
  */
-export function terrainLayers({ flat, zoom, basemap, mesh = false, opacity = 1, imageryUrl, meshWorkerUrl }: TerrainOptions): Layer[] {
+export function terrainLayers({ flat, zoom, basemap, mesh = false, opacity = 1, imageryUrl, meshWorkerUrl, extensions }: TerrainOptions): Layer[] {
   if (meshWorkerUrl && terrainNeedsGroundElevation({ flat, zoom, mesh })) {
     return [terrainMeshLayer(basemap === "satellite" ? imageryUrl : undefined, meshWorkerUrl)];
   }
   // opacity in steps, so the layer's props don't change with every frame of a zoom
   const fade = Math.round(hillshadeFade(zoom) * 20) / 20;
-  return [hillshadeLayer(HILLSHADE_OPACITY[basemap] * opacity * fade)];
+  return [hillshadeLayer(HILLSHADE_OPACITY[basemap] * opacity * fade, extensions)];
 }
 
 /**

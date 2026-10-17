@@ -640,6 +640,10 @@ export interface Train {
   reports?: Sighting[];
   /** Dev builds: where the real train most likely is, as `frames`. */
   predicted?: [number, number, number][];
+  /** How many cars (and locomotives) it runs with, where its operator says. */
+  cars?: number | null;
+  /** The track it has come along, `[lat, lon]` back from the start of `frames`, for its cars. */
+  tail?: [number, number][];
 }
 
 /**
@@ -716,6 +720,11 @@ export type TrainRoute = {
   complete: boolean;
 };
 export const trainRoute = (id: string) => invoke<TrainRoute>("train_route", { id });
+/** A signal block: from a main signal to the next its trains meet, `[lon, lat]` stretches (branching where the track does). */
+export type TrainBlock = { id: string; signal: string | null; lines: [number, number][][] };
+/** The blocks starting in an area, close in; while `complete` is false the track or signals are still loading. */
+export const trainBlocks = (area: { west: number; south: number; east: number; north: number }) =>
+  invoke<{ blocks: TrainBlock[]; complete: boolean }>("train_blocks", area);
 /** The trains the map shows close up, streamed live like a followed one (an empty list stops it). */
 export const watchTrains = (ids: string[]) => invoke<void>("watch_trains", { ids });
 

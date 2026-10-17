@@ -180,8 +180,13 @@ export const TRAIN_SOURCE_NAMES: Record<TrainSource, string> = {
 
 /** A train with a direction is a carriage with a nose; one without, a rounded square. Coloured by operator when it has a colour. */
 export function trainIcon(kind: TrainKind, heading: number | null, operator?: string | null): string {
+  return `${heading === null ? "box" : "car"}-${colourKey(kind, operator)}`;
+}
+
+/** The atlas row a train's colour is in: its operator's, else its kind's. */
+function colourKey(kind: TrainKind, operator?: string | null): string {
   const i = operatorIndex(operator);
-  return `${heading === null ? "box" : "car"}-${i >= 0 ? `op${i}` : kind in KINDS ? kind : "other"}`;
+  return i >= 0 ? `op${i}` : kind in KINDS ? kind : "other";
 }
 
 /** Base icon length in pixels per kind: long-distance trains a little longer, metros shorter. */
@@ -217,6 +222,7 @@ const INK = "rgba(8, 12, 20, 0.9)";
 export function trainAtlas(): { atlas: HTMLCanvasElement; mapping: Record<string, object> } | null {
   if (typeof document === "undefined") return null;
   const canvas = document.createElement("canvas");
+  // the carriage, then the square
   canvas.width = CELL * 2;
   // a row per kind's colour, then one per operator's
   const rows: [string, RGB][] = [

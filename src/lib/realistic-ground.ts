@@ -1,0 +1,517 @@
+// The realistic map's ground, as Streets GL draws it: from the map's own data,
+// not photographs, in Streets GL's textures (github.com/StrandedKitty/streets-gl,
+// MIT licence). Grass where nothing else is mapped; woods, fields, parks, sand,
+// rock, the paving of towns, water; roads in asphalt with their markings at
+// their real widths between pavements, railways' tracks on their ballast,
+// paths and runways. Lit as the rest of the realistic map is (realistic.ts):
+// wet in rain, white under snow, water rippling and reflecting the sky.
+
+import { type Layer, LayerExtension } from "@deck.gl/core";
+import { MVTLayer } from "@deck.gl/geo-layers";
+import { GeoJsonLayer, PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
+import type { Device } from "@luma.gl/core";
+import { realisticLight } from "./realistic";
+import { type GROUND_TEXTURES, realisticTextures, textureLayer } from "./realistic-textures";
+
+type RGB = [number, number, number];
+type RGBA = [number, number, number, number];
+
+/**
+ * A kind of ground: its texture (or water), how many metres a repeat of it
+ * covers (0: laid along a line, across its whole width), how rough it is,
+ * whether snow lies on it (1) or turns to slush (0.5), and whether rain makes
+ * it shine.
+ */
+type Surface = { texture: (typeof GROUND_TEXTURES)[number] | "water"; metres: number; rough: number; snow: number; paved?: boolean };
+
+/** The surfaces, by the id a feature's colour carries in its alpha (255 less the id). */
+const SURFACES: Record<number, Surface> = {
+  0: { texture: "grass", metres: 12, rough: 0.95, snow: 1 },
+  1: { texture: "park", metres: 8, rough: 0.9, snow: 1 },
+  2: { texture: "forest", metres: 10, rough: 0.95, snow: 1 },
+  3: { texture: "farmland0", metres: 22, rough: 0.95, snow: 1 },
+  4: { texture: "grass", metres: 14, rough: 0.95, snow: 1 },
+  5: { texture: "garden", metres: 10, rough: 0.92, snow: 1 },
+  6: { texture: "sand", metres: 8, rough: 0.9, snow: 1 },
+  7: { texture: "rock", metres: 10, rough: 0.85, snow: 1 },
+  8: { texture: "soil", metres: 8, rough: 0.95, snow: 1 },
+  9: { texture: "pavement", metres: 4, rough: 0.8, snow: 0.5, paved: true },
+  10: { texture: "asphalt", metres: 6, rough: 0.85, snow: 0.5, paved: true },
+  11: { texture: "water", metres: 0, rough: 0.05, snow: 0 },
+  12: { texture: "gravel", metres: 4, rough: 0.9, snow: 1 },
+  13: { texture: "cobblestone", metres: 3, rough: 0.75, snow: 0.5, paved: true },
+  // glaciers and ice caps: snow, whatever the weather
+  14: { texture: "sand", metres: 10, rough: 0.6, snow: 1 },
+  // a pitch (one for every game: the map doesn't say which), and wooden planks
+  15: { texture: "pitch", metres: 20, rough: 0.9, snow: 1 },
+  16: { texture: "wood", metres: 4, rough: 0.8, snow: 1 },
+  // lines: laid along them
+  32: { texture: "road", metres: 0, rough: 0.8, snow: 0.5, paved: true },
+  33: { texture: "road-unmarked", metres: 0, rough: 0.8, snow: 0.5, paved: true },
+  34: { texture: "dirt", metres: 0, rough: 0.95, snow: 1 },
+  35: { texture: "railway", metres: 0, rough: 0.8, snow: 0.5 },
+  39: { texture: "tram", metres: 0, rough: 0.8, snow: 0.5, paved: true },
+  40: { texture: "wood", metres: 0, rough: 0.8, snow: 1 },
+  // lines with a texture of the world's
+  36: { texture: "pavement", metres: 3, rough: 0.8, snow: 0.5, paved: true },
+  37: { texture: "asphalt", metres: 6, rough: 0.8, snow: 0.5, paved: true },
+  38: { texture: "gravel", metres: 3, rough: 0.9, snow: 1 },
+  41: { texture: "cycleway", metres: 8, rough: 0.8, snow: 0.5, paved: true },
+};
+const FARMLAND = 3;
+const WATER_ID = 11;
+const ICE = 14;
+
+const paint = (id: number, [r, g, b]: RGB = [255, 255, 255]): RGBA => [r, g, b, 255 - id];
+const NONE: RGBA = [0, 0, 0, 0];
+
+/** The ground where nothing else is mapped: grass, as in Streets GL. */
+export const LAND = paint(0);
+/** The globe itself, showing only past the map's edge at the poles: ice. */
+export const POLES: RGB = [226, 234, 240];
+
+// tints multiply a texture's own colours: white leaves them as they are
+const AREAS: Record<string, RGBA> = {
+  ocean: paint(WATER_ID, [200, 214, 222]),
+  water: paint(WATER_ID),
+  pool: paint(WATER_ID, [150, 255, 255]),
+  wood: paint(2),
+  scrub: paint(2, [230, 236, 214]),
+  grass: paint(0),
+  park: paint(1),
+  meadow: paint(4, [255, 246, 206]),
+  golf: paint(1, [236, 255, 228]),
+  heath: paint(4, [236, 220, 196]),
+  farmland: paint(FARMLAND),
+  orchard: paint(5, [232, 240, 214]),
+  allotments: paint(8, [226, 236, 206]),
+  wetland: paint(4, [196, 214, 200]),
+  sand: paint(6),
+  rock: paint(7),
+  ice: paint(14),
+  residential: paint(5),
+  institutional: paint(5, [236, 236, 226]),
+  commercial: paint(9),
+  industrial: paint(10, [236, 236, 236]),
+  railway: paint(12),
+  cemetery: paint(1, [228, 236, 222]),
+  pitch: paint(15),
+  athletics: paint(8, [255, 150, 120]),
+  playground: paint(6),
+  quarry: paint(8, [236, 228, 214]),
+  aerodrome: paint(0, [236, 244, 222]),
+  apron: paint(10, [255, 255, 255]),
+  runway: paint(10, [180, 180, 186]),
+  taxiway: paint(10, [214, 214, 218]),
+  square: paint(13),
+  platform: paint(9),
+  pier: paint(16),
+  bridge: paint(9),
+};
+
+type Properties = Record<string, unknown>;
+type Feature = { properties: Properties };
+/** An area's paint, or none (left out). */
+export function areaPaint({ properties: p }: Feature): RGBA {
+  const [cls, sub] = [String(p.class ?? ""), String(p.subclass ?? "")];
+  switch (p.layerName) {
+    case "water":
+      return cls === "ocean" ? AREAS.ocean : cls === "swimming_pool" ? AREAS.pool : AREAS.water;
+    case "landcover":
+      switch (cls) {
+        case "wood":
+          return AREAS.wood;
+        case "farmland":
+          return sub === "orchard" || sub === "vineyard" || sub === "plant_nursery" ? AREAS.orchard : AREAS.farmland;
+        case "grass":
+          if (sub === "scrub" || sub === "shrubbery") return AREAS.scrub;
+          if (sub === "heath" || sub === "fell") return AREAS.heath;
+          if (sub === "golf_course") return AREAS.golf;
+          if (sub === "meadow" || sub === "grassland") return AREAS.meadow;
+          if (sub === "allotments") return AREAS.allotments;
+          if (sub === "park" || sub === "garden" || sub === "village_green" || sub === "recreation_ground") return AREAS.park;
+          return AREAS.grass;
+        case "wetland":
+          return AREAS.wetland;
+        case "sand":
+          return AREAS.sand;
+        case "rock":
+          return AREAS.rock;
+        case "ice":
+          return AREAS.ice;
+        default:
+          return NONE;
+      }
+    case "landuse":
+      switch (cls) {
+        case "residential":
+          return AREAS.residential;
+        case "school":
+        case "university":
+        case "college":
+        case "kindergarten":
+        case "hospital":
+        case "library":
+        case "stadium":
+          return AREAS.institutional;
+        case "commercial":
+        case "retail":
+        case "garages":
+        case "bus_station":
+        case "dam":
+          return AREAS.commercial;
+        case "industrial":
+          return AREAS.industrial;
+        case "railway":
+          return AREAS.railway;
+        case "cemetery":
+          return AREAS.cemetery;
+        case "pitch":
+          return AREAS.pitch;
+        case "track":
+          return AREAS.athletics;
+        case "playground":
+          return AREAS.playground;
+        case "quarry":
+          return AREAS.quarry;
+        case "theme_park":
+        case "zoo":
+          return AREAS.park;
+        default:
+          // suburbs, quarters and neighbourhoods are names, not ground
+          return NONE;
+      }
+    case "aeroway":
+      switch (cls) {
+        case "aerodrome":
+          return AREAS.aerodrome;
+        case "apron":
+          return AREAS.apron;
+        case "runway":
+          return AREAS.runway;
+        case "taxiway":
+          return AREAS.taxiway;
+        default:
+          return NONE;
+      }
+    case "transportation":
+      if (cls === "pier") return AREAS.pier;
+      if (cls === "bridge") return AREAS.bridge;
+      if (sub === "platform") return AREAS.platform;
+      return AREAS.square;
+    default:
+      return NONE;
+  }
+}
+
+/** A line's surface: its full width in metres and paint, and its edging either side (pavements, ballast) and paint. */
+type Line = { width: number; paint: RGBA; edge: number; edgePaint: RGBA };
+const PAVEMENT = paint(36);
+const SHOULDER = paint(37, [210, 210, 210]);
+const BALLAST = paint(38);
+const road = (width: number, marked: boolean, edge = 0, edgePaint = PAVEMENT): Line => ({
+  width,
+  paint: paint(marked ? 32 : 33),
+  edge,
+  edgePaint,
+});
+const ROADS: Record<string, Line> = {
+  motorway: road(11, true, 1.5, SHOULDER),
+  trunk: road(10, true, 1.5, SHOULDER),
+  primary: road(9, true, 2),
+  secondary: road(8, true, 2),
+  tertiary: road(7, false, 1.8),
+  minor: road(6, false, 1.6),
+  busway: road(7, false, 1.8),
+  service: road(4, false),
+  raceway: road(10, true),
+  track: { width: 3, paint: paint(34), edge: 0, edgePaint: NONE },
+  // the track itself, rails on sleepers, on its ballast
+  rail: { width: 2.6, paint: paint(35), edge: 1, edgePaint: BALLAST },
+  transit: { width: 2.2, paint: paint(35), edge: 0.6, edgePaint: BALLAST },
+  pier: { width: 3, paint: paint(40), edge: 0, edgePaint: NONE },
+};
+const PATHS: Record<string, Line> = {
+  footway: { width: 2, paint: paint(36), edge: 0, edgePaint: NONE },
+  cycleway: { width: 2.5, paint: paint(41), edge: 0, edgePaint: NONE },
+  pedestrian: { width: 5, paint: paint(36), edge: 0, edgePaint: NONE },
+  path: { width: 1.6, paint: paint(38, [236, 226, 206]), edge: 0, edgePaint: NONE },
+};
+const WATERWAYS: Record<string, number> = { river: 18, canal: 12, stream: 3, drain: 1.5, ditch: 1.5 };
+const AEROWAYS: Record<string, Line> = {
+  runway: { width: 45, paint: paint(37, [180, 180, 186]), edge: 0, edgePaint: NONE },
+  taxiway: { width: 18, paint: paint(37, [214, 214, 218]), edge: 0, edgePaint: NONE },
+};
+const TRAM: Line = { width: 2.2, paint: paint(39), edge: 0, edgePaint: NONE };
+const NO_LINE: Line = { width: 0, paint: NONE, edge: 0, edgePaint: NONE };
+
+/** How a line is drawn on the ground: a road, railway, path, river or runway (tunnels and ferries not at all). */
+export function lineOf({ properties: p }: Feature): Line {
+  const [cls, sub] = [String(p.class ?? ""), String(p.subclass ?? "")];
+  switch (p.layerName) {
+    case "transportation":
+      if (p.brunnel === "tunnel" || cls === "ferry" || cls.endsWith("_construction")) return NO_LINE;
+      if (cls === "path") return PATHS[sub] ?? PATHS[sub === "steps" || sub === "platform" ? "footway" : "path"];
+      // a tram's rails are set in the street; light rail runs on its own ballast, as a railway
+      if (cls === "transit" && sub === "tram") return TRAM;
+      return ROADS[cls] ?? NO_LINE;
+    case "waterway": {
+      if (p.brunnel === "tunnel") return NO_LINE;
+      return { width: WATERWAYS[cls] ?? 2, paint: AREAS.water, edge: 0, edgePaint: NONE };
+    }
+    case "aeroway":
+      return AEROWAYS[cls] ?? NO_LINE;
+    default:
+      return NO_LINE;
+  }
+}
+
+const linePaint = (f: Feature) => lineOf(f).paint;
+const lineWidth = (f: Feature) => lineOf(f).width;
+const edgePaint = (f: Feature) => lineOf(f).edgePaint;
+const edgeWidth = (f: Feature) => {
+  const line = lineOf(f);
+  return line.edge ? line.width + 2 * line.edge : 0;
+};
+
+// --------------------------------------------------------------- shading
+
+const SURFACE_COUNT = Math.max(...Object.keys(SURFACES).map(Number)) + 1;
+/** A GLSL table of one of the surfaces' properties, by id (unused ids: grass's). */
+const table = (name: string, value: (s: Surface) => number) =>
+  `const float ${name}[${SURFACE_COUNT}] = float[${SURFACE_COUNT}](${Array.from({ length: SURFACE_COUNT }, (_, i) =>
+    value(SURFACES[i] ?? SURFACES[0]).toFixed(3),
+  ).join(", ")});`;
+
+const groundFs = /* glsl */ `\
+uniform mediump sampler2DArray rground_color;
+uniform mediump sampler2DArray rground_normal;
+uniform sampler2D rground_water;
+${table("GS_LAYER", (s) => (s.texture === "water" ? -1 : textureLayer.ground(s.texture)))}
+${table("GS_METRES", (s) => s.metres)}
+${table("GS_ROUGH", (s) => s.rough)}
+${table("GS_SNOW", (s) => s.snow)}
+${table("GS_PAVED", (s) => (s.paved ? 1 : 0))}
+`;
+
+const groundInject = {
+  "fs:DECKGL_FILTER_COLOR": /* glsl */ `
+  {
+    float id = floor((1.0 - color.a) * 255.0 + 0.5);
+    if (id >= ${SURFACE_COUNT}.0) {
+      color.a = 0.0;
+    } else {
+      int i = int(id);
+      vec3 tint = rl_linear(color.rgb);
+      float layer = GS_LAYER[i];
+      vec3 v = normalize(rl_eye);
+      vec3 n = vec3(0.0, 0.0, 1.0);
+      vec3 albedo;
+      float rough = GS_ROUGH[i];
+      // texture coordinates: fixed to the world, whole repeats to the period; or along a line, across its width
+      vec2 uv = GS_METRES[i] > 0.0
+        ? rl_t * max(1.0, floor(rlight.periodMetres / GS_METRES[i] + 0.5))
+        : vec2(geometry.uv.x * 0.5 + 0.5, geometry.uv.y * 0.5);
+      if (layer < 0.0) {
+        // water: Streets GL's ripples, two of them drifting across each other, under a mirror of the sky
+        vec2 w = rl_t * max(1.0, floor(rlight.periodMetres / 18.0 + 0.5));
+        vec3 n1 = texture(rground_water, w + vec2(rlight.time * 0.011, rlight.time * 0.007)).xyz * 2.0 - 1.0;
+        vec3 n2 = texture(rground_water, w * 1.7 - vec2(rlight.time * 0.008, -rlight.time * 0.012)).xyz * 2.0 - 1.0;
+        n = normalize(vec3(n1.xy + n2.xy, n1.z * n2.z) * vec3(0.6, 0.6, 1.0));
+        albedo = vec3(0.012, 0.025, 0.035) * tint * 2.0;
+        // ripples too small to see from up here still break up the sun's reflection: a soft sheen, not a mirror's spot
+        float unseen = smoothstep(0.04, 0.5, rl_cells(w));
+        rough = mix(rough, 0.25, unseen);
+        rl_glint = 1.0 - 0.8 * unseen;
+      } else {
+        if (i == ${FARMLAND}) {
+          // field to field the crop differs, and the way its rows run
+          vec2 field = floor(rl_t * 24.0);
+          // (one crop for them all where the fields are too small to see, not a flicker)
+          float pick = rl_cells(rl_t * 24.0) < 0.5 ? rl_hash(field, 24.0) : 0.1;
+          layer += floor(pick * 2.999);
+          if (fract(pick * 7.0) > 0.5) uv = uv.yx;
+        }
+        // (the images are stored top row first: v runs up them)
+        vec3 at = vec3(uv.x, -uv.y, layer);
+        vec4 c = texture(rground_color, at);
+        vec3 nm = texture(rground_normal, at).xyz * 2.0 - 1.0;
+        n = normalize(vec3(nm.xy, max(nm.z, 0.3)));
+        // a little unevenness over tens of metres, so the repeats don't show (gone where it would only speckle)
+        float grain = 1.0 - smoothstep(0.25, 1.0, rl_cells(rl_t * 32.0));
+        albedo = c.rgb * tint * (1.0 + 0.28 * grain * (rl_noise(rl_t, 32.0) - 0.5));
+        // snow lies on the land, slush on the roads; rain darkens what is paved and makes it shine
+        float snow = i == ${ICE} ? 1.0 : rlight.snow * GS_SNOW[i];
+        albedo = mix(albedo, vec3(0.82, 0.84, 0.88) * mix(0.75, 1.0, GS_SNOW[i]), snow);
+        float wet = rlight.wet * mix(0.35, 1.0, GS_PAVED[i]);
+        albedo *= 1.0 - 0.45 * wet;
+        rough = mix(rough, 0.12, wet * GS_PAVED[i] * (1.0 - rlight.snow));
+        n = normalize(mix(n, vec3(0.0, 0.0, 1.0), wet * 0.6));
+      }
+      vec3 lit = rl_shade(albedo, n, v, rough, 0.0, 1.0, rl_sunVisible());
+      color = vec4(rl_display(rl_aerial(lit)), 1.0);
+    }
+  }
+  `,
+};
+
+const groundModule = {
+  name: "rground",
+  fs: groundFs,
+} as const;
+
+type ExtLayer = Layer & { context: { device: Device }; setShaderModuleProps(props: object): void };
+
+/** The ground's surfaces, by the id their colour carries (see `paint`), lit as the realistic map is. */
+export class GroundExtension extends LayerExtension {
+  static extensionName = "RealisticGroundExtension";
+
+  getShaders(this: Layer) {
+    // a line's sides lie a way out from its middle, which the textures fixed to the world need on the globe
+    const defines = this instanceof PathLayer ? { RL_LINE: 1 } : {};
+    return { modules: [realisticLight.module, groundModule], inject: groundInject, defines };
+  }
+
+  draw(this: ExtLayer, params: Parameters<typeof realisticLight.props>[0]) {
+    const textures = realisticTextures(this.context.device);
+    this.setShaderModuleProps({
+      rlight: realisticLight.props(params),
+      rground: {
+        rground_color: textures.ground.color,
+        rground_normal: textures.ground.normal,
+        rground_water: textures.water,
+      },
+    });
+  }
+}
+
+export const GROUND_SURFACES = new GroundExtension();
+
+// --------------------------------------------------------------- layers
+
+// Each tile is drawn three times over: its areas, then the edging of its
+// lines, then the lines themselves, so no road's pavement covers another's
+// asphalt where they meet. The loader's binary tile is split once into areas
+// and lines (an empty part in each), so each pass only builds what it draws.
+
+type Binary = Record<"points" | "lines" | "polygons", Record<string, unknown>>;
+const ids = () => ({ value: new Uint32Array(0), size: 1 });
+const noGeometry = (size: number) => ({
+  positions: { value: new Float64Array(0), size },
+  featureIds: ids(),
+  globalFeatureIds: ids(),
+  numericProps: {},
+  properties: [],
+  fields: [],
+});
+const parts = new WeakMap<object, { areas: Binary; lines: Binary }>();
+
+type GeoFeature = { geometry?: { type?: string } };
+const featureParts = new WeakMap<object, { areas: GeoFeature[]; lines: GeoFeature[] }>();
+/** A tile's GeoJSON features, as areas and lines. */
+function splitFeatures(features: GeoFeature[]): { areas: GeoFeature[]; lines: GeoFeature[] } {
+  let p = featureParts.get(features);
+  if (!p) {
+    const type = (f: GeoFeature) => f.geometry?.type ?? "";
+    p = { areas: features.filter((f) => type(f).endsWith("Polygon")), lines: features.filter((f) => type(f).endsWith("LineString")) };
+    featureParts.set(features, p);
+  }
+  return p;
+}
+function split(tile: Binary): { areas: Binary; lines: Binary } {
+  let p = parts.get(tile);
+  if (!p) {
+    const size = Number((tile.polygons.positions as { size?: number } | undefined)?.size ?? 2);
+    const points = { ...noGeometry(size), type: "Point" };
+    const lines = { ...noGeometry(size), type: "LineString", pathIndices: { value: new Uint32Array([0]), size: 1 } };
+    const polygons = {
+      ...noGeometry(size),
+      type: "Polygon",
+      polygonIndices: { value: new Uint32Array([0]), size: 1 },
+      primitivePolygonIndices: { value: new Uint32Array([0]), size: 1 },
+      triangles: { value: new Uint32Array(0), size: 1 },
+    };
+    p = { areas: { ...tile, points, lines }, lines: { ...tile, points, polygons } };
+    parts.set(tile, p);
+  }
+  return p;
+}
+
+/**
+ * One tile of ground: a GeoJsonLayer to MVTLayer (which expects one), drawn
+ * by the three passes rather than by GeoJsonLayer's own state.
+ */
+class GroundTile extends GeoJsonLayer {
+  static layerName = "GroundTile";
+
+  updateState() {
+    // nothing of its own: see renderLayers
+  }
+
+  renderLayers() {
+    // the props passed in (a spread misses `data`, which deck.gl keeps behind a getter as it may load)
+    const own = { ...this.props } as Record<string, unknown>;
+    const id = this.props.id;
+    const data = this.props.data as unknown as Binary | GeoFeature[] | null;
+    if (!data) return [];
+    // binary in the flat projection; on the globe, GeoJSON features
+    const { areas, lines } = Array.isArray(data) ? splitFeatures(data) : split(data);
+    return [
+      new GeoJsonLayer({ ...own, id: `${id}-areas`, data: areas, filled: true, stroked: false } as never),
+      new GeoJsonLayer({ ...own, id: `${id}-edges`, data: lines, filled: false, getLineColor: edgePaint, getLineWidth: edgeWidth } as never),
+      new GeoJsonLayer({ ...own, id: `${id}-lines`, data: lines, filled: false } as never),
+    ];
+  }
+}
+
+const renderGround = (props: object) => new GroundTile(props as never);
+
+const GROUND_LAYERS = ["landuse", "landcover", "aeroway", "water", "waterway", "transportation"];
+const loadOptions = new Map<string, object>();
+
+/** The ground's vector tiles; MVTLayer decodes per projection, so each gets its own layer (and cache). */
+export const groundLayer = (url: string, flat: boolean, workerUrl: string, extensions: unknown[], parameters: object) => {
+  let options = loadOptions.get(workerUrl);
+  if (!options) loadOptions.set(workerUrl, (options = { mvt: { layers: GROUND_LAYERS, workerUrl } }));
+  return new MVTLayer({
+    id: flat ? "ground-flat" : "ground-globe",
+    data: url,
+    minZoom: 0,
+    maxZoom: 14,
+    loadOptions: options,
+    renderSubLayers: renderGround as never,
+    getFillColor: areaPaint as never,
+    getLineColor: linePaint as never,
+    getLineWidth: lineWidth as never,
+    lineWidthUnits: "meters",
+    // far out, the main roads and rivers stay a hairline
+    lineWidthMinPixels: 0.6,
+    lineJointRounded: true,
+    lineCapRounded: true,
+    getPointRadius: 0,
+    extensions: extensions as never,
+    parameters,
+    pickable: false,
+  });
+};
+
+const LAND_DATA = [
+  [
+    [
+      [-180, -85.06],
+      [180, -85.06],
+      [180, 85.06],
+      [-180, 85.06],
+    ],
+  ],
+];
+/** The land under the ground's tiles: grass all over, the sea and everything else drawn over it. */
+export const landLayer = (extensions: unknown[], parameters: object) =>
+  new SolidPolygonLayer({
+    id: "ground-land",
+    data: LAND_DATA,
+    getPolygon: (d: unknown) => d as never,
+    getFillColor: LAND,
+    extensions: extensions as never,
+    parameters,
+  });

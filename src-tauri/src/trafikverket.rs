@@ -113,8 +113,19 @@ fn services_query(numbers: &[String]) -> String {
             "InformationOwner",
             "Operator",
             "ToLocation",
+            "TrainComposition",
         ])
     )
+}
+
+/// How many cars (locomotives counted) a row's car order lists:
+/// "Vagnsordning Lok-2-3-4-5[-6]" is six, "Vagnsordning 11,10,12" three; none without one.
+fn cars_in(composition: &Value) -> Option<u32> {
+    composition.as_array()?.iter().find_map(|c| {
+        let order = c["Description"].as_str()?.strip_prefix("Vagnsordning")?;
+        let n = order.split(|ch: char| !ch.is_alphanumeric()).filter(|w| !w.is_empty()).count();
+        (n > 0).then_some(n as u32)
+    })
 }
 
 /// Departures in the half hour either side of now, for how late each train runs.
@@ -242,6 +253,8 @@ pub struct Service {
     pub date: String,
     /// Where it stops, in order, with the timetable's times.
     pub calls: Vec<Call>,
+    /// How many cars (and locomotives) its car order lists, where it has one.
+    pub cars: Option<u32>,
 }
 
 /// A stop in the timetable: the station and the planned times, Unix ms.
@@ -308,6 +321,7 @@ pub fn parse_services(body: &str) -> Result<HashMap<String, Vec<Service>>, Strin
                     to: last_location(&row["ToLocation"]),
                     date,
                     calls: Vec::new(),
+                    cars: None,
                 });
                 runs.len() - 1
             }
@@ -318,6 +332,7 @@ pub fn parse_services(body: &str) -> Result<HashMap<String, Vec<Service>>, Strin
         run.product_code = run.product_code.take().or_else(|| product_code(&row["ProductInformation"]));
         run.owner = run.owner.take().or_else(|| text(&row["InformationOwner"])).or_else(|| text(&row["Operator"]));
         run.to = run.to.take().or_else(|| last_location(&row["ToLocation"]));
+        run.cars = run.cars.or_else(|| cars_in(&row["TrainComposition"]));
         let (Some(station), Some(time)) =
             (text(&row["LocationSignature"]), row["AdvertisedTimeAtLocation"].as_str().and_then(unix_ms))
         else {
@@ -684,6 +699,9 @@ pub fn train(
     let class = service.map(|s| crate::train_class::class_of(s.product_code.as_deref(), s.product.as_deref()));
     let rail = crate::rail::Rail { class };
     let motion::Sim { frames, predicted } = frames_for(report, prev, &stops, now_ms, &rail);
+    // the track behind it, as long as its cars (three where not known), for them to be drawn on
+    let cars = service.and_then(|s| s.cars).unwrap_or(DEFAULT_CARS);
+    let tail = tail_of(&frames, report, f64::from(cars) * CAR_M + TAIL_SPARE_M);
     let place = frames
         .first()
         .map(|f| (f.0, f.1))
@@ -723,7 +741,29 @@ pub fn train(
             Vec::new()
         },
         predicted: if crate::devlog::ENABLED { predicted } else { Vec::new() },
+        cars: service.and_then(|s| s.cars),
+        tail,
     }
+}
+
+/// A train's cars where its operator doesn't say how many.
+const DEFAULT_CARS: u32 = 4;
+/// How long a car is drawn, metres (a coach is about 25 m, with its coupling).
+pub const CAR_M: f64 = 26.0;
+/// The track behind a train reaches this much further than its cars, metres.
+const TAIL_SPARE_M: f64 = 40.0;
+
+/// The track behind where a train's frames start, back the way it came
+/// (its drawn heading, else its report's), `length` metres; empty where the
+/// track isn't known.
+fn tail_of(frames: &[motion::Frame], report: &Report, length: f64) -> Vec<(f64, f64)> {
+    let Some(first) = frames.first() else { return Vec::new() };
+    let heading = motion::drawn_at(frames, first.2)
+        .and_then(|d| d.heading)
+        .or(report.bearing.map(f64::from))
+        .filter(|h| h.is_finite());
+    let Some(h) = heading else { return Vec::new() };
+    crate::rail::track_from((first.0, first.1), (h + 180.0) % 360.0, length).unwrap_or_default()
 }
 
 /// The run's stops still ahead at `at_ms`, with places, at the times now
@@ -1819,6 +1859,18 @@ mod tests {
          "TimeStamp":"2026-10-14T10:20:00.000+02:00","Status":{"Active":false}}]}]}}"#;
 
     #[test]
+    fn a_trains_cars_are_counted_from_its_car_order() {
+        let order = |d: &str| serde_json::json!([{ "Code": "TNA001", "Description": d }]);
+        assert_eq!(cars_in(&order("Vagnsordning 3-2-1")), Some(3));
+        assert_eq!(cars_in(&order("Vagnsordning Lok-2-3-4-5[-6]")), Some(6));
+        assert_eq!(cars_in(&order("Vagnsordning 11,10,12,13,14,15,16")), Some(7));
+        assert_eq!(cars_in(&order("Vagnsordning 14-13-12-11-10-8, 7-6-5-4-3-1")), Some(12));
+        assert_eq!(cars_in(&order("Vagnsordning A-B-C-D-E")), Some(5));
+        assert_eq!(cars_in(&order("Bakre delen går låst.")), None);
+        assert_eq!(cars_in(&serde_json::Value::Null), None);
+    }
+
+    #[test]
     fn requests_carry_the_key_escaped() {
         let body = request("a\"b", "<QUERY/>");
         assert!(body.starts_with("<REQUEST><LOGIN authenticationkey=\"a&quot;b\"/>"));
@@ -2026,6 +2078,8 @@ mod tests {
             frames: Vec::new(),
             reports: Vec::new(),
             predicted: Vec::new(),
+            cars: None,
+            tail: Vec::new(),
         };
         let report = |n: &str| Report {
             advertised: None,
@@ -2169,7 +2223,10 @@ mod tests {
                 let class = service.map(|s| crate::train_class::class_of(s.product_code.as_deref(), s.product.as_deref()));
                 let rail = crate::rail::Rail { class };
                 let t = Instant::now();
-                frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
+                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
+                if std::env::var("NO_TAIL").is_err() {
+                    tail_of(&sim.frames, r, f64::from(DEFAULT_CARS) * CAR_M + TAIL_SPARE_M);
+                }
                 if t.elapsed() > slowest.0 {
                     slowest = (t.elapsed(), r.lookup().to_owned());
                 }

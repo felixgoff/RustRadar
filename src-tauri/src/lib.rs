@@ -30,6 +30,7 @@ mod train_media;
 mod trains;
 #[cfg(desktop)]
 mod updater;
+mod weather;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -743,6 +744,8 @@ pub fn run() {
             trains::train_stops,
             trains::train_route,
             trains::watch_trains,
+            trains::train_blocks,
+            weather::weather_at,
             trains::hide_train_operators,
             devlog::dev_log,
             devlog::dev_log_clear,

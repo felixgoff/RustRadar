@@ -68,6 +68,13 @@ Python library.
 - A dark vector map drawn from OpenFreeMap tiles (water, borders, roads,
   runways and taxiways), or satellite imagery. Place and airport names are a
   separate text layer, never baked into the map. 3D buildings from zoom 13.
+- A realistic map, after Streets GL: the ground drawn from the map's own data
+  in textures (grass, woods, fields, paving, roads with their markings,
+  railways on ballast, rippling water), buildings with façades of windows and
+  roofs, trees, and the sky over them, all in physically based light. The sun
+  casts shadows, the distance fades into the air, and windows light up at
+  night. The weather sets the look: live where the map is looking (MET
+  Norway's forecast for the hour), or chosen (sun, clouds, rain, fog, snow).
 - Tilt and rotate (right-drag, or the map controls) down to street level.
 
 ## Layout
@@ -202,6 +209,11 @@ covering the visible area when zoomed in. It refreshes the whole world every
   opendata.dwd.de, in `src-tauri/src/dwd.rs`) and RainViewer elsewhere
   (available up to zoom 7); the plumbing shared by all three is
   `src-tauri/src/radar.rs`. Airline logos for automatic liveries: pics.avs.io.
+- The realistic map's textures are [Streets GL](https://github.com/StrandedKitty/streets-gl)'s
+  (MIT, © StrandedKitty): `scripts/realistic-textures.py` turns them into the
+  texture arrays in `static/realistic/`, with Streets GL's licence beside
+  them. Its weather is MET Norway's Locationforecast (CC BY 4.0), fetched by
+  `src-tauri/src/weather.rs`, which identifies the app as MET asks.
 - Aircraft shapes come from [Flightradar24's 3D models](https://github.com/Flightradar24/fr24-3d-models)
   (glTF 1.0, in turn from the FlightGear project). `bun run build:aircraft`
   downloads them, reduces each by vertex clustering to two levels of detail,

@@ -23,6 +23,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::motion::{ahead, course, distance};
 
+#[path = "blocks.rs"]
+pub mod blocks;
+
 const TILES: &str = "https://openrailwaymap.app/railway_line_high,railway_text_km";
 const REFERER: &str = "https://github.com/felixgoff/RustRadar";
 /// The zoom routing uses, and the deepest the map draws (it scales the
@@ -1329,6 +1332,43 @@ pub fn load_tiles_for_tests(dir: &str) {
     }
 }
 
+/// The track from `start` going `heading` (degrees) for `metres`, straight on
+/// at switches whichever way traffic usually runs there: what lies behind a
+/// train, given the way back. None while the track isn't loaded, or `start`
+/// isn't on it.
+pub fn track_from(start: (f64, f64), heading: f64, metres: f64) -> Option<Vec<(f64, f64)>> {
+    // the tiles round it only (a train's length from it at most): the same for every train there, built once
+    let g = graph_for(tiles_for(&[start], (metres / 111_000.0).min(0.003)))?;
+    let (a, b, q, _) = g.snap(start, SNAP_SPREAD_M)?;
+    let (mut came, mut at) = if turn(heading, course(g.nodes[a], g.nodes[b])) <= 90.0 { (a, b) } else { (b, a) };
+    let mut out = vec![q, g.nodes[at]];
+    let mut left = metres - distance(q, g.nodes[at]);
+    let mut seen = HashSet::from([came, at]);
+    while left > 0.0 {
+        let way = course(g.nodes[came], g.nodes[at]);
+        let next = g.adj[at]
+            .iter()
+            .filter(|e| !seen.contains(&e.to))
+            .map(|e| (e, turn(way, course(g.nodes[at], g.nodes[e.to]))))
+            .filter(|(e, t)| *t <= MAX_TURN || e.len < SHORT_M)
+            .min_by(|x, y| (x.1 + if x.0.service { 30.0 } else { 0.0 }).total_cmp(&(y.1 + if y.0.service { 30.0 } else { 0.0 })));
+        let Some((e, _)) = next else { break };
+        let p = g.nodes[e.to];
+        if e.len >= left {
+            // as far as it reaches, part way along the last piece
+            let k = left / e.len.max(0.01);
+            let from = g.nodes[at];
+            out.push((from.0 + (p.0 - from.0) * k, from.1 + (p.1 - from.1) * k));
+            break;
+        }
+        out.push(p);
+        seen.insert(e.to);
+        left -= e.len;
+        (came, at) = (at, e.to);
+    }
+    Some(out)
+}
+
 /// The nearest point on the track, if it is loaded and near.
 pub fn snap(p: (f64, f64)) -> Option<(f64, f64)> {
     let g = graph_for(tiles_for(&[p], 0.005))?;
@@ -1349,24 +1389,22 @@ pub fn platform(station: (f64, f64), track: Option<&str>, heading: Option<f64>) 
 /// aren't numbered in the map has several). None while the track there
 /// isn't loaded.
 pub fn platforms(station: (f64, f64), track: Option<&str>, heading: Option<f64>) -> Option<Vec<(f64, f64)>> {
-    // the same for every train calling there the same way (worked out once: it takes the track round it)
+    // the platforms the map has there, with the tracks they serve (sent for the first time)
+    let mapped = track.and(crate::osm_platforms::near(station));
+    // the same for every train calling there the same way (worked out once: it takes the track round
+    // it), and once more when the mapped platforms come
     let key = (
         (station.0 * 1e5).round() as i64,
         (station.1 * 1e5).round() as i64,
         track.map(str::to_owned),
         heading.map(|h| h.round() as i32),
+        mapped.is_some(),
     );
     if let Some(found) = platform_cache().lock().unwrap().get(&key) {
         return Some(found.clone());
     }
     let g = graph_for(tiles_for(&[station], 0.015))?;
-    // the platforms the map has there, with the tracks they serve (sent for the first time)
-    let mapped = track.and(crate::osm_platforms::near(station));
     let found = platforms_in(&g, station, track, heading, mapped.as_deref().map_or(&[], Vec::as_slice));
-    // (worked out again once the platforms are here)
-    if track.is_some() && mapped.is_none() {
-        return Some(found);
-    }
     let mut cache = platform_cache().lock().unwrap();
     if cache.len() >= MAX_PLATFORM_CACHE {
         cache.clear();
@@ -1378,7 +1416,7 @@ pub fn platforms(station: (f64, f64), track: Option<&str>, heading: Option<f64>)
 /// Stations' platforms worked out, at most.
 const MAX_PLATFORM_CACHE: usize = 50_000;
 
-type PlatformKey = (i64, i64, Option<String>, Option<i32>);
+type PlatformKey = (i64, i64, Option<String>, Option<i32>, bool);
 type PlatformCache = Mutex<HashMap<PlatformKey, Vec<(f64, f64)>>>;
 
 /// The places found at each station (`platforms`), by where it is, the track and the way trains go.
@@ -1895,6 +1933,26 @@ mod tests {
         assert!(p1.iter().take(2).any(|p| on(*p, south)) && p1.iter().take(2).any(|p| on(*p, middle)));
         // with no platform mapped, as before: the nearest
         assert!(on(platforms_in(&g, station, Some("3"), None, &[])[0], south));
+    }
+
+    #[test]
+    fn the_track_behind_a_train_follows_its_own_line() {
+        // a line east 3 km, with a parallel one 4.5 m north; behind a train going east at 2 km: west along its own
+        let a = (63.5, 17.0);
+        let north = ahead(a, 0.0, 4.5);
+        {
+            let mut st = store().lock().unwrap();
+            for key in tiles_for(&[a, ahead(a, 90.0, 3_000.0)], 0.05) {
+                st.tracks.insert(key, (Instant::now(), Arc::new(Vec::new())));
+            }
+            st.tracks.insert(tile_of(a.0, a.1), (Instant::now(), Arc::new(vec![track(line(a, 90.0, 3.0)), track(line(north, 90.0, 3.0))])));
+        }
+        let at = ahead(a, 90.0, 2_000.0);
+        let back = track_from(at, 270.0, 100.0).unwrap();
+        assert!(distance(back[0], at) < 1.0);
+        let end = *back.last().unwrap();
+        assert!((distance(end, ahead(a, 90.0, 1_900.0))) < 1.0, "100 m back along it: {end:?}");
+        assert!(back.iter().all(|p| distance(*p, ahead(a, 90.0, distance(a, *p))) < 2.0), "on its own track, not the one beside it");
     }
 
     #[test]

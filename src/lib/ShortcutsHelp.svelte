@@ -22,7 +22,7 @@
     [["+", "−"], "Zoom in or out"],
     [["T"], "Tilt to 3D, or look straight down"],
     [["N"], "North up"],
-    [["1", "2"], "Dark map or satellite imagery"],
+    [["1", "2", "3"], "Dark map, satellite imagery or realistic 3D"],
     [["E"], "Terrain"],
     [["B"], "3D buildings"],
     [["L"], "Place names"],

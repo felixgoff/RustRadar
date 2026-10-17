@@ -86,6 +86,8 @@
   import { delayText, trainColorOf, trainCredits, trainLabel } from "$lib/trains";
   import { RAIL_SPEED_ATTRIBUTION } from "$lib/rail-layer";
   import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
+  import { conditionsOf, fetchWeather, PRESETS, type Weather } from "$lib/weather";
+  import { distanceKm as distanceKmBetween } from "$lib/flightpath";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   // A world refresh costs ~20 requests, a regional one a handful: poll the
@@ -168,6 +170,44 @@
   let following = $state(false);
   /** The camera follows the selected train or ship. */
   let followingVehicle = $state(false);
+
+  // The realistic map's weather, live: where the map is looking, asked for
+  // again every ten minutes or after a move of 15 km; after a failure, not
+  // for another two minutes.
+  const WEATHER_REFRESH_MS = 10 * 60_000;
+  const WEATHER_RETRY_MS = 2 * 60_000;
+  const WEATHER_MOVE_KM = 15;
+  let liveWeather = $state.raw<Weather | null>(null);
+  let weatherAsked: { lat: number; lon: number; at: number; ok: boolean } | null = null;
+  let weatherBusy = false;
+  async function refreshWeather(lat: number, lon: number) {
+    const last = weatherAsked;
+    const age = last ? Date.now() - last.at : Infinity;
+    const moved = last ? distanceKmBetween([last.lon, last.lat], [lon, lat]) : Infinity;
+    if (weatherBusy || (last && age < (last.ok ? WEATHER_REFRESH_MS : WEATHER_RETRY_MS) && (moved < WEATHER_MOVE_KM || !last.ok))) return;
+    weatherBusy = true;
+    try {
+      liveWeather = await fetchWeather(lat, lon);
+      weatherAsked = { lat, lon, at: Date.now(), ok: true };
+    } catch {
+      weatherAsked = { lat, lon, at: Date.now(), ok: false };
+    } finally {
+      weatherBusy = false;
+    }
+  }
+  const weatherLive = $derived(settings.basemap === "realistic" && settings.sky === "live");
+  $effect(() => {
+    if (!weatherLive) return;
+    const { latitude, longitude } = view;
+    untrack(() => void refreshWeather(latitude, longitude));
+  });
+  $effect(() => {
+    if (!weatherLive) return;
+    const timer = setInterval(() => untrack(() => void refreshWeather(view.latitude, view.longitude)), 60_000);
+    return () => clearInterval(timer);
+  });
+  /** How the weather lights the realistic map: the live weather's, or the one chosen (until the live one comes, none). */
+  const skyConditions = $derived(settings.sky === "live" ? (liveWeather ? conditionsOf(liveWeather) : null) : PRESETS[settings.sky]);
   /** IATA code of the airport whose board is open. */
   let boardCode = $state<string | null>(null);
   /** The open flight was picked from that board. */
@@ -504,6 +544,12 @@
   }
   async function loadTrains() {
     stopTrains();
+    // dev builds in a plain browser, `#demo` in the address: made-up trains in the middle of the view
+    if (import.meta.env.DEV && !isTauri() && trainsOn && location.hash.includes("demo")) {
+      const { demoTrains } = await import("$lib/demo-trains");
+      trains = demoTrains(view, Date.now());
+      return;
+    }
     if (!trainsOn || !isTauri()) return;
     trainsRefresh = setTimeout(loadTrains, TRAINS_REFRESH_MS);
     if (document.visibilityState === "hidden") return;
@@ -1104,6 +1150,7 @@
     "-": () => globe.zoomBy(-1),
     "1": () => (settings.basemap = "dark"),
     "2": () => (settings.basemap = "satellite"),
+    "3": () => (settings.basemap = "realistic"),
     l: () => (settings.labels = !settings.labels),
     b: () => (settings.buildings = !settings.buildings),
     // the focus: Planes, traIns (T tilts), Ships; with Shift, that kind also shown on the map or not
@@ -1170,6 +1217,8 @@
       // the rail map in the app is OpenRailwayMap's; elsewhere the OpenStreetMap data the map credit below covers
       settings.railMap && isTauri() && RAIL_SPEED_ATTRIBUTION,
       settings.terrain && TERRAIN_ATTRIBUTION,
+      settings.basemap === "realistic" && "Textures: Streets GL (MIT)",
+      weatherLive && liveWeather && "Weather: MET Norway",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]
       .filter((c): c is string => Boolean(c)),
@@ -1188,6 +1237,12 @@
 
   let timers: ReturnType<typeof setInterval>[] = [];
   onMount(() => {
+    // dev builds: `#@lat,lon,zoom,pitch,bearing` opens the map there
+    const at = import.meta.env.DEV ? location.hash.match(/^#@(-?[\d.]+),(-?[\d.]+),([\d.]+)(?:,([\d.]+))?(?:,(-?[\d.]+))?/) : null;
+    if (at) {
+      const [lat, lon, zoom, pitch, bearing] = at.slice(1).map((v) => (v === undefined ? undefined : Number(v)));
+      globe.jumpTo({ latitude: lat, longitude: lon, zoom, pitch: pitch ?? 0, bearing: bearing ?? 0 });
+    }
     if (!isTauri()) {
       feedError = "RustRadar needs its Rust backend. Start it with `bun tauri dev`.";
       return;
@@ -1226,6 +1281,7 @@
     labels={settings.labels}
     labelScale={settings.labelSize}
     buildings={settings.buildings}
+    sky={skyConditions}
     aircraft={aircraftOn}
     aircraftLabels={settings.aircraftLabels}
     daylight={settings.daylight}
@@ -1234,6 +1290,7 @@
     {hoveredTrainId}
     {hoveredShipMmsi}
     railMap={settings.railMap}
+    trainBlocks={settings.trainBlocks && isTauri()}
     terrain={settings.terrain}
     follow={following}
     followVehicle={followingVehicle}
@@ -1550,6 +1607,8 @@
     bind:weather={settings.weather}
     bind:adsb={settings.adsb}
     bind:railMap={settings.railMap}
+    bind:trainBlocks={settings.trainBlocks}
+    bind:sky={settings.sky}
     bind:terrain={settings.terrain}
     bind:exaggeration={settings.exaggeration}
     {session}

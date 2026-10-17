@@ -2,6 +2,7 @@
   import Segmented from "./Segmented.svelte";
   import ToggleRow from "./ToggleRow.svelte";
   import type { Basemap } from "./geo";
+  import type { Sky } from "./weather";
 
   // What is drawn on the globe. How the app behaves lives in SettingsMenu.
   interface Props {
@@ -10,6 +11,9 @@
     buildings: boolean;
     labels: boolean;
     railMap: boolean;
+    trainBlocks: boolean;
+    /** The realistic map's weather. */
+    sky: Sky;
     /** The aircraft are on the map (the focus or shown with it): their own layers apply. */
     aircraftShown: boolean;
     aircraftLabels: boolean;
@@ -23,6 +27,8 @@
     buildings = $bindable(),
     labels = $bindable(),
     railMap = $bindable(),
+    trainBlocks = $bindable(),
+    sky = $bindable(),
     aircraftShown,
     aircraftLabels = $bindable(),
     weather = $bindable(),
@@ -32,16 +38,30 @@
   const BASEMAPS = [
     ["dark", "Dark", "1"],
     ["satellite", "Satellite", "2"],
+    ["realistic", "Realistic", "3"],
+  ] as const;
+  const SKIES = [
+    ["live", "Live"],
+    ["sunny", "Sun"],
+    ["cloudy", "Clouds"],
+    ["rain", "Rain"],
+    ["fog", "Fog"],
+    ["snow", "Snow"],
   ] as const;
 </script>
 
 <section aria-labelledby="layers-map">
   <h3 id="layers-map">Map</h3>
   <Segmented legend="Basemap" hideLegend name="basemap" options={BASEMAPS} bind:value={basemap} />
+  {#if basemap === "realistic"}
+    <!-- live: the weather where the map is looking -->
+    <Segmented legend="Weather" name="sky" options={SKIES} bind:value={sky} columns={3} />
+  {/if}
   <ToggleRow label="Terrain" hint="Mountains and valleys in relief" key="E" bind:checked={terrain} />
   <ToggleRow label="3D buildings" hint="Appear at street level" key="B" bind:checked={buildings} />
   <ToggleRow label="Place names" key="L" bind:checked={labels} />
   <ToggleRow label="Rail map" hint="Railway lines from OpenStreetMap" key="R" bind:checked={railMap} />
+  <ToggleRow label="Signal blocks" hint="Free or taken, and by which train (zoom in)" bind:checked={trainBlocks} />
 </section>
 
 <!-- which traffic is on the map is the mode bar's: only the aircraft have a layer of their own, offered while they are on it -->

@@ -59,6 +59,8 @@
     type Ship,
     type Train,
     type TrainRoute,
+    type TrainBlock,
+    trainBlocks as fetchTrainBlocks,
     type Sighting,
   } from "./api";
   import { NorthUpGlobeController } from "./controller";
@@ -90,6 +92,23 @@
   import { screenAngle } from "./screen";
   import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection, sunlight } from "./shadow";
   import { BuildingLayer, buildingHeight } from "./building-layer";
+  import {
+    BUILDINGS as REALISTIC_BUILDINGS,
+    FOOT_SHADE,
+    fromLocal,
+    HAZE_FADE,
+    look,
+    lookFor,
+    sceneSun,
+    setLook,
+    skyCss,
+    TREES as REALISTIC_TREES,
+    UNLIT,
+  } from "./realistic";
+  import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES } from "./realistic-ground";
+  import { onTexturesReady } from "./realistic-textures";
+  import { treeLayers } from "./tree-layer";
+  import { PRESETS, type Conditions } from "./weather";
   import HoverCard from "./HoverCard.svelte";
   import { flightDetails, isRateLimited } from "./api";
   import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
@@ -111,6 +130,9 @@
     trainPositionAge,
   } from "./trains";
   import { type RouteCursor, routeAhead, wayToStop } from "./train-route";
+  import { CAR_M, carLines, DEFAULT_CARS } from "./train-cars";
+  import { CAR_HEIGHT_M, CAR_WIDTH_M, carMeshes, type CarPlace, carPlaces } from "./train-models";
+  import { isTrackpadScroll, pinched, type PinchEvent, wheelPixels, wrapBearing } from "./trackpad";
 
   interface Props {
     flights: LiveFlight[];
@@ -131,6 +153,8 @@
     /** Place-name size, as a multiple of the default (a setting). */
     labelScale: number;
     buildings: boolean;
+    /** The realistic map's weather, as it lights it (live, or chosen). */
+    sky?: Conditions | null;
     /** Draw the aircraft at all; off, none of them nor anything of the selected one's. */
     aircraft?: boolean;
     /** Write each aircraft's callsign beside it. */
@@ -149,6 +173,8 @@
     selectedTrain?: Train | null;
     /** The selected train's whole way along the track. */
     trainRoute?: TrainRoute | null;
+    /** Signal blocks close in: free, or taken by the train drawn in them. */
+    trainBlocks?: boolean;
     /** The selected train isn't on its route (it is out of date): ask for it again. */
     ontrainrouteoff?: () => void;
     /** A train was clicked. */
@@ -184,6 +210,7 @@
     labels,
     labelScale,
     buildings,
+    sky = null,
     aircraft: showAircraft = true,
     aircraftLabels = false,
     daylight,
@@ -193,6 +220,7 @@
     trains = [],
     selectedTrain = null,
     trainRoute = null,
+    trainBlocks = false,
     ontrainrouteoff,
     ontrainselect,
     hoveredTrainId = null,
@@ -217,6 +245,8 @@
   /** GlobeView switches to a flat Web Mercator projection above this zoom. */
   const FLAT_ABOVE_ZOOM = 12;
   const LIMITS = { minZoom: 0.5, maxZoom: 18, maxPitch: 60 };
+  /** The realistic map tilts further, to look along the streets to the horizon and the sky over it. */
+  const REALISTIC_LIMITS = { ...LIMITS, maxPitch: 75 };
   /** Following an aircraft, the camera can come down nearly level with it and circle it. */
   const FOLLOW_MAX_PITCH = 85;
   /** ...and close in until the camera is this many of its lengths away, so it can't end up inside it. */
@@ -242,7 +272,7 @@
    * look at it from any side.
    */
   function limits() {
-    if (!(follow && selected)) return LIMITS;
+    if (!(follow && selected)) return basemap === "realistic" ? REALISTIC_LIMITS : LIMITS;
     // GlobeController shifts its zoom limits by latitude (its zoomAdjust); undo
     // that so the aircraft's limit is the zoom actually reached
     const shift = Math.log2(Math.max(0.05, Math.cos(selected.lat * DEGREES)));
@@ -399,8 +429,8 @@
   // reference (meshes, callbacks, option objects) is created once so props
   // compare equal between renders.
   const EARTH_MESH = new SphereGeometry({ radius: 6.3e6, nlat: 36, nlong: 72 });
-  // the dark map's land is the globe itself; under imagery it only shows at the poles
-  const GROUND: Record<Basemap, [number, number, number]> = { dark: [50, 50, 50], satellite: [6, 16, 34] };
+  // the dark map's land is the globe itself; under imagery or the realistic ground it only shows at the poles
+  const GROUND: Record<Basemap, [number, number, number]> = { dark: [50, 50, 50], satellite: [6, 16, 34], realistic: POLES };
   const earthLayer = (kind: Basemap) =>
     new SimpleMeshLayer({
       id: "earth",
@@ -964,6 +994,64 @@
       sun,
       shadowColor: SHADOW_COLOR,
       shadowParameters: SHADOW_PARAMETERS,
+    });
+
+  // The realistic map, as Streets GL draws a city: its ground from the map's
+  // data (realistic-ground.ts), buildings with façades and roofs (realistic.ts),
+  // trees (tree-layer.ts), lit by the sun and the sky through the weather, the
+  // distance fading into the air. Their own shaders light them, so deck.gl's
+  // light is kept off them (UNLIT).
+  const REALISTIC_BUILDINGS_ZOOM = 13.5;
+  /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
+  const TREES_ZOOM = 14.5;
+  const FACADED = [REALISTIC_BUILDINGS];
+  const HAZE_FADED = [HAZE_FADE];
+  const FOOT_SHADED = [FOOT_SHADE];
+  const TREED = [REALISTIC_TREES];
+  const GROUNDED = [GROUND_SURFACES];
+  /** Shadows in sunshine: a deep blue, the sky's light being all that is left in them. */
+  const REALISTIC_SHADOW_COLOR: [number, number, number] = [6, 12, 28];
+  /** How dark a building's shadow gets in full sun, against its usual (BUILDING_SHADOW_ALPHA). */
+  const REALISTIC_SHADOW_STRENGTH = 1.55;
+  /** How dark the ground gets at the foot of a wall. */
+  const FOOT_SHADE_ALPHA = 0.42;
+  /** The sun the realistic buildings' shadows were last cast with, kept until it moves about a quarter of a degree. */
+  let realisticSun: [number, number, number] | null = null;
+  function realisticShadowSun(now: number, lat: number, lon: number): readonly number[] {
+    if (daylight) return shadowSun(now);
+    const sun = fromLocal(sceneSun(false, [0, 0, 1]), lat, lon);
+    if (!realisticSun || sun[0] * realisticSun[0] + sun[1] * realisticSun[1] + sun[2] * realisticSun[2] < SHADOW_SUN_STEP) {
+      realisticSun = sun;
+    }
+    return realisticSun;
+  }
+  /** How much of the sun gets through now, 0 to 1. */
+  const sunStrength = () => Math.max(...look.sunColor) / 3.2;
+  /** Only the deepest tiles, so a building looks the same in each tile it is in (see `wallColoursOf`). */
+  const realisticBuildingLayer = (url: string, sun: readonly number[]) =>
+    new BuildingLayer({
+      id: "buildings-realistic",
+      data: url,
+      minZoom: 14,
+      maxZoom: 14,
+      loadOptions: BUILDING_LOAD_OPTIONS,
+      extruded: true,
+      filled: true,
+      stroked: false,
+      getElevation: buildingElevation,
+      wallColours: true,
+      material: UNLIT,
+      parameters: NO_CULL,
+      _subLayerProps: BUILDING_SUBLAYER_PROPS,
+      extensions: FACADED,
+      sun,
+      // in steps, so the tiles aren't redrawn for every flicker of the light
+      shadowStrength: Math.round(sunStrength() * REALISTIC_SHADOW_STRENGTH * 20) / 20,
+      shadowColor: REALISTIC_SHADOW_COLOR,
+      shadowParameters: SHADOW_PARAMETERS,
+      shadowExtensions: HAZE_FADED,
+      footShade: FOOT_SHADE_ALPHA,
+      footShadeExtensions: FOOT_SHADED,
     });
 
   // Night shading, recomputed each minute: four nested bands (sunset and the
@@ -1729,10 +1817,9 @@
     return layers;
   }
 
-  // Trains: icons on land, drawn like the ships' icons. Their data arrays are
+  // Trains: each as its cars, on the ground or in 3D. Their data arrays are
   // built once per train list; on each render only the trains with frames
-  // (expected positions ahead) move along them, and the icons' screen angles
-  // follow the camera and those moves.
+  // (expected positions ahead) move along them, and their cars with them.
   const TRAIN_ALPHA = 240;
   const TRAIN_PARAMETERS = { ...NO_CULL, depthWriteEnabled: false } as const;
   type TrainData = {
@@ -1740,7 +1827,6 @@
     positions: [number, number, number][];
     /** Direction of travel as drawn, degrees; null when unknown. */
     headings: (number | null)[];
-    icons: string[];
     colors: ShipColor[];
     /** Indices of all trains. */
     all: number[];
@@ -1761,7 +1847,6 @@
       list,
       positions: [],
       headings: [],
-      icons: [],
       colors: [],
       all: [],
       moving: [],
@@ -1774,7 +1859,6 @@
       if (blend) data.blends.set(i, blend);
       data.positions.push([train.lon, train.lat, 0]);
       data.headings.push(train.heading);
-      data.icons.push(trainIcon(train.kind, train.heading, train.operator));
       data.colors.push([...trainColorOf(train), TRAIN_ALPHA]);
       data.all.push(i);
       data.byId.set(train.id, i);
@@ -1793,44 +1877,87 @@
       const heading = headingAt(train, nowMs);
       data.positions[i] = [lon, lat, 0];
       data.headings[i] = heading;
-      data.icons[i] = trainIcon(train.kind, heading, train.operator);
     }
     trainMoves++;
   }
-  /** The icons' angles on screen: all redone when the camera moves, only the moving trains' otherwise. */
-  let trainAngles: { key: string; list: Train[] | null; angles: Float32Array; version: number } = {
-    key: "",
-    list: null,
-    angles: new Float32Array(0),
-    version: 0,
-  };
-  function trainLayers(list: Train[], flat: boolean, mpp: number, nowMs: number): Layer[] {
-    const { zoom, bearing, pitch, longitude, latitude } = view;
+  /**
+   * Close in, a train is its cars in 3D, true to scale along the track behind
+   * it. Further out a car would be shorter than this on the screen (px): drawn
+   * any larger, the cars would run off the track known behind the train, so
+   * there a train is one icon lying on the ground along its way.
+   */
+  const CARS_MIN_PX = 9;
+  /** A 3D car is never thinner than this (px), and a little taller. */
+  const MIN_CAR_WIDTH_PX = 3;
+  const CAR_MESH_MATERIAL = { ambient: 0.45, diffuse: 0.6, shininess: 40, specularColor: [70, 70, 70] as [number, number, number] };
+
+  /** A car on the map, of the train at `train` in the trains' list. */
+  type DrawnCar = CarPlace & { train: number; lead: boolean };
+
+  /**
+   * The cars of the trains in view, as many as their operator says (else
+   * four), along the track behind each train; a train whose way isn't known
+   * has them in a row back along its heading.
+   */
+  function drawnCars(data: TrainData, nowMs: number): DrawnCar[] {
+    const b = viewBounds();
+    if (!b) return [];
+    const [west, south, east, north] = b;
+    const cars: DrawnCar[] = [];
+    data.list.forEach((train, i) => {
+      const [lon, lat] = data.positions[i];
+      if (lon < west - 0.01 || lon > east + 0.01 || lat < south - 0.01 || lat > north + 0.01) return;
+      const count = Math.max(1, train.cars ?? DEFAULT_CARS);
+      let places = carPlaces(carLines(train.frames ?? [], train.tail ?? [], count, nowMs));
+      if (places.length !== count) {
+        const h = (data.headings[i] ?? 0) * DEGREES;
+        const behind: [number, number] = [lat - Math.cos(h) / 1000, lon - Math.sin(h) / 1000 / (Math.cos(lat * DEGREES) || 1e-6)];
+        places = carPlaces(carLines([[lat, lon, nowMs]], [[lat, lon], behind], count, nowMs));
+      }
+      places.forEach((place, k) => cars.push({ ...place, train: i, lead: k === 0 }));
+    });
+    return cars;
+  }
+
+  /** The trains as their cars in 3D, close in (the flat projection), `mpp` metres to a pixel. */
+  function carLayers(data: TrainData, nowMs: number, mpp: number): Layer[] {
+    const cars = drawnCars(data, nowMs);
+    // never thinner than a few pixels, so a train far off is still seen whole
+    const width = Math.max(CAR_WIDTH_M, MIN_CAR_WIDTH_PX * mpp);
+    const height = Math.max(CAR_HEIGHT_M, MIN_CAR_WIDTH_PX * 1.3 * mpp);
+    const meshes = carMeshes();
+    return ([true, false] as const).map(
+      (lead) =>
+        new SimpleMeshLayer<DrawnCar>({
+          id: `train-car-meshes-${lead ? "cab" : "coach"}`,
+          data: cars.filter((c) => c.lead === lead),
+          mesh: lead ? meshes.cab : meshes.coach,
+          getPosition: (c) => c.at,
+          getOrientation: (c) => [0, -c.heading, 0],
+          getScale: (c) => [width, c.length, height],
+          getColor: (c) => data.colors[c.train],
+          material: CAR_MESH_MATERIAL,
+          pickable: true,
+          autoHighlight: true,
+          highlightColor: [55, 142, 240, 110],
+          parameters: NO_CULL,
+          updateTriggers: { getPosition: trainMoves, getOrientation: trainMoves, getScale: [trainMoves, width, height] },
+        }),
+    );
+  }
+
+  function trainLayers(list: Train[], nowMs: number): Layer[] {
+    const { zoom, latitude } = view;
     const data = trainsFor(list, nowMs);
     if (!list.length) return [];
     trainAtlasData ??= trainAtlas();
     if (!trainAtlasData) return [];
     moveTrains(data, nowMs);
-    const key = `${zoom},${bearing},${pitch},${longitude},${latitude}`;
-    const whole = trainAngles.key !== key || trainAngles.list !== list;
-    if (whole || data.moving.length) {
-      const width = container.clientWidth;
-      const height = container.clientHeight;
-      const viewport = flat
-        ? new WebMercatorViewport({ ...view, width, height })
-        : new GlobeViewport({ ...view, width, height });
-      const step = ICON_HEADING_STEP_PX * mpp;
-      const angles = whole ? new Float32Array(list.length) : trainAngles.angles;
-      const minCos = Math.cos((visibleRadius(zoom, pitch, width, height) * Math.PI) / 180);
-      for (const i of whole ? data.all : data.moving) {
-        const heading = data.headings[i];
-        const [lon, lat] = data.positions[i];
-        if (heading === null || cosAngle(lon, lat, longitude, latitude) <= minCos) continue;
-        angles[i] = screenAngle(viewport, data.positions[i], heading, step) ?? bearing - heading;
-      }
-      trainAngles = { key, list, angles, version: trainAngles.version + 1 };
-    }
-    const angles = trainAngles.angles;
+    // close in, the cars; further out, a train is an icon lying on the ground along its way
+    const mpp = metersPerPixel(zoom, latitude);
+    if (zoom > FLAT_ABOVE_ZOOM && CAR_M / mpp >= CARS_MIN_PX) return carLayers(data, nowMs, mpp);
+    // (the globe's ground turns icons half round from the flat projection's, as it does the ship models)
+    const yaw0 = zoom > FLAT_ABOVE_ZOOM ? 0 : 180;
     return [
       new IconLayer<number>({
         id: "train-icons",
@@ -1839,20 +1966,21 @@
         highlightedObjectIndex: hoveredTrainId !== null ? (data.byId.get(hoveredTrainId) ?? -1) : -1,
         highlightColor: [55, 142, 240, 200],
         getPosition: (i) => data.positions[i],
-        getIcon: (i) => data.icons[i],
+        getIcon: (i) => trainIcon(list[i].kind, data.headings[i], list[i].operator),
         iconAtlas: trainAtlasData.atlas as never,
         iconMapping: trainAtlasData.mapping as never,
         getSize: (i) => trainIconSize(list[i].kind, data.headings[i], zoom),
-        getAngle: (i) => angles[i],
+        // on the ground, turned to the way it goes (degrees anticlockwise from north)
+        getAngle: (i) => yaw0 - (data.headings[i] ?? 0),
         getColor: (i) => data.colors[i],
         sizeUnits: "pixels",
-        billboard: true,
+        billboard: false,
         pickable: true,
         parameters: TRAIN_PARAMETERS,
         updateTriggers: {
           getPosition: trainMoves,
           getIcon: trainMoves,
-          getAngle: trainAngles.version,
+          getAngle: [trainMoves, yaw0],
           getSize: [trainIconScale(zoom), trainMoves],
         },
       }),
@@ -1946,6 +2074,131 @@
         getLineWidth: 2,
         lineWidthUnits: "pixels",
         parameters: ground,
+      }),
+    ];
+  }
+
+  /** Signal blocks show from this zoom (the signals are only mapped close in). */
+  const BLOCKS_MIN_ZOOM = 13;
+  /** A train drawn this near a block's track is in it, metres. */
+  const IN_BLOCK_M = 12;
+  const BLOCK_FREE: [number, number, number, number] = [60, 200, 110, 220];
+  const BLOCK_TAKEN: [number, number, number, number] = [235, 64, 52, 240];
+  /** The blocks fetched, for the area asked (padded round the view), and whether all of it was there. */
+  let blockSet: { west: number; south: number; east: number; north: number; list: TrainBlock[]; complete: boolean } | null = null;
+  let blocksAsking = false;
+  let blocksAskedAt = 0;
+  /** Which train is in each block (by block id), worked out now and then. */
+  let blocksTaken: { at: number; by: Map<string, string>; version: number } = { at: 0, by: new Map(), version: 0 };
+
+  /** The view's bounds, close in (the flat projection), `[west, south, east, north]`. */
+  function viewBounds(): [number, number, number, number] | null {
+    if (view.zoom <= FLAT_ABOVE_ZOOM) return null;
+    const [width, height] = [container.clientWidth, container.clientHeight];
+    const b = new WebMercatorViewport({ ...view, width, height }).getBounds();
+    return [b[0], b[1], b[2], b[3]];
+  }
+
+  /** Asks for the blocks round the view when it has left those fetched, or they were still loading. */
+  function refreshBlocks() {
+    const b = viewBounds();
+    if (!trainBlocks || !b || view.zoom < BLOCKS_MIN_ZOOM || blocksAsking) return;
+    const [west, south, east, north] = b;
+    const inside = blockSet && west >= blockSet.west && east <= blockSet.east && south >= blockSet.south && north <= blockSet.north;
+    const now = Date.now();
+    if (inside && (blockSet!.complete || now - blocksAskedAt < 2_500)) return;
+    if (!inside && now - blocksAskedAt < 700) return;
+    const [dx, dy] = [(east - west) * 0.15, (north - south) * 0.15];
+    const area = { west: west - dx, south: south - dy, east: east + dx, north: north + dy };
+    blocksAsking = true;
+    blocksAskedAt = now;
+    fetchTrainBlocks(area)
+      .then((r) => {
+        blockSet = { ...area, list: r.blocks, complete: r.complete };
+        blocksTaken.at = 0;
+      })
+      .catch(() => {})
+      .finally(() => (blocksAsking = false));
+  }
+
+  /** The nearest a point is to a line of `[lon, lat]` points, metres (flat). */
+  function metresToLine(p: [number, number], line: [number, number][]): number {
+    const k = Math.cos((p[1] * Math.PI) / 180);
+    let best = Infinity;
+    for (let i = 1; i < line.length; i++) {
+      const [ax, ay] = [(line[i - 1][0] - p[0]) * k, line[i - 1][1] - p[1]];
+      const [dx, dy] = [(line[i][0] - line[i - 1][0]) * k, line[i][1] - line[i - 1][1]];
+      const len2 = dx * dx + dy * dy;
+      const t = len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+      best = Math.min(best, Math.hypot(ax + dx * t, ay + dy * t) * 111_320);
+    }
+    return best;
+  }
+
+  /** Each block a train is drawn in: the nearest block's track to it, if near enough. */
+  function takenBlocks(list: TrainBlock[]): Map<string, string> {
+    const by = new Map<string, string>();
+    const b = viewBounds();
+    if (!trainData || !b) return by;
+    const [west, south, east, north] = b;
+    trainData.list.forEach((train, i) => {
+      const p: [number, number] = [trainData!.positions[i][0], trainData!.positions[i][1]];
+      if (p[0] < west || p[0] > east || p[1] < south || p[1] > north) return;
+      let best: { id: string; d: number } | null = null;
+      for (const block of list) {
+        for (const line of block.lines) {
+          const d = metresToLine(p, line);
+          if (d <= IN_BLOCK_M && (!best || d < best.d)) best = { id: block.id, d };
+        }
+      }
+      if (best) by.set(best.id, by.has(best.id) ? `${by.get(best.id)}, ${train.name}` : train.name);
+    });
+    return by;
+  }
+
+  /** The signal blocks round the view: green free, red taken, with the train taking each. */
+  function blockLayers(): Layer[] {
+    refreshBlocks();
+    if (!trainBlocks || !blockSet || view.zoom < BLOCKS_MIN_ZOOM) return [];
+    const list = blockSet.list;
+    const now = Date.now();
+    if (now - blocksTaken.at > 500) {
+      blocksTaken = { at: now, by: takenBlocks(list), version: blocksTaken.version + 1 };
+    }
+    const taken = blocksTaken.by;
+    const lines = list.flatMap((b) => b.lines.map((line) => ({ line, taken: taken.has(b.id) })));
+    // each taken block named once, halfway along its first stretch
+    const labels = list
+      .filter((b) => taken.has(b.id))
+      .map((b) => ({ text: taken.get(b.id)!, at: b.lines[0][Math.floor(b.lines[0].length / 2)] }));
+    const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
+    return [
+      new PathLayer<(typeof lines)[number]>({
+        id: "train-blocks",
+        data: lines,
+        getPath: (l) => l.line,
+        getColor: (l) => (l.taken ? BLOCK_TAKEN : BLOCK_FREE),
+        getWidth: (l) => (l.taken ? 4 : 2.5),
+        widthUnits: "pixels",
+        capRounded: true,
+        parameters: ground,
+        updateTriggers: { getColor: blocksTaken.version, getWidth: blocksTaken.version },
+      }),
+      new TextLayer<(typeof labels)[number]>({
+        id: "train-block-labels",
+        data: labels,
+        getPosition: (l) => l.at,
+        getText: (l) => l.text,
+        getColor: [255, 255, 255, 255],
+        getSize: 11,
+        sizeUnits: "pixels",
+        fontFamily: "ui-monospace, monospace",
+        background: true,
+        getBackgroundColor: [150, 30, 24, 230],
+        backgroundPadding: [4, 2],
+        billboard: true,
+        parameters: ground,
+        updateTriggers: { getText: blocksTaken.version, getPosition: blocksTaken.version },
       }),
     ];
   }
@@ -2056,6 +2309,7 @@
   }
 
   function buildLayers(): Layer[] {
+    updateLook();
     // the motion model's clock follows the feed's, not this machine's
     const now = motion.now();
     const { longitude: cLon, latitude: cLat, zoom, bearing, pitch } = view;
@@ -2173,10 +2427,17 @@
     }
 
     const layers: Layer[] = [earthLayer(basemap)];
+    const realistic = basemap === "realistic";
     // shaded relief goes on the ground, under the map's water, borders, roads and runways
     if (basemap === "satellite") {
       layers.push(imageryLayer());
       if (terrain) layers.push(...terrainLayers({ flat, zoom, basemap }));
+    } else if (realistic) {
+      // drawn from the map's data, as Streets GL does: grass, woods, fields, water, roads and rails
+      layers.push(realisticLandLayer(GROUNDED, SURFACE));
+      if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
+      // and always in relief: the lie of the land
+      layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
     } else {
       layers.push(landLayer());
       if (terrain) layers.push(...terrainLayers({ flat, zoom, basemap }));
@@ -2200,8 +2461,35 @@
       for (const volume of measured) layers.push(...measuredLayers(volume, ex, lift));
     } else freeArenas();
     if (daylight) layers.push(nightLayer(now));
-    const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= 13);
-    if (showBuildings) layers.push(buildingLayer(tileUrl!, shadowSun(now)));
+    const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= (realistic ? REALISTIC_BUILDINGS_ZOOM : 13));
+    if (showBuildings) {
+      layers.push(realistic ? realisticBuildingLayer(tileUrl!, realisticShadowSun(now, cLat, cLon)) : buildingLayer(tileUrl!, shadowSun(now)));
+    }
+    if (realistic && tileUrl && flat && zoom >= TREES_ZOOM) {
+      // out to about as far as the camera is from the point it looks at, the nearest in full detail
+      const distance = CAMERA_HEIGHTS * container.clientHeight * mpp;
+      layers.push(
+        ...treeLayers({
+          url: tileUrl,
+          centre: [cLon, cLat],
+          radius: Math.min(3200, Math.max(700, 1.2 * distance)),
+          detailRadius: Math.min(1000, Math.max(300, 0.45 * distance)),
+          date: new Date(now),
+          extensions: TREED,
+          material: UNLIT,
+          shadow:
+            sunStrength() > 0.05
+              ? {
+                  sun: look.sunDir,
+                  color: [...REALISTIC_SHADOW_COLOR, Math.round(Math.min(0.6, 0.55 * sunStrength()) * 255)],
+                  parameters: SHADOW_PARAMETERS,
+                  extensions: HAZE_FADED,
+                }
+              : null,
+          onLoad: render,
+        }),
+      );
+    }
     // close in over buildings, the key light comes from the real sun (fading
     // back to its usual direction as the sun sets), so walls and shadows agree
     const toSunHere = localSun(sunDirection(now), cLat, cLon);
@@ -2214,7 +2502,9 @@
     // on land, like the ships under the labels and every aircraft; the
     // trains' frames are timed on this machine's clock, not the flight feed's
     const trainRing = selectedTrain ? trainSelectionLayers(selectedTrain, zoom, cLon, cLat) : null;
-    const trainsDrawn = trainLayers(trains, flat, mpp, Date.now());
+    const trainsDrawn = trainLayers(trains, Date.now());
+    // the signal blocks, free or taken, under the route and the trains
+    layers.push(...blockLayers());
     // the selected train's way ahead, from where it is drawn now, under the trains
     if (trainRoute && selectedTrain) layers.push(...trainRouteLayers(trainRoute, selectedTrain));
     if (trainRing) layers.push(trainRing.halo);
@@ -2709,6 +2999,14 @@
     goTo(target, 1500, ["longitude", "latitude", "zoom"]);
   }
 
+  /** Straight to a view, no flight (dev builds' `#@lat,lon,zoom,pitch,bearing` address). */
+  export function jumpTo(target: Partial<ViewState>) {
+    view = { ...view, ...target };
+    onviewchange?.(view);
+    deck?.setProps({ initialViewState: { ...view, ...limits() } });
+    render();
+  }
+
   export function zoomBy(delta: number) {
     const zoom = Math.min(maxZoomNow(), Math.max(LIMITS.minZoom, view.zoom + delta));
     goTo({ zoom }, 250, ["zoom"]);
@@ -2790,8 +3088,11 @@
 
   /** The train a pick landed on. */
   function pickedTrain(info: PickingInfo): Train | null {
-    if (info.layer?.id !== "train-icons" || typeof info.object !== "number") return null;
-    return (trainData?.list ?? trains)[info.object] ?? null;
+    const list = trainData?.list ?? trains;
+    if (info.layer?.id === "train-icons" && typeof info.object === "number") return list[info.object] ?? null;
+    // one of its cars
+    const car = info.layer?.id.startsWith("train-car-") ? (info.object as DrawnCar | undefined) : undefined;
+    return car ? (list[car.train] ?? null) : null;
   }
 
   /** The ship a pick landed on, whichever of the ship layers drew it. */
@@ -2898,6 +3199,11 @@
       reportMapError(e);
       return;
     }
+    // the realistic map's textures arrive after its first frames
+    stopTextures = onTexturesReady(() => deck?.redraw("realistic textures"));
+    // trackpads as in Apple Maps: ahead of deck.gl's own handling (capture), which zooms on any wheel
+    container.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    for (const [type, handler] of PINCH_HANDLERS) container.addEventListener(type, handler as EventListener, { capture: true });
     // a lost WebGL context draws nothing until it's restored
     container.querySelector("canvas")?.addEventListener("webglcontextlost", () =>
       reportMapError(new Error("The graphics context was lost (WebGL context lost)")),
@@ -2920,17 +3226,143 @@
       .catch(() => {}); // labels and buildings are optional extras
   });
 
+  /** The view as deck.gl draws it: the flat projection above zoom 12, else the globe. */
+  function viewportOf(v: ViewState) {
+    const [width, height] = [container.clientWidth, container.clientHeight];
+    return v.zoom > FLAT_ABOVE_ZOOM ? new WebMercatorViewport({ ...v, width, height }) : new GlobeViewport({ ...v, width, height });
+  }
+  /** Where a point on screen is on the map, `[lon, lat]`; none off the globe. */
+  function mapAt(v: ViewState, at: [number, number]): [number, number] | null {
+    const p = viewportOf(v).unproject(at) as number[] | null;
+    return p && Number.isFinite(p[0]) && Number.isFinite(p[1]) ? [p[0], p[1]] : null;
+  }
+  /** Locked on to an aircraft, train or ship: the camera only zooms and turns about it. */
+  const cameraLocked = () => Boolean((follow && selected) || vehicleLocked);
+  /** The camera moved by a gesture of ours (deck.gl hears only its own). */
+  function moveView(next: ViewState) {
+    const lim = limits();
+    view = {
+      ...next,
+      zoom: Math.max(lim.minZoom, Math.min(lim.maxZoom, next.zoom)),
+      latitude: Math.max(-85, Math.min(85, next.latitude)),
+      bearing: wrapBearing(next.bearing),
+    };
+    if (follow && selected) view = lockedView(view, selected);
+    if (Math.floor(view.zoom * 2) !== Math.floor(shownZoom * 2)) shownZoom = view.zoom;
+    onviewchange?.(view);
+    deck?.setProps({ initialViewState: { ...view, ...lim } });
+    render();
+  }
+  /** Zoomed and turned, keeping the place under `at` (on screen) where it is. */
+  function zoomAbout(zoom: number, bearing: number, at: [number, number]) {
+    let next = { ...view, zoom, bearing };
+    const before = cameraLocked() ? null : mapAt(view, at);
+    const after = before && mapAt(next, at);
+    if (before && after) next = { ...next, longitude: next.longitude + before[0] - after[0], latitude: next.latitude + before[1] - after[1] };
+    moveView(next);
+  }
+  /** Two fingers moved together on a trackpad: the map moves with them. A mouse wheel is left to deck.gl (zoom). */
+  function onWheel(e: WheelEvent) {
+    // a pinch while WebKit's own pinch events come: those zoom
+    if (e.ctrlKey && pinch) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (!isTrackpadScroll(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (cameraLocked() || Date.now() < transitionUntil) return;
+    const [dx, dy] = wheelPixels(e, container.clientHeight);
+    const centre: [number, number] = [container.clientWidth / 2 + dx, container.clientHeight / 2 + dy];
+    const p = mapAt(view, centre);
+    if (p) moveView({ ...view, longitude: p[0], latitude: p[1] });
+  }
+  /** A pinch under way (WebKit): the view it started from, and where between the fingers. */
+  let pinch: { zoom: number; bearing: number; at: [number, number] } | null = null;
+  const PINCH_HANDLERS: [string, (e: PinchEvent) => void][] = [
+    [
+      "gesturestart",
+      (e) => {
+        e.preventDefault();
+        const box = container.getBoundingClientRect();
+        pinch = { zoom: view.zoom, bearing: view.bearing, at: [e.clientX - box.left, e.clientY - box.top] };
+      },
+    ],
+    [
+      "gesturechange",
+      (e) => {
+        e.preventDefault();
+        if (!pinch) return;
+        const { zoom, bearing } = pinched(pinch, e);
+        const at: [number, number] = cameraLocked() ? [container.clientWidth / 2, container.clientHeight / 2] : pinch.at;
+        zoomAbout(zoom, bearing, at);
+      },
+    ],
+    [
+      "gestureend",
+      (e) => {
+        e.preventDefault();
+        pinch = null;
+      },
+    ],
+  ];
+
+  /** The sky shown behind the map, as last set (the realistic map's), to set it only when it changes. */
+  let shownSky = "";
+  /**
+   * The realistic map's light for this frame, from the weather and the sun over
+   * the view (the real one, or with day and night off always a fine
+   * afternoon): set before every frame deck.gl draws, so the light and the air
+   * keep up with the camera. With it the sky behind the map: its gradient to
+   * the horizon wherever the tilt puts that, the sun's glow when it is in view.
+   */
+  function updateLook() {
+    if (basemap !== "realistic" || !container) {
+      if (shownSky && container) container.style.background = shownSky = "";
+      return;
+    }
+    const { latitude, longitude, zoom, pitch, bearing } = view;
+    const sun = sceneSun(daylight, localSun(sunDirection(Date.now()), latitude, longitude));
+    // the haze is set against how far the camera is from the middle of the view
+    setLook(lookFor(sky ?? PRESETS.sunny, sun, CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude)));
+    // deck.gl's camera sees 2·atan(1/3) (about 37°) top to bottom
+    const halfFov = Math.atan(1 / 3) / DEGREES;
+    const tilt = Math.max(1, pitch);
+    const horizonAt = (1 - 3 / Math.tan(tilt * DEGREES)) / 2;
+    // the sun on the screen, when it is in front of the camera
+    let sunAt: [number, number] | null = null;
+    if (zoom > FLAT_ABOVE_ZOOM && sun[2] > -0.02) {
+      const [sb, cb, sp, cp] = [Math.sin(bearing * DEGREES), Math.cos(bearing * DEGREES), Math.sin(pitch * DEGREES), Math.cos(pitch * DEGREES)];
+      // the camera's forward, right and up, as east, north, up
+      const forward = [sb * sp, cb * sp, -cp];
+      const right = [cb, -sb, 0];
+      const up = [sb * cp, cb * cp, sp];
+      const dot = (a: number[], b: readonly number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      const ahead = dot(forward, sun);
+      if (ahead > 0.05) {
+        const f = 3 * (container.clientHeight / 2);
+        sunAt = [container.clientWidth / 2 + (dot(right, sun) / ahead) * f, container.clientHeight / 2 - (dot(up, sun) / ahead) * f];
+      }
+    }
+    const background = skyCss(look, tilt + halfFov - 90, horizonAt, sunAt, clamp01((11.5 - zoom) / 2.5));
+    if (background !== shownSky) container.style.background = shownSky = background;
+  }
+
   function createDeck() {
     deck = new Deck<GlobeView>({
       parent: container,
       views: new GlobeView({ resolution: 5 }),
       initialViewState: { ...view, ...LIMITS },
+      useDevicePixels: pixelRatio(),
       controller: controllerFor(false),
       effects: [lighting],
       // the shadows mark it (SHADOW_PARAMETERS); deck.gl clears it each frame
-      deviceProps: { webgl: { stencil: true } },
+      // dev builds: a shader the driver rejects shows its compiler's errors
+      deviceProps: { webgl: { stencil: true }, ...(import.meta.env.DEV ? { debugShaders: "errors" } : {}) } as never,
       pickingRadius: 6,
       onDeviceInitialized: (d) => (device = d),
+      onBeforeRender: updateLook,
       // a layer that fails (a shader the GPU driver rejects, say) is reported, not just logged
       onError: (error) => reportMapError(error),
       onViewStateChange: ({ viewState }) => {
@@ -2974,7 +3406,30 @@
     });
   }
 
+  let stopTextures: (() => void) | null = null;
+  /**
+   * The realistic map's shading costs per pixel drawn: on a sharp screen it is
+   * drawn at 1.5 pixels to the CSS pixel, not 2 or 3 (half the work or less).
+   * shortcut: read when the basemap is set, so a window moved to a sharper screen keeps the old ratio; listen for ratio changes if that matters.
+   */
+  const pixelRatio = () => (basemap === "realistic" ? Math.min(devicePixelRatio, 1.5) : true);
+  // The realistic map tilts further than the others; leaving it tilted past
+  // their limit, the camera eases back within it.
+  $effect(() => {
+    void basemap;
+    untrack(() => {
+      deck?.setProps({ useDevicePixels: pixelRatio() });
+      if (!deck || (follow && selected)) return;
+      const { maxPitch } = limits();
+      if (view.pitch > maxPitch) goTo({ pitch: maxPitch }, 600, ["pitch"]);
+      else deck.setProps({ initialViewState: { ...view, ...limits() } });
+    });
+  });
+
   onDestroy(() => {
+    stopTextures?.();
+    container?.removeEventListener("wheel", onWheel, { capture: true });
+    for (const [type, handler] of PINCH_HANDLERS) container?.removeEventListener(type, handler as EventListener, { capture: true });
     cancelAnimationFrame(frame);
     freeArenas();
     deck?.finalize();
@@ -2983,8 +3438,8 @@
 
   // re-render immediately when inputs change, rather than waiting for the next tick
   $effect(() => {
-    void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings];
-    void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain, trainRoute];
+    void [flights, ships, selected, details, route, airport, place, exaggeration, basemap, labels, labelScale, buildings, sky];
+    void [showAircraft, aircraftLabels, daylight, weather, follow, selectedShip, terrain, railMap, trains, selectedTrain, trainRoute, trainBlocks];
     void [hoveredTrainId, hoveredShipMmsi];
     render();
   });

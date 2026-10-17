@@ -1,8 +1,9 @@
 // Trees for the realistic map: 3D trees wherever OpenFreeMap's vector tiles
 // have woods, parks, gardens, cemeteries, orchards, scrub or the gardens of
 // residential streets, kept off the roads, railways, buildings and water of
-// the same tile. Conifers and broadleaves by latitude, coloured by the season
-// (autumn's yellows and reds, bare in winter).
+// the same tile. Conifers and broadleaves by latitude, each one of Streets
+// GL's trees (fir; beech, linden or oak), coloured by the season (autumn's
+// yellows and reds, bare in winter).
 //
 // Each tile is planted once: its polygons and lines are rasterised into two
 // masks (what grows where, and where nothing may), then each kind of cover's
@@ -16,7 +17,7 @@ import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { load } from "@loaders.gl/core";
 import { MVTLoader } from "@loaders.gl/mvt";
 import { Geometry } from "@luma.gl/engine";
-import { treeMeshes } from "./tree-models";
+import { treeCard } from "./tree-models";
 
 /** Tiles are planted from this zoom's data, OpenFreeMap's deepest. */
 export const TREE_TILE_ZOOM = 14;
@@ -231,18 +232,13 @@ export function leafPhase(date: Date, lat: number): { spring: number; summer: nu
 }
 
 type RGB = [number, number, number];
-const CONIFER: RGB[] = [
-  [34, 58, 38],
-  [42, 66, 40],
-  [52, 74, 44],
-  [38, 62, 46],
-];
-const SUMMER: RGB[] = [
-  [60, 94, 44],
-  [72, 106, 48],
-  [56, 86, 40],
-  [82, 112, 50],
-];
+/** Streets GL's trees, by their layer in the textures (realistic-textures.ts): fir, and the broadleaves. */
+const FIR = 1;
+const BROADLEAVES = [0, 2, 3, 4];
+/** How much larger than the tree its card is, by layer (Streets GL's, for each picture's margin). */
+const CARD_SCALE = [1.35, 1.06, 1.19, 1.02, 1.43];
+/** A tree shown as its picture is: grey, which the brightness varies (220 is as it is). */
+const SUMMER_AS_DRAWN: RGB = [220, 220, 220];
 const SPRING: RGB[] = [
   [104, 146, 62],
   [118, 158, 70],
@@ -306,7 +302,19 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
   // conifers: a third in the south of Sweden, three quarters in the north; the same pattern elsewhere by latitude
   const woodConifers = Math.min(0.8, Math.max(0.15, 0.35 + (Math.abs(midLat) - 56) * 0.12));
   const leaves = leafPhase(date, midLat);
-  type Tree = { x: number; y: number; rank: number; conifer: boolean; height: number; width: number; yaw: number; colour: RGB };
+  type Tree = {
+    x: number;
+    y: number;
+    rank: number;
+    conifer: boolean;
+    height: number;
+    width: number;
+    yaw: number;
+    colour: RGB;
+    species: number;
+    /** Its colour is the season's in place of the picture's own (spring, autumn, bare). */
+    retint: boolean;
+  };
   const trees: Tree[] = [];
   for (const code of present) {
     const c = COVERS[code];
@@ -326,24 +334,26 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
         if (cover[cell] !== code || blocked[cell]) continue;
         const conifer = h(3) < (c.conifers ?? woodConifers);
         const height = c.height[0] + (c.height[1] - c.height[0]) * h(4);
-        let colour: RGB;
+        let colour: RGB = SUMMER_AS_DRAWN;
         let width = c.width[0] + (c.width[1] - c.width[0]) * h(5);
-        if (conifer) colour = CONIFER[Math.floor(h(6) * CONIFER.length)];
-        else {
+        const species = conifer ? FIR : BROADLEAVES[Math.floor(h(11) * BROADLEAVES.length)];
+        let retint = false;
+        if (!conifer) {
           // each tree turns in its own time: pick its look by the season's shares
           const r = h(7);
           const pick = (list: RGB[]) => list[Math.floor(h(6) * list.length)];
+          // (in summer, the picture's own green)
+          retint = r < leaves.bare + leaves.autumn + leaves.spring;
           if (r < leaves.bare) {
             colour = pick(BARE);
             width *= 0.82;
           } else if (r < leaves.bare + leaves.autumn) colour = pick(AUTUMN);
-          else if (r < leaves.bare + leaves.autumn + leaves.spring) colour = pick(SPRING);
-          else colour = pick(SUMMER);
+          else if (retint) colour = pick(SPRING);
         }
         // a little variety in brightness, tree to tree
         const v = 0.88 + 0.24 * h(8);
         colour = colour.map((ch) => Math.min(255, Math.round(ch * v))) as RGB;
-        trees.push({ x, y, rank: h(9), conifer, height, width, yaw: h(10) * 2 * Math.PI, colour });
+        trees.push({ x, y, rank: h(9), conifer, height, width, yaw: h(10) * 2 * Math.PI, colour, species, retint });
       }
     }
   }
@@ -363,10 +373,13 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
       out.positions[k * 3] = lonAt(t.x);
       out.positions[k * 3 + 1] = latAt(t.y);
       const [s, c] = [Math.sin(t.yaw), Math.cos(t.yaw)];
-      const across = t.height * t.width;
+      // the card a little larger than the tree, as Streets GL has each picture's margin
+      const tall = t.height * CARD_SCALE[t.species];
+      const across = tall * t.width;
       // turned by its yaw, as wide as it is, as tall
-      out.matrices.set([c * across, s * across, 0, -s * across, c * across, 0, 0, 0, t.height, 0, 0, 0], k * 12);
-      out.colors.set([...t.colour, 255], k * 4);
+      out.matrices.set([c * across, s * across, 0, -s * across, c * across, 0, 0, 0, tall, 0, 0, 0], k * 12);
+      // the alpha says which picture, and whether the colour replaces its own (realistic.ts reads it)
+      out.colors.set([...t.colour, 200 + t.species * 10 + (t.retint ? 5 : 0)], k * 4);
     });
     return out;
   };
@@ -511,11 +524,9 @@ export type TreeShadowOptions = {
 export type TreeOptions = {
   /** OpenFreeMap's tile URL template, `{z}/{x}/{y}`. */
   url: string;
-  /** Plant around here, `[lon, lat]`, out to `radius` metres... */
+  /** Plant around here, `[lon, lat]`, out to `radius` metres. */
   centre: [number, number];
   radius: number;
-  /** ...the nearest tiles, within `detailRadius`, in full detail. */
-  detailRadius: number;
   /** The day, for the leaves' colours. */
   date: Date;
   /** Extensions for the trees' layers (their light), and their material. */
@@ -528,11 +539,10 @@ export type TreeOptions = {
 };
 
 /** The trees around the view, one layer per tile and kind of tree. */
-export function treeLayers({ url, centre, radius, detailRadius, date, extensions, material, shadow, onLoad }: TreeOptions): Layer[] {
-  const meshes = treeMeshes();
+export function treeLayers({ url, centre, radius, date, extensions, material, shadow, onLoad }: TreeOptions): Layer[] {
   const layers: Layer[] = [];
   const now = performance.now();
-  for (const { tile, distance } of tilesAround(centre[0], centre[1], radius)) {
+  for (const { tile } of tilesAround(centre[0], centre[1], radius)) {
     const key = `${tile.z}/${tile.x}/${tile.y}`;
     let entry = cache.get(key);
     if (!entry) {
@@ -544,7 +554,6 @@ export function treeLayers({ url, centre, radius, detailRadius, date, extensions
     }
     entry.used = now;
     if (!entry.data || !entry.trees) continue;
-    const detail = distance <= detailRadius ? 1 : 0;
     if (shadow && shadow.sun[2] > 0.02) {
       const az = Math.round((Math.atan2(shadow.sun[0], shadow.sun[1]) * 180) / Math.PI * 2);
       const alt = Math.round((Math.asin(Math.min(1, shadow.sun[2])) * 180) / Math.PI * 2);
@@ -579,9 +588,9 @@ export function treeLayers({ url, centre, radius, detailRadius, date, extensions
       if (!data.length) continue;
       layers.push(
         new SimpleMeshLayer({
-          id: `trees-${key}-${kind}-${detail}`,
+          id: `trees-${key}-${kind}`,
           data: data as never,
-          mesh: (kind === "conifers" ? meshes.conifer : meshes.broadleaf)[detail],
+          mesh: treeCard(),
           material: material ?? TREE_MATERIAL,
           extensions: extensions as never,
           pickable: false,

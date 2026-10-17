@@ -26,7 +26,8 @@ type Surface = { texture: (typeof GROUND_TEXTURES)[number] | "water"; metres: nu
 
 /** The surfaces, by the id a feature's colour carries in its alpha (255 less the id); each texture's metres as Streets GL lays it. */
 const SURFACES: Record<number, Surface> = {
-  0: { texture: "grass", metres: 25, rough: 0.95, snow: 1 },
+  // where nothing is mapped: Streets GL's terrain (its detail repeats every 76 m)
+  0: { texture: "terrain", metres: 76, rough: 0.9, snow: 1 },
   1: { texture: "park", metres: 20, rough: 0.9, snow: 1 },
   2: { texture: "forest", metres: 15, rough: 0.95, snow: 1 },
   3: { texture: "farmland0", metres: 50, rough: 0.95, snow: 1 },
@@ -65,8 +66,8 @@ const ICE = 14;
 const paint = (id: number, [r, g, b]: RGB = [255, 255, 255]): RGBA => [r, g, b, 255 - id];
 const NONE: RGBA = [0, 0, 0, 0];
 
-/** The ground where nothing else is mapped: grass, as in Streets GL. */
-export const LAND = paint(0);
+/** The ground where nothing else is mapped, as in Streets GL: its terrain in its biome's colour (temperate). */
+export const LAND = paint(0, [58, 81, 29]);
 /** The globe itself, showing only past the map's edge at the poles: ice. */
 export const POLES: RGB = [226, 234, 240];
 
@@ -77,7 +78,7 @@ const AREAS: Record<string, RGBA> = {
   pool: paint(WATER_ID, [150, 255, 255]),
   wood: paint(2),
   scrub: paint(2, [230, 236, 214]),
-  grass: paint(0),
+  grass: paint(4),
   park: paint(1),
   meadow: paint(4, [255, 246, 206]),
   golf: paint(1, [236, 255, 228]),
@@ -99,7 +100,7 @@ const AREAS: Record<string, RGBA> = {
   athletics: paint(8, [255, 150, 120]),
   playground: paint(6),
   quarry: paint(8, [236, 228, 214]),
-  aerodrome: paint(0, [236, 244, 222]),
+  aerodrome: paint(4, [236, 244, 222]),
   apron: paint(10, [255, 255, 255]),
   runway: paint(10, [180, 180, 186]),
   taxiway: paint(10, [214, 214, 218]),
@@ -361,14 +362,15 @@ const groundInject = {
         // Zoomed out the map's data hardly says what the land is (desert, savanna and tundra would all be
         // grass): there its colour is the Earth's own, from the picture of it, taking over as a pixel grows
         // past 100 m or so. Closer in, land nothing is mapped on keeps the Earth's colour where that is
-        // dry (sand, rock), in the grass's texture; where it is green, the grass is as it is.
+        // dry (sand, rock), in the terrain's detail; where it is green, Streets GL's biome green.
         vec4 earth = texture(rground_earth, rg_e);
         float far = earth.a * smoothstep(120.0, 1200.0, rl_cells(rl_t) * rlight.periodMetres);
         if (i == 0) {
           const vec3 LUM = vec3(0.2126, 0.7152, 0.0722);
-          vec3 grass = textureLod(rground_color, vec3(0.5, 0.5, layer), 16.0).rgb;
+          // (the detail's own unevenness, around its tinted mean, on the Earth's colour)
+          vec3 mean = textureLod(rground_color, vec3(0.5, 0.5, layer), 16.0).rgb * tint;
           float dry = earth.a * smoothstep(0.03, 0.15, (earth.r - earth.g) / (earth.r + earth.g + 1e-4));
-          albedo = mix(albedo, earth.rgb * dot(albedo, LUM) / max(dot(grass, LUM), 1e-4), dry);
+          albedo = mix(albedo, earth.rgb * dot(albedo, LUM) / max(dot(mean, LUM), 1e-4), dry);
         }
         if (i != ${ICE}) albedo = mix(albedo, earth.rgb, far);
         // snow lies on the land, slush on the roads; rain darkens what is paved and makes it shine

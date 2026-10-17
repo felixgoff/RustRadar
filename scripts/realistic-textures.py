@@ -16,13 +16,14 @@ Each texture becomes one layer of a texture array in the map's shaders
 
 Every image is opaque: a browser may premultiply an image's colour by its
 alpha as it decodes it (Safari does), which would lose the colour wherever
-the alpha is 0. Needs Pillow. 512 px, as Streets GL draws them.
+the alpha is 0 (the trees' shapes are masks of their own). Needs Pillow and NumPy. 512 px, as Streets GL draws them.
 """
 
 import shutil
 import sys
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 
 SIZE = 512
@@ -76,7 +77,12 @@ GROUND = [
     ("wood", S + "wood_road_diffuse", S + "wood_road_normal", S + "wood_road_mask", None),
     # a tramway's rails, set in the street
     ("tram", [S + "asphalt_diffuse", S + "rail_diffuse"], S + "asphalt_normal", S + "common_mask", None),
+    # the ground where nothing is mapped: Streets GL's terrain, a pale detail its biome's colour tints
+    ("terrain", S + "generic_terrain_color", S + "generic_terrain_normal", S + "common_mask", None),
 ]
+
+# Streets GL's trees, each a picture of a whole tree (under src/resources/models/tree)
+TREES = ["beech", "fir", "linden0", "linden1", "oak"]
 
 
 def load(root: Path, name: str, mode: str, size: int = SIZE) -> Image.Image:
@@ -92,6 +98,36 @@ def layered(root: Path, names) -> Image.Image:
     for over in names[1:]:
         image = Image.alpha_composite(image, load(root, over, "RGBA"))
     return image.convert("RGB")
+
+
+def bleed(image: Image.Image) -> Image.Image:
+    """An RGBA image's colour, opaque: where it is see-through, the colour of what is nearest (so filtering
+    and a browser's premultiplying can't darken the edges). Pull-push over halvings; the size a power of 2."""
+    a = np.asarray(image, dtype=np.float64)
+    known = (a[..., 3] > 8).astype(np.float64)
+    levels = [(a[..., :3] * known[..., None], known)]
+    while levels[-1][1].shape[0] > 1:
+        c, w = levels[-1]
+        levels.append((c[0::2, 0::2] + c[1::2, 0::2] + c[0::2, 1::2] + c[1::2, 1::2], w[0::2, 0::2] + w[1::2, 0::2] + w[0::2, 1::2] + w[1::2, 1::2]))
+    filled = None
+    for c, w in reversed(levels):
+        mean = c / np.maximum(w, 1e-9)[..., None]
+        if filled is not None:
+            mean = np.where(w[..., None] > 0, mean, np.repeat(np.repeat(filled, 2, axis=0), 2, axis=1))
+        filled = mean
+    return Image.fromarray(np.clip(filled + 0.5, 0, 255).astype(np.uint8), "RGB")
+
+
+def trees(root: Path, out: Path) -> None:
+    """Each tree's colour (opaque, bled), its shape (white where it is, as a mask) and normal map; and the one
+    normal map of a crown's volume they all share."""
+    models = root.parent / "models/tree"
+    for name in TREES:
+        image = Image.open(models / f"{name}_diffuse.png").convert("RGBA").resize((SIZE, SIZE), Image.LANCZOS)
+        bleed(image).save(out / f"tree-{name}.color.webp", "WEBP", quality=88, method=6)
+        image.getchannel("A").convert("RGB").save(out / f"tree-{name}.mask.webp", "WEBP", quality=90, method=6)
+        load(models, f"{name}_normal", "RGB").save(out / f"tree-{name}.normal.webp", "WEBP", quality=90, method=6)
+    load(models, "tree_volume_normal", "RGB").save(out / "tree-volume.normal.webp", "WEBP", quality=90, method=6)
 
 
 def build(root: Path, out: Path, sets, masks: bool) -> None:
@@ -114,10 +150,13 @@ def main() -> None:
     out = Path(__file__).resolve().parent.parent / "static" / "realistic"
     out.mkdir(parents=True, exist_ok=True)
     # the ground's roughness is its surface's (realistic-ground.ts), so it needs no masks
+    # (the Earth's picture is earth-texture.py's)
     for old in out.glob("*.webp"):
-        old.unlink()
+        if not old.name.startswith("earth."):
+            old.unlink()
     build(root, out, BUILDINGS, masks=True)
     build(root, out, GROUND, masks=False)
+    trees(root, out)
     Image.open(root / "surfaces/water_normal.png").convert("RGB").save(out / "water.normal.webp", "WEBP", quality=90, method=6)
     shutil.copyfile(repo / "LICENSE", out / "LICENSE-streets-gl.txt")
     total = sum(f.stat().st_size for f in out.iterdir())

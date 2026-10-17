@@ -650,25 +650,52 @@ export class BuildingExtension extends LayerExtension {
 const rtreeModule = {
   name: "rtree",
   vs: "out vec3 rt_n;\n",
-  fs: "in vec3 rt_n;\n",
+  fs: /* glsl */ `\
+in vec3 rt_n;
+uniform mediump sampler2DArray rtree_color;
+uniform mediump sampler2DArray rtree_normal;
+uniform mediump sampler2DArray rtree_mask;
+uniform sampler2D rtree_volume;
+`,
   inject: {
     "vs:DECKGL_FILTER_GL_POSITION": "    rt_n = geometry.normal * rl_frame(geometry.position.xyz, project.projectionMode == PROJECTION_MODE_GLOBE);\n",
   },
 } as const;
 
+// Streets GL's trees: a picture of the whole tree on crossed cards, its shape cut out, lit as a
+// rounded crown (the volume's normal map, the leaves' own on it, Streets GL's way)
 const rtreeInject = {
   "fs:DECKGL_FILTER_COLOR": /* glsl */ `
   {
-    vec3 albedo = rl_linear(color.rgb);
-    vec3 n = normalize(rt_n);
+    // the instance's alpha: which picture, and whether its colour is the season's (tree-layer.ts)
+    float code = floor(color.a * 255.0 + 0.5) - 200.0;
+    float layer = floor(code / 10.0 + 0.01);
+    bool retint = mod(code, 10.0) > 2.5;
+    vec3 at = vec3(geometry.uv, layer);
+    if (texture(rtree_mask, at).r < 0.5) discard;
+    vec3 leaf = texture(rtree_color, at).rgb;
+    vec3 albedo = retint
+      ? leaf * rl_linear(color.rgb) / max(textureLod(rtree_color, vec3(0.5, 0.5, layer), 16.0).rgb, vec3(1e-3))
+      : leaf * pow(color.r / 0.8627, 2.2);
     vec3 v = normalize(rl_eye);
+    // the card's face towards the camera, across it and up it
+    vec3 card = normalize(rt_n);
+    if (dot(card, v) < 0.0) card = -card;
+    vec3 up = vec3(0.0, 0.0, 1.0);
+    vec3 across = normalize(cross(up, card) + vec3(1e-6, 0.0, 0.0));
+    // reoriented normal mapping: the leaves' normals on the crown's
+    vec3 t = texture(rtree_volume, geometry.uv).xyz * 2.0 - 1.0 + vec3(0.0, 0.0, 1.0);
+    vec3 u = (texture(rtree_normal, at).xyz * 2.0 - 1.0) * vec3(-1.0, -1.0, 1.0);
+    vec3 m = normalize(t * dot(t, u) - u * t.z);
+    vec3 n = normalize(across * m.x + up * m.y + card * max(m.z, 0.05));
     float sun = rl_sunVisible();
-    // snow on the tops of the crowns
+    // snow on the tops of the crowns; the inside and underneath shaded
     albedo = mix(albedo, vec3(0.75), rlight.snow * smoothstep(0.2, 0.7, n.z) * 0.8);
-    vec3 lit = rl_shade(albedo, n, v, 0.85, 0.0, 1.0, sun);
+    float ao = mix(0.6, 1.0, smoothstep(0.95, 0.35, geometry.uv.y));
+    vec3 lit = rl_shade(albedo, n, v, 0.9, 0.0, ao, sun);
     // the sun through the leaves, seen from the shaded side
     lit += albedo * rl_sunLight() * 0.3 * pow(max(dot(-v, rl_toSun()), 0.0), 3.0) * sun;
-    color = vec4(rl_display(rl_aerial(lit)), color.a);
+    color = vec4(rl_display(rl_aerial(lit)), 1.0);
   }
   `,
 };
@@ -682,7 +709,11 @@ export class TreeExtension extends LayerExtension {
   }
 
   draw(this: ExtLayer, params: DrawParams) {
-    this.setShaderModuleProps({ rlight: rlightProps(params) });
+    const t = realisticTextures(this.context.device).trees;
+    this.setShaderModuleProps({
+      rlight: rlightProps(params),
+      rtree: { rtree_color: t.color, rtree_normal: t.normal, rtree_mask: t.mask, rtree_volume: t.volume },
+    });
   }
 }
 

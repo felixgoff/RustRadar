@@ -2472,14 +2472,13 @@
       layers.push(realistic ? realisticBuildingLayer(tileUrl!, realisticShadowSun(now, cLat, cLon)) : buildingLayer(tileUrl!, shadowSun(now)));
     }
     if (realistic && tileUrl && flat && zoom >= TREES_ZOOM) {
-      // out to about as far as the camera is from the point it looks at, the nearest in full detail
+      // out to about as far as the camera is from the point it looks at
       const distance = CAMERA_HEIGHTS * container.clientHeight * mpp;
       layers.push(
         ...treeLayers({
           url: tileUrl,
           centre: [cLon, cLat],
           radius: Math.min(3200, Math.max(700, 1.2 * distance)),
-          detailRadius: Math.min(1000, Math.max(300, 0.45 * distance)),
           date: new Date(now),
           extensions: TREED,
           material: UNLIT,

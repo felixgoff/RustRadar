@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { KeyRound } from "@lucide/svelte";
   import Segmented from "./Segmented.svelte";
   import ToggleRow from "./ToggleRow.svelte";
 
@@ -9,9 +10,11 @@
     labelSize: number;
     exaggeration: number;
     adsb: boolean;
+    /** Opens the keys page: listed here on a phone, where the map's rail has no room for its own button. */
+    onkeys?: () => void;
   }
 
-  let { labels, labelSize = $bindable(), exaggeration = $bindable(), adsb = $bindable() }: Props = $props();
+  let { labels, labelSize = $bindable(), exaggeration = $bindable(), adsb = $bindable(), onkeys }: Props = $props();
 
   /** Place-name sizes on offer, as multiples of the default. */
   const LABEL_SIZES = [
@@ -45,6 +48,9 @@
 <section aria-labelledby="settings-data">
   <h3 id="settings-data">Data</h3>
   <ToggleRow label="Aircraft-reported data" hint="Heading, bank and autopilot, from adsb.lol" bind:checked={adsb} />
+  {#if onkeys}
+    <button class="button keys" onclick={onkeys}><KeyRound size={14} strokeWidth={1.75} /> API keys and Flightradar24 login</button>
+  {/if}
 </section>
 
 <style>
@@ -92,5 +98,14 @@
   }
   .range small {
     margin-top: calc(var(--space-1) * -1);
+  }
+  .keys {
+    display: none;
+  }
+  @media (max-width: 899px), (max-height: 500px) {
+    .keys {
+      display: inline-flex;
+      align-self: flex-start;
+    }
   }
 </style>

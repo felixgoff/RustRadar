@@ -251,10 +251,10 @@
 
 <aside class="panel surface" aria-label="Selected flight" style:--footer-height="{footerHeight}px">
   {#if back}
-    <button class="back" onclick={back.onclick}><ArrowLeft size={14} strokeWidth={2} /> {back.label}</button>
+    <button class="back" onclick={back.onclick} data-peek><ArrowLeft size={14} strokeWidth={2} /> {back.label}</button>
   {/if}
 
-  <header class="strip">
+  <header class="strip" data-peek>
     <div class="cell id">
       <h2 class="data">{flight.callsign || flight.flight || "No callsign"}</h2>
       <p>{flight.flight || schedule?.flight_number || "No flight number"}</p>
@@ -301,7 +301,7 @@
     </div>
   {/if}
 
-  <section class="route" aria-label="Route">
+  <section class="route" aria-label="Route" data-peek>
     <div class="airports">
       {#each [{ code: origin?.iata || flight.origin, airport: origin, time: departure, end: false }, { code: destination?.iata || flight.destination, airport: destination, time: arrival, end: true }] as side (side.end)}
         <!-- once ended, the arrival is an estimate from live data that stopped: dimmed, and its
@@ -639,7 +639,7 @@
     {/if}
   </div>
 
-  <footer bind:offsetHeight={footerHeight}>
+  <footer bind:offsetHeight={footerHeight} data-peek>
     <!-- the footer's wording swaps whole elements: announce the end from a region that stays put -->
     <span class="visually-hidden" role="status">
       {ended ? (seenAt ? `No longer live, last seen ${clockWithZone(seenAt, seenZone)}` : "Not live") : ""}
@@ -1357,39 +1357,30 @@
     }
   }
   /* Phones (the query in phone.svelte.ts): a sheet along the bottom */
+  /* Phones (the query in phone.svelte.ts): in the page's bottom sheet, which
+     frames it and lowers it to the parts marked data-peek */
   @media (max-width: 899px), (max-height: 500px) {
     .panel {
-      position: fixed;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      z-index: 5;
+      position: static;
+      flex: 1;
+      min-height: 0;
       width: auto;
-      max-height: 72dvh;
-      border-bottom: 0;
-      border-left: 0;
-      border-right: 0;
-      border-radius: 12px 12px 0 0;
-      padding-bottom: env(safe-area-inset-bottom, 0px);
-      padding-left: env(safe-area-inset-left, 0px);
-      padding-right: env(safe-area-inset-right, 0px);
-      animation-name: rise;
-    }
-    @keyframes rise {
-      from {
-        transform: translateY(24px);
-        opacity: 0;
-      }
-    }
-  }
-  /* a phone on its side: down the right, beside the list */
-  @media (max-height: 500px) and (orientation: landscape) {
-    .panel {
-      top: 0;
-      left: auto;
-      width: min(360px, 50vw);
       max-height: none;
-      border-radius: 12px 0 0 0;
+      border: 0;
+      border-radius: 0;
+      background: none;
+      box-shadow: none;
+      animation: none;
+    }
+    /* the summary first, the picture lower down */
+    .photo,
+    .airline,
+    .tabs,
+    .tabpanel {
+      order: 1;
+    }
+    footer {
+      order: 2;
     }
   }
 </style>

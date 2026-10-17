@@ -247,4 +247,10 @@
   .more + .foot {
     padding-top: 0;
   }
+  /* on a phone the sheet's head already says how many are in view */
+  @media (max-width: 899px), (max-height: 500px) {
+    header {
+      display: none;
+    }
+  }
 </style>

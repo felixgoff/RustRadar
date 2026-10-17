@@ -5,30 +5,55 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
 
-  // On a phone, the lists and filters in a sheet over the bottom of the map.
-  // Drag the handle between three heights, or tap it to step through them.
+  // On a phone, the lists and filters in a sheet over the bottom of the map,
+  // and the details of whatever is picked in their place. Drag the handle
+  // between three heights, or tap it to step through them.
 
   interface Props {
     detent?: Detent;
     /** The sheet's height on screen now, in px, home-bar padding included: what sits above it moves with it. */
     height?: number;
     label: string;
+    /** What the full sheet leaves clear at the top, px: the search and mode buttons, when they're on show. */
+    clear?: number;
     /** Always on show, under the handle. */
     head?: Snippet;
     children: Snippet;
   }
 
-  let { detent = $bindable("peek"), height = $bindable(0), label, head, children }: Props = $props();
+  let { detent = $bindable("peek"), height = $bindable(0), label, clear = 64, head, children }: Props = $props();
 
   const PEEK = 90;
-  /** What the full sheet leaves clear at the top: the search and mode buttons. */
-  const TOP_CLEAR = 104;
   const ORDER: Detent[] = ["peek", "half", "full"];
 
   let vh = $state(typeof innerHeight === "number" ? innerHeight : 800);
   let drag = $state<{ y: number; from: number; now: number; moved: boolean } | null>(null);
 
-  const heights = $derived({ peek: PEEK, half: Math.round(vh * 0.5), full: Math.max(PEEK, vh - TOP_CLEAR) });
+  // Content that marks its summary with `data-peek` (a panel's name strip, its
+  // key line and its sticky actions) is lowered to just that: the map stays in view.
+  let grab = $state(0);
+  let headHeight = $state(0);
+  let body: HTMLDivElement;
+  let summary = $state(0);
+  $effect(() => {
+    const marked = () => [...body.querySelectorAll<HTMLElement>("[data-peek]")];
+    const measure = () => (summary = marked().reduce((sum, el) => sum + el.offsetHeight, 0));
+    const sizes = new ResizeObserver(measure);
+    const watch = () => {
+      sizes.disconnect();
+      marked().forEach((el) => sizes.observe(el));
+      measure();
+    };
+    const changes = new MutationObserver(watch);
+    changes.observe(body, { childList: true, subtree: true });
+    watch();
+    return () => {
+      sizes.disconnect();
+      changes.disconnect();
+    };
+  });
+  const peek = $derived(summary ? grab + (head ? headHeight : 0) + summary : PEEK);
+  const heights = $derived({ peek, half: Math.max(peek, Math.round(vh * 0.5)), full: Math.max(peek, vh - clear) });
   const shown = $derived(drag ? drag.now : heights[detent]);
 
 
@@ -40,7 +65,7 @@
   function move(e: PointerEvent) {
     if (!drag) return;
     const dy = drag.y - e.clientY;
-    drag.now = Math.min(heights.full, Math.max(PEEK - 40, drag.from + dy));
+    drag.now = Math.min(heights.full, Math.max(heights.peek - 40, drag.from + dy));
     if (Math.abs(dy) > 6) drag.moved = true;
   }
 
@@ -67,9 +92,17 @@
 <svelte:window bind:innerHeight={vh} />
 
 <!-- `shown` is the content's height; the home-bar padding goes under it, and the measured whole is reported -->
-<section class="sheet surface" class:dragging={drag} style:height="{shown}px" bind:offsetHeight={height} aria-label={label}>
+<section
+  class="sheet surface"
+  class:dragging={drag}
+  style:height="{shown}px"
+  style:--clear="{clear}px"
+  bind:offsetHeight={height}
+  aria-label={label}
+>
   <button
     class="grab"
+    bind:offsetHeight={grab}
     aria-label="{label}: {detent === 'full' ? 'full height' : detent === 'half' ? 'half height' : 'lowered'}. Drag, tap or use the arrow keys to resize"
     onpointerdown={down}
     onpointermove={move}
@@ -79,8 +112,8 @@
   >
     <span></span>
   </button>
-  {#if head}<div class="head">{@render head()}</div>{/if}
-  <div class="body">{@render children()}</div>
+  {#if head}<div class="head" bind:offsetHeight={headHeight}>{@render head()}</div>{/if}
+  <div class="body" bind:this={body}>{@render children()}</div>
 </section>
 
 <style>
@@ -98,6 +131,8 @@
     border-right: 0;
     border-radius: 12px 12px 0 0;
     padding-bottom: env(safe-area-inset-bottom, 0px);
+    /* below a notch, the full height still leaves the search clear */
+    max-height: calc(100dvh - var(--clear) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
     transition: height 220ms var(--ease-out);
     overflow: hidden;
   }
@@ -108,7 +143,7 @@
     flex: none;
     display: grid;
     place-items: center;
-    height: 18px;
+    height: 22px;
     padding: 0;
     border: 0;
     background: none;

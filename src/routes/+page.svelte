@@ -160,7 +160,7 @@
   let keysOpen = $state(false);
   /** The map controls' open menu. */
   let menu = $state<"layers" | "settings" | null>(null);
-  /** On a phone: how far up the list sheet is, and its height in px. */
+  /** On a phone: how far up the sheet is, and its height in px. */
   let sheetDetent = $state<Detent>("peek");
   let sheetHeight = $state(0);
   /** The keys page opened from a "sign in" prompt: the caret goes to the login, and back to the prompt after. */
@@ -779,7 +779,10 @@
     heading: "Trains in view",
     noun: "trains",
     icon: TrainFront,
-    placeholder: "Train, destination or address",
+    // the mode buttons share a phone's search row
+    get placeholder() {
+      return layout.phone ? "Train or address" : "Train, destination or address";
+    },
     search: () =>
       trainsListed.slice(0, 6).map((t) => ({
         key: t.id,
@@ -796,7 +799,9 @@
     heading: "Ships in view",
     noun: "ships",
     icon: ShipIcon,
-    placeholder: "Ship name, MMSI or address",
+    get placeholder() {
+      return layout.phone ? "Ship or address" : "Ship name, MMSI or address";
+    },
     search: () =>
       shipsListed.slice(0, 6).map((s) => ({
         key: String(s.mmsi),
@@ -1067,6 +1072,22 @@
     keysOpen = true;
   }
 
+  /** A flight, train, ship or airport board is open: on a phone it takes the sheet, and the search steps aside. */
+  const detailOpen = $derived(Boolean(selected || boardCode || selectedShip || selectedTrain));
+  // on a phone the details open lowered, to their summary (a board half up:
+  // its flights are what it's for); the list comes back as high as it was
+  let listDetent: Detent = "peek";
+  $effect.pre(() => {
+    if (!detailOpen) return;
+    untrack(() => {
+      listDetent = sheetDetent;
+      sheetDetent = boardCode && !selected ? "half" : "peek";
+    });
+    return () => {
+      sheetDetent = listDetent;
+    };
+  });
+
   /** Closes whatever is on top (Escape, or Android's back gesture); false when nothing is open. */
   function closeTop(): boolean {
     if (keysOpen) closeKeys();
@@ -1266,7 +1287,7 @@
 
 <svelte:window {onkeydown} />
 
-<main class:phone={layout.phone} style:--sheet-h={layout.phone ? `${sheetHeight}px` : null}>
+<main class:phone={layout.phone} class:detail={detailOpen} style:--sheet-h={layout.phone ? `${sheetHeight}px` : null}>
   <Globe
     bind:this={globe}
     flights={shown}
@@ -1433,19 +1454,20 @@
         <p class="counts">
           <span class="count">{count(filtered.length)}</span>
           {#if filtered.length !== flights.length}of {count(flights.length)}{/if}
+          <span class="noun">flights</span>
           {regional ? "in view" : "worldwide"}
         </p>
       {:else if focus === "trains" && trainsAt}
         <p class="counts">
           <span class="count">{count(trainsListed.length)}</span>
           {#if trainsListed.length !== trains.length}of {count(trains.length)}{/if}
-          in view
+          <span class="noun">trains</span> in view
         </p>
       {:else if focus === "ships" && shipsAt}
         <p class="counts">
           <span class="count">{count(shipsListed.length)}</span>
           {#if shipsListed.length !== ships.length}of {count(ships.length)}{/if}
-          in view
+          <span class="noun">ships</span> in view
         </p>
       {/if}
     </div>
@@ -1514,12 +1536,19 @@
   </section>
   {/snippet}
 
+  <!-- On a phone, one sheet: the list, or in its place the details of what is picked, lowered to their summary so the map stays in view -->
   {#if layout.phone}
-    <BottomSheet bind:detent={sheetDetent} bind:height={sheetHeight} label={focus === "aircraft" ? "Flights" : focus === "trains" ? "Trains" : "Ships"}>
-      {#snippet head()}{@render toolbar()}{/snippet}
-      {@render sheetContent()}
+    <BottomSheet
+      bind:detent={sheetDetent}
+      bind:height={sheetHeight}
+      label={detailOpen ? "Details" : focus === "aircraft" ? "Flights" : focus === "trains" ? "Trains" : "Ships"}
+      clear={detailOpen ? 12 : 64}
+      head={detailOpen ? undefined : listHead}
+    >
+      {#if detailOpen}{@render details()}{:else}{@render sheetContent()}{/if}
     </BottomSheet>
   {/if}
+  {#snippet listHead()}{@render toolbar()}{/snippet}
 
   {#snippet filterToggle(n: number)}
     <button
@@ -1535,6 +1564,7 @@
     </button>
   {/snippet}
 
+  {#snippet details()}
   {#if boardCode}
     <!-- kept while a flight from the board is open, so going back keeps its tab and pages -->
     <div hidden={selected !== null}>
@@ -1592,6 +1622,9 @@
       {liveStops}
     />
   {/if}
+  {/snippet}
+
+  {#if !layout.phone}{@render details()}{/if}
 
   <MapControls
     zoom={view.zoom}
@@ -1740,6 +1773,10 @@
     font-weight: 650;
     color: var(--text-1);
   }
+  /* beside the mode buttons it goes without saying; in a phone's sheet, under icons alone, it doesn't */
+  .noun {
+    display: none;
+  }
   .alert {
     display: flex;
     gap: var(--space-2);
@@ -1798,8 +1835,9 @@
   .attribution a:hover {
     color: var(--text-1);
   }
-  /* Phones (the query in phone.svelte.ts): the search and mode buttons along
-     the top, the lists and filters in the bottom sheet. */
+  /* Phones (the query in phone.svelte.ts): the search and mode buttons in one
+     row along the top, the lists and filters in the bottom sheet. With
+     something picked, its details take the sheet and the search steps aside. */
   @media (max-width: 899px), (max-height: 500px) {
     .sidebar {
       top: max(var(--space-2), env(safe-area-inset-top, 0px));
@@ -1808,20 +1846,48 @@
       bottom: auto;
       width: auto;
       z-index: 3;
+      transition:
+        transform 220ms var(--ease-out),
+        opacity 220ms var(--ease-out);
+    }
+    .detail .sidebar {
+      transform: translateY(calc(-100% - var(--space-2)));
+      opacity: 0;
+      visibility: hidden;
+      transition:
+        transform 220ms var(--ease-out),
+        opacity 220ms var(--ease-out),
+        visibility 0s 220ms;
     }
     .primary {
-      padding: var(--space-2);
-      gap: var(--space-2);
+      flex-flow: row wrap;
+      align-items: center;
+      padding: var(--space-1);
+      gap: var(--space-1);
+    }
+    .primary > :global(.search) {
+      flex: 1;
+      min-width: 0;
+    }
+    .primary > .alert,
+    .primary > .note {
+      flex-basis: 100%;
     }
     .brand {
       display: none;
     }
-    /* in the sheet's head: the list's own heading gives the count, just below */
-    .toolbar .counts {
-      display: none;
+    /* the sheet's head is its title: the count on the left, the filters on the right */
+    .toolbar {
+      flex-direction: row-reverse;
+    }
+    .counts .count {
+      font-size: var(--text-base);
+    }
+    .noun {
+      display: inline;
     }
     .filter-toggle {
-      height: 30px;
+      height: 32px;
       padding: 0 var(--space-3);
     }
     .list {

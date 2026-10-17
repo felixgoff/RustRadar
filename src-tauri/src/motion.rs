@@ -66,11 +66,11 @@ const DRAWN_BRAKE: f64 = 0.8;
 /// The hardest the drawn train brakes, only when it must to stop in time, m/s².
 const HARD_BRAKE: f64 = 1.2;
 /// The drawn train runs up to this far behind the predicted one (where it
-/// was this long before), so a new report moving the predicted train a
-/// little changes little, ms.
-const LAG_MS: i64 = 5_000;
+/// was this long before: about 55 m at 100 km/h), so a new report moving the
+/// predicted train back a little seldom leaves it ahead, ms.
+const LAG_MS: i64 = 2_000;
 /// Within that, it drifts back by its distance from there over this long, seconds.
-const DRIFT_S: f64 = 60.0;
+const DRIFT_S: f64 = 30.0;
 /// It closes the gap to there over about this long, seconds (far off,
 /// no faster than it can ease out of again at `EASE`).
 const FOLLOW_S: f64 = 5.0;
@@ -1512,12 +1512,12 @@ mod tests {
 
     #[test]
     fn it_is_drawn_where_the_real_train_is_by_now() {
-        // seen 30 s ago at 0 doing 30 m/s on a 108 km/h line: by now 900 m on, drawn where it was 5 s ago
+        // seen 30 s ago at 0 doing 30 m/s on a 108 km/h line: by now 900 m on, drawn where it was `LAG_MS` ago
         let track = rails(108.0);
         let f = sim(None, &fix(0.0, NOW - 30_000, Some(30.0)), None, &[far()], NOW, &track);
         assert_eq!(f[0].2, NOW);
         let x = x_of((f[0].0, f[0].1));
-        assert!((x - 750.0).abs() < 5.0, "{x}");
+        assert!((x - (900.0 - 30.0 * LAG_MS as f64 / 1000.0)).abs() < 5.0, "{x}");
         let v = legs(&f)[0];
         assert!((v - 30.0).abs() < 0.5, "{v}");
         never_back(&f);

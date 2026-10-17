@@ -931,6 +931,26 @@ pub fn parse_stops(body: &str, stations: &HashMap<String, Station>) -> Result<Ve
 
 // ---------------------------------------------------------------- fetching
 
+const REFUSED: &str = "Trafikverket didn't accept the API key (check it on the keys page)";
+
+/// Whether the saved key works, asked of Trafikverket with the smallest
+/// query there is: "ok", "invalid" (refused), or "none" (no key saved). An
+/// error when Trafikverket can't be reached: the key may be fine.
+#[tauri::command]
+pub async fn trafikverket_key_status() -> crate::CmdResult<&'static str> {
+    let key = crate::keys::current().trafikverket;
+    if key.is_empty() {
+        return Ok("none");
+    }
+    let http = crate::trains::client()?;
+    let query = "<QUERY objecttype=\"TrainStation\" namespace=\"rail.infrastructure\" schemaversion=\"1.4\" limit=\"1\"><INCLUDE>LocationSignature</INCLUDE></QUERY>";
+    match post(http, &key, query).await {
+        Ok(_) => Ok("ok"),
+        Err(e) if e == REFUSED => Ok("invalid"),
+        Err(e) => Err(e),
+    }
+}
+
 async fn post(http: &reqwest::Client, key: &str, queries: &str) -> Result<String, String> {
     let sent = request(key, queries);
     let call = crate::devlog::start("Trafikverket", "POST", URL, Some(&sent));
@@ -950,7 +970,7 @@ async fn post(http: &reqwest::Client, key: &str, queries: &str) -> Result<String
         c.finish(status.as_u16(), body.as_bytes());
     }
     if status.as_u16() == 401 || status.as_u16() == 403 {
-        return Err("Trafikverket didn't accept the API key (check it on the keys page)".into());
+        return Err(REFUSED.into());
     }
     if !status.is_success() {
         // its errors come as JSON with a message worth showing

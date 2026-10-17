@@ -3,7 +3,7 @@
   import type { Train } from "./api";
   import FilterChips from "./FilterChips.svelte";
   import ToggleRow from "./ToggleRow.svelte";
-  import { DEFAULT_TRAIN_FILTERS, TRAIN_REGIONS, trainFilterCount, trainOperators, type TrainFilters } from "./train-list";
+  import { DEFAULT_TRAIN_FILTERS, trainFilterCount, trainOperators, type TrainFilters } from "./train-list";
   import { TRAIN_KINDS, trainColor, trainColorOf, trainLabel } from "./trains";
 
   interface Props {
@@ -28,10 +28,6 @@
     const n = tally((t) => t.kind);
     return TRAIN_KINDS.map((k) => ({ value: k, label: trainLabel(k), color: `rgb(${trainColor(k).join(", ")})`, count: n.get(k) }));
   });
-  const regions = $derived.by(() => {
-    const n = tally((t) => t.source);
-    return TRAIN_REGIONS.map((r) => ({ value: r.source, label: r.label, count: n.get(r.source) }));
-  });
 
   // those of the trains loaded, and any left out that aren't running now (so they can be put back)
   const operators = $derived.by(() => {
@@ -47,7 +43,6 @@
 
   function reset() {
     filters.hiddenKinds = [];
-    filters.hiddenSources = [];
     filters.hiddenOperators = [];
     filters.delayedOnly = DEFAULT_TRAIN_FILTERS.delayedOnly;
   }
@@ -65,12 +60,11 @@
 
   <div class="body">
     <FilterChips label="Kind" options={kinds} bind:hidden={filters.hiddenKinds} />
-    <FilterChips label="Region" options={regions} bind:hidden={filters.hiddenSources} />
     <FilterChips
       label="Operator"
       options={operators}
       bind:hidden={filters.hiddenOperators}
-      hint="In Sweden each operator's trains come live on their own stream; one left out isn't streamed."
+      hint="Each operator's trains come live on their own stream; one left out isn't streamed."
     />
     <ToggleRow label="Delayed only" hint="5 min or more late, as the operator reports" bind:checked={filters.delayedOnly} />
   </div>

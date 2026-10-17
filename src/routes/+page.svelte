@@ -40,6 +40,7 @@
     hideTrainOperators,
     followTrain,
     unfollowTrain,
+    trafikverketKeyStatus,
   } from "$lib/api";
   import AirportPanel from "$lib/AirportPanel.svelte";
   import FilterPanel from "$lib/FilterPanel.svelte";
@@ -150,6 +151,32 @@
   const focus = $derived(settings.mode);
 
   /** Shift+P, I or S, or the mode bar's eye: another kind on or off the map. The focus is always on. */
+  // The trains are Sweden's, from Trafikverket: offered once its key is saved
+  // and Trafikverket has accepted it (asked at the start and when the keys
+  // page closes; while that's unknown, a trains mode already chosen stays).
+  let trafikverketKey = $state<"none" | "invalid" | "ok" | null>(null);
+  let keyRetry = 0;
+  function checkTrafikverketKey() {
+    clearTimeout(keyRetry);
+    if (!isTauri()) {
+      trafikverketKey = "none";
+      return;
+    }
+    trafikverketKeyStatus().then(
+      (status) => (trafikverketKey = status),
+      // Trafikverket out of reach: the key may be fine, ask again shortly
+      () => (keyRetry = window.setTimeout(checkTrafikverketKey, 30_000)),
+    );
+  }
+  const trainsOffered = $derived(trafikverketKey === "ok");
+  $effect(() => {
+    if (trafikverketKey !== "none" && trafikverketKey !== "invalid") return;
+    untrack(() => {
+      if (settings.mode === "trains") settings.mode = "aircraft";
+      if (settings.alsoShow.includes("trains")) settings.alsoShow = settings.alsoShow.filter((k) => k !== "trains");
+    });
+  });
+
   function toggleShown(kind: Mode) {
     if (kind === settings.mode) return;
     const list = settings.alsoShow;
@@ -1145,6 +1172,7 @@
 
   function closeKeys() {
     keysOpen = false;
+    checkTrafikverketKey();
     const back = keysPrompt;
     keysPrompt = null;
     if (back) requestAnimationFrame(() => back()?.focus());
@@ -1176,10 +1204,10 @@
     b: () => (settings.buildings = !settings.buildings),
     // the focus: Planes, traIns (T tilts), Ships; with Shift, that kind also shown on the map or not
     p: () => (settings.mode = "aircraft"),
-    i: () => (settings.mode = "trains"),
+    i: () => trainsOffered && (settings.mode = "trains"),
     s: () => (settings.mode = "ships"),
     P: () => toggleShown("aircraft"),
-    I: () => toggleShown("trains"),
+    I: () => trainsOffered && toggleShown("trains"),
     S: () => toggleShown("ships"),
     k: () => aircraftOn && (settings.aircraftLabels = !settings.aircraftLabels),
     d: () => (settings.daylight = !settings.daylight),
@@ -1259,6 +1287,7 @@
 
   let timers: ReturnType<typeof setInterval>[] = [];
   onMount(() => {
+    checkTrafikverketKey();
     // dev builds: `#@lat,lon,zoom,pitch,bearing` opens the map there
     const at = import.meta.env.DEV ? location.hash.match(/^#@(-?[\d.]+),(-?[\d.]+),([\d.]+)(?:,([\d.]+))?(?:,(-?[\d.]+))?/) : null;
     if (at) {
@@ -1281,6 +1310,7 @@
     timers.forEach(clearInterval);
     clearTimeout(refreshTimer);
     clearTimeout(viewTimer);
+    clearTimeout(keyRetry);
     stopShips();
     stopTrains();
   });
@@ -1312,7 +1342,7 @@
     {hoveredTrainId}
     {hoveredShipMmsi}
     railMap={settings.railMap}
-    trainBlocks={settings.trainBlocks && isTauri()}
+    trainBlocks={settings.railMap && settings.railShows === "blocks" && isTauri()}
     terrain={settings.terrain}
     follow={following}
     followVehicle={followingVehicle}
@@ -1344,6 +1374,7 @@
   {#snippet modeBar()}
     <ModeBar
       bind:mode={settings.mode}
+      offered={{ aircraft: true, trains: trainsOffered || settings.mode === "trains", ships: true }}
       shown={kinds}
       ontoggle={toggleShown}
       counts={{
@@ -1641,7 +1672,7 @@
     bind:weather={settings.weather}
     bind:adsb={settings.adsb}
     bind:railMap={settings.railMap}
-    bind:trainBlocks={settings.trainBlocks}
+    bind:railShows={settings.railShows}
     bind:sky={settings.sky}
     bind:terrain={settings.terrain}
     bind:exaggeration={settings.exaggeration}
@@ -1668,7 +1699,7 @@
     onsignout={handleSignOut}
   />
 
-  <!-- the train credits come first, so the line's ellipsis can't hide them: Amtraker asks for a prominent link -->
+  <!-- the train credits come first, so the line's ellipsis can't hide them -->
   <p class="attribution" title={[...trainCredit.map((c) => c.text), ...attribution].join(" · ")}>
     {#each trainCredit as c, i (c.url)}
       {i ? " · " : ""}<a href={c.url} onclick={(e) => (e.preventDefault(), openUrl(c.url))}>{c.text}</a>

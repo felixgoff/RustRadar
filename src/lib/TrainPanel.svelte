@@ -37,7 +37,7 @@
   let { train, now, following, onfollow, onclose, liveStops = null }: Props = $props();
 
   const kind = $derived(trainLabel(train.kind));
-  /** Names run long ("Amtrak 171 Northeast Regional"): those wrap to a second line instead of losing their end. */
+  /** Names run long ("Arlanda Express 7041"): those wrap to a second line instead of losing their end. */
   const long = $derived(train.name.length > 16);
   const swatch = $derived(`rgb(${trainColorOf(train).join(", ")})`);
   const heading = $derived(headingAt(train, now));
@@ -240,7 +240,7 @@
       </button>
       {#if credit}
         <button class="button source" onclick={() => openUrl(credit.url)} title={credit.url}>
-          {train.source === "amtrak" ? "Amtraker" : sourceName.split(" (")[0]} <ExternalLink size={14} strokeWidth={1.75} />
+          {sourceName} <ExternalLink size={14} strokeWidth={1.75} />
         </button>
       {/if}
     </div>

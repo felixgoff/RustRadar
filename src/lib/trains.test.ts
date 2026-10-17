@@ -24,7 +24,7 @@ import {
 
 const train = (over: Partial<Train> = {}): Train => ({
   id: "vbb:1",
-  source: "vbb",
+  source: "trafikverket",
   name: "RE1",
   kind: "regional",
   lat: 52.51,
@@ -48,8 +48,6 @@ describe("colours and labels", () => {
       "Intercity",
       "Regional",
       "Suburban",
-      "Metro",
-      "Freight",
       "Other",
     ]);
   });
@@ -131,10 +129,9 @@ describe("headingAt", () => {
 
 describe("credits and wording", () => {
   test("one credit per source in view", () => {
-    const credits = trainCredits([train(), train({ source: "amtrak" }), train()]);
-    expect(credits).toEqual([TRAIN_CREDITS.vbb, TRAIN_CREDITS.amtrak]);
-    expect(TRAIN_CREDITS.digitraffic.text).toContain("CC BY 4.0");
-    expect(TRAIN_CREDITS.amtrak.url).toBe("https://amtraker.com");
+    const credits = trainCredits([train({ source: "trafikverket" }), train({ source: "trafikverket" })]);
+    expect(credits).toEqual([TRAIN_CREDITS.trafikverket]);
+    expect(TRAIN_CREDITS.trafikverket.text).toContain("CC0");
   });
 
   test("delays", () => {
@@ -148,7 +145,7 @@ describe("credits and wording", () => {
 describe("on the map", () => {
   test("a carriage with a heading, a square without; unknown kinds as other", () => {
     expect(trainIcon("intercity", 90)).toBe("car-intercity");
-    expect(trainIcon("metro", null)).toBe("box-metro");
+    expect(trainIcon("suburban", null)).toBe("box-suburban");
     expect(trainIcon("tram" as TrainKind, 0)).toBe("car-other");
   });
 
@@ -160,7 +157,7 @@ describe("on the map", () => {
       expect(trainIconSize(kind, 0, 2)).toBeLessThan(close);
       expect(trainIconSize(kind, null, 12)).toBeLessThan(close);
     }
-    expect(trainIconSize("highSpeed", 0, 12)).toBeGreaterThan(trainIconSize("metro", 0, 12));
+    expect(trainIconSize("highSpeed", 0, 12)).toBeGreaterThan(trainIconSize("suburban", 0, 12));
   });
 });
 
@@ -185,8 +182,7 @@ describe("panel", () => {
     for (const source of Object.keys(TRAIN_CREDITS)) {
       expect(TRAIN_SOURCE_NAMES[source as keyof typeof TRAIN_SOURCE_NAMES]).toBeTruthy();
     }
-    expect(TRAIN_CREDITS.amtrak.url).toBe("https://amtraker.com");
-    expect(TRAIN_CREDITS.amtrak.text).toContain("Amtraker");
+    expect(TRAIN_CREDITS.trafikverket.url).toBe("https://data.trafikverket.se/");
   });
 });
 
@@ -228,6 +224,5 @@ describe("products", () => {
     expect(trainProduct({ source: "trafikverket", name: "Öresundståg 1322" })).toBe("Öresundståg");
     expect(trainProduct({ source: "trafikverket", name: "SJ Snabbtåg 531" })).toBe("SJ Snabbtåg");
     expect(trainProduct({ source: "trafikverket", name: "Train 1322" })).toBeNull();
-    expect(trainProduct({ source: "amtrak", name: "Amtrak 5 California Zephyr" })).toBeNull();
   });
 });

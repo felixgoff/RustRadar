@@ -12,9 +12,11 @@
     counts: Record<Mode, number | null>;
     /** Show or hide a kind other than the focus on the map. */
     ontoggle: (kind: Mode) => void;
+    /** The kinds on offer (the trains need a working Trafikverket key). */
+    offered: Record<Mode, boolean>;
   }
 
-  let { mode = $bindable(), shown, counts, ontoggle }: Props = $props();
+  let { mode = $bindable(), shown, counts, ontoggle, offered }: Props = $props();
 
   const MODES = [
     ["aircraft", "Aircraft", "P"],
@@ -30,7 +32,7 @@
 <!-- centred over the map, clear of the sidebar on the left and the detail panels on the right -->
 <nav class="wrap" aria-label="Traffic">
   <div class="modebar surface">
-    <Segmented legend="Show" hideLegend name="mode" options={MODES} bind:value={mode}>
+    <Segmented legend="Show" hideLegend name="mode" options={MODES.filter(([m]) => offered[m])} bind:value={mode}>
       {#snippet content(option, label)}
         {@const Icon = ICONS[option]}
         <Icon size={15} strokeWidth={1.75} aria-hidden="true" />
@@ -42,7 +44,7 @@
       {#snippet trailing(option, label)}
         <!-- the focus is always on the map: no toggle of its own -->
         {#if option !== mode}
-          {@const key = MODES.find(([m]) => m === option)![2]}
+          {@const key = MODES.find(([m]) => m === option)?.[2]}
           <button
             type="button"
             class="show"

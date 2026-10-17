@@ -102,6 +102,10 @@ export function matcher(f: Filters): (flight: LiveFlight) => boolean {
 export type Mode = "aircraft" | "trains" | "ships";
 export const MODES: readonly Mode[] = ["aircraft", "trains", "ships"];
 
+/** What the rail map shows: the track's speed limits, or its signal blocks (close in). */
+export type RailShows = "speeds" | "blocks";
+export const RAIL_SHOWS: readonly RailShows[] = ["speeds", "blocks"];
+
 export interface Settings {
   /** The focus: aircraft, trains or ships. Its kind is always on the map, and the sidebar is for it. */
   mode: Mode;
@@ -120,8 +124,8 @@ export interface Settings {
   adsb: boolean;
   /** Railway lines from OpenRailwayMap. */
   railMap: boolean;
-  /** Signal blocks close in: free, or taken by the train drawn in them. */
-  trainBlocks: boolean;
+  /** What the rail map shows: speed limits, or signal blocks close in (free, or taken by the train drawn in them). */
+  railShows: RailShows;
   /** The realistic map's weather: live where the map is looking, or one chosen. */
   sky: Sky;
   /** Relief from the AWS Terrain Tiles (Mapzen). */
@@ -141,7 +145,7 @@ export const DEFAULT_SETTINGS: Settings = {
   weather: false,
   adsb: true,
   railMap: false,
-  trainBlocks: false,
+  railShows: "speeds",
   sky: "live",
   terrain: false,
   exaggeration: 10,
@@ -171,6 +175,9 @@ export function mergeSettings(saved: unknown): Settings {
     ? MODES.filter((m) => (old.alsoShow as unknown[]).includes(m))
     : [];
   if (!SKIES.includes(merged.sky)) merged.sky = DEFAULT_SETTINGS.sky;
+  if (!RAIL_SHOWS.includes(merged.railShows)) merged.railShows = DEFAULT_SETTINGS.railShows;
+  // signal blocks were a switch of their own, drawn with or without the rail map
+  if (old.trainBlocks === true && !("railShows" in old)) Object.assign(merged, { railMap: true, railShows: "blocks" });
   if (!MODES.includes(old.mode as Mode)) {
     merged.mode = DEFAULT_SETTINGS.mode;
     // the old switches defaulted to on: missing counts as on

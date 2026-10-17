@@ -597,9 +597,9 @@ export const airlineLogoUrl = (airlineId: number) =>
   `https://cdn.flightradar24.com/assets/airlines/logotypes/${airlineId}.png`;
 
 /** Where a train comes from: one regional public feed each. */
-export type TrainSource = "trafikverket" | "digitraffic" | "amtrak" | "entur" | "irishrail" | "vbb";
+export type TrainSource = "trafikverket";
 
-export type TrainKind = "highSpeed" | "intercity" | "regional" | "suburban" | "metro" | "freight" | "other";
+export type TrainKind = "highSpeed" | "intercity" | "regional" | "suburban" | "other";
 
 /** A train on the move, merged from regional public feeds (no global one exists). */
 /** A position report as the dev map marks it. */
@@ -613,10 +613,10 @@ export interface Sighting {
 }
 
 export interface Train {
-  /** Source-prefixed and stable while the train runs, e.g. `digitraffic:2026-10-13:2`. */
+  /** Source-prefixed and stable while the train runs, e.g. `trafikverket:2026-10-13:523`. */
   id: string;
   source: TrainSource;
-  /** e.g. "IC 1", "H train 1608", "Amtrak 5 California Zephyr", "F4 Oslo S-Bergen". */
+  /** e.g. "SJ Snabbtåg 523", "Pendeltåg 2245". */
   name: string;
   kind: TrainKind;
   lat: number;
@@ -647,12 +647,9 @@ export interface Train {
 }
 
 /**
- * Trains in an area (`west > east` crosses the antimeridian) at a deck.gl
- * zoom, from every regional source covering it (Sweden with a Trafikverket
- * key from the keys page; Finland, Norway, Ireland, the USA and Canada at any
- * zoom; Berlin–Brandenburg from zoom 6). Cached
- * 20–30 s per source in Rust, with backoff; a failing source is left out,
- * and it rejects only when every source in view failed.
+ * Trains in Sweden in an area (`west > east` crosses the antimeridian) at a
+ * deck.gl zoom, from Trafikverket with the key from the keys page. Cached
+ * 10–30 s in Rust (the live streams patch it between), with backoff.
  */
 export const trainsInView = (area: BoundingBox, zoom: number) =>
   invoke<Train[]>("trains_in_view", { ...area, zoom });
@@ -733,3 +730,6 @@ export const hideTrainOperators = (names: string[]) => invoke<void>("hide_train_
 
 /** Every stop of a train, in order, for sources with its timetable (Trafikverket); empty for the others. */
 export const trainStops = (id: string) => invoke<TrainStop[]>("train_stops", { id });
+
+/** Whether the saved Trafikverket key works: "none" saved, "invalid" (refused) or "ok"; rejects when Trafikverket can't be reached. */
+export const trafikverketKeyStatus = () => invoke<"none" | "invalid" | "ok">("trafikverket_key_status");

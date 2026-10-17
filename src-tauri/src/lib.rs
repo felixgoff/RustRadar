@@ -750,6 +750,7 @@ pub fn run() {
             devlog::dev_log,
             devlog::dev_log_clear,
             trafikverket::product_codes,
+            trafikverket::trafikverket_key_status,
             trains::follow_train,
             trains::unfollow_train,
             train_media::train_media,

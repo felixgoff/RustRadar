@@ -12,6 +12,7 @@
   import LayersMenu from "./LayersMenu.svelte";
   import SettingsMenu from "./SettingsMenu.svelte";
   import type { SessionInfo } from "./api";
+  import type { RailShows } from "./filters";
   import type { Basemap } from "./geo";
   import type { Sky } from "./weather";
 
@@ -30,7 +31,7 @@
     weather: boolean;
     adsb: boolean;
     railMap: boolean;
-    trainBlocks: boolean;
+    railShows: RailShows;
     sky: Sky;
     terrain: boolean;
     exaggeration: number;
@@ -60,7 +61,7 @@
     weather = $bindable(),
     adsb = $bindable(),
     railMap = $bindable(),
-    trainBlocks = $bindable(),
+    railShows = $bindable(),
     sky = $bindable(),
     terrain = $bindable(),
     exaggeration = $bindable(),
@@ -136,7 +137,7 @@
           bind:buildings
           bind:labels
           bind:railMap
-          bind:trainBlocks
+          bind:railShows
           bind:sky
           {aircraftShown}
           bind:aircraftLabels

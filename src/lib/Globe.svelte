@@ -1987,8 +1987,8 @@
     ];
   }
 
-  /** The rail map is coloured by speed limit in the app (its tiles come through the backend). */
-  const railSpeeds = isTauri();
+  /** The rail map is coloured by speed limit in the app (its tiles come through the backend), unless it shows the signal blocks. */
+  const railSpeeds = $derived(isTauri() && !trainBlocks);
   /** The zoom, for what the page shows over the map (the legend). */
   let shownZoom = $state(0);
 

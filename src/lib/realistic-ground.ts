@@ -334,15 +334,35 @@ const groundInject = {
         rough = mix(rough, 0.25, unseen);
         rl_glint = 1.0 - 0.8 * unseen;
       } else {
-        // field to field the crop differs, and the way its rows run: Streets GL's patchwork, a field to
-        // each repeat of the texture (about 50 m); fields too small to see take the crops' mean, not a flicker
+        // Fields, as a plain's lie: each block of the textures' period (numbered the world over, 16 to
+        // the clouds' period, so the pattern repeats only every 11 km or so) cut three or four times
+        // across its longer side at a hashed point, so the fields have straight edges and all sizes and
+        // shapes; to each its crop (one of Streets GL's three), its rows along its length. Fields too
+        // small to see take the crops' mean, not a flicker.
         float crops = 0.0;
         if (i == ${FARMLAND}) {
-          vec2 field = floor(rl_t * 12.0);
-          float pick = rl_hash(field, 12.0);
-          layer += floor(pick * 2.999);
-          if (fract(pick * 7.0) > 0.5) uv = uv.yx;
-          crops = smoothstep(0.35, 0.9, rl_cells(rl_t * 12.0));
+          vec2 p = rl_c * 16.0;
+          vec2 lo = floor(p);
+          vec2 hi = lo + 1.0;
+          float seed = rl_hash(lo, 16.0);
+          for (int k = 0; k < 4; k++) {
+            if (k == 3 && seed < 0.5) break;
+            float cut = 0.3 + 0.4 * fract(seed * 13.7);
+            bool beyond;
+            if (hi.x - lo.x >= hi.y - lo.y) {
+              float x = mix(lo.x, hi.x, cut);
+              beyond = p.x >= x;
+              if (beyond) lo.x = x; else hi.x = x;
+            } else {
+              float y = mix(lo.y, hi.y, cut);
+              beyond = p.y >= y;
+              if (beyond) lo.y = y; else hi.y = y;
+            }
+            seed = fract(sin(seed * 91.3 + (beyond ? 47.1 : 12.9)) * 43758.5453);
+          }
+          layer += floor(fract(seed * 7.0) * 2.999);
+          if (hi.y - lo.y > hi.x - lo.x) uv = uv.yx;
+          crops = smoothstep(0.35, 0.9, rl_cells(rl_t * 3.0));
         }
         // (the images are stored top row first: v runs up them)
         vec3 at = vec3(uv.x, -uv.y, layer);

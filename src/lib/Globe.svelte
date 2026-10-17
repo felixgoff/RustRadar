@@ -2114,6 +2114,12 @@
     blocksAskedAt = now;
     fetchTrainBlocks(area)
       .then((r) => {
+        // while the track or signals load the answer comes back short (often empty): the blocks on
+        // show stay until one has them all, or the map would flick between them and the bare lines
+        if (!r.complete && blockSet && r.blocks.length < blockSet.list.length) {
+          blockSet.complete = false;
+          return;
+        }
         blockSet = { ...area, list: r.blocks, complete: r.complete };
         blocksTaken.at = 0;
       })

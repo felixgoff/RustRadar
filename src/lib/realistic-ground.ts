@@ -24,22 +24,22 @@ type RGBA = [number, number, number, number];
  */
 type Surface = { texture: (typeof GROUND_TEXTURES)[number] | "water"; metres: number; rough: number; snow: number; paved?: boolean };
 
-/** The surfaces, by the id a feature's colour carries in its alpha (255 less the id). */
+/** The surfaces, by the id a feature's colour carries in its alpha (255 less the id); each texture's metres as Streets GL lays it. */
 const SURFACES: Record<number, Surface> = {
-  0: { texture: "grass", metres: 12, rough: 0.95, snow: 1 },
-  1: { texture: "park", metres: 8, rough: 0.9, snow: 1 },
-  2: { texture: "forest", metres: 10, rough: 0.95, snow: 1 },
-  3: { texture: "farmland0", metres: 22, rough: 0.95, snow: 1 },
-  4: { texture: "grass", metres: 14, rough: 0.95, snow: 1 },
-  5: { texture: "garden", metres: 10, rough: 0.92, snow: 1 },
-  6: { texture: "sand", metres: 8, rough: 0.9, snow: 1 },
-  7: { texture: "rock", metres: 10, rough: 0.85, snow: 1 },
-  8: { texture: "soil", metres: 8, rough: 0.95, snow: 1 },
-  9: { texture: "pavement", metres: 4, rough: 0.8, snow: 0.5, paved: true },
-  10: { texture: "asphalt", metres: 6, rough: 0.85, snow: 0.5, paved: true },
+  0: { texture: "grass", metres: 25, rough: 0.95, snow: 1 },
+  1: { texture: "park", metres: 20, rough: 0.9, snow: 1 },
+  2: { texture: "forest", metres: 15, rough: 0.95, snow: 1 },
+  3: { texture: "farmland0", metres: 50, rough: 0.95, snow: 1 },
+  4: { texture: "grass", metres: 25, rough: 0.95, snow: 1 },
+  5: { texture: "garden", metres: 16, rough: 0.92, snow: 1 },
+  6: { texture: "sand", metres: 12, rough: 0.9, snow: 1 },
+  7: { texture: "rock", metres: 32, rough: 0.85, snow: 1 },
+  8: { texture: "soil", metres: 25, rough: 0.95, snow: 1 },
+  9: { texture: "pavement", metres: 10, rough: 0.8, snow: 0.5, paved: true },
+  10: { texture: "asphalt", metres: 20, rough: 0.85, snow: 0.5, paved: true },
   11: { texture: "water", metres: 0, rough: 0.05, snow: 0 },
-  12: { texture: "gravel", metres: 4, rough: 0.9, snow: 1 },
-  13: { texture: "cobblestone", metres: 3, rough: 0.75, snow: 0.5, paved: true },
+  12: { texture: "gravel", metres: 8, rough: 0.9, snow: 1 },
+  13: { texture: "cobblestone", metres: 6, rough: 0.75, snow: 0.5, paved: true },
   // glaciers and ice caps: snow, whatever the weather
   14: { texture: "sand", metres: 10, rough: 0.6, snow: 1 },
   // a pitch (one for every game: the map doesn't say which), and wooden planks
@@ -53,9 +53,9 @@ const SURFACES: Record<number, Surface> = {
   39: { texture: "tram", metres: 0, rough: 0.8, snow: 0.5, paved: true },
   40: { texture: "wood", metres: 0, rough: 0.8, snow: 1 },
   // lines with a texture of the world's
-  36: { texture: "pavement", metres: 3, rough: 0.8, snow: 0.5, paved: true },
-  37: { texture: "asphalt", metres: 6, rough: 0.8, snow: 0.5, paved: true },
-  38: { texture: "gravel", metres: 3, rough: 0.9, snow: 1 },
+  36: { texture: "pavement", metres: 10, rough: 0.8, snow: 0.5, paved: true },
+  37: { texture: "asphalt", metres: 20, rough: 0.8, snow: 0.5, paved: true },
+  38: { texture: "gravel", metres: 8, rough: 0.9, snow: 1 },
   41: { texture: "cycleway", metres: 8, rough: 0.8, snow: 0.5, paved: true },
 };
 const FARMLAND = 3;
@@ -333,17 +333,26 @@ const groundInject = {
         rough = mix(rough, 0.25, unseen);
         rl_glint = 1.0 - 0.8 * unseen;
       } else {
+        // field to field the crop differs, and the way its rows run: Streets GL's patchwork, a field to
+        // each repeat of the texture (about 50 m); fields too small to see take the crops' mean, not a flicker
+        float crops = 0.0;
         if (i == ${FARMLAND}) {
-          // field to field the crop differs, and the way its rows run
-          vec2 field = floor(rl_t * 24.0);
-          // (one crop for them all where the fields are too small to see, not a flicker)
-          float pick = rl_cells(rl_t * 24.0) < 0.5 ? rl_hash(field, 24.0) : 0.1;
+          vec2 field = floor(rl_t * 12.0);
+          float pick = rl_hash(field, 12.0);
           layer += floor(pick * 2.999);
           if (fract(pick * 7.0) > 0.5) uv = uv.yx;
+          crops = smoothstep(0.35, 0.9, rl_cells(rl_t * 12.0));
         }
         // (the images are stored top row first: v runs up them)
         vec3 at = vec3(uv.x, -uv.y, layer);
         vec4 c = texture(rground_color, at);
+        if (crops > 0.0) {
+          float first = GS_LAYER[${FARMLAND}];
+          vec3 mean = textureLod(rground_color, vec3(0.5, 0.5, first), 16.0).rgb
+            + textureLod(rground_color, vec3(0.5, 0.5, first + 1.0), 16.0).rgb
+            + textureLod(rground_color, vec3(0.5, 0.5, first + 2.0), 16.0).rgb;
+          c.rgb = mix(c.rgb, mean / 3.0, crops);
+        }
         vec3 nm = texture(rground_normal, at).xyz * 2.0 - 1.0;
         n = normalize(vec3(nm.xy, max(nm.z, 0.3)));
         // a little unevenness over tens of metres, so the repeats don't show (gone where it would only speckle)

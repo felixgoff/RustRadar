@@ -1,10 +1,12 @@
 // The realistic map's light and materials, after Streets GL
 // (github.com/StrandedKitty/streets-gl, MIT licence): physically based
 // shading in linear light — a sun reddened by the air it comes through, the
-// sky's light from every side and the ground's from below, GGX highlights and
-// reflections of the sky — then aerial perspective, the distance fading into
-// the sky's colour, and a filmic tone curve. The weather sets it all: how much
-// sun gets through, how grey the sky is, how thick the air, wet or snowy.
+// sky's grey light from every side, GGX highlights and reflections of the
+// sky — then aerial perspective, the distance fading into the sky's colour
+// (the clear air's few percent a kilometre, thick only in fog), and the
+// screen's gamma with no tone curve, so the colours stay as Streets GL shows
+// them. The weather sets it all: how much sun gets through, how grey the sky
+// is, how thick the air, wet or snowy.
 //
 // The shading is shader code injected into deck.gl's layers by extensions:
 // buildings (Streets GL's façade and roof textures: storeys and bays of
@@ -54,7 +56,7 @@ export type Look = {
   cloudShadow: number;
   /** 0 by day to 1 at night: windows light up. */
   night: number;
-  /** Brightening before the tone curve, more at night. */
+  /** Brightening before the screen's gamma: under cloud a little, at night more. */
   exposure: number;
 };
 
@@ -83,15 +85,18 @@ export function transmittance(altDeg: number, haze: number): RGB {
 
 /** How bright a colour looks (Rec. 709's weights). */
 const luminance = (c: readonly number[]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-/** The daylight under a grey sky, which the exposure is set for; brighter scenes are taken darker. */
-const OVERCAST_DAYLIGHT = 0.75;
+/** The daylight of a clear day with the sun 40° up, which the exposure is set for (Streets GL's: no adjusting); dimmer scenes are taken brighter. */
+const CLEAR_DAYLIGHT = 1.84;
+/** The clear air's own haze, per metre: Streets GL's atmosphere at the ground (about 2 % a kilometre). */
+const CLEAR_AIR = 2.2e-5;
 
 /**
  * The light in some weather with the sun towards `sun` (east, north, up),
- * the camera `cameraMetres` from what it looks at. The air thins out the view
- * as the weather has it, but never so much that the map gets hard to read:
- * at most about a fifth of the way to the middle of the view, more in fog,
- * which only begins half way there.
+ * the camera `cameraMetres` from what it looks at. As Streets GL has it, the
+ * air is clear (a couple of percent a kilometre) whatever the clouds; only
+ * fog thickens it, and never so much that the map gets hard to read: at most
+ * about a fifth of the way to the middle of the view, more in fog, which
+ * only begins half way there.
  */
 export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 1000): Look {
   const sunUp = Math.max(-1, Math.min(1, sun[2]));
@@ -112,8 +117,11 @@ export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 10
   const skyHorizon = mix(clearHorizon, greyHorizon, c.cloud);
   const skyLight = mix(skyHorizon, skyZenith, 0.5);
   const night = 1 - smooth(-7, 1, altDeg);
-  // at night more of it, as Streets GL keeps: the streets dim but there to see, not black
-  const ambient = (1 + 0.25 * c.cloud) * (1 + 3 * night);
+  // Streets GL's light from the sky: grey and the same from every side, a fifth of the sun's
+  // on a clear day; under cloud the sky gives what the sun doesn't; at night a little, so the
+  // streets are dim but there to see, not black
+  const overcast = luminance(mix(OVERCAST_ZENITH, OVERCAST_HORIZON, 0.5)) * (1 - 0.3 * c.wet);
+  const ambient = (0.2 + (overcast * 1.1 - 0.2) * c.cloud) * (0.15 + 0.85 * day) + 0.08 * night;
   // the ground throws back about a fifth of what falls on it
   const groundColor = skyLight.map((s, i) => 0.2 * (s + sunColor[i] * Math.max(sunUp, 0))) as RGB;
   // fog is the air itself lit: whiter than a hazy sky
@@ -121,9 +129,9 @@ export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 10
   const fogColour = scale([0.7, 0.71, 0.72], Math.max(day, 0.02));
   const hazeColor = mix(skyHorizon, mix(skyLight, fogColour, 0.5), fog);
   const camera = Math.max(cameraMetres, 50);
-  // as a camera would: a sunny day taken darker than a grey one, so it isn't washed out (more so at night)
-  const daylight = luminance(sunColor) * Math.max(sunUp, 0) + luminance(skyLight) * ambient;
-  const adapt = Math.min(1, Math.max(0.5, Math.sqrt(OVERCAST_DAYLIGHT / Math.max(daylight, 1e-3))));
+  // a clear day as Streets GL shows it; a grey one taken a little brighter, as a camera would (more so at night)
+  const daylight = luminance(sunColor) * Math.max(sunUp, 0) + ambient;
+  const adapt = Math.min(1.8, Math.max(1, Math.sqrt(CLEAR_DAYLIGHT / Math.max(daylight, 1e-3))));
   return {
     sunDir: [sun[0], sun[1], sunUp],
     sunUp,
@@ -133,7 +141,7 @@ export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 10
     groundColor,
     ambient,
     hazeColor,
-    hazeDensity: Math.min(c.haze, (0.22 + 0.64 * fog) / camera),
+    hazeDensity: Math.min(Math.min(c.haze, CLEAR_AIR) * (1 - fog) + c.haze * fog, (0.22 + 0.64 * fog) / camera),
     hazeStart: fog * 0.5 * camera,
     wet: c.wet,
     snow: c.snow,
@@ -150,11 +158,9 @@ export function setLook(next: Look) {
   Object.assign(look, next);
 }
 
-/** ACES's filmic curve (Narkowicz's fit), as the shaders have it. */
-const aces = (x: number) => clamp01((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
-/** A linear colour as the screen shows it, 0–255, through the same exposure and curve as the shaders. */
+/** A linear colour as the screen shows it, 0–255, through the same exposure and gamma as the shaders (Streets GL's: no tone curve). */
 export function displayRgb(linear: readonly number[], exposure = look.exposure): RGB {
-  return linear.map((v) => Math.round(255 * aces(v * exposure) ** (1 / 2.2))) as RGB;
+  return linear.map((v) => Math.round(255 * clamp01(v * exposure) ** (1 / 2.2))) as RGB;
 }
 
 /**
@@ -269,11 +275,9 @@ ${rlightVaryings("in")}
 vec3 rl_linear(vec3 c) {
   return pow(max(c, vec3(0.0)), vec3(2.2));
 }
-// ACES's filmic curve (Narkowicz's fit), then the screen's gamma
+// the screen's gamma, as Streets GL shows its colours: no tone curve to dull them
 vec3 rl_display(vec3 c) {
-  vec3 x = c * rlight.exposure;
-  x = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
-  return pow(x, vec3(1.0 / 2.2));
+  return pow(clamp(c * rlight.exposure, 0.0, 1.0), vec3(1.0 / 2.2));
 }
 // value noise on a lattice \`n\` cells to the period, repeating with it
 float rl_hash(vec2 cell, float n) {
@@ -309,10 +313,9 @@ vec3 rl_sky(vec3 dir) {
   sky += rl_sunLight() * (0.04 * pow(toSun, 6.0) + 0.5 * pow(toSun, 900.0));
   return mix(sky, rlight.groundColor, smoothstep(0.0, -0.2, up));
 }
-// all the light a surface facing \`n\` gets from the sky above and the ground below
+// all the light a surface facing \`n\` gets from the sky: grey, as Streets GL has it (a little less facing down)
 vec3 rl_irradiance(vec3 n) {
-  vec3 sky = mix(rlight.skyHorizon, rlight.skyZenith, 0.6);
-  return mix(rlight.groundColor, sky, clamp(0.5 + 0.5 * n.z, 0.0, 1.0)) * rlight.ambient;
+  return vec3(rlight.ambient) * mix(0.6, 1.0, clamp(0.5 + 0.5 * n.z, 0.0, 1.0));
 }
 // the split-sum environment BRDF (Karis's fit for mobile, as Streets GL has it)
 vec2 rl_envBRDF(float NdotV, float roughness) {
@@ -582,10 +585,14 @@ const rbuildInject = {
       layer = 9.0 + roof;
       float metres = roof < 0.5 ? 4.0 : roof < 1.5 ? 10.0 : roof < 2.5 ? 4.0 : roof < 3.5 ? 3.0 : roof < 4.5 ? 5.0 : 18.0;
       uv = rl_t * max(1.0, floor(rlight.periodMetres / metres + 0.5));
-      // tiles and metal in a roof's colours; the rest their own
-      vec3 roofTint = which < 0.4 ? vec3(0.42, 0.12, 0.06) : which < 0.62 ? vec3(0.2, 0.08, 0.05)
-        : which < 0.88 ? vec3(0.06, 0.06, 0.07) : vec3(0.1, 0.24, 0.17);
-      tint = (roof > 1.5 && roof < 3.5) ? roofTint : vec3(0.55);
+      // Streets GL's roof colours: tiles terracotta (or slate), metal pale grey-blue (or copper),
+      // concrete grey; its flat roofs a little under their textures' white, so the sun doesn't burn them out;
+      // tar and eternit darker
+      tint = roof > 2.5 && roof < 3.5 ? (which < 0.75 ? vec3(0.597, 0.205, 0.127) : vec3(0.262, 0.262, 0.309))
+        : roof > 1.5 && roof < 2.5 ? (which < 0.8 ? vec3(0.546, 0.644, 0.723) : vec3(0.366, 0.59, 0.509))
+        : roof > 0.5 && roof < 1.5 ? vec3(0.497)
+        : roof > 4.5 ? vec3(0.8)
+        : vec3(0.55);
     }
     // (the images are stored top row first: v runs up them)
     vec3 at = vec3(uv.x, -uv.y, layer);

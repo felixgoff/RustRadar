@@ -1239,6 +1239,7 @@
       settings.railMap && isTauri() && RAIL_SPEED_ATTRIBUTION,
       settings.terrain && TERRAIN_ATTRIBUTION,
       settings.basemap === "realistic" && "Textures: Streets GL (MIT)",
+      settings.basemap === "realistic" && "Earth: NASA Blue Marble",
       weatherLive && liveWeather && "Weather: MET Norway",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]

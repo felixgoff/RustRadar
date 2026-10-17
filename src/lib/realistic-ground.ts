@@ -287,6 +287,8 @@ const groundFs = /* glsl */ `\
 uniform mediump sampler2DArray rground_color;
 uniform mediump sampler2DArray rground_normal;
 uniform sampler2D rground_water;
+uniform sampler2D rground_earth;
+in vec2 rg_e;
 ${table("GS_LAYER", (s) => (s.texture === "water" ? -1 : textureLayer.ground(s.texture)))}
 ${table("GS_METRES", (s) => s.metres)}
 ${table("GS_ROUGH", (s) => s.rough)}
@@ -295,6 +297,13 @@ ${table("GS_PAVED", (s) => (s.paved ? 1 : 0))}
 `;
 
 const groundInject = {
+  "vs:DECKGL_FILTER_GL_POSITION": /* glsl */ `
+  {
+    // where it is on the picture of the Earth: on the globe, its own place; on the flat map (close in) the view's centre is near enough
+    vec2 rg_ll = project.projectionMode == PROJECTION_MODE_GLOBE ? geometry.worldPosition.xy : rlight.anchor;
+    rg_e = vec2((rg_ll.x + 180.0) / 360.0, (90.0 - rg_ll.y) / 180.0);
+  }
+  `,
   "fs:DECKGL_FILTER_COLOR": /* glsl */ `
   {
     float id = floor((1.0 - color.a) * 255.0 + 0.5);
@@ -340,10 +349,24 @@ const groundInject = {
         // a little unevenness over tens of metres, so the repeats don't show (gone where it would only speckle)
         float grain = 1.0 - smoothstep(0.25, 1.0, rl_cells(rl_t * 32.0));
         albedo = c.rgb * tint * (1.0 + 0.28 * grain * (rl_noise(rl_t, 32.0) - 0.5));
+        // Zoomed out the map's data hardly says what the land is (desert, savanna and tundra would all be
+        // grass): there its colour is the Earth's own, from the picture of it, taking over as a pixel grows
+        // past 100 m or so. Closer in, land nothing is mapped on keeps the Earth's colour where that is
+        // dry (sand, rock), in the grass's texture; where it is green, the grass is as it is.
+        vec4 earth = texture(rground_earth, rg_e);
+        float far = earth.a * smoothstep(120.0, 1200.0, rl_cells(rl_t) * rlight.periodMetres);
+        if (i == 0) {
+          const vec3 LUM = vec3(0.2126, 0.7152, 0.0722);
+          vec3 grass = textureLod(rground_color, vec3(0.5, 0.5, layer), 16.0).rgb;
+          float dry = earth.a * smoothstep(0.03, 0.15, (earth.r - earth.g) / (earth.r + earth.g + 1e-4));
+          albedo = mix(albedo, earth.rgb * dot(albedo, LUM) / max(dot(grass, LUM), 1e-4), dry);
+        }
+        if (i != ${ICE}) albedo = mix(albedo, earth.rgb, far);
         // snow lies on the land, slush on the roads; rain darkens what is paved and makes it shine
-        float snow = i == ${ICE} ? 1.0 : rlight.snow * GS_SNOW[i];
+        // (the weather where the camera is: not the whole world's, zoomed out)
+        float snow = i == ${ICE} ? 1.0 : rlight.snow * GS_SNOW[i] * (1.0 - far);
         albedo = mix(albedo, vec3(0.82, 0.84, 0.88) * mix(0.75, 1.0, GS_SNOW[i]), snow);
-        float wet = rlight.wet * mix(0.35, 1.0, GS_PAVED[i]);
+        float wet = rlight.wet * mix(0.35, 1.0, GS_PAVED[i]) * (1.0 - far);
         albedo *= 1.0 - 0.45 * wet;
         rough = mix(rough, 0.12, wet * GS_PAVED[i] * (1.0 - rlight.snow));
         n = normalize(mix(n, vec3(0.0, 0.0, 1.0), wet * 0.6));
@@ -357,6 +380,7 @@ const groundInject = {
 
 const groundModule = {
   name: "rground",
+  vs: "out vec2 rg_e;\n",
   fs: groundFs,
 } as const;
 
@@ -380,6 +404,7 @@ export class GroundExtension extends LayerExtension {
         rground_color: textures.ground.color,
         rground_normal: textures.ground.normal,
         rground_water: textures.water,
+        rground_earth: textures.earth,
       },
     });
   }

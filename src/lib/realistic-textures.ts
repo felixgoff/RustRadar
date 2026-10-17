@@ -65,7 +65,8 @@ export const textureLayer = {
 
 export type BuildingTextures = { color: Texture; normal: Texture; mask: Texture; glow: Texture };
 export type GroundTextures = { color: Texture; normal: Texture };
-export type RealisticTextures = { buildings: BuildingTextures; ground: GroundTextures; water: Texture; ready: boolean };
+/** `earth`: the whole Earth, cloud-free, for the land's colour zoomed out (its alpha is 0 until it loads: not used). */
+export type RealisticTextures = { buildings: BuildingTextures; ground: GroundTextures; water: Texture; earth: Texture; ready: boolean };
 
 const BASE = "/realistic/";
 const SAMPLER = {
@@ -106,6 +107,21 @@ function textureArray(device: Device, images: ImageBitmap[] | null, kind: Kind):
   } as never);
   images.forEach((image, z) => texture.copyExternalImage({ image, z, width: size, height: size, depth: 1 }));
   (texture as unknown as { generateMipmapsWebGL(): void }).generateMipmapsWebGL();
+  return texture;
+}
+
+/** A plain 2D texture of `image`, mipmapped. */
+function texture2d(device: Device, image: ImageBitmap, format: string, sampler: object = SAMPLER): Texture {
+  const texture = device.createTexture({
+    format,
+    width: image.width,
+    height: image.height,
+    mipLevels: Math.floor(Math.log2(Math.max(image.width, image.height))) + 1,
+    sampler,
+  } as never);
+  texture.copyExternalImage({ image, width: image.width, height: image.height });
+  (texture as unknown as { generateMipmapsWebGL(): void }).generateMipmapsWebGL();
+  image.close();
   return texture;
 }
 
@@ -166,31 +182,27 @@ export function realisticTextures(device: Device): RealisticTextures {
     buildings: standIns(device, BUILDING_KINDS),
     ground: standIns(device, GROUND_KINDS),
     water: waterStandIn,
+    earth: device.createTexture({ format: "rgba8unorm", width: 1, height: 1, data: new Uint8Array(4) } as never),
     ready: false,
   };
   state = { device, textures };
   const mine = state;
   void (async () => {
     try {
-      const [buildings, ground, water] = await Promise.all([
+      const [buildings, ground, water, earth] = await Promise.all([
         loadSet(device, BUILDING_TEXTURES, BUILDING_KINDS),
         loadSet(device, GROUND_TEXTURES, GROUND_KINDS),
         bitmap(`${BASE}water.normal.webp`),
+        bitmap(`${BASE}earth.color.webp`),
       ]);
       if (state !== mine) return;
-      const waterTexture = device.createTexture({
-        format: "rgba8unorm",
-        width: water.width,
-        height: water.height,
-        mipLevels: Math.floor(Math.log2(Math.max(water.width, water.height))) + 1,
-        sampler: SAMPLER,
-      } as never);
-      waterTexture.copyExternalImage({ image: water, width: water.width, height: water.height });
-      (waterTexture as unknown as { generateMipmapsWebGL(): void }).generateMipmapsWebGL();
-      water.close();
+      const waterTexture = texture2d(device, water, "rgba8unorm");
+      // round the world east to west; not over the poles
+      const earthTexture = texture2d(device, earth, "rgba8unorm-srgb", { ...SAMPLER, addressModeV: "clamp-to-edge" });
       for (const old of [textures.buildings, textures.ground]) for (const t of Object.values(old)) t.destroy();
       textures.water.destroy();
-      Object.assign(textures, { buildings, ground, water: waterTexture, ready: true });
+      textures.earth.destroy();
+      Object.assign(textures, { buildings, ground, water: waterTexture, earth: earthTexture, ready: true });
       for (const listener of listeners) listener();
     } catch (error) {
       // the stand-ins stay: plain surfaces, lit as ever

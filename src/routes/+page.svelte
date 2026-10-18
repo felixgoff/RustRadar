@@ -1300,6 +1300,23 @@
   const retryIn = $derived(Math.max(0, Math.ceil((nextRefreshAt - now) / 1000)));
   const count = (n: number) => n.toLocaleString();
 
+  // dev builds: frames a second, for the corner's readout
+  let fps = $state(0);
+  $effect(() => {
+    if (!import.meta.env.DEV) return;
+    let frames = 0;
+    let since = performance.now();
+    let id = requestAnimationFrame(function tick(now) {
+      frames++;
+      if (now - since >= 1000) {
+        fps = Math.round((frames * 1000) / (now - since));
+        [frames, since] = [0, now];
+      }
+      id = requestAnimationFrame(tick);
+    });
+    return () => cancelAnimationFrame(id);
+  });
+
   let timers: ReturnType<typeof setInterval>[] = [];
   onMount(() => {
     checkTrafikverketKey();
@@ -1716,6 +1733,14 @@
     onsignout={handleSignOut}
   />
 
+  {#if import.meta.env.DEV}
+    <!-- where the view is and what it shows, for development -->
+    <pre class="dev-readout">z {view.zoom.toFixed(2)}  pitch {view.pitch.toFixed(0)}°  bearing {view.bearing.toFixed(0)}°
+{view.latitude.toFixed(5)}, {view.longitude.toFixed(5)}
+{settings.basemap}{settings.basemap === "realistic" && view.zoom >= SGL_ZOOM - 0.5 ? " · Streets GL" : ""}  {fps} fps
+{count(flights.length)} aircraft · {count(trains.length)} trains · {count(ships.length)} ships</pre>
+  {/if}
+
   <!-- the train credits come first, so the line's ellipsis can't hide them -->
   <p class="attribution" title={[...trainCredit.map((c) => c.text), ...attribution].join(" · ")}>
     {#each trainCredit as c, i (c.url)}
@@ -1861,15 +1886,29 @@
     font-size: var(--text-sm);
     color: var(--text-2);
   }
+  .dev-readout {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    margin: 0;
+    padding: 4px 6px;
+    border-radius: var(--radius-sm);
+    background: oklch(0.15 0 0 / 0.75);
+    color: var(--text-2);
+    font: 10px/1.35 var(--font-mono, ui-monospace, monospace);
+    pointer-events: none;
+    z-index: 5;
+  }
   .attribution {
     position: absolute;
     right: 0;
     bottom: 0;
     max-width: calc(100% - 352px);
-    padding: 3px var(--space-2);
+    padding: 1px var(--space-1);
     border-top-left-radius: var(--radius-sm);
-    background: oklch(0.15 0 0 / 0.85);
-    font-size: var(--text-xs);
+    background: oklch(0.15 0 0 / 0.6);
+    font-size: 8px;
+    line-height: 1.3;
     color: var(--text-3);
     white-space: nowrap;
     overflow: hidden;
@@ -1957,7 +1996,7 @@
       left: 0;
       max-width: none;
       border-radius: 0;
-      font-size: 10px;
+      font-size: 7px;
       z-index: 2;
     }
   }

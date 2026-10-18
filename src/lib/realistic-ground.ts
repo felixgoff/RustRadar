@@ -336,45 +336,49 @@ const groundInject = {
         rough = mix(rough, 0.25, unseen);
         rl_glint = 1.0 - 0.8 * unseen;
       } else {
-        // Fields, as a plain's lie: each block of the textures' period (numbered the world over, 16 to
-        // the clouds' period, so the pattern repeats only every 11 km or so) cut three or four times
-        // across its longer side at a hashed point, so the fields have straight edges and all sizes and
-        // shapes; to each its crop (one of Streets GL's three), its rows along its length. Fields too
-        // small to see take the crops' mean, not a flicker.
-        float crops = 0.0;
+        // Fields: the land round points scattered over it (40 to the clouds' period, about 250 m, numbered
+        // the world over so the pattern repeats only every 11 km or so), so each field has straight edges
+        // and its own shape, size and lie; to each its crop (one of Streets GL's three) and its rows turned
+        // its own way. The crops' colours are drawn closer together than in the pictures, the more so the
+        // smaller the fields look (side by side, far off, the soil's brown turns purple in the air), and
+        // fields too small to see take the crops' mean, not a flicker.
+        vec3 c3 = vec3(0.0);
+        float crops = 0.0, even = 0.0, shade = 1.0;
         if (i == ${FARMLAND}) {
-          vec2 p = rl_c * 16.0;
-          vec2 lo = floor(p);
-          vec2 hi = lo + 1.0;
-          float seed = rl_hash(lo, 16.0);
-          for (int k = 0; k < 4; k++) {
-            if (k == 3 && seed < 0.5) break;
-            float cut = 0.3 + 0.4 * fract(seed * 13.7);
-            bool beyond;
-            if (hi.x - lo.x >= hi.y - lo.y) {
-              float x = mix(lo.x, hi.x, cut);
-              beyond = p.x >= x;
-              if (beyond) lo.x = x; else hi.x = x;
-            } else {
-              float y = mix(lo.y, hi.y, cut);
-              beyond = p.y >= y;
-              if (beyond) lo.y = y; else hi.y = y;
+          vec2 p = rl_c * 40.0;
+          vec2 cell = floor(p);
+          float best = 1e9;
+          vec2 field = cell;
+          for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+              vec2 o = cell + vec2(float(x), float(y));
+              vec2 q = o + 0.1 + 0.8 * vec2(rl_hash(o, 40.0), rl_hash(o + 17.0, 40.0));
+              float d = dot(p - q, p - q);
+              if (d < best) {
+                best = d;
+                field = o;
+              }
             }
-            seed = fract(sin(seed * 91.3 + (beyond ? 47.1 : 12.9)) * 43758.5453);
           }
-          layer += floor(fract(seed * 7.0) * 2.999);
-          if (hi.y - lo.y > hi.x - lo.x) uv = uv.yx;
+          float seed = rl_hash(field + 29.0, 40.0);
+          layer += floor(seed * 2.999);
+          float a = 6.2832 * fract(seed * 7.31);
+          uv = mat2(cos(a), sin(a), -sin(a), cos(a)) * uv;
+          float first = GS_LAYER[${FARMLAND}];
+          c3 = (textureLod(rground_color, vec3(0.5, 0.5, first), 16.0).rgb
+            + textureLod(rground_color, vec3(0.5, 0.5, first + 1.0), 16.0).rgb
+            + textureLod(rground_color, vec3(0.5, 0.5, first + 2.0), 16.0).rgb) / 3.0;
+          even = mix(0.5, 0.85, smoothstep(0.004, 0.04, rl_cells(p)));
+          shade = 0.93 + 0.14 * fract(seed * 3.7);
           crops = smoothstep(0.35, 0.9, rl_cells(rl_t * 3.0));
         }
         // (the images are stored top row first: v runs up them)
         vec3 at = vec3(uv.x, -uv.y, layer);
         vec4 c = texture(rground_color, at);
-        if (crops > 0.0) {
-          float first = GS_LAYER[${FARMLAND}];
-          vec3 mean = textureLod(rground_color, vec3(0.5, 0.5, first), 16.0).rgb
-            + textureLod(rground_color, vec3(0.5, 0.5, first + 1.0), 16.0).rgb
-            + textureLod(rground_color, vec3(0.5, 0.5, first + 2.0), 16.0).rgb;
-          c.rgb = mix(c.rgb, mean / 3.0, crops);
+        if (i == ${FARMLAND}) {
+          vec3 own = textureLod(rground_color, vec3(0.5, 0.5, layer), 16.0).rgb;
+          c.rgb *= mix(vec3(1.0), c3 / max(own, vec3(1e-3)), even) * shade;
+          c.rgb = mix(c.rgb, c3, crops);
         }
         vec3 nm = texture(rground_normal, at).xyz * 2.0 - 1.0;
         n = normalize(vec3(nm.xy, max(nm.z, 0.3)));

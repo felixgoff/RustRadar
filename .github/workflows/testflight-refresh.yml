@@ -1,0 +1,138 @@
+name: TestFlight refresh
+
+# A TestFlight build expires 90 days after it is uploaded. Each day this asks
+# App Store Connect how old the newest build is; past 60 days it builds the
+# latest release again (a new build number: the day's date) and uploads it,
+# so testers always have one that works. Run it by hand to upload one now.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Upload a new build whatever the newest one's age
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight-refresh
+
+env:
+  MAX_AGE_DAYS: 60
+
+jobs:
+  check:
+    name: Newest build's age
+    runs-on: ubuntu-latest
+    outputs:
+      due: ${{ steps.due.outputs.due }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: App Store Connect key
+        env:
+          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          key="$RUNNER_TEMP/AuthKey_$KEY_ID.p8"
+          printf '%s\n' "$KEY" > "$key"
+          echo "APPLE_API_KEY_PATH=$key" >> "$GITHUB_ENV"
+
+      - name: Ask App Store Connect
+        id: age
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: node scripts/testflight-age.mjs
+
+      - name: Due?
+        id: due
+        run: |
+          days="${{ steps.age.outputs.days }}"
+          if [ "${{ inputs.force }}" = "true" ] || [ "$days" -gt "$MAX_AGE_DAYS" ]; then
+            echo "due=true" >> "$GITHUB_OUTPUT"
+            echo "**TestFlight:** newest build ${{ steps.age.outputs.version }} is $days days old: uploading a new one" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "due=false" >> "$GITHUB_OUTPUT"
+            echo "**TestFlight:** newest build ${{ steps.age.outputs.version }} is $days days old: nothing to do" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # The iOS job of the release workflow (rust.yml), for the latest release.
+  upload:
+    name: Upload a new build
+    needs: check
+    if: needs.check.outputs.due == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The latest release
+        run: |
+          tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+          [ -n "$tag" ] || { echo "::error::no release tag to build"; exit 1; }
+          git checkout --quiet "$tag"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "Building $tag" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: ios
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: App Store Connect key
+        env:
+          ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          KEY: ${{ secrets.APPLE_API_KEY }}
+          TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          key="$HOME/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8"
+          printf '%s\n' "$KEY" > "$key"
+          {
+            echo "APPLE_API_ISSUER=$ISSUER"
+            echo "APPLE_API_KEY=$KEY_ID"
+            echo "APPLE_API_KEY_ID=$KEY_ID"
+            echo "APPLE_API_KEY_PATH=$key"
+            echo "APPLE_DEVELOPMENT_TEAM=$TEAM"
+          } >> "$GITHUB_ENV"
+
+      # the release's version (as rust.yml sets it), and a build number of its own: App Store
+      # Connect takes a build only once, and a date sorts after the release's own (its version)
+      - name: Version and build number
+        run: |
+          node scripts/version.mjs "${TAG#v}"
+          echo "BUILD_NUMBER=$(date -u +%Y%m%d%H)" >> "$GITHUB_ENV"
+
+      - name: Xcode project
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          brew list cocoapods >/dev/null 2>&1 || brew install cocoapods
+          bun tauri ios init --ci
+          bun tauri icon src-tauri/icons/icon.png
+          # (App Store Connect refuses icons with an alpha channel: see rust.yml)
+          cp src-tauri/icons/ios/*.png src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/
+
+      - name: Build for the App Store
+        run: bun tauri ios build --export-method app-store-connect --config "{\"bundle\":{\"iOS\":{\"bundleVersion\":\"$BUILD_NUMBER\"}}}"
+
+      - name: Upload to TestFlight
+        run: |
+          ipa="$(find src-tauri/gen/apple/build -name '*.ipa' | head -n 1)"
+          xcrun altool --upload-app --type ios --file "$ipa" --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER"
+          echo "Uploaded $TAG as build $BUILD_NUMBER" >> "$GITHUB_STEP_SUMMARY"

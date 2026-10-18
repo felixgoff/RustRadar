@@ -16,7 +16,7 @@ import type { Layer } from "@deck.gl/core";
 import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { load } from "@loaders.gl/core";
 import { MVTLoader } from "@loaders.gl/mvt";
-import { Geometry } from "@luma.gl/engine";
+import { shadowStep } from "./building-shadow";
 import { SGL_ZOOM, sglPath, sglTree } from "./streets-gl";
 import { treeCard } from "./tree-models";
 
@@ -518,57 +518,30 @@ const TREE_MATERIAL = { ambient: 0.55, diffuse: 0.55, shininess: 4, specularColo
 
 // --------------------------------------------------------------- shadows
 
-/** A flat disc on the ground, 1 across, for a tree's shadow. */
-let discMesh: Geometry | null = null;
-function disc(): Geometry {
-  if (discMesh) return discMesh;
-  const positions: number[] = [];
-  const SIDES = 14;
-  for (let i = 0; i < SIDES; i++) {
-    const [a, b] = [(i / SIDES) * 2 * Math.PI, ((i + 1) / SIDES) * 2 * Math.PI];
-    positions.push(0, 0, 0.05, Math.cos(a) * 0.5, Math.sin(a) * 0.5, 0.05, Math.cos(b) * 0.5, Math.sin(b) * 0.5, 0.05);
-  }
-  const n = positions.length / 3;
-  return (discMesh = new Geometry({
-    topology: "triangle-list",
-    attributes: {
-      positions: { size: 3, value: new Float32Array(positions) },
-      normals: { size: 3, value: new Float32Array(Array.from({ length: n }, () => [0, 0, 1]).flat()) },
-      colors: { size: 3, value: new Float32Array(n * 3).fill(1) },
-    },
-  }));
-}
-
 /**
- * Where each tree's crown throws its shadow with the sun towards `sun`
- * (east, north, up): an ellipse on the ground, away from the sun, as long as
- * the low sun stretches it (no longer than three times its width).
+ * Each tree's shadow with the sun towards `sun` (east, north, up): its cards
+ * laid flat on the ground away from the sun, each point as far along as its
+ * height throws it (as a building's, `shadowStep`), just over the ground. The
+ * layer cuts them to the pictures' shapes (realistic.ts's TreeShadowExtension),
+ * so a tree's shadow is its own, from its trunk out. Null with the sun down.
  */
-export function treeShadows(trees: TileTrees, sun: readonly number[]): { length: number; positions: Float64Array; matrices: Float32Array } {
-  const across = Math.hypot(sun[0], sun[1]) || 1e-6;
-  const [de, dn] = [-sun[0] / across, -sun[1] / across];
-  const sinAlt = Math.max(Math.min(sun[2], 1), 0.3);
-  const cot = Math.sqrt(1 - sinAlt * sinAlt) / sinAlt;
+export function treeShadows(trees: TileTrees, sun: readonly number[]): Instances | null {
+  const step = shadowStep(sun);
+  if (!step) return null;
   const length = trees.conifers.length + trees.broadleaves.length;
-  const positions = new Float64Array(length * 3);
-  const matrices = new Float32Array(length * 12);
+  const out: Instances = { length, positions: new Float64Array(length * 3), matrices: new Float32Array(length * 12), colors: new Uint8Array(length * 4) };
   let k = 0;
-  for (const [kind, crown, centre] of [
-    [trees.conifers, 0.23, 0.5],
-    [trees.broadleaves, 0.3, 0.64],
-  ] as const) {
+  for (const kind of [trees.conifers, trees.broadleaves]) {
+    out.positions.set(kind.positions, k * 3);
+    out.colors.set(kind.colors, k * 4);
     for (let i = 0; i < kind.length; i++, k++) {
-      positions.set(kind.positions.subarray(i * 3, i * 3 + 3), k * 3);
       const m = kind.matrices.subarray(i * 12, i * 12 + 12);
-      const width = Math.hypot(m[0], m[1]);
-      const height = m[8];
-      const r = crown * width;
-      const [minor, major] = [2 * r, (2 * r) / sinAlt];
-      const shift = centre * height * cot;
-      matrices.set([de * major, dn * major, 0, -dn * minor, de * minor, 0, 0, 0, 1, de * shift, dn * shift, 0], k * 12);
+      // [x, y, z] to [x + z·east, y + z·north, 0] after the tree's own transform
+      const flat = (c: number) => [m[c] + m[c + 2] * step[0], m[c + 1] + m[c + 2] * step[1], 0];
+      out.matrices.set([...flat(0), ...flat(3), ...flat(6), m[9] + m[11] * step[0], m[10] + m[11] * step[1], 0.05], k * 12);
     }
   }
-  return { length, positions, matrices };
+  return out;
 }
 
 export type TreeShadowOptions = {
@@ -576,6 +549,7 @@ export type TreeShadowOptions = {
   sun: readonly number[];
   color: [number, number, number, number];
   parameters: object;
+  /** Extensions for the shadows' layers: realistic.ts's TREE_SHADOWS, which cuts them out and colours them. */
   extensions: unknown[];
 };
 
@@ -623,8 +597,15 @@ export function treeLayers({ url, sgl, centre, radius, date, extensions, materia
         entry.shadows = {
           key: sunKey,
           data: {
-            length: cast.length,
-            attributes: { getPosition: { value: cast.positions, size: 3 }, instanceModelMatrix: { value: cast.matrices, size: 12 } },
+            length: cast?.length ?? 0,
+            attributes: cast
+              ? {
+                  getPosition: { value: cast.positions, size: 3 },
+                  instanceModelMatrix: { value: cast.matrices, size: 12 },
+                  // (the trees' own: which picture)
+                  getColor: { value: cast.colors, size: 4 },
+                }
+              : {},
           },
         };
       }
@@ -633,12 +614,12 @@ export function treeLayers({ url, sgl, centre, radius, date, extensions, materia
           new SimpleMeshLayer({
             id: `trees-${key}-shadows`,
             data: entry.shadows.data as never,
-            mesh: disc(),
-            getColor: shadow.color,
+            mesh: treeCard(),
             material: SHADOW_MATERIAL,
             parameters: shadow.parameters,
             extensions: shadow.extensions as never,
             pickable: false,
+            ...{ treeShadowColor: shadow.color },
           }),
         );
       }

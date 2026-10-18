@@ -104,6 +104,7 @@
     setLook,
     skyCss,
     TREES as REALISTIC_TREES,
+    TREE_SHADOWS,
     UNLIT,
   } from "./realistic";
   import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, sglGroundLayer } from "./realistic-ground";
@@ -1022,6 +1023,7 @@
   const HAZE_FADED = [HAZE_FADE];
   const FOOT_SHADED = [FOOT_SHADE];
   const TREED = [REALISTIC_TREES];
+  const TREE_SHADOWED = [TREE_SHADOWS];
   const GROUNDED = [GROUND_SURFACES];
   /** Shadows in sunshine: a deep blue, the sky's light being all that is left in them. */
   const REALISTIC_SHADOW_COLOR: [number, number, number] = [6, 12, 28];
@@ -2572,7 +2574,7 @@
                   sun: look.sunDir,
                   color: [...REALISTIC_SHADOW_COLOR, Math.round(Math.min(0.6, 0.55 * sunStrength()) * 255)],
                   parameters: SHADOW_PARAMETERS,
-                  extensions: HAZE_FADED,
+                  extensions: TREE_SHADOWED,
                 }
               : null,
           onLoad: render,

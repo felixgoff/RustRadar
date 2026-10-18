@@ -72,15 +72,14 @@ describe("trees", () => {
     expect(tiles.length).toBeGreaterThan(3);
   });
 
-  test("the cards: two crossed quads a unit wide and tall, on the ground, the picture's top at the top; a level one for the crown", () => {
+  test("the cards: two crossed quads a unit wide and tall, on the ground, the picture's top at the top", () => {
     const a = cardArrays();
-    expect(a.positions.length).toBe(3 * 6 * 3);
+    expect(a.positions.length).toBe(2 * 6 * 3);
     expect(a.normals.length).toBe(a.positions.length);
     expect(a.texCoords.length).toBe((a.positions.length / 3) * 2);
     const zs = a.positions.filter((_, i) => i % 3 === 2);
     expect([Math.min(...zs), Math.max(...zs)]).toEqual([0, 1]);
     for (let k = 0; k < 12; k++) expect(a.texCoords[k * 2 + 1]).toBe(1 - zs[k]);
-    expect(a.normals.slice(36, 39)).toEqual([0, 0, 1]);
     // the second card is the first turned a quarter
     expect(a.normals.slice(0, 3)).toEqual([0, -1, 0]);
     expect(a.normals.slice(18, 21)).toEqual([1, 0, 0]);

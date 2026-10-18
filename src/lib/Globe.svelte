@@ -112,7 +112,7 @@
   import { landCoverGroundLayer } from "./landcover-ground";
   import { sglBuildingFetch } from "./overture";
   import { roadWidthsVersion, wantRoadWidths } from "./road-widths";
-  import { SGL_TILES, SGL_ZOOM } from "./streets-gl";
+  import { SGL_FROM_ZOOM, SGL_TILES, SGL_ZOOM } from "./streets-gl";
   import { onTexturesReady } from "./realistic-textures";
   import { treeLayers } from "./tree-layer";
   import { mixConditions, PRESETS, type Conditions } from "./weather";
@@ -1019,7 +1019,6 @@
    * (streets-gl.ts: each building's height and materials, each field, wood
    * and mapped tree), from where deck.gl asks for the only zoom they come in.
    */
-  const SGL_FROM_ZOOM = SGL_ZOOM - 0.5;
   const SGL_BUILDING_OPTIONS = { mvt: { layers: ["buildings"], workerUrl: mvtWorkerUrl } };
   /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
   const TREES_ZOOM = 14.5;
@@ -1058,7 +1057,8 @@
     new BuildingLayer({
       id: "buildings-far",
       data: buildingTilesUrl(),
-      minZoom: 10,
+      // (deck.gl hides a tile layer under its minZoom: from where they are to show)
+      minZoom: FAR_BUILDINGS_ZOOM,
       maxZoom: 12,
       loadOptions: BUILDING_LOAD_OPTIONS,
       extruded: true,
@@ -1075,7 +1075,8 @@
     new BuildingLayer({
       id: sgl ? "buildings-sgl" : "buildings-realistic",
       data: sgl ? SGL_TILES : url,
-      minZoom: sgl ? SGL_ZOOM : 14,
+      // (deck.gl hides a tile layer under its minZoom: from where they are to show)
+      minZoom: sgl ? SGL_FROM_ZOOM : REALISTIC_BUILDINGS_ZOOM,
       maxZoom: sgl ? SGL_ZOOM : 14,
       loadOptions: sgl ? SGL_BUILDING_OPTIONS : BUILDING_LOAD_OPTIONS,
       // (with Overture's heights where Streets GL's tiles have none)

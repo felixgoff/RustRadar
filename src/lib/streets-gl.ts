@@ -15,6 +15,13 @@ import { MVTLoader } from "@loaders.gl/mvt";
 /** The tiles; only `SGL_ZOOM` is served. */
 export const SGL_TILES = "https://tiles.streets.gl/vector/{z}/{x}/{y}";
 export const SGL_ZOOM = 16;
+/**
+ * The map draws from these tiles from here (deck.gl rounds the view's zoom to
+ * the tiles', so from half a zoom under theirs). A tile layer's `minZoom` is
+ * this, not theirs: deck.gl hides a layer under its `minZoom` whatever tiles
+ * it loads.
+ */
+export const SGL_FROM_ZOOM = SGL_ZOOM - 0.5;
 /** Their credit, with OpenStreetMap's. */
 export const SGL_ATTRIBUTION = "Map data close in: Streets GL (tiles.streets.gl), © OpenStreetMap contributors";
 

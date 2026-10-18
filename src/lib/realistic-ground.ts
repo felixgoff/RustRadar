@@ -12,7 +12,7 @@ import { GeoJsonLayer, PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import type { Device } from "@luma.gl/core";
 import { bridgeParts, omtDeck, type Lines, type TileIndex } from "./bridges";
 import { LC } from "./landcover";
-import { SGL_TILES, SGL_ZOOM, sglFetch, sglPath } from "./streets-gl";
+import { SGL_FROM_ZOOM, SGL_TILES, SGL_ZOOM, sglFetch, sglPath } from "./streets-gl";
 import { realisticLight } from "./realistic";
 import { withRoadWidths } from "./road-widths";
 import { type GROUND_TEXTURES, realisticTextures, textureLayer } from "./realistic-textures";
@@ -761,7 +761,7 @@ export const sglGroundLayer = (workerUrl: string, extensions: unknown[], paramet
     id: "ground-sgl",
     data: SGL_TILES,
     roadsVersion,
-    minZoom: SGL_ZOOM,
+    minZoom: SGL_FROM_ZOOM,
     maxZoom: SGL_ZOOM,
     loadOptions: options,
     fetch: sglFetch as never,

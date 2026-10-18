@@ -1275,6 +1275,8 @@
       // the ground where the map leaves it unmapped (the flat map's), and what plants the trees close in (Globe's TREES_ZOOM)
       settings.basemap === "realistic" && view.zoom >= 12 && LANDCOVER_ATTRIBUTION,
       settings.basemap === "realistic" && view.zoom >= 14.5 && `${CANOPY_ATTRIBUTION} · ${STREET_TREES_ATTRIBUTION}`,
+      // (Globe's ROAD_WIDTHS_ZOOM; the app asks with the Trafikverket key)
+      settings.basemap === "realistic" && view.zoom >= 14 && isTauri() && "Road widths: Trafikverket NVDB",
       settings.basemap === "realistic" && "Earth: NASA Blue Marble",
       weatherLive && liveWeather && "Weather: MET Norway",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",

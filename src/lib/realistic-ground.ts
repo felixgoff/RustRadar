@@ -14,6 +14,7 @@ import { bridgeParts, omtDeck, type Lines, type TileIndex } from "./bridges";
 import { LC } from "./landcover";
 import { SGL_TILES, SGL_ZOOM, sglFetch, sglPath } from "./streets-gl";
 import { realisticLight } from "./realistic";
+import { withRoadWidths } from "./road-widths";
 import { type GROUND_TEXTURES, realisticTextures, textureLayer } from "./realistic-textures";
 
 type RGB = [number, number, number];
@@ -328,7 +329,7 @@ export function lineOf({ properties: p }: Feature): Line {
       if (cls === "path") return PATHS[sub] ?? PATHS[sub === "steps" || sub === "platform" ? "footway" : "path"];
       // a tram's rails are set in the street; light rail runs on its own ballast, as a railway
       if (cls === "transit" && sub === "tram") return TRAM;
-      return ROADS[cls] ?? NO_LINE;
+      return asSurveyed(ROADS[cls] ?? NO_LINE, p, false);
     case "waterway": {
       if (p.brunnel === "tunnel") return NO_LINE;
       return { width: WATERWAYS[cls] ?? 2, paint: AREAS.water, edge: 0, edgePaint: NONE };
@@ -342,14 +343,15 @@ export function lineOf({ properties: p }: Feature): Line {
       if (!path) return NO_LINE;
       const own = AEROWAYS[path.kind] ?? PATHS[path.kind] ?? ROADS[path.kind] ?? NO_LINE;
       const surface = SGL_SURFACES[path.surface];
-      return {
+      const mappedWidth = Number(p.width) > 0;
+      return asSurveyed({
         ...own,
         width: path.width ?? own.width,
         // a road's own surface where it isn't asphalt; a path's as mapped
         paint: surface && (path.surface !== "asphalt" || PATHS[path.kind]) ? surface : own.paint,
         edge: p.sidewalkSide ? Math.max(own.edge, 2) : own.edge,
         edgePaint: p.sidewalkSide ? PAVEMENT : own.edgePaint,
-      };
+      }, p, mappedWidth || typeof p.surface === "string");
     }
     case "water":
       if (p.type !== "waterway") return NO_LINE;
@@ -357,6 +359,34 @@ export function lineOf({ properties: p }: Feature): Line {
     default:
       return NO_LINE;
   }
+}
+
+/**
+ * A road as Trafikverket's survey has it (road-widths.ts), where it has it:
+ * as wide as it is (unless `mapped` already says), and gravel where it is.
+ */
+function asSurveyed(line: Line, p: Properties, mapped: boolean): Line {
+  const width = Number(p.nvdbWidth) || 0;
+  if (!width || mapped) return line;
+  return { ...line, width, paint: Number(p.nvdbGravel) > 0 ? paint(34) : line.paint };
+}
+
+/** Whether a tile's line is a road the survey may have (not a railway, path, runway or pier). */
+const isCarRoad = (p: Properties) => {
+  if (p.layerName === "transportation") return String(p.class) in ROADS && !["rail", "transit", "pier", "track"].includes(String(p.class));
+  if (p.layerName !== "highways" || p.type === "railway") return false;
+  const path = sglPath(p);
+  return Boolean(path && path.kind in ROADS && path.kind !== "track");
+};
+/** A tile's lines with the survey's roads, kept the same object while they are (for the layers' data to compare equal). */
+const surveyed = new WeakMap<object, Binary>();
+function withSurvey(lines: Binary, tile: TileIndex): Binary {
+  const own = lines.lines as unknown as Lines;
+  const roads = withRoadWidths(own, tile, isCarRoad);
+  if (roads === own) return lines;
+  let out = surveyed.get(roads);
+  if (!out) surveyed.set(roads, (out = { ...lines, lines: roads as never }));
+  return out;
 }
 
 /** Streets GL's road surfaces (streets-gl.ts), as the ground's line paints: asphalt the road's own. */
@@ -632,8 +662,10 @@ class GroundTile extends GeoJsonLayer {
     const data = this.props.data as unknown as Binary | GeoFeature[] | null;
     if (!data) return [];
     // binary in the flat projection; on the globe, GeoJSON features
-    const { areas, lines } = Array.isArray(data) ? splitFeatures(data) : split(data);
+    const { areas, lines: tileLines } = Array.isArray(data) ? splitFeatures(data) : split(data);
     const tile = (this.props as { tile?: { index: TileIndex } }).tile?.index;
+    // the survey's roads at their widths (binary tiles, the flat map's)
+    const lines = !Array.isArray(data) && tile ? withSurvey(tileLines as Binary, tile) : tileLines;
     const bridges = !Array.isArray(data) && tile ? bridgeParts((lines as Binary).lines as unknown as Lines, tile, omtDeck) : null;
     const onGround = bridges ? { ...(lines as Binary), lines: bridges.ground } : lines;
     const layers = [
@@ -682,12 +714,14 @@ const GROUND_LAYERS = ["landuse", "landcover", "aeroway", "water", "waterway", "
 const loadOptions = new Map<string, object>();
 
 /** The ground's vector tiles; MVTLayer decodes per projection, so each gets its own layer (and cache). */
-export const groundLayer = (url: string, flat: boolean, workerUrl: string, extensions: unknown[], parameters: object) => {
+export const groundLayer = (url: string, flat: boolean, workerUrl: string, extensions: unknown[], parameters: object, roadsVersion = 0) => {
   let options = loadOptions.get(workerUrl);
   if (!options) loadOptions.set(workerUrl, (options = { mvt: { layers: GROUND_LAYERS, workerUrl } }));
   return new MVTLayer({
     id: flat ? "ground-flat" : "ground-globe",
     data: url,
+    // (its tiles drawn again as the survey's roads come in)
+    roadsVersion,
     minZoom: 0,
     maxZoom: 14,
     loadOptions: options,
@@ -711,12 +745,13 @@ const SGL_GROUND_LAYERS = ["common", "natural", "water", "highways"];
 const sglOptions = new Map<string, object>();
 
 /** The ground close in from Streets GL's tiles (streets-gl.ts): each field, garden and road as mapped. Flat projection only. */
-export const sglGroundLayer = (workerUrl: string, extensions: unknown[], parameters: object) => {
+export const sglGroundLayer = (workerUrl: string, extensions: unknown[], parameters: object, roadsVersion = 0) => {
   let options = sglOptions.get(workerUrl);
   if (!options) sglOptions.set(workerUrl, (options = { mvt: { layers: SGL_GROUND_LAYERS, workerUrl } }));
   return new MVTLayer({
     id: "ground-sgl",
     data: SGL_TILES,
+    roadsVersion,
     minZoom: SGL_ZOOM,
     maxZoom: SGL_ZOOM,
     loadOptions: options,

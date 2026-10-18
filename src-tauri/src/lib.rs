@@ -19,6 +19,7 @@ mod radar;
 mod osm_platforms;
 mod rail;
 mod reference;
+mod roads;
 mod runways;
 mod session;
 mod ships;
@@ -751,6 +752,7 @@ pub fn run() {
             devlog::dev_log_clear,
             trafikverket::product_codes,
             trafikverket::trafikverket_key_status,
+            roads::road_widths,
             trains::follow_train,
             trains::unfollow_train,
             train_media::train_media,

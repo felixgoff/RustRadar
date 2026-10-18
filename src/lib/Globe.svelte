@@ -109,6 +109,7 @@
   } from "./realistic";
   import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, sglGroundLayer } from "./realistic-ground";
   import { landCoverGroundLayer } from "./landcover-ground";
+  import { roadWidthsVersion, wantRoadWidths } from "./road-widths";
   import { SGL_TILES, SGL_ZOOM, sglFetch } from "./streets-gl";
   import { onTexturesReady } from "./realistic-textures";
   import { treeLayers } from "./tree-layer";
@@ -1019,6 +1020,8 @@
   const SGL_BUILDING_OPTIONS = { mvt: { layers: ["buildings"], workerUrl: mvtWorkerUrl } };
   /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
   const TREES_ZOOM = 14.5;
+  /** From here the roads are drawn at their surveyed widths, where Trafikverket has them. */
+  const ROAD_WIDTHS_ZOOM = 14;
   const FACADED = [REALISTIC_BUILDINGS];
   const ROOFED = [REALISTIC_ROOFS];
   const HAZE_FADED = [HAZE_FADE];
@@ -2527,8 +2530,10 @@
       layers.push(realisticLandLayer(GROUNDED, SURFACE));
       // where the map's data says nothing, what the land cover has
       if (flat) layers.push(landCoverGroundLayer(GROUNDED, SURFACE_NO_CULL));
-      if (sgl) layers.push(sglGroundLayer(mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
-      else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
+      // close in, the numbered roads as wide as Trafikverket has them (the app, with its key)
+      if (flat && zoom >= ROAD_WIDTHS_ZOOM) wantRoadWidths(cLon, cLat, render);
+      if (sgl) layers.push(sglGroundLayer(mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
+      else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
       // and always in relief: the lie of the land
       layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
     } else {

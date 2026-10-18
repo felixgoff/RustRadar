@@ -494,15 +494,7 @@ function rlightProps(params: DrawParams) {
 }
 
 /** The shared light, for the ground's extension (realistic-ground.ts). */
-/** The flat map's origin for a layer, web mercator units (as the shaders measure from it); null on the globe. */
-function layerOrigin(params: DrawParams): [number, number] | null {
-  const projectProps = params.shaderModuleProps.project;
-  if (projectProps.viewport.resolution) return null;
-  const { commonOrigin } = project.getUniforms(projectProps as never) as { commonOrigin: number[] };
-  return [commonOrigin[0], commonOrigin[1]];
-}
-
-export const realisticLight = { module: rlightModule, props: rlightProps, origin: layerOrigin };
+export const realisticLight = { module: rlightModule, props: rlightProps };
 
 // --------------------------------------------------------------- buildings
 

@@ -69,14 +69,3 @@ test("land cover traced into rounded outlines: a wood and a field, towns and wat
   expect(Math.min(...xs[1])).toBeGreaterThan(10);
   expect(Math.max(...xs[1])).toBeLessThan(26);
 });
-
-test("the imagery's window: eight tiles round the point, in deck.gl's mercator units", async () => {
-  const { windowAt } = await import("./imagery");
-  const w = windowAt(13.19, 55.705, 12);
-  const n = 2 ** 12;
-  expect(w.rect.size).toBeCloseTo((8 / n) * 512, 9);
-  // the point is in it
-  const x = ((13.19 + 180) / 360) * 512;
-  expect(x).toBeGreaterThan(w.rect.west);
-  expect(x).toBeLessThan(w.rect.west + w.rect.size);
-});

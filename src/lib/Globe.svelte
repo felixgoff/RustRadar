@@ -110,7 +110,6 @@
   import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, sglGroundLayer } from "./realistic-ground";
   import { landCoverGroundLayer } from "./landcover-ground";
   import { sglBuildingFetch } from "./overture";
-  import { wantImagery } from "./imagery";
   import { roadWidthsVersion, wantRoadWidths } from "./road-widths";
   import { SGL_TILES, SGL_ZOOM } from "./streets-gl";
   import { onTexturesReady } from "./realistic-textures";
@@ -2530,8 +2529,6 @@
       if (terrain) layers.push(...terrainLayers({ flat, zoom, basemap }));
     } else if (realistic) {
       // drawn from the map's data, as Streets GL does: grass, woods, fields, water, roads and rails
-      // the land's colour at the middle zooms, from imagery round the view
-      wantImagery(cLon, cLat, zoom, render);
       layers.push(realisticLandLayer(GROUNDED, SURFACE));
       // where the map's data says nothing, what the land cover has
       if (flat) layers.push(landCoverGroundLayer(GROUNDED, SURFACE_NO_CULL));

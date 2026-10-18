@@ -1,5 +1,6 @@
 mod adsblol;
 mod board;
+mod building_lod;
 mod devlog;
 mod dwd;
 mod export;
@@ -669,9 +670,15 @@ pub fn run() {
             let path = request.uri().path().to_owned();
             tauri::async_runtime::spawn(async move { responder.respond(rail::serve(&path).await) });
         })
+        // buildings far out, quantized (building_lod.rs)
+        .register_asynchronous_uri_scheme_protocol("buildingtiles", |_ctx, request, responder| {
+            let path = request.uri().path().to_owned();
+            tauri::async_runtime::spawn(async move { responder.respond(building_lod::serve(&path).await) });
+        })
         .setup(|app| {
             if let Ok(dir) = app.path().app_cache_dir() {
                 osm_platforms::set_cache_dir(dir.clone());
+                building_lod::set_cache_dir(dir.clone());
                 rail::set_cache_dir(dir);
             }
             // every Swedish train's position as it comes, while the map shows them

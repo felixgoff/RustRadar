@@ -25,6 +25,14 @@ const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6_378_137;
 type Properties = Record<string, unknown>;
 
 /**
+ * The backend's tiles of buildings far out, quantized (building_lod.rs), zooms
+ * 10 to 12. Windows and Android webviews reach custom protocols as `http://<scheme>.localhost`.
+ */
+export function buildingTilesUrl(userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent): string {
+  return /Windows|Android/.test(userAgent) ? "http://buildingtiles.localhost/{z}/{x}/{y}" : "buildingtiles://localhost/{z}/{x}/{y}";
+}
+
+/**
  * A building's height as drawn, metres: OpenFreeMap's `render_height`, 6 m
  * when it has none; Streets GL's (streets-gl.ts) to its eaves when its roof
  * is pitched (roofs.ts builds it), else to halfway up its roof, and none for

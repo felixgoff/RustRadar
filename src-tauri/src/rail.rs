@@ -231,12 +231,12 @@ impl<'a> Pb<'a> {
     }
 }
 
-fn fields(b: &[u8]) -> impl Iterator<Item = (u64, Result<u64, &[u8]>)> {
+pub(crate) fn fields(b: &[u8]) -> impl Iterator<Item = (u64, Result<u64, &[u8]>)> {
     let mut pb = Pb { b, i: 0 };
     std::iter::from_fn(move || pb.field())
 }
 
-fn packed(b: &[u8]) -> Vec<u64> {
+pub(crate) fn packed(b: &[u8]) -> Vec<u64> {
     let mut pb = Pb { b, i: 0 };
     std::iter::from_fn(|| if pb.i < pb.b.len() { pb.varint() } else { None }).collect()
 }

@@ -91,7 +91,7 @@
   import { TAXIWAY_ZOOM, taxiwaysFor } from "./taxiways";
   import { screenAngle } from "./screen";
   import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection, sunlight } from "./shadow";
-  import { BuildingLayer, buildingHeight } from "./building-layer";
+  import { BuildingLayer, buildingHeight, buildingTilesUrl } from "./building-layer";
   import {
     BUILDINGS as REALISTIC_BUILDINGS,
     ROOFS as REALISTIC_ROOFS,
@@ -1049,6 +1049,26 @@
   /** How much of the sun gets through now, 0 to 1. */
   const sunStrength = () => Math.max(...look.sunColor) / 3.2;
   /** Only the deepest tiles, so a building looks the same in each tile it is in (see `wallColoursOf`). */
+  /** Far out, the backend's quantized buildings (blocks a cell or more across, zooms 10 to 12), until the real ones take over. */
+  const FAR_BUILDINGS_ZOOM = 9.5;
+  const FAR_REALISTIC_COLOR: [number, number, number] = [214, 206, 192];
+  const farBuildingLayer = (realistic: boolean) =>
+    new BuildingLayer({
+      id: "buildings-far",
+      data: buildingTilesUrl(),
+      minZoom: 10,
+      maxZoom: 12,
+      loadOptions: BUILDING_LOAD_OPTIONS,
+      extruded: true,
+      filled: true,
+      stroked: false,
+      getElevation: buildingElevation,
+      getFillColor: realistic ? FAR_REALISTIC_COLOR : BUILDING_COLOR,
+      material: BUILDING_MATERIAL,
+      parameters: NO_CULL,
+      _subLayerProps: BUILDING_SUBLAYER_PROPS,
+      pickable: false,
+    });
   const realisticBuildingLayer = (url: string, sun: readonly number[], sgl: boolean) =>
     new BuildingLayer({
       id: sgl ? "buildings-sgl" : "buildings-realistic",
@@ -2562,6 +2582,8 @@
     } else freeArenas();
     if (daylight) layers.push(nightLayer(now));
     const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= (realistic ? REALISTIC_BUILDINGS_ZOOM : 13));
+    // (the app's backend makes them)
+    if (buildings && !showBuildings && isTauri() && zoom >= FAR_BUILDINGS_ZOOM) layers.push(farBuildingLayer(realistic));
     if (showBuildings) {
       layers.push(realistic ? realisticBuildingLayer(tileUrl!, realisticShadowSun(now, cLat, cLon), sgl) : buildingLayer(tileUrl!, shadowSun(now)));
     }

@@ -3467,8 +3467,9 @@
     return t * t * (3 - 2 * t);
   };
   // The clouds as they are now (clouds.ts), at their height: drawn over the ground but under the
-  // map's own lines, trains and aircraft, which stay to be read (so not hidden behind them)
-  const CLOUD_PARAMETERS = { ...NO_CULL, depthWriteEnabled: false, depthCompare: "always" } as const;
+  // map's own lines, trains and aircraft, which stay to be read (the clouds write no depth to hide
+  // them); tested against the globe's, so those over its far side stay behind it
+  const CLOUD_PARAMETERS = { ...NO_CULL, depthWriteEnabled: false, depthCompare: "less-equal" } as const;
   const cloudLayers = (picture: ImageBitmap, opacity: number, flat: boolean, lat: number) => {
     const [west, south, east, north] = CLOUD_BOUNDS;
     const h = CLOUD_HEIGHT_M;

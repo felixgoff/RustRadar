@@ -1580,7 +1580,7 @@
       clear={detailOpen ? 12 : 64}
       head={detailOpen ? undefined : listHead}
     >
-      {#if detailOpen}{@render details()}{:else}{@render sheetContent()}{/if}
+      {#if detailOpen}{@render panels()}{:else}{@render sheetContent()}{/if}
     </BottomSheet>
   {/if}
   {#snippet listHead()}{@render toolbar()}{/snippet}
@@ -1599,7 +1599,7 @@
     </button>
   {/snippet}
 
-  {#snippet details()}
+  {#snippet panels()}
   {#if boardCode}
     <!-- kept while a flight from the board is open, so going back keeps its tab and pages -->
     <div hidden={selected !== null}>
@@ -1659,7 +1659,7 @@
   {/if}
   {/snippet}
 
-  {#if !layout.phone}{@render details()}{/if}
+  {#if !layout.phone}{@render panels()}{/if}
 
   <MapControls
     zoom={view.zoom}

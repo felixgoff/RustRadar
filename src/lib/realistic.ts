@@ -621,10 +621,12 @@ const rbuildInject = {
     }
     // (the images are stored top row first: v runs up them)
     vec3 at = vec3(uv.x, -uv.y, layer);
-    vec3 c = texture(rbuild_color, at).rgb;
-    vec3 nm = texture(rbuild_normal, at).xyz * 2.0 - 1.0;
-    vec3 m = texture(rbuild_mask, at).rgb;
-    float glow = texture(rbuild_glow, at).r;
+    // the textures coarser further off (past a kilometre and a half, a mip level each doubling)
+    float detail = clamp(log2(length(rl_eye) / 1500.0), 0.0, 4.0);
+    vec3 c = texture(rbuild_color, at, detail).rgb;
+    vec3 nm = texture(rbuild_normal, at, detail).xyz * 2.0 - 1.0;
+    vec3 m = texture(rbuild_mask, at, detail).rgb;
+    float glow = texture(rbuild_glow, at, detail).r;
     vec3 albedo = c * mix(vec3(1.0), tint, m.b);
     if (!wall) albedo = mix(albedo, vec3(0.8), rlight.snow * 0.92);
     // the texture's u runs along the wall (or east), its v up the wall (or north)

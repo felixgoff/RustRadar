@@ -1072,6 +1072,10 @@
       _subLayerProps: BUILDING_SUBLAYER_PROPS,
       pickable: false,
     });
+  /** Whether the layer drawn as `id` last frame had all its tiles in view loaded. */
+  // (deck.gl's layer manager is protected in its types, not in fact)
+  type Layers = { layerManager?: { getLayers(o: { layerIds: string[] }): { id: string; isLoaded: boolean }[] } };
+  const layerLoaded = (id: string) => Boolean((deck as unknown as Layers | undefined)?.layerManager?.getLayers({ layerIds: [id] }).find((l) => l.id === id)?.isLoaded);
   const realisticBuildingLayer = (url: string, sun: readonly number[], sgl: boolean) =>
     new BuildingLayer({
       id: sgl ? "buildings-sgl" : "buildings-realistic",
@@ -1101,6 +1105,8 @@
       footShadeExtensions: FOOT_SHADED,
       // Streets GL's tiles say how their roofs are shaped
       roofExtensions: sgl ? ROOFED : [],
+      // (the map's own are drawn until these are in: drawn again then)
+      onViewportLoad: sgl ? render : undefined,
     });
 
   // Night shading, recomputed each minute: four nested bands (sunset and the
@@ -2558,8 +2564,9 @@
       if (flat) layers.push(landCoverGroundLayer(GROUNDED, SURFACE_NO_CULL));
       // close in, the numbered roads as wide as Trafikverket has them (the app, with its key)
       if (flat && zoom >= ROAD_WIDTHS_ZOOM) wantRoadWidths(cLon, cLat, render);
-      if (sgl) layers.push(sglGroundLayer(mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
-      else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
+      // Streets GL's ground close in; the map's own under it until Streets GL's tiles are in (not empty meanwhile)
+      if (tileUrl && (!sgl || !layerLoaded("ground-sgl"))) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
+      if (sgl) layers.push(sglGroundLayer(mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion(), render));
       // and always in relief: the lie of the land
       layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
       const clouds = 1 - smoothstep(CLOUDS_FULL_ZOOM, CLOUDS_GONE_ZOOM, zoom);
@@ -2592,9 +2599,12 @@
     const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= (realistic ? REALISTIC_BUILDINGS_ZOOM : 13));
     // (the app's backend makes them)
     if (buildings && !showBuildings && isTauri() && zoom >= FAR_BUILDINGS_ZOOM) layers.push(farBuildingLayer(realistic));
-    if (showBuildings) {
-      layers.push(realistic ? realisticBuildingLayer(tileUrl!, realisticShadowSun(now, cLat, cLon), sgl) : buildingLayer(tileUrl!, shadowSun(now)));
-    }
+    if (showBuildings && realistic) {
+      const sun = realisticShadowSun(now, cLat, cLon);
+      // close in Streets GL's, and the map's own until those are in
+      if (!sgl || !layerLoaded("buildings-sgl")) layers.push(realisticBuildingLayer(tileUrl!, sun, false));
+      if (sgl) layers.push(realisticBuildingLayer(tileUrl!, sun, true));
+    } else if (showBuildings) layers.push(buildingLayer(tileUrl!, shadowSun(now)));
     if (realistic && tileUrl && flat && zoom >= TREES_ZOOM) {
       // out to about as far as the camera is from the point it looks at
       const distance = CAMERA_HEIGHTS * container.clientHeight * mpp;

@@ -774,13 +774,14 @@ const SGL_GROUND_LAYERS = ["common", "natural", "water", "highways"];
 const sglOptions = new Map<string, object>();
 
 /** The ground close in from Streets GL's tiles (streets-gl.ts): each field, garden and road as mapped. Flat projection only. */
-export const sglGroundLayer = (workerUrl: string, extensions: unknown[], parameters: object, roadsVersion = 0) => {
+export const sglGroundLayer = (workerUrl: string, extensions: unknown[], parameters: object, roadsVersion = 0, onViewportLoad?: () => void) => {
   let options = sglOptions.get(workerUrl);
   if (!options) sglOptions.set(workerUrl, (options = { mvt: { layers: SGL_GROUND_LAYERS, workerUrl } }));
   return new MVTLayer({
     id: "ground-sgl",
     data: SGL_TILES,
     roadsVersion,
+    onViewportLoad,
     minZoom: SGL_FROM_ZOOM,
     maxZoom: SGL_ZOOM,
     loadOptions: options,

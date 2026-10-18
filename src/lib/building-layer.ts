@@ -181,7 +181,7 @@ function wallColoursOf(tile: { index: { x: number; y: number; z: number } }) {
   return (feature: { properties: Properties } | null, info: { index: number; data: BinaryPolygons }) => {
     const { startIndices, attributes } = info.data;
     const { value, size } = attributes.getPolygon;
-    return styleAt(tile.index, value, startIndices[info.index] * size, feature?.properties ?? {});
+    return styleAt(tile.index, value, startIndices[info.index], startIndices[info.index + 1] ?? startIndices[info.index] + 1, size, feature?.properties ?? {});
   };
 }
 
@@ -205,10 +205,23 @@ function roofColoursOf(tile: { index: { x: number; y: number; z: number } }) {
   };
 }
 
-/** A building's look (`buildingStyle`), by where its outline starts (`positions[vertex]`, in its tile's own units). */
-function styleAt(index: { x: number; y: number }, positions: ArrayLike<number>, vertex: number, properties: Properties) {
-  const gx = Math.round((index.x + positions[vertex]) * 4096);
-  const gy = Math.round((index.y + positions[vertex + 1]) * 4096);
+/**
+ * A building's look (`buildingStyle`), by the middle of its outline (vertices
+ * `from` to `to` of `positions`, `size` numbers each, in its tile's own units)
+ * in the world, to about 5 m: the same in a zoom-14 tile as in a zoom-16 one
+ * (whose outlines start at other corners), so it keeps its look as the map
+ * changes from one to the other.
+ */
+function styleAt(index: { x: number; y: number; z: number }, positions: ArrayLike<number>, from: number, to: number, size: number, properties: Properties) {
+  let [sx, sy] = [0, 0];
+  const n = Math.max(1, to - from);
+  for (let v = from; v < from + n; v++) {
+    sx += positions[v * size];
+    sy += positions[v * size + 1];
+  }
+  const scale = 2 ** (23 - index.z);
+  const gx = Math.round((index.x + sx / n) * scale);
+  const gy = Math.round((index.y + sy / n) * scale);
   const { colour, look } = lookOf(properties);
   return buildingStyle(Math.imul(gx, 73_856_093) ^ Math.imul(gy, 19_349_663), buildingHeight(properties), colour, look);
 }
@@ -258,7 +271,7 @@ function tileRoofs(content: BinaryFeatureCollection, tile: TileProps["tile"] & {
         direction: Number(properties.roofDirection) || undefined,
       });
       if (!parts.walls.length) continue;
-      const style = styleAt(tile.index, pos, from * size, properties);
+      const style = styleAt(tile.index, pos, from, to, size, properties);
       const code = 255 - style[3];
       const wall = [style[0] / 255, style[1] / 255, style[2] / 255];
       // a roof colour mapped, its own; else the shader's for its kind

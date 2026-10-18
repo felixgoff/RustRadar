@@ -172,6 +172,16 @@ Android installs update through the app. When a newer release has an APK, the
 app shows the update toast, and its button downloads the APK
 (`src-tauri/src/mobile_update.rs`). iOS installs update through TestFlight.
 
+To have Android update in the background instead, install
+[Obtainium](https://github.com/ImranR98/Obtainium) and add RustRadar to it:
+
+[<img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="54">](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/felixgoff/RustRadar)
+
+(or in Obtainium: Add App, `https://github.com/felixgoff/RustRadar`). It
+checks the releases here and installs each new APK. Updating over an install
+from elsewhere works as long as both are signed with the release key; a debug
+build has to be uninstalled first.
+
 ## Design
 
 The UI follows the [impeccable](https://github.com/pbakaus/impeccable)

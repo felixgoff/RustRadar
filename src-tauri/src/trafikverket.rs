@@ -461,13 +461,36 @@ fn frames_for(
     stops: &[motion::Stop],
     now_ms: i64,
     rail: &crate::rail::Rail,
+    guide: &Guide,
 ) -> motion::Sim {
     // tests share no state between them
     if cfg!(test) {
         let prev = prev.map(Report::fix);
-        return motion::simulate(None, &report.fix(), prev.as_ref(), stops, now_ms, Some(rail));
+        let way = guide(None);
+        let track = crate::rail::Guided { rail, way: &way };
+        return motion::simulate(None, &report.fix(), prev.as_ref(), stops, now_ms, Some(&track));
     }
-    frames_in(plans(), report, prev, stops, now_ms, rail)
+    frames_in(plans(), report, prev, stops, now_ms, rail, guide)
+}
+
+/// The way a train's route takes from where it is drawn (none: not drawn yet), for its motion to follow
+/// (`rail::Guided`): asked for only when it is worked out anew.
+type Guide<'a> = dyn Fn(Option<motion::Drawn>) -> Vec<(f64, f64)> + 'a;
+
+/// The places ahead a train's motion is led along its route through.
+const GUIDE_PLACES: usize = 3;
+
+/// The way `route_from` takes for a run, through its next few places, as `(lat, lon)` points (`Guide`).
+fn guide_of(
+    run: &Service,
+    delay: Option<i32>,
+    stations: &HashMap<String, Station>,
+    seen: motion::Fix,
+    drawn: Option<motion::Drawn>,
+    now: i64,
+) -> Vec<(f64, f64)> {
+    let route = route_from(run, delay, stations, Some(seen), drawn, now, GUIDE_PLACES);
+    route.segments.into_iter().next().map(|s| s.into_iter().map(|p| (p[1], p[0])).collect()).unwrap_or_default()
 }
 
 /// `frames_for`, with how the trains are drawn kept in `plans`.
@@ -478,6 +501,7 @@ fn frames_in(
     stops: &[motion::Stop],
     now_ms: i64,
     rail: &crate::rail::Rail,
+    guide: &Guide,
 ) -> motion::Sim {
     let mut latest = report.fix();
     let prev = prev.map(Report::fix);
@@ -521,7 +545,10 @@ fn frames_in(
         }
     }
     let drawn = old.as_ref().map(|d| d.sim.frames.as_slice());
-    let sim = motion::simulate(drawn, &latest, prev.as_ref(), stops, now_ms, Some(rail));
+    // along the way its route takes
+    let way = guide(drawn.and_then(|f| motion::drawn_at(f, now_ms)));
+    let track = crate::rail::Guided { rail, way: &way };
+    let sim = motion::simulate(drawn, &latest, prev.as_ref(), stops, now_ms, Some(&track));
     let mut plans = plans.lock().unwrap();
     plans.retain(|_, d| now_ms - d.made_ms < CONTINUE_MS);
     plans.insert(key, Drawn { fix: latest, made_ms: now_ms, sim: sim.clone() });
@@ -698,7 +725,8 @@ pub fn train(
     // along the track, on its limits for its kind of train
     let class = service.map(|s| crate::train_class::class_of(s.product_code.as_deref(), s.product.as_deref()));
     let rail = crate::rail::Rail { class };
-    let motion::Sim { frames, predicted } = frames_for(report, prev, &stops, now_ms, &rail);
+    let guide = |drawn| service.map(|s| guide_of(s, delay, stations, report.fix(), drawn, now_ms)).unwrap_or_default();
+    let motion::Sim { frames, predicted } = frames_for(report, prev, &stops, now_ms, &rail, &guide);
     // the track behind it, as long as its cars (three where not known), for them to be drawn on
     let cars = service.and_then(|s| s.cars).unwrap_or(DEFAULT_CARS);
     let tail = tail_of(&frames, report, f64::from(cars) * CAR_M + TAIL_SPARE_M);
@@ -826,6 +854,66 @@ fn stops_ahead(
 
 /// A stop ahead with its call and station, and the way the train runs through it.
 type CallAhead<'a> = (&'a Call, &'a Station, motion::Stop, Option<f64>);
+/// A call, its station, and where that is.
+type Placed<'a> = (&'a Call, &'a Station, (f64, f64));
+
+/// The way a train runs through its `i`th place: from the place before to the one after.
+fn through_heading(placed: &[Placed], i: usize) -> Option<f64> {
+    let (before, after) = (placed[i.saturating_sub(1)].2, placed[(i + 1).min(placed.len() - 1)].2);
+    (motion::distance(before, after) > 1.0).then(|| motion::course(before, after))
+}
+
+/// The places a train might stop at at its `i`th place, likeliest first (`rail::platforms`).
+fn spots_at(placed: &[Placed], i: usize) -> Option<Vec<(f64, f64)>> {
+    let (c, _, place) = placed[i];
+    crate::rail::platforms(place, c.track.as_deref(), through_heading(placed, i))
+}
+
+/// The stops ahead whose platform is the one the way through takes (the
+/// motion aims for a few at a time).
+const THROUGH_CALLS: usize = 4;
+
+/// Where a train stops at its `i`th place, as its route (`route_from`) takes
+/// it: of the platforms it might, the first (the announced track's first)
+/// it can reach from the place before and go on from to the one after; a
+/// bay platform it would have to back out of, or one on a track that leads
+/// elsewhere, isn't. None for its first place, and while the track isn't
+/// loaded. The same for every train going that way: worked out once.
+fn through_platform(placed: &[Placed], i: usize) -> Option<(f64, f64)> {
+    type Key = ((i64, i64), (i64, i64), (i64, i64), Option<String>);
+    // the spot, or when it couldn't be worked out (tried again a while later)
+    type Chosen = Mutex<HashMap<Key, Result<(f64, f64), Instant>>>;
+    static CHOSEN: OnceLock<Chosen> = OnceLock::new();
+    if i == 0 {
+        return None;
+    }
+    let round = |p: (f64, f64)| ((p.0 * 1e5).round() as i64, (p.1 * 1e5).round() as i64);
+    let next = placed.get(i + 1).map_or(placed[i].2, |n| n.2);
+    let key = (round(placed[i - 1].2), round(placed[i].2), round(next), placed[i].0.track.clone());
+    let chosen = CHOSEN.get_or_init(Default::default);
+    match chosen.lock().unwrap().get(&key) {
+        Some(Ok(p)) => return Some(*p),
+        Some(Err(at)) if at.elapsed() < THROUGH_RETRY => return None,
+        _ => {}
+    }
+    let found = (|| {
+        let mut places = vec![spots_at(placed, i - 1)?, spots_at(placed, i)?];
+        if i + 1 < placed.len() {
+            places.push(spots_at(placed, i + 1)?);
+        }
+        let way = crate::rail::way(&places, None);
+        way.spots.get(1).copied().flatten().filter(|_| way.complete)
+    })();
+    let mut chosen = chosen.lock().unwrap();
+    if chosen.len() > 20_000 {
+        chosen.clear();
+    }
+    chosen.insert(key, found.ok_or_else(Instant::now));
+    found
+}
+
+/// A platform the way through couldn't be worked out for (the track not loaded) is tried again after this long.
+const THROUGH_RETRY: Duration = Duration::from_secs(60);
 
 /// As `stops_ahead`, with each stop's call and station, and the way the train runs through it.
 fn calls_ahead<'a>(
@@ -861,12 +949,16 @@ fn calls_ahead<'a>(
         .iter()
         .enumerate()
         .skip_while(|(_, (c, _, _))| gone(c))
-        .map(|(i, &(c, station, place))| {
-            // the way it runs through: from the station before to the one after
-            let (before, after) = (placed[i.saturating_sub(1)].2, placed[(i + 1).min(placed.len() - 1)].2);
-            let heading = (motion::distance(before, after) > 1.0).then(|| motion::course(before, after));
-            // at the platform it is announced at, else on the track running its way, where the track is known
-            let (lat, lon) = crate::rail::platform(place, c.track.as_deref(), heading).unwrap_or(place);
+        .enumerate()
+        .map(|(k, (i, &(c, station, place)))| {
+            let heading = through_heading(&placed, i);
+            // at the platform the way through takes (as its route shows it: the next few), else the one it is
+            // announced at, else on the track running its way, where the track is known
+            let (lat, lon) = (k < THROUGH_CALLS)
+                .then(|| through_platform(&placed, i))
+                .flatten()
+                .or_else(|| crate::rail::platform(place, c.track.as_deref(), heading))
+                .unwrap_or(place);
             let stop = motion::Stop {
                 lat,
                 lon,
@@ -1816,11 +1908,11 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
     let now = crate::trains::now_ms();
     let lookup = operational_numbers().lock().unwrap().get(id).cloned();
     let drawn = lookup.and_then(|n| drawn_now(&n, now));
-    Ok(route_from(&run, delay, &stations, seen.map(|s| s.latest), drawn, now))
+    Ok(route_from(&run, delay, &stations, seen.map(|s| s.latest), drawn, now, usize::MAX))
 }
 
 /// `route`: the way on for a run from where the train is `drawn` at `now`
-/// (else where it was last `seen`).
+/// (else where it was last `seen`), through `upto` of its places ahead.
 fn route_from(
     run: &Service,
     delay: Option<i32>,
@@ -1828,6 +1920,7 @@ fn route_from(
     seen: Option<motion::Fix>,
     drawn: Option<motion::Drawn>,
     now: i64,
+    upto: usize,
 ) -> TrainRoute {
     let at_ms = seen.map_or(now, |s| s.t_ms);
     let calls = calls_ahead(run, delay, stations, at_ms);
@@ -1844,7 +1937,7 @@ fn route_from(
     };
     // each place's possible spots, the one its motion heads for first
     let mut places: Vec<Vec<(f64, f64)>> = start.iter().map(|s| vec![s.0]).collect();
-    places.extend(calls[onwards.min(calls.len())..].iter().map(|(call, station, stop, heading)| {
+    places.extend(calls[onwards.min(calls.len())..].iter().take(upto).map(|(call, station, stop, heading)| {
         let mut spots = vec![(stop.lat, stop.lon)];
         if let (Some(lat), Some(lon)) = (station.lat, station.lon)
             && let Some(more) = crate::rail::platforms((lat, lon), call.track.as_deref(), *heading)
@@ -2248,7 +2341,8 @@ mod tests {
                     .unwrap_or_default();
                 let class = service.map(|s| crate::train_class::class_of(s.product_code.as_deref(), s.product.as_deref()));
                 let rail = crate::rail::Rail { class };
-                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
+                let guide = |drawn| service.map(|s| guide_of(s, None, &stations, r.fix(), drawn, now)).unwrap_or_default();
+                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail, &guide);
                 let fix = r.fix();
                 let next = match motion::plan((fix.lat, fix.lon), fix.speed, fix.heading, &stops, fix.t_ms) {
                     motion::Plan::Standing { at } | motion::Plan::Moving { next: at } => at,
@@ -2319,7 +2413,8 @@ mod tests {
                 let class = service.map(|s| crate::train_class::class_of(s.product_code.as_deref(), s.product.as_deref()));
                 let rail = crate::rail::Rail { class };
                 let t = Instant::now();
-                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
+                let guide = |drawn| service.map(|s| guide_of(s, None, &stations, r.fix(), drawn, now)).unwrap_or_default();
+                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail, &guide);
                 if std::env::var("NO_TAIL").is_err() {
                     tail_of(&sim.frames, r, f64::from(DEFAULT_CARS) * CAR_M + TAIL_SPARE_M);
                 }
@@ -2384,9 +2479,10 @@ mod tests {
                 let stops = stops_ahead(service, None, &stations, r.at_ms);
                 let class = crate::train_class::class_of(service.product_code.as_deref(), service.product.as_deref());
                 let rail = crate::rail::Rail { class: Some(class) };
-                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
+                let guide = |drawn| guide_of(service, None, &stations, r.fix(), drawn, now);
+                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail, &guide);
                 let Some(drawn) = motion::drawn_at(&sim.frames, now) else { continue };
-                let route = route_from(service, None, &stations, Some(r.fix()), Some(drawn), now);
+                let route = route_from(service, None, &stations, Some(r.fix()), Some(drawn), now, usize::MAX);
                 let first: &[[f64; 2]] = route.segments.first().map_or(&[], |s| s.as_slice());
                 let start = first.first().map_or((f64::NAN, f64::NAN), |p| (p[1], p[0]));
                 let gap = motion::distance(drawn.at, start);
@@ -2474,11 +2570,12 @@ mod tests {
                 }
                 let class = crate::train_class::class_of(service.product_code.as_deref(), service.product.as_deref());
                 let rail = crate::rail::Rail { class: Some(class) };
-                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail);
+                let guide = |drawn| guide_of(service, None, &stations, r.fix(), drawn, now);
+                let sim = frames_in(&plans, r, prev.as_ref(), &stops, now, &rail, &guide);
                 let asked = drawn.get(r.lookup()).map_or(i64::MIN / 2, |d| d.1);
                 let asked = if now - asked >= 30_000 {
                     let at = motion::drawn_at(&sim.frames, now);
-                    let route = route_from(service, None, &stations, Some(r.fix()), at, now);
+                    let route = route_from(service, None, &stations, Some(r.fix()), at, now, usize::MAX);
                     out += &format!(
                         "{{\"train\":\"{}\",\"t\":{now},\"route\":{}}}\n",
                         r.lookup(),

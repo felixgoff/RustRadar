@@ -37,8 +37,8 @@ pub const MIN_ZOOM: u32 = 7;
 const MAX_TILES: usize = 3000;
 /// Tiles' bytes kept in memory for the map.
 const MAX_BYTES: usize = 400;
-/// Graphs kept built, by the tiles they cover.
-const MAX_GRAPHS: usize = 12;
+/// Graphs kept built, by the tiles they cover (each train's motion and its way ahead use several).
+const MAX_GRAPHS: usize = 32;
 /// A tile on disk is used without asking again for this long.
 const DISK_FRESH: Duration = Duration::from_secs(14 * 24 * 3600);
 /// A route near a train needing more tiles than this is too long to make here.
@@ -1683,8 +1683,24 @@ fn end_heading(points: &[(f64, f64)]) -> Option<f64> {
 /// is one it has passed, and it goes on to the one after (up to
 /// `MAX_PASSED` of them). Also how many it passed.
 pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Line>, bool, usize) {
+    let way = way(places, heading);
+    (way.stretches, way.complete, way.passed)
+}
+
+/// `way_through`'s way, and the spot it takes at each place (none: passed, or not reached).
+pub struct Way {
+    pub stretches: Vec<Line>,
+    pub complete: bool,
+    pub passed: usize,
+    /// By place (those with no spots left out).
+    pub spots: Vec<Option<(f64, f64)>>,
+}
+
+/// `way_through`, with the spots it takes.
+pub fn way(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> Way {
     let places: Vec<&[(f64, f64)]> =
         places.iter().map(|p| &p[..p.len().min(MAX_PLATFORMS)]).filter(|p| !p.is_empty()).collect();
+    let mut spots = vec![None; places.len()];
     let keys_between = |a: &[(f64, f64)], b: &[(f64, f64)]| {
         let mut points = a.to_vec();
         points.extend(b);
@@ -1694,8 +1710,9 @@ pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Lin
     let mut cur: Line = Vec::new();
     let mut complete = true;
     let mut passed = 0;
-    let Some(first) = places.first() else { return (stretches, complete, passed) };
+    let Some(first) = places.first() else { return Way { stretches, complete, passed, spots } };
     let mut at = first[0];
+    spots[0] = Some(at);
     let mut i = 0;
     while i + 1 < places.len() {
         i += 1;
@@ -1759,6 +1776,7 @@ pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Lin
                     cur.extend(r.points.into_iter().skip(1));
                 }
                 at = spot;
+                spots[i] = Some(spot);
             }
             None => {
                 if cur.len() >= 2 {
@@ -1772,7 +1790,7 @@ pub fn way_through(places: &[Vec<(f64, f64)>], heading: Option<f64>) -> (Vec<Lin
     if cur.len() >= 2 {
         stretches.push(cur);
     }
-    (stretches, complete, passed)
+    Way { stretches, complete, passed, spots }
 }
 
 /// The track, for the motion module, as a train of a class runs on it
@@ -1800,6 +1818,122 @@ impl crate::motion::Track for Rail {
 
     fn hold(&self, at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)> {
         hold(at, platform)
+    }
+}
+
+/// The track, with the way the train's route takes (`trafikverket::route_from`,
+/// as its panel shows it): the motion goes along that way's tracks where it
+/// leads (through points along it, `GUIDE_EVERY_M` apart), rather than
+/// finding a way of its own between the stops (a parallel track, the other
+/// side of a junction). Where the way can't be followed, as `Rail`.
+pub struct Guided<'a> {
+    pub rail: &'a Rail,
+    /// From where the train is, as `(lat, lon)` points.
+    pub way: &'a [(f64, f64)],
+}
+
+/// The points the motion is led through along a train's way are this far apart, metres.
+const GUIDE_EVERY_M: f64 = 250.0;
+/// ...as far as this on, metres (the motion's horizon, at most).
+const GUIDE_FOR_M: f64 = 8_000.0;
+/// A place this near the way is on it, metres.
+const ON_WAY_M: f64 = 12.0;
+/// A place this near where the way starts is led onto it, metres.
+const SHORT_OF_WAY_M: f64 = 1_000.0;
+
+/// How far along `line` the point nearest `p` is (from `after` on), if it is within `within`.
+fn along_line(line: &[(f64, f64)], p: (f64, f64), within: f64, after: f64) -> Option<f64> {
+    let mut s = 0.0;
+    let mut best: Option<(f64, f64)> = None;
+    for w in line.windows(2) {
+        let len = distance(w[0], w[1]);
+        let (q, t) = project(p, w[0], w[1]);
+        let at = s + t * len;
+        let off = distance(p, q);
+        if at >= after - 0.5 && off <= within && best.is_none_or(|b| off < b.1 - 0.5) {
+            best = Some((at, off));
+        }
+        s += len;
+    }
+    best.map(|b| b.0)
+}
+
+/// The point `s` metres along `line`.
+fn point_along(line: &[(f64, f64)], s: f64) -> (f64, f64) {
+    let mut left = s;
+    for w in line.windows(2) {
+        let len = distance(w[0], w[1]);
+        if left <= len {
+            let t = if len > 0.0 { left / len } else { 0.0 };
+            return (w[0].0 + (w[1].0 - w[0].0) * t, w[0].1 + (w[1].1 - w[0].1) * t);
+        }
+        left -= len;
+    }
+    *line.last().unwrap_or(&(0.0, 0.0))
+}
+
+impl crate::motion::Track for Guided<'_> {
+    fn route(
+        &self,
+        start: (f64, f64),
+        heading: Option<f64>,
+        targets: &[(f64, f64)],
+        onwards_m: f64,
+        onwards_only: bool,
+    ) -> Option<crate::motion::Routed> {
+        let plain = || self.rail.route(start, heading, targets, onwards_m, onwards_only);
+        // where it is along the way: on it, or short of where it starts (the report behind the drawn train)
+        let short = self.way.first().is_some_and(|w| distance(start, *w) <= SHORT_OF_WAY_M);
+        let Some(s0) = along_line(self.way, start, ON_WAY_M, 0.0).or(short.then_some(0.0)) else { return plain() };
+        let length: f64 = self.way.windows(2).map(|w| distance(w[0], w[1])).sum();
+        // the targets on the way, in order, and where (those after the first off it: as they are)
+        let mut on_way = Vec::new();
+        let mut after = s0;
+        for t in targets {
+            let Some(s) = along_line(self.way, *t, ON_WAY_M, after) else { break };
+            on_way.push(s);
+            after = s;
+        }
+        // each stop on it where the way passes it (its platform, as the way takes it)
+        let target = |i: usize| on_way.get(i).map_or(targets[i], |s| point_along(self.way, *s));
+        // through the way's points between them, and on along it
+        let end = length.min(s0 + GUIDE_FOR_M);
+        let mut through: Vec<((f64, f64), Option<usize>)> = Vec::new();
+        let mut s = s0 + GUIDE_EVERY_M;
+        let mut next = 0;
+        while s < end {
+            while next < on_way.len() && on_way[next] <= s {
+                through.push((target(next), Some(next)));
+                next += 1;
+            }
+            if on_way.iter().all(|t| (t - s).abs() > GUIDE_EVERY_M / 4.0) {
+                through.push((point_along(self.way, s), None));
+            }
+            s += GUIDE_EVERY_M;
+        }
+        through.extend((next..targets.len()).map(|i| (target(i), Some(i))));
+        if through.iter().all(|t| t.1.is_some()) {
+            return plain();
+        }
+        let points: Vec<(f64, f64)> = through.iter().map(|t| t.0).collect();
+        let (pts, reached, speeds) = self.rail.route(start, heading, &points, onwards_m, onwards_only)?;
+        let of_targets: Vec<f64> = reached.iter().zip(&through).filter(|(_, t)| t.1.is_some()).map(|(r, _)| *r).collect();
+        // led astray (the way not followed to the end): the way of its own, if it reaches more of the stops
+        if reached.len() < through.len()
+            && let Some(own) = plain()
+            && own.1.len() > of_targets.len()
+        {
+            return Some(own);
+        }
+        Some((pts, of_targets, speeds))
+    }
+
+    fn top(&self) -> Option<f64> {
+        self.rail.top()
+    }
+
+    fn hold(&self, at: (f64, f64), platform: (f64, f64)) -> Option<(f64, f64)> {
+        self.rail.hold(at, platform)
     }
 }
 
@@ -1972,6 +2106,75 @@ mod tests {
         assert_eq!(stretches.len(), 1, "A to B only: {stretches:?}");
         assert!(stretches[0].iter().all(|p| (p.0 - a.0).abs() < 1e-4), "along the track, not off to C");
         assert!(distance(*stretches[0].last().unwrap(), b) < 1.0);
+    }
+
+    #[test]
+    fn the_way_through_takes_the_platform_it_can_go_on_from() {
+        // the line east 3.6 km (in one tile, as its graph is made of the tiles round each leg); at
+        // 1.5 km a bay track leaves it, 10 m north of it, ending at 2.1 km
+        let n = f64::from(1u32 << ZOOM);
+        let a = (62.5, ((16.5_f64 + 180.0) / 360.0 * n).floor() / n * 360.0 - 180.0 + 0.0005);
+        let along = |m: f64| ahead(a, 90.0, m);
+        assert_eq!(tile_of(a.0, a.1), tile_of(along(3_600.0).0, along(3_600.0).1));
+        let mut bay = vec![along(1_500.0)];
+        bay.extend((16..=21).map(|i| ahead(along(i as f64 * 100.0), 0.0, 10.0)));
+        {
+            let mut st = store().lock().unwrap();
+            for key in tiles_for(&[a, along(3_600.0)], 0.05) {
+                st.tracks.insert(key, (Instant::now(), Arc::new(Vec::new())));
+            }
+            st.tracks.insert(tile_of(a.0, a.1), (Instant::now(), Arc::new(vec![track(line(a, 90.0, 3.6)), track(bay)])));
+        }
+        // the station at 1.9 km: the bay's spot the likelier, then the line's
+        let (bay_spot, line_spot) = (ahead(along(1_900.0), 0.0, 10.0), along(1_900.0));
+        let through = way(&[vec![along(300.0)], vec![bay_spot, line_spot], vec![along(3_300.0)]], None);
+        assert!(through.complete);
+        assert_eq!(through.spots[1], Some(line_spot), "not the bay, which it would have to back out of");
+        assert_eq!(through.spots[2], Some(along(3_300.0)));
+        // the last place: the likeliest it reaches
+        let ending = way(&[vec![along(300.0)], vec![bay_spot, line_spot]], None);
+        assert_eq!(ending.spots[1], Some(bay_spot), "a train ending there may stop in the bay");
+    }
+
+    #[test]
+    fn the_motion_follows_the_way_its_route_takes() {
+        use crate::motion::Track as _;
+        // two tracks east 3 km, 10 m apart, joined by crossovers at each end (in one tile)
+        let n = f64::from(1u32 << ZOOM);
+        let a = (61.5, ((15.5_f64 + 180.0) / 360.0 * n).floor() / n * 360.0 - 180.0 + 0.0005);
+        let south = |m: f64| ahead(a, 90.0, m);
+        let north = |m: f64| ahead(ahead(a, 0.0, 10.0), 90.0, m);
+        {
+            let mut st = store().lock().unwrap();
+            for key in tiles_for(&[a, south(3_000.0)], 0.05) {
+                st.tracks.insert(key, (Instant::now(), Arc::new(Vec::new())));
+            }
+            st.tracks.insert(
+                tile_of(a.0, a.1),
+                (
+                    Instant::now(),
+                    Arc::new(vec![
+                        track(line(a, 90.0, 3.0)),
+                        track(line(ahead(a, 0.0, 10.0), 90.0, 3.0)),
+                        track(vec![south(200.0), north(300.0)]),
+                        track(vec![north(2_700.0), south(2_800.0)]),
+                    ]),
+                ),
+            );
+        }
+        let rail = Rail { class: None };
+        let (start, target) = (south(100.0), south(2_900.0));
+        let on_north = |points: &[(f64, f64)]| points.iter().any(|p| distance(*p, north(1_500.0)) < 2.0);
+        let (own, ..) = rail.route(start, Some(90.0), &[target], 0.0, false).unwrap();
+        assert!(!on_north(&own), "on its own it keeps to the track it is on");
+        // its route crosses over and back
+        let mut way = vec![start, south(200.0)];
+        way.extend((3..=27).map(|i| north(i as f64 * 100.0)));
+        way.extend([south(2_800.0), target]);
+        let (led, reached, _) = Guided { rail: &rail, way: &way }.route(start, Some(90.0), &[target], 0.0, false).unwrap();
+        assert!(on_north(&led), "along the way its route takes");
+        assert_eq!(reached.len(), 1, "and still to its stop");
+        assert!(distance(*led.last().unwrap(), target) < 1.0);
     }
 
     #[test]

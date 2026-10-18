@@ -3,7 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- the app itself never zooms (a pinch over a menu would): only the map does, by its own gestures -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <style>
+      html { touch-action: manipulation; }
+    </style>
+    <script>
+      // iOS zooms the page on a pinch whatever the viewport says: its gesture events, cancelled
+      for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
+        document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+      }
+    </script>
     <title>RustRadar</title>
     %sveltekit.head%
   </head>

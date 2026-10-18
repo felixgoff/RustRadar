@@ -2963,9 +2963,17 @@
   const LOCK_CAMERA_ABOVE = 0.9;
   /** Whether the wheel zooms about the cursor or the centre of the screen. */
   let zoomAround: "center" | "pointer" = "pointer";
-  /** Locked to an aircraft, a plain drag orbits it instead of panning away. */
+  /**
+   * Locked to an aircraft, a plain drag orbits it instead of panning away.
+   * Otherwise two fingers dragged together pan, as one does (a pinch still zooms).
+   */
   const controllerFor = (locked: boolean) =>
-    ({ type: NorthUpGlobeController, zoomAround: locked ? "center" : "pointer", dragMode: locked ? "rotate" : "pan" }) as const;
+    ({
+      type: NorthUpGlobeController,
+      zoomAround: locked ? "center" : "pointer",
+      dragMode: locked ? "rotate" : "pan",
+      multiTouchDrag: locked ? null : "pan",
+    }) as const;
 
   /**
    * The view with its centre moved so the camera is locked on the aircraft.

@@ -7,7 +7,7 @@ import {
   HILLSHADE_STYLE,
   reliefExaggeration,
   terrainLayers,
-  terrainNeedsGroundElevation,
+  terrainSurfaceLayer,
   tileRowMetersPerPixel,
 } from "./terrain-layer";
 
@@ -105,20 +105,17 @@ test("zoomed out, relief is exaggerated more", () => {
   expect(reliefExaggeration(15)).toBe(1);
 });
 
-test("the hillshade at every zoom, the mesh only when asked for and flat", () => {
+test("the hillshade at every zoom", () => {
   const ids = (o: Parameters<typeof terrainLayers>[0]) => terrainLayers(o).map((l) => l.id);
   expect(ids({ flat: false, zoom: 3, basemap: "dark" })).toEqual(["terrain-hillshade"]);
   expect(ids({ flat: true, zoom: 14, basemap: "dark" })).toEqual(["terrain-hillshade"]);
-  expect(ids({ flat: false, zoom: 10, basemap: "dark", mesh: true })).toEqual(["terrain-hillshade"]);
-  const meshWorkerUrl = "/terrain-worker.js";
-  // the mesh can only be parsed in the bundled worker
-  expect(ids({ flat: true, zoom: 13, basemap: "dark", mesh: true })).toEqual(["terrain-hillshade"]);
-  expect(ids({ flat: true, zoom: 13, basemap: "dark", mesh: true, meshWorkerUrl })).toEqual(["terrain-mesh"]);
-  expect(ids({ flat: true, zoom: 13, basemap: "satellite", mesh: true, meshWorkerUrl, imageryUrl: "https://x/{z}/{y}/{x}" })).toEqual([
-    "terrain-mesh-imagery",
-  ]);
-  expect(terrainNeedsGroundElevation({ flat: true, zoom: 13, mesh: true })).toBe(true);
-  expect(terrainNeedsGroundElevation({ flat: true, zoom: 13 })).toBe(false);
+});
+
+test("the 3D surface is deck.gl's terrain, never below the sea", () => {
+  const surface = terrainSurfaceLayer("/terrain-worker.js");
+  expect(surface.props.operation).toBe("terrain+draw");
+  const extensions = surface.props.extensions as unknown as { constructor: { extensionName?: string } }[];
+  expect(extensions.map((e) => e.constructor.extensionName)).toEqual(["SeaLevelExtension"]);
 });
 
 test("the hillshade is fainter over the imagery", () => {

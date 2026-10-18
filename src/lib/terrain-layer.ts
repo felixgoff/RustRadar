@@ -1,5 +1,5 @@
-// Terrain: shaded relief under the map, and (optionally) a true 3D surface
-// close in.
+// Terrain: shaded relief under the map, and a true 3D surface the map stands
+// on (the terrain setting, on the flat map).
 //
 // Elevation comes from the keyless AWS Open Data "Terrain Tiles" (Mapzen /
 // Tilezen Joerd), terrarium PNG encoding, z0-15:
@@ -11,12 +11,12 @@
 // the light and faintly lightens those facing it. Flat ground comes out fully
 // transparent, so plains, the sea and tile edges leave the map untouched.
 //
-// The 3D mesh (`mesh: true`) is a deck.gl TerrainLayer. It is opaque and
-// stands above the z = 0 plane everything else is drawn on (roads, runways,
-// buildings, ships, aircraft on the ground near airports), so it hides or
-// swallows all of that: see `terrainLayers` and the integration notes.
+// The 3D surface (`terrainSurfaceLayer`) is a deck.gl TerrainLayer drawn as
+// deck.gl's terrain: the map's other layers stand on it with deck.gl's
+// TerrainExtension (Globe.svelte's `onTerrain`), the flat ones draped over
+// it, the rest raised by the ground's height under them.
 
-import { COORDINATE_SYSTEM, type Layer } from "@deck.gl/core";
+import { COORDINATE_SYSTEM, type Layer, LayerExtension } from "@deck.gl/core";
 import { TerrainLayer, TileLayer } from "@deck.gl/geo-layers";
 import { BitmapLayer } from "@deck.gl/layers";
 
@@ -249,27 +249,11 @@ export type TerrainOptions = {
   /** The view's zoom. */
   zoom: number;
   basemap: TerrainBasemap;
-  /**
-   * Also draw a true 3D surface in the flat projection. Off by default: it
-   * hides everything drawn at height 0 (see the module notes); worth it only
-   * over the satellite imagery, which it then replaces.
-   */
-  mesh?: boolean;
   /** Hillshade strength, 0-1, on top of the basemap's own. */
   opacity?: number;
-  /** URL template of the satellite imagery, `{z}/{y}/{x}`, to texture the mesh with. */
-  imageryUrl?: string;
   /** Layer extensions for the hillshade (the realistic map's haze). */
   extensions?: unknown[];
-  /**
-   * The bundled `@loaders.gl/terrain` worker (`@loaders.gl/terrain/terrain-worker.js?url`):
-   * deck.gl's TerrainLayer only parses in a worker, which would otherwise come from a CDN. No mesh without it.
-   */
-  meshWorkerUrl?: string;
 };
-
-/** The mesh only from here (and only in the flat projection). */
-export const MESH_MIN_ZOOM = 12;
 
 /**
  * The hillshade's deepest tiles. Most of the source data is ~30 m (SRTM,
@@ -319,52 +303,65 @@ function meshLoadOptionsFor(workerUrl: string) {
   return options;
 }
 
-const MESH_MATERIAL = { ambient: 0.5, diffuse: 0.7, shininess: 8, specularColor: [30, 30, 30] as [number, number, number] };
 /** The dark map's land, which the untextured mesh is painted in. */
 const MESH_COLOR: [number, number, number] = [34, 39, 48];
 
-/** A true 3D terrain surface, for the flat projection; textured with `imageryUrl` when given. */
-export const terrainMeshLayer = (imageryUrl: string | undefined, workerUrl: string) =>
+/**
+ * The 3D terrain no lower than the sea: the tiles have the sea floor, which
+ * the sea's surface (the globe, the map's water) would otherwise hide.
+ * (Its mesh's vertices are longitude, latitude and metres up, as they pass
+ * the size filter.)
+ */
+class SeaLevelExtension extends LayerExtension {
+  static extensionName = "SeaLevelExtension";
+
+  getShaders() {
+    return { inject: { "vs:DECKGL_FILTER_SIZE": "size.z = max(size.z, 0.0);" } };
+  }
+}
+const SEA_LEVEL = new SeaLevelExtension();
+
+/**
+ * The 3D surface's deepest tiles: about 5 m a pixel, finer than most of the
+ * data (~30 m), and each a texture of what is draped on it (deck.gl's, up to
+ * 2048 px: well under a metre a pixel). Deeper would only make more tiles to
+ * mesh and drape.
+ */
+const SURFACE_MAX_ZOOM = 14;
+
+/**
+ * The ground in 3D: the elevation as a surface, which the map's other layers
+ * stand on with deck.gl's TerrainExtension (the flat ones draped over it,
+ * the rest raised by the height under them). Drawn with what is draped on
+ * it; its own colour only shows where nothing is.
+ */
+export const terrainSurfaceLayer = (workerUrl: string, extensions: unknown[] = NO_EXTENSIONS) =>
   new TerrainLayer({
-    id: imageryUrl ? "terrain-mesh-imagery" : "terrain-mesh",
+    id: "terrain-surface",
     elevationData: TERRARIUM_URL,
-    texture: imageryUrl ?? null,
     elevationDecoder: TERRARIUM_DECODER,
-    minZoom: MESH_MIN_ZOOM - 2,
-    maxZoom: TERRARIUM_MAX_ZOOM,
+    // out to the horizon, where coarser tiles are asked for
+    minZoom: 0,
+    maxZoom: SURFACE_MAX_ZOOM,
     tileSize: TILE_SIZE,
     meshMaxError: 4,
     color: MESH_COLOR,
-    material: imageryUrl ? false : MESH_MATERIAL,
+    material: false,
+    operation: "terrain+draw",
     loadOptions: meshLoadOptionsFor(workerUrl),
     maxRequests: 8,
+    extensions: [SEA_LEVEL, ...extensions] as never,
   });
 
 /**
- * The terrain layers for the current view, in drawing order.
+ * The terrain layers for the current view, in drawing order: the hillshade.
  *
  * Insert them right after the basemap's ground (`landLayer()` on the dark map,
  * `imageryLayer()` on the satellite one) and before `vectorMapLayer`, so
  * water, borders, roads and runways stay crisp on top of the shading.
- *
- * With `mesh`, in the flat projection, the result is the 3D surface instead of
- * the hillshade, and `terrainNeedsGroundElevation` says so: see there.
  */
-export function terrainLayers({ flat, zoom, basemap, mesh = false, opacity = 1, imageryUrl, meshWorkerUrl, extensions }: TerrainOptions): Layer[] {
-  if (meshWorkerUrl && terrainNeedsGroundElevation({ flat, zoom, mesh })) {
-    return [terrainMeshLayer(basemap === "satellite" ? imageryUrl : undefined, meshWorkerUrl)];
-  }
+export function terrainLayers({ zoom, basemap, opacity = 1, extensions }: TerrainOptions): Layer[] {
   // opacity in steps, so the layer's props don't change with every frame of a zoom
   const fade = Math.round(hillshadeFade(zoom) * 20) / 20;
   return [hillshadeLayer(HILLSHADE_OPACITY[basemap] * opacity * fade, extensions)];
-}
-
-/**
- * Whether `terrainLayers` returns the 3D surface for this view, which stands
- * at true height above the 0 plane: anything meant to sit on the ground would
- * have to be raised by the terrain height under it (and aircraft drawn at MSL,
- * without the motion model's airport field-elevation removal) to match.
- */
-export function terrainNeedsGroundElevation({ flat, zoom, mesh = false }: Pick<TerrainOptions, "flat" | "zoom" | "mesh">): boolean {
-  return mesh && flat && zoom >= MESH_MIN_ZOOM;
 }

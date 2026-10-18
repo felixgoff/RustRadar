@@ -254,6 +254,8 @@ layout(std140) uniform rlightUniforms {
   float night;
   float time;
   float globe;
+  float cover;
+  vec3 eye;
 } rlight;
 `;
 
@@ -374,6 +376,8 @@ vec3 rl_shade(vec3 albedo, vec3 n, vec3 v, float roughness, float metalness, flo
 }
 // how much of what is here gets through the air to the camera (fog only from some way out, so the map stays readable)
 float rl_clear() {
+  // (draped on the 3D terrain: its surface takes the air, as it is drawn)
+  if (rlight.cover > 0.5) return 1.0;
   return exp(-max(length(rl_eye) - rlight.hazeStart, 0.0) * rlight.hazeDensity);
 }
 // the air between here and the camera: dimming and adding its own light (brighter towards the sun)
@@ -408,7 +412,9 @@ const rlightModule = {
     bool rl_globe = project.projectionMode == PROJECTION_MODE_GLOBE;
     mat3 rl_enu = rl_frame(geometry.position.xyz, rl_globe);
     // to the camera and to the sun from here, as metres east, north and up
-    rl_eye = ((project.cameraPosition - geometry.position.xyz) / project.commonUnitsPerMeter.x) * rl_enu;
+    // (draped on the 3D terrain, it is drawn from above: still seen from the map's own camera)
+    vec3 rl_cam = rlight.cover > 0.5 ? rlight.eye : project.cameraPosition;
+    rl_eye = ((rl_cam - geometry.position.xyz) / project.commonUnitsPerMeter.x) * rl_enu;
     rl_sun = rl_globe ? rlight.sunGlobe * rl_enu : rlight.sunDir;
     // where it is on the flat map, for what lies fixed to the world (textures, the clouds' shadows):
     // on the globe, web mercator's units from the view's centre, so they fit the flat map's
@@ -453,12 +459,27 @@ const rlightModule = {
     night: "f32",
     time: "f32",
     globe: "f32",
+    cover: "f32",
+    eye: "vec3<f32>",
   },
 } as const;
 
-type DrawParams = {
-  shaderModuleProps: { project: { viewport: { resolution?: number; longitude?: number; latitude?: number } } };
+type Viewport = {
+  resolution?: number;
+  longitude?: number;
+  latitude?: number;
+  cameraPosition: number[];
+  projectPosition(p: number[]): number[];
+  unprojectPosition(p: number[]): number[];
 };
+type DrawParams = { shaderModuleProps: { project: { viewport: Viewport } } };
+
+/** The map's camera, `[lng, lat, metres up]`: for what deck.gl draws from elsewhere (draped on the 3D terrain). */
+let mapEye: number[] = [0, 0, 1000];
+/** Where the map's camera is, from its viewport (before each frame: what is draped is drawn first). */
+export function aimMapEye(viewport: Pick<Viewport, "cameraPosition" | "unprojectPosition">) {
+  mapEye = viewport.unprojectPosition(viewport.cameraPosition);
+}
 const mod = (v: number, p: number) => ((v % p) + p) % p;
 
 /** A place on web mercator's map, as deck.gl's flat map has it (512 units round the world). */
@@ -477,13 +498,18 @@ function rlightProps(params: DrawParams) {
   const viewport = projectProps.viewport;
   const [lng, lat] = [Math.fround(viewport.longitude ?? 0), Math.fround(viewport.latitude ?? 0)];
   let at: [number, number];
-  if (viewport.resolution) {
+  // the map's own view is the globe's; a flat one is deck.gl's, drawing what is draped on the 3D terrain from above
+  const cover = !viewport.resolution;
+  let eye = [0, 0, 0];
+  if (!cover) {
     // the globe: from the view's centre (the shader measures from it)
     at = mercator(lng, lat);
   } else {
     // the flat map: from deck.gl's origin for the layer
     const { commonOrigin } = project.getUniforms(projectProps as never) as { commonOrigin: number[] };
     at = [commonOrigin[0], commonOrigin[1]];
+    const p = viewport.projectPosition(mapEye);
+    eye = [p[0] - commonOrigin[0], p[1] - commonOrigin[1], p[2] - (commonOrigin[2] ?? 0)];
   }
   // towards the sun in the globe's common space (x, y and z are the Earth's y, −x and z)
   const sun = fromLocal(look.sunDir, lat, lng);
@@ -512,6 +538,8 @@ function rlightProps(params: DrawParams) {
     night: look.night,
     time: (performance.now() / 1000) % 100_000,
     globe: look.globe,
+    cover: cover ? 1 : 0,
+    eye,
   };
 }
 
@@ -907,6 +935,32 @@ export class FootShadeExtension extends LayerExtension {
   }
 }
 
+/**
+ * The 3D terrain's surface, drawn with the ground draped on it (which leaves
+ * the air out, being drawn once for many frames): the air between it and the
+ * camera.
+ */
+export class TerrainAirExtension extends LayerExtension {
+  static extensionName = "RealisticTerrainAirExtension";
+
+  getShaders() {
+    return {
+      modules: [rlightModule],
+      inject: {
+        "fs:#main-end": /* glsl */ `
+    float rl_t = rl_clear();
+    vec3 rl_air = rl_aerial(vec3(0.0)) / max(1.0 - rl_t, 1e-4);
+    fragColor.rgb = fragColor.rgb * rl_t + rl_display(rl_air) * (1.0 - rl_t) * fragColor.a;
+  `,
+      },
+    };
+  }
+
+  draw(this: ExtLayer, params: DrawParams) {
+    this.setShaderModuleProps({ rlight: rlightProps(params) });
+  }
+}
+
 /** One of each, shared by every layer that uses them: the same extension compares equal, so no shader rebuilds. */
 export const BUILDINGS = new BuildingExtension();
 export const ROOFS = new RoofExtension();
@@ -915,6 +969,7 @@ export const TREE_SHADOWS = new TreeShadowExtension();
 export const CLOUDS = new CloudExtension();
 export const HAZE_FADE = new HazeFadeExtension();
 export const FOOT_SHADE = new FootShadeExtension();
+export const TERRAIN_AIR = new TerrainAirExtension();
 
 // --------------------------------------------------------------- buildings' looks
 

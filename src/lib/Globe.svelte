@@ -27,6 +27,7 @@
     type PickingInfo,
   } from "@deck.gl/core";
   import {
+    _TerrainExtension as TerrainExtension,
     CollisionFilterExtension,
     PathStyleExtension,
     type CollisionFilterExtensionProps,
@@ -106,7 +107,9 @@
     TREES as REALISTIC_TREES,
     CLOUDS as REALISTIC_CLOUDS,
     TREE_SHADOWS,
+    TERRAIN_AIR,
     UNLIT,
+    aimMapEye,
   } from "./realistic";
   import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, sglGroundLayer } from "./realistic-ground";
   import { landCoverGroundLayer } from "./landcover-ground";
@@ -123,7 +126,8 @@
   import { reference } from "./reference.svelte";
   import { offsetEastNorth, shipMeshes, shipPlacement, type ShipClass } from "./ship-models";
   import { shipAtlas, shipColor, shipIcon, shipIconScale, shipIconSize, shipKindLabel } from "./ships";
-  import { terrainLayers } from "./terrain-layer";
+  import { terrainLayers, terrainSurfaceLayer } from "./terrain-layer";
+  import terrainWorkerUrl from "@loaders.gl/terrain/terrain-worker.js?url";
   import { RAIL_MIN_ZOOM, railLayers, SPEED_BANDS, SPEED_UNKNOWN } from "./rail-layer";
   import {
     delayText,
@@ -1031,6 +1035,7 @@
   const TREED = [REALISTIC_TREES];
   const TREE_SHADOWED = [TREE_SHADOWS];
   const GROUNDED = [GROUND_SURFACES];
+  const TERRAIN_AIRED = [TERRAIN_AIR];
   /** Shadows in sunshine: a deep blue, the sky's light being all that is left in them. */
   const REALISTIC_SHADOW_COLOR: [number, number, number] = [6, 12, 28];
   /** How dark a building's shadow gets in full sun, against its usual (BUILDING_SHADOW_ALPHA). */
@@ -2550,7 +2555,13 @@
     }
 
     const layers: Layer[] = [earthLayer(basemap)];
+    // the ground in 3D on the flat map (on the globe it would hardly show): everything else stands on it (`onTerrain`)
+    const relief = terrain && flat;
     const realistic = basemap === "realistic";
+    if (relief) {
+      layers.push(terrainSurfaceLayer(terrainWorkerUrl, realistic ? TERRAIN_AIRED : []));
+      if (realistic) aimMapEye(new GlobeViewport({ ...view, width: container.clientWidth, height: container.clientHeight }));
+    }
     /** Close in, Streets GL's own tiles. */
     const sgl = realistic && flat && zoom >= SGL_FROM_ZOOM;
     // shaded relief goes on the ground, under the map's water, borders, roads and runways
@@ -2964,8 +2975,18 @@
         }),
       );
     }
-    return layers;
+    return relief ? onTerrain(layers) : layers;
   }
+
+  const ON_TERRAIN = new TerrainExtension();
+  /** Drawn as they are over the 3D terrain: the globe, the terrain itself and the clouds. */
+  const OVER_TERRAIN = /^(earth$|terrain-surface$|clouds-)/;
+  /**
+   * The layers on the 3D terrain: flat ones draped over it, the rest (buildings,
+   * trees, trains, aircraft) raised by the ground's height under them.
+   */
+  const onTerrain = (layers: Layer[]) =>
+    layers.map((l) => (OVER_TERRAIN.test(l.id) ? l : l.clone({ extensions: [...l.props.extensions, ON_TERRAIN] })));
 
   const DEGREES = Math.PI / 180;
   const METRES_PER_DEGREE = 111_320;

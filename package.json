@@ -26,6 +26,7 @@
     "@fontsource-variable/overpass-mono": "^5.3.0",
     "@loaders.gl/core": "4.5.2",
     "@loaders.gl/mvt": "4.5.2",
+    "@loaders.gl/terrain": "4.5.3",
     "@lucide/svelte": "^1.52.0",
     "@luma.gl/core": "^9.4.2",
     "@luma.gl/engine": "^9.4.2",

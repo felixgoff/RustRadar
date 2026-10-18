@@ -90,6 +90,7 @@
   import { LANDCOVER_ATTRIBUTION } from "$lib/landcover";
   import { CANOPY_ATTRIBUTION } from "$lib/canopy";
   import { STREET_TREES_ATTRIBUTION } from "$lib/street-trees";
+  import { OVERTURE_ATTRIBUTION } from "$lib/overture";
   import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
   import { conditionsOf, fetchWeather, PRESETS, type Weather } from "$lib/weather";
   import { distanceKm as distanceKmBetween } from "$lib/flightpath";
@@ -1272,6 +1273,7 @@
       settings.terrain && TERRAIN_ATTRIBUTION,
       settings.basemap === "realistic" && "Textures: Streets GL (MIT)",
       settings.basemap === "realistic" && view.zoom >= SGL_ZOOM - 0.5 && SGL_ATTRIBUTION,
+      settings.basemap === "realistic" && view.zoom >= SGL_ZOOM - 0.5 && OVERTURE_ATTRIBUTION,
       // the ground where the map leaves it unmapped (the flat map's), and what plants the trees close in (Globe's TREES_ZOOM)
       settings.basemap === "realistic" && view.zoom >= 12 && LANDCOVER_ATTRIBUTION,
       settings.basemap === "realistic" && view.zoom >= 14.5 && `${CANOPY_ATTRIBUTION} · ${STREET_TREES_ATTRIBUTION}`,

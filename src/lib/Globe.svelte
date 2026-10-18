@@ -109,8 +109,9 @@
   } from "./realistic";
   import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, sglGroundLayer } from "./realistic-ground";
   import { landCoverGroundLayer } from "./landcover-ground";
+  import { sglBuildingFetch } from "./overture";
   import { roadWidthsVersion, wantRoadWidths } from "./road-widths";
-  import { SGL_TILES, SGL_ZOOM, sglFetch } from "./streets-gl";
+  import { SGL_TILES, SGL_ZOOM } from "./streets-gl";
   import { onTexturesReady } from "./realistic-textures";
   import { treeLayers } from "./tree-layer";
   import { PRESETS, type Conditions } from "./weather";
@@ -1055,7 +1056,8 @@
       minZoom: sgl ? SGL_ZOOM : 14,
       maxZoom: sgl ? SGL_ZOOM : 14,
       loadOptions: sgl ? SGL_BUILDING_OPTIONS : BUILDING_LOAD_OPTIONS,
-      ...(sgl ? { fetch: sglFetch as never } : {}),
+      // (with Overture's heights where Streets GL's tiles have none)
+      ...(sgl ? { fetch: sglBuildingFetch as never } : {}),
       extruded: true,
       filled: true,
       stroked: false,

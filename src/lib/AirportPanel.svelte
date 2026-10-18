@@ -81,7 +81,7 @@
 </script>
 
 <aside class="panel surface" aria-label="{airport?.name ?? code} departures and arrivals">
-  <header class="strip">
+  <header class="strip" data-peek>
     <div class="cell id">
       <h2 class="data">{code}</h2>
       <p class="data">{airport?.icao ?? ""}</p>
@@ -100,7 +100,7 @@
     </button>
   </header>
 
-  <div class="tabs" role="tablist" aria-label="Board">
+  <div class="tabs" role="tablist" aria-label="Board" data-peek>
     {#each [["departures", "Departures", PlaneTakeoff], ["arrivals", "Arrivals", PlaneLanding]] as const as [id, label, Icon] (id)}
       <button
         id="board-{id}"
@@ -182,7 +182,7 @@
     {/if}
   </div>
 
-  <footer>
+  <footer data-peek>
     <span class="updated">
       {#if updatedAt}Updated {clockAt(updatedAt / 1000, timeZone)} · {timeZone ? `times at ${code}` : "your time"}{/if}
     </span>
@@ -426,39 +426,20 @@
     color: var(--text-3);
   }
   /* Phones (the query in phone.svelte.ts): a sheet along the bottom */
+  /* Phones (the query in phone.svelte.ts): in the page's bottom sheet, which
+     frames it and lowers it to the parts marked data-peek */
   @media (max-width: 899px), (max-height: 500px) {
     .panel {
-      position: fixed;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      z-index: 5;
+      position: static;
+      flex: 1;
+      min-height: 0;
       width: auto;
-      max-height: 72dvh;
-      border-bottom: 0;
-      border-left: 0;
-      border-right: 0;
-      border-radius: 12px 12px 0 0;
-      padding-bottom: env(safe-area-inset-bottom, 0px);
-      padding-left: env(safe-area-inset-left, 0px);
-      padding-right: env(safe-area-inset-right, 0px);
-      animation-name: rise;
-    }
-    @keyframes rise {
-      from {
-        transform: translateY(24px);
-        opacity: 0;
-      }
-    }
-  }
-  /* a phone on its side: down the right, beside the list */
-  @media (max-height: 500px) and (orientation: landscape) {
-    .panel {
-      top: 0;
-      left: auto;
-      width: min(360px, 50vw);
       max-height: none;
-      border-radius: 12px 0 0 0;
+      border: 0;
+      border-radius: 0;
+      background: none;
+      box-shadow: none;
+      animation: none;
     }
   }
 </style>

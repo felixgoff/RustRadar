@@ -82,7 +82,7 @@
 </script>
 
 <aside class="panel surface" aria-label="Selected ship">
-  <header class="strip" class:bare={!moving && !loading}>
+  <header class="strip" class:bare={!moving && !loading} data-peek>
     <div class="cell id">
       <h2 class="data" class:long={name.length > 13} title={name}>{name}</h2>
       {#if subtitle}<p title={subtitle}>{subtitle}</p>{:else if loading}<p><span class="skeleton line short"></span></p>{/if}
@@ -115,7 +115,7 @@
   {/if}
 
   {#if loading}
-    <section class="voyage" aria-busy="true" aria-label="Voyage">
+    <section class="voyage" aria-busy="true" aria-label="Voyage" data-peek>
       <div class="legs">
         <div><span class="skeleton line code-line"></span></div>
         <div class="end"><span class="skeleton line code-line"></span></div>
@@ -123,7 +123,7 @@
       <span class="skeleton line"></span>
     </section>
   {:else if destination || eta || status || details?.sar}
-    <section class="voyage" aria-label="Voyage">
+    <section class="voyage" aria-label="Voyage" data-peek>
       {#if destination || eta}
         <div class="legs">
           <div>
@@ -200,7 +200,7 @@
     {/if}
   </section>
 
-  <footer>
+  <footer data-peek>
     <div class="report">
       {#if age}
         {#if age.stale}
@@ -521,39 +521,28 @@
     padding: 0;
   }
   /* Phones (the query in phone.svelte.ts): a sheet along the bottom */
+  /* Phones (the query in phone.svelte.ts): in the page's bottom sheet, which
+     frames it and lowers it to the parts marked data-peek */
   @media (max-width: 899px), (max-height: 500px) {
     .panel {
-      position: fixed;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      z-index: 5;
+      position: static;
+      flex: 1;
+      min-height: 0;
       width: auto;
-      max-height: 72dvh;
-      border-bottom: 0;
-      border-left: 0;
-      border-right: 0;
-      border-radius: 12px 12px 0 0;
-      padding-bottom: env(safe-area-inset-bottom, 0px);
-      padding-left: env(safe-area-inset-left, 0px);
-      padding-right: env(safe-area-inset-right, 0px);
-      animation-name: rise;
-    }
-    @keyframes rise {
-      from {
-        transform: translateY(24px);
-        opacity: 0;
-      }
-    }
-  }
-  /* a phone on its side: down the right, beside the list */
-  @media (max-height: 500px) and (orientation: landscape) {
-    .panel {
-      top: 0;
-      left: auto;
-      width: min(360px, 50vw);
       max-height: none;
-      border-radius: 12px 0 0 0;
+      border: 0;
+      border-radius: 0;
+      background: none;
+      box-shadow: none;
+      animation: none;
+    }
+    /* the summary first, the picture lower down */
+    .photo,
+    .body {
+      order: 1;
+    }
+    footer {
+      order: 2;
     }
   }
 </style>

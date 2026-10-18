@@ -517,7 +517,11 @@
     color: var(--text-3);
   }
   /* no keyboard on a phone to press it with (the query in phone.svelte.ts) */
+  /* Phones: the mode buttons share the row, so the results drop the full width of the bar */
   @media (max-width: 899px), (max-height: 500px) {
+    .search {
+      position: static;
+    }
     kbd {
       display: none;
     }

@@ -69,7 +69,8 @@ Python library.
   runways and taxiways), or satellite imagery. Place and airport names are a
   separate text layer, never baked into the map. 3D buildings from zoom 13.
 - A realistic map, after Streets GL: the ground drawn from the map's own data
-  in textures (grass, woods, fields, paving, roads with their markings,
+  in textures (zoomed out, the land in its own colours from NASA's Blue
+  Marble: deserts sandy, forests green; grass, woods, fields, paving, roads with their markings,
   railways on ballast, rippling water), buildings with façades of windows and
   roofs, trees, and the sky over them, all in physically based light. The sun
   casts shadows, the distance fades into the air, and windows light up at
@@ -171,6 +172,16 @@ Android installs update through the app. When a newer release has an APK, the
 app shows the update toast, and its button downloads the APK
 (`src-tauri/src/mobile_update.rs`). iOS installs update through TestFlight.
 
+To have Android update in the background instead, install
+[Obtainium](https://github.com/ImranR98/Obtainium) and add RustRadar to it:
+
+[<img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="54">](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/felixgoff/RustRadar)
+
+(or in Obtainium: Add App, `https://github.com/felixgoff/RustRadar`). It
+checks the releases here and installs each new APK. Updating over an install
+from elsewhere works as long as both are signed with the release key; a debug
+build has to be uninstalled first.
+
 ## Design
 
 The UI follows the [impeccable](https://github.com/pbakaus/impeccable)
@@ -212,7 +223,10 @@ covering the visible area when zoomed in. It refreshes the whole world every
 - The realistic map's textures are [Streets GL](https://github.com/StrandedKitty/streets-gl)'s
   (MIT, © StrandedKitty): `scripts/realistic-textures.py` turns them into the
   texture arrays in `static/realistic/`, with Streets GL's licence beside
-  them. Its weather is MET Norway's Locationforecast (CC BY 4.0), fetched by
+  them. The land's colours zoomed out are NASA's Blue Marble: Next Generation
+  (public domain; NASA Earth Observatory, Reto Stöckli), which
+  `scripts/earth-texture.py` turns into `static/realistic/earth.color.webp`.
+  Its weather is MET Norway's Locationforecast (CC BY 4.0), fetched by
   `src-tauri/src/weather.rs`, which identifies the app as MET asks.
 - Aircraft shapes come from [Flightradar24's 3D models](https://github.com/Flightradar24/fr24-3d-models)
   (glTF 1.0, in turn from the FlightGear project). `bun run build:aircraft`

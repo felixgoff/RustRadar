@@ -16,7 +16,7 @@ import {
 
 const train = (over: Partial<Train>): Train => ({
   id: over.name ?? "t",
-  source: "digitraffic",
+  source: "trafikverket",
   name: "IC 1",
   kind: "intercity",
   lat: 60.17,
@@ -34,7 +34,7 @@ const train = (over: Partial<Train>): Train => ({
 const helsinki = { lat: 60.17, lon: 24.94 };
 
 describe("trainMatches", () => {
-  const t = train({ name: "F4 Oslo S-Bergen", destination: "Bergen", operator: "Vy", source: "entur" });
+  const t = train({ name: "F4 Oslo S-Bergen", destination: "Bergen", operator: "Vy", source: "trafikverket" });
 
   test("an empty search matches everything", () => {
     expect(trainMatches(t, "  ")).toBe(true);
@@ -65,10 +65,10 @@ describe("trainMatches", () => {
 
 describe("trainFilter", () => {
   const list = [
-    train({ name: "a", kind: "intercity", source: "digitraffic", delayMinutes: 0 }),
-    train({ name: "b", kind: "freight", source: "digitraffic", delayMinutes: 12 }),
-    train({ name: "c", kind: "regional", source: "amtrak", delayMinutes: 5 }),
-    train({ name: "d", kind: "regional", source: "entur", delayMinutes: null }),
+    train({ name: "a", kind: "intercity", source: "trafikverket", delayMinutes: 0 }),
+    train({ name: "b", kind: "suburban", source: "trafikverket", delayMinutes: 12 }),
+    train({ name: "c", kind: "regional", source: "trafikverket", delayMinutes: 5 }),
+    train({ name: "d", kind: "regional", source: "trafikverket", delayMinutes: null }),
   ];
   const names = (f: typeof DEFAULT_TRAIN_FILTERS) => list.filter(trainFilter(f)).map((t) => t.name);
 
@@ -77,9 +77,9 @@ describe("trainFilter", () => {
     expect(trainFilterCount(DEFAULT_TRAIN_FILTERS)).toBe(0);
   });
 
-  test("hidden kinds and regions are left out", () => {
-    expect(names({ ...DEFAULT_TRAIN_FILTERS, hiddenKinds: ["freight"] })).toEqual(["a", "c", "d"]);
-    expect(names({ ...DEFAULT_TRAIN_FILTERS, hiddenSources: ["digitraffic", "entur"] })).toEqual(["c"]);
+  test("hidden kinds are left out", () => {
+    expect(names({ ...DEFAULT_TRAIN_FILTERS, hiddenKinds: ["suburban"] })).toEqual(["a", "c", "d"]);
+    expect(names({ ...DEFAULT_TRAIN_FILTERS, hiddenKinds: ["regional", "intercity"] })).toEqual(["b"]);
   });
 
   test("delayed only keeps trains 5 min or more late, not unknown delays", () => {
@@ -114,7 +114,7 @@ describe("trainFilter", () => {
   });
 
   test("each group counts once for the badge", () => {
-    expect(trainFilterCount({ ...DEFAULT_TRAIN_FILTERS, hiddenKinds: ["metro", "other"], hiddenSources: ["vbb"] })).toBe(2);
+    expect(trainFilterCount({ ...DEFAULT_TRAIN_FILTERS, hiddenKinds: ["suburban", "other"], hiddenOperators: ["SJ"] })).toBe(2);
   });
 });
 
@@ -167,21 +167,20 @@ describe("mergeTrainFilters", () => {
   test("nothing stored gives the defaults, not shared", () => {
     const f = mergeTrainFilters(undefined);
     expect(f).toEqual(DEFAULT_TRAIN_FILTERS);
-    f.hiddenKinds.push("metro");
+    f.hiddenKinds.push("suburban");
     expect(DEFAULT_TRAIN_FILTERS.hiddenKinds).toEqual([]);
   });
 
-  test("stored choices are kept; unknown kinds, sources and sorts are dropped", () => {
+  test("stored choices are kept; unknown kinds and sorts, and the old regions, are dropped", () => {
     const f = mergeTrainFilters({
-      hiddenKinds: ["metro", "hovercraft"],
+      hiddenKinds: ["suburban", "hovercraft", "metro"],
       hiddenSources: ["vbb", "mars"],
       hiddenOperators: ["SJ", 7],
       delayedOnly: true,
       sort: "speed",
     });
     expect(f).toEqual({
-      hiddenKinds: ["metro"],
-      hiddenSources: ["vbb"],
+      hiddenKinds: ["suburban"],
       hiddenOperators: ["SJ"],
       delayedOnly: true,
       sort: "speed",

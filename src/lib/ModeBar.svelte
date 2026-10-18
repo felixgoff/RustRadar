@@ -12,9 +12,11 @@
     counts: Record<Mode, number | null>;
     /** Show or hide a kind other than the focus on the map. */
     ontoggle: (kind: Mode) => void;
+    /** The kinds on offer (the trains need a working Trafikverket key). */
+    offered: Record<Mode, boolean>;
   }
 
-  let { mode = $bindable(), shown, counts, ontoggle }: Props = $props();
+  let { mode = $bindable(), shown, counts, ontoggle, offered }: Props = $props();
 
   const MODES = [
     ["aircraft", "Aircraft", "P"],
@@ -30,11 +32,11 @@
 <!-- centred over the map, clear of the sidebar on the left and the detail panels on the right -->
 <nav class="wrap" aria-label="Traffic">
   <div class="modebar surface">
-    <Segmented legend="Show" hideLegend name="mode" options={MODES} bind:value={mode}>
+    <Segmented legend="Show" hideLegend name="mode" options={MODES.filter(([m]) => offered[m])} bind:value={mode}>
       {#snippet content(option, label)}
         {@const Icon = ICONS[option]}
         <Icon size={15} strokeWidth={1.75} aria-hidden="true" />
-        {label}
+        <span class="name">{label}</span>
         {#if counts[option] !== null}
           <span class="count data">{format.format(counts[option]!)}</span>
         {/if}
@@ -42,7 +44,7 @@
       {#snippet trailing(option, label)}
         <!-- the focus is always on the map: no toggle of its own -->
         {#if option !== mode}
-          {@const key = MODES.find(([m]) => m === option)![2]}
+          {@const key = MODES.find(([m]) => m === option)?.[2]}
           <button
             type="button"
             class="show"
@@ -143,29 +145,33 @@
   .modebar :global(label:has(+ .show.on) > span) {
     color: var(--text-1);
   }
-  /* Phones (the query in phone.svelte.ts): under the search, in the flow, the
-     three sharing the width evenly */
+  /* Phones (the query in phone.svelte.ts): beside the search, in the flow,
+     icons alone (the names stay for screen readers; the counts are in the
+     sheet's head) */
   @media (max-width: 899px), (max-height: 500px) {
     .wrap {
       position: static;
     }
     .modebar {
-      flex: 1;
       border: 0;
       background: none;
       box-shadow: none;
       padding: 0;
     }
-    .modebar :global(.options) {
-      width: 100%;
-    }
-    .modebar :global(.options > label) {
-      flex: 1;
-      min-width: 0;
-    }
     .modebar :global(.options > label > span) {
       justify-content: center;
-      padding: 6px var(--space-2);
+      width: 44px;
+      height: 36px;
+      padding: 0;
+    }
+    .name,
+    .count {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
   }
 </style>

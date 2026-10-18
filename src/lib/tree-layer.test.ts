@@ -1,7 +1,7 @@
 // @ts-ignore bun's types are not a dependency; the runner provides the module
 import { describe, expect, test } from "bun:test";
 import { blockOf, coverOf, leafPhase, plantTile, tilesAround } from "./tree-layer";
-import { broadleafArrays, coniferArrays } from "./tree-models";
+import { cardArrays } from "./tree-models";
 
 describe("trees", () => {
   test("woods, parks and gardens grow trees; roads, buildings and water keep them off", () => {
@@ -44,8 +44,8 @@ describe("trees", () => {
       expect(Math.abs(y - 0.4)).toBeGreaterThan(0.001);
       expect(x > 0.25 && x < 0.3 && y > 0.25 && y < 0.3).toBe(false);
     }
-    // as tall as a wood's trees
-    for (const [, , height] of all) expect(height >= 13 && height <= 24).toBe(true);
+    // as tall as a wood's trees (their cards up to Streets GL's margin taller)
+    for (const [, , height] of all) expect(height >= 13 && height <= 24 * 1.43).toBe(true);
   });
 
   test("the same trees every time", () => {
@@ -72,15 +72,17 @@ describe("trees", () => {
     expect(tiles.length).toBeGreaterThan(3);
   });
 
-  test("the meshes are whole triangles, a unit tall, standing on the ground", () => {
-    for (const a of [broadleafArrays(0), broadleafArrays(1), coniferArrays(0), coniferArrays(1)]) {
-      expect(a.positions.length % 9).toBe(0);
-      expect(a.normals.length).toBe(a.positions.length);
-      const zs = a.positions.filter((_, i) => i % 3 === 2);
-      expect(Math.min(...zs)).toBeGreaterThanOrEqual(0);
-      expect(Math.max(...zs)).toBeLessThanOrEqual(1.15);
-      expect(Math.max(...zs)).toBeGreaterThan(0.9);
-      for (let i = 0; i < a.normals.length; i += 3) expect(Math.hypot(a.normals[i], a.normals[i + 1], a.normals[i + 2])).toBeCloseTo(1, 4);
-    }
+  test("the cards: two crossed quads a unit wide and tall, on the ground, the picture's top at the top; a level one for the crown", () => {
+    const a = cardArrays();
+    expect(a.positions.length).toBe(3 * 6 * 3);
+    expect(a.normals.length).toBe(a.positions.length);
+    expect(a.texCoords.length).toBe((a.positions.length / 3) * 2);
+    const zs = a.positions.filter((_, i) => i % 3 === 2);
+    expect([Math.min(...zs), Math.max(...zs)]).toEqual([0, 1]);
+    for (let k = 0; k < 12; k++) expect(a.texCoords[k * 2 + 1]).toBe(1 - zs[k]);
+    expect(a.normals.slice(36, 39)).toEqual([0, 0, 1]);
+    // the second card is the first turned a quarter
+    expect(a.normals.slice(0, 3)).toEqual([0, -1, 0]);
+    expect(a.normals.slice(18, 21)).toEqual([1, 0, 0]);
   });
 });

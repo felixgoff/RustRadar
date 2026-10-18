@@ -1,10 +1,12 @@
 // The realistic map's light and materials, after Streets GL
 // (github.com/StrandedKitty/streets-gl, MIT licence): physically based
 // shading in linear light — a sun reddened by the air it comes through, the
-// sky's light from every side and the ground's from below, GGX highlights and
-// reflections of the sky — then aerial perspective, the distance fading into
-// the sky's colour, and a filmic tone curve. The weather sets it all: how much
-// sun gets through, how grey the sky is, how thick the air, wet or snowy.
+// sky's grey light from every side, GGX highlights and reflections of the
+// sky — then aerial perspective, the distance fading into the sky's colour
+// (the clear air's few percent a kilometre, thick only in fog), and the
+// screen's gamma with no tone curve, so the colours stay as Streets GL shows
+// them. The weather sets it all: how much sun gets through, how grey the sky
+// is, how thick the air, wet or snowy.
 //
 // The shading is shader code injected into deck.gl's layers by extensions:
 // buildings (Streets GL's façade and roof textures: storeys and bays of
@@ -54,7 +56,7 @@ export type Look = {
   cloudShadow: number;
   /** 0 by day to 1 at night: windows light up. */
   night: number;
-  /** Brightening before the tone curve, more at night. */
+  /** Brightening before the screen's gamma: under cloud a little, at night more. */
   exposure: number;
 };
 
@@ -83,15 +85,18 @@ export function transmittance(altDeg: number, haze: number): RGB {
 
 /** How bright a colour looks (Rec. 709's weights). */
 const luminance = (c: readonly number[]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-/** The daylight under a grey sky, which the exposure is set for; brighter scenes are taken darker. */
-const OVERCAST_DAYLIGHT = 0.75;
+/** The daylight of a clear day with the sun 40° up, which the exposure is set for (Streets GL's: no adjusting); dimmer scenes are taken brighter. */
+const CLEAR_DAYLIGHT = 1.84;
+/** The clear air's own haze, per metre: Streets GL's atmosphere at the ground (about 2 % a kilometre). */
+const CLEAR_AIR = 2.2e-5;
 
 /**
  * The light in some weather with the sun towards `sun` (east, north, up),
- * the camera `cameraMetres` from what it looks at. The air thins out the view
- * as the weather has it, but never so much that the map gets hard to read:
- * at most about a fifth of the way to the middle of the view, more in fog,
- * which only begins half way there.
+ * the camera `cameraMetres` from what it looks at. As Streets GL has it, the
+ * air is clear (a couple of percent a kilometre) whatever the clouds; only
+ * fog thickens it, and never so much that the map gets hard to read: at most
+ * about a fifth of the way to the middle of the view, more in fog, which
+ * only begins half way there.
  */
 export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 1000): Look {
   const sunUp = Math.max(-1, Math.min(1, sun[2]));
@@ -112,8 +117,11 @@ export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 10
   const skyHorizon = mix(clearHorizon, greyHorizon, c.cloud);
   const skyLight = mix(skyHorizon, skyZenith, 0.5);
   const night = 1 - smooth(-7, 1, altDeg);
-  // at night more of it, as Streets GL keeps: the streets dim but there to see, not black
-  const ambient = (1 + 0.25 * c.cloud) * (1 + 3 * night);
+  // Streets GL's light from the sky: grey and the same from every side, a fifth of the sun's
+  // on a clear day; under cloud the sky gives what the sun doesn't; at night a little, so the
+  // streets are dim but there to see, not black
+  const overcast = luminance(mix(OVERCAST_ZENITH, OVERCAST_HORIZON, 0.5)) * (1 - 0.3 * c.wet);
+  const ambient = (0.2 + (overcast * 1.1 - 0.2) * c.cloud) * (0.15 + 0.85 * day) + 0.08 * night;
   // the ground throws back about a fifth of what falls on it
   const groundColor = skyLight.map((s, i) => 0.2 * (s + sunColor[i] * Math.max(sunUp, 0))) as RGB;
   // fog is the air itself lit: whiter than a hazy sky
@@ -121,9 +129,9 @@ export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 10
   const fogColour = scale([0.7, 0.71, 0.72], Math.max(day, 0.02));
   const hazeColor = mix(skyHorizon, mix(skyLight, fogColour, 0.5), fog);
   const camera = Math.max(cameraMetres, 50);
-  // as a camera would: a sunny day taken darker than a grey one, so it isn't washed out (more so at night)
-  const daylight = luminance(sunColor) * Math.max(sunUp, 0) + luminance(skyLight) * ambient;
-  const adapt = Math.min(1, Math.max(0.5, Math.sqrt(OVERCAST_DAYLIGHT / Math.max(daylight, 1e-3))));
+  // a clear day as Streets GL shows it; a grey one taken a little brighter, as a camera would (more so at night)
+  const daylight = luminance(sunColor) * Math.max(sunUp, 0) + ambient;
+  const adapt = Math.min(1.8, Math.max(1, Math.sqrt(CLEAR_DAYLIGHT / Math.max(daylight, 1e-3))));
   return {
     sunDir: [sun[0], sun[1], sunUp],
     sunUp,
@@ -133,7 +141,7 @@ export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 10
     groundColor,
     ambient,
     hazeColor,
-    hazeDensity: Math.min(c.haze, (0.22 + 0.64 * fog) / camera),
+    hazeDensity: Math.min(Math.min(c.haze, CLEAR_AIR) * (1 - fog) + c.haze * fog, (0.22 + 0.64 * fog) / camera),
     hazeStart: fog * 0.5 * camera,
     wet: c.wet,
     snow: c.snow,
@@ -150,11 +158,9 @@ export function setLook(next: Look) {
   Object.assign(look, next);
 }
 
-/** ACES's filmic curve (Narkowicz's fit), as the shaders have it. */
-const aces = (x: number) => clamp01((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
-/** A linear colour as the screen shows it, 0–255, through the same exposure and curve as the shaders. */
+/** A linear colour as the screen shows it, 0–255, through the same exposure and gamma as the shaders (Streets GL's: no tone curve). */
 export function displayRgb(linear: readonly number[], exposure = look.exposure): RGB {
-  return linear.map((v) => Math.round(255 * aces(v * exposure) ** (1 / 2.2))) as RGB;
+  return linear.map((v) => Math.round(255 * clamp01(v * exposure) ** (1 / 2.2))) as RGB;
 }
 
 /**
@@ -269,11 +275,9 @@ ${rlightVaryings("in")}
 vec3 rl_linear(vec3 c) {
   return pow(max(c, vec3(0.0)), vec3(2.2));
 }
-// ACES's filmic curve (Narkowicz's fit), then the screen's gamma
+// the screen's gamma, as Streets GL shows its colours: no tone curve to dull them
 vec3 rl_display(vec3 c) {
-  vec3 x = c * rlight.exposure;
-  x = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
-  return pow(x, vec3(1.0 / 2.2));
+  return pow(clamp(c * rlight.exposure, 0.0, 1.0), vec3(1.0 / 2.2));
 }
 // value noise on a lattice \`n\` cells to the period, repeating with it
 float rl_hash(vec2 cell, float n) {
@@ -309,10 +313,9 @@ vec3 rl_sky(vec3 dir) {
   sky += rl_sunLight() * (0.04 * pow(toSun, 6.0) + 0.5 * pow(toSun, 900.0));
   return mix(sky, rlight.groundColor, smoothstep(0.0, -0.2, up));
 }
-// all the light a surface facing \`n\` gets from the sky above and the ground below
+// all the light a surface facing \`n\` gets from the sky: grey, as Streets GL has it (a little less facing down)
 vec3 rl_irradiance(vec3 n) {
-  vec3 sky = mix(rlight.skyHorizon, rlight.skyZenith, 0.6);
-  return mix(rlight.groundColor, sky, clamp(0.5 + 0.5 * n.z, 0.0, 1.0)) * rlight.ambient;
+  return vec3(rlight.ambient) * mix(0.6, 1.0, clamp(0.5 + 0.5 * n.z, 0.0, 1.0));
 }
 // the split-sum environment BRDF (Karis's fit for mobile, as Streets GL has it)
 vec2 rl_envBRDF(float NdotV, float roughness) {
@@ -581,11 +584,18 @@ const rbuildInject = {
       // (whole tiles to the textures' period, so they meet where it repeats)
       layer = 9.0 + roof;
       float metres = roof < 0.5 ? 4.0 : roof < 1.5 ? 10.0 : roof < 2.5 ? 4.0 : roof < 3.5 ? 3.0 : roof < 4.5 ? 5.0 : 18.0;
-      uv = rl_t * max(1.0, floor(rlight.periodMetres / metres + 0.5));
-      // tiles and metal in a roof's colours; the rest their own
-      vec3 roofTint = which < 0.4 ? vec3(0.42, 0.12, 0.06) : which < 0.62 ? vec3(0.2, 0.08, 0.05)
-        : which < 0.88 ? vec3(0.06, 0.06, 0.07) : vec3(0.1, 0.24, 0.17);
-      tint = (roof > 1.5 && roof < 3.5) ? roofTint : vec3(0.55);
+      // a pitched roof's (RoofExtension) lie along its own face, in metres
+      uv = rb_info.z > 0.5 ? rb_uv / metres : rl_t * max(1.0, floor(rlight.periodMetres / metres + 0.5));
+      // Streets GL's roof colours: tiles terracotta (or slate), metal pale grey-blue (or copper),
+      // concrete grey; its flat roofs a little under their textures' white, so the sun doesn't burn them out;
+      // tar and eternit darker
+      tint = roof > 2.5 && roof < 3.5 ? (which < 0.75 ? vec3(0.597, 0.205, 0.127) : vec3(0.262, 0.262, 0.309))
+        : roof > 1.5 && roof < 2.5 ? (which < 0.8 ? vec3(0.546, 0.644, 0.723) : vec3(0.366, 0.59, 0.509))
+        : roof > 0.5 && roof < 1.5 ? vec3(0.497)
+        : roof > 4.5 ? vec3(0.8)
+        : vec3(0.55);
+      // one with its own colour mapped
+      if (rb_info.z > 1.5) tint = rl_linear(rb_tint);
     }
     // (the images are stored top row first: v runs up them)
     vec3 at = vec3(uv.x, -uv.y, layer);
@@ -615,6 +625,39 @@ const rbuildInject = {
 
 type ExtLayer = Layer & { context: { device: Device }; setShaderModuleProps(props: object): void };
 
+// Pitched roofs (roofs.ts) as meshes: each corner says what it is (its face's
+// code and own colour, as a building's; a roof or a gable), and the building
+// shading above does the rest.
+const roofInject = {
+  "vs:#decl": "in vec4 rr_info;\n",
+  "vs:#main-end": /* glsl */ `
+    rb_tint = colors;
+    rb_n = geometry.normal;
+    rb_uv = texCoords;
+    rb_tangent = normalize(cross(vec3(0.0, 0.0, 1.0), rb_n) + vec3(1e-6, 0.0, 0.0));
+    rb_z = 10.0;
+    rb_info = rr_info;
+  `,
+  "fs:DECKGL_FILTER_COLOR": rbuildInject["fs:DECKGL_FILTER_COLOR"],
+};
+
+/** Pitched roofs (roofs.ts) on their SimpleMeshLayer, shaded as the buildings are; the mesh carries `rr_info`. */
+export class RoofExtension extends LayerExtension {
+  static extensionName = "RealisticRoofExtension";
+
+  getShaders() {
+    return { modules: [rlightModule, rbuildModule], inject: roofInject };
+  }
+
+  draw(this: ExtLayer, params: DrawParams) {
+    const textures = realisticTextures(this.context.device).buildings;
+    this.setShaderModuleProps({
+      rlight: rlightProps(params),
+      rbuild: { rbuild_color: textures.color, rbuild_normal: textures.normal, rbuild_mask: textures.mask, rbuild_glow: textures.glow },
+    });
+  }
+}
+
 /** Buildings with Streets GL's façades and roofs, lit as the realistic map is: for their SolidPolygonLayer. */
 export class BuildingExtension extends LayerExtension {
   static extensionName = "RealisticBuildingExtension";
@@ -643,25 +686,52 @@ export class BuildingExtension extends LayerExtension {
 const rtreeModule = {
   name: "rtree",
   vs: "out vec3 rt_n;\n",
-  fs: "in vec3 rt_n;\n",
+  fs: /* glsl */ `\
+in vec3 rt_n;
+uniform mediump sampler2DArray rtree_color;
+uniform mediump sampler2DArray rtree_normal;
+uniform mediump sampler2DArray rtree_mask;
+uniform sampler2D rtree_volume;
+`,
   inject: {
     "vs:DECKGL_FILTER_GL_POSITION": "    rt_n = geometry.normal * rl_frame(geometry.position.xyz, project.projectionMode == PROJECTION_MODE_GLOBE);\n",
   },
 } as const;
 
+// Streets GL's trees: a picture of the whole tree on crossed cards, its shape cut out, lit as a
+// rounded crown (the volume's normal map, the leaves' own on it, Streets GL's way)
 const rtreeInject = {
   "fs:DECKGL_FILTER_COLOR": /* glsl */ `
   {
-    vec3 albedo = rl_linear(color.rgb);
-    vec3 n = normalize(rt_n);
+    // the instance's alpha: which picture, and whether its colour is the season's (tree-layer.ts)
+    float code = floor(color.a * 255.0 + 0.5) - 200.0;
+    float layer = floor(code / 10.0 + 0.01);
+    bool retint = mod(code, 10.0) > 2.5;
+    vec3 at = vec3(geometry.uv, layer);
+    if (texture(rtree_mask, at).r < 0.5) discard;
+    vec3 leaf = texture(rtree_color, at).rgb;
+    vec3 albedo = retint
+      ? leaf * rl_linear(color.rgb) / max(textureLod(rtree_color, vec3(0.5, 0.5, layer), 16.0).rgb, vec3(1e-3))
+      : leaf * pow(color.r / 0.8627, 2.2);
     vec3 v = normalize(rl_eye);
+    // the card's face towards the camera, across it and up it (up the picture: north, on the crown's level card)
+    vec3 card = normalize(rt_n);
+    if (dot(card, v) < 0.0) card = -card;
+    vec3 across = normalize(cross(abs(card.z) > 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0), card));
+    vec3 up = cross(card, across);
+    // reoriented normal mapping: the leaves' normals on the crown's
+    vec3 t = texture(rtree_volume, geometry.uv).xyz * 2.0 - 1.0 + vec3(0.0, 0.0, 1.0);
+    vec3 u = (texture(rtree_normal, at).xyz * 2.0 - 1.0) * vec3(-1.0, -1.0, 1.0);
+    vec3 m = normalize(t * dot(t, u) - u * t.z);
+    vec3 n = normalize(across * m.x + up * m.y + card * max(m.z, 0.05));
     float sun = rl_sunVisible();
-    // snow on the tops of the crowns
+    // snow on the tops of the crowns; the inside and underneath shaded
     albedo = mix(albedo, vec3(0.75), rlight.snow * smoothstep(0.2, 0.7, n.z) * 0.8);
-    vec3 lit = rl_shade(albedo, n, v, 0.85, 0.0, 1.0, sun);
+    float ao = mix(0.6, 1.0, smoothstep(0.95, 0.35, geometry.uv.y));
+    vec3 lit = rl_shade(albedo, n, v, 0.9, 0.0, ao, sun);
     // the sun through the leaves, seen from the shaded side
     lit += albedo * rl_sunLight() * 0.3 * pow(max(dot(-v, rl_toSun()), 0.0), 3.0) * sun;
-    color = vec4(rl_display(rl_aerial(lit)), color.a);
+    color = vec4(rl_display(rl_aerial(lit)), 1.0);
   }
   `,
 };
@@ -675,7 +745,11 @@ export class TreeExtension extends LayerExtension {
   }
 
   draw(this: ExtLayer, params: DrawParams) {
-    this.setShaderModuleProps({ rlight: rlightProps(params) });
+    const t = realisticTextures(this.context.device).trees;
+    this.setShaderModuleProps({
+      rlight: rlightProps(params),
+      rtree: { rtree_color: t.color, rtree_normal: t.normal, rtree_mask: t.mask, rtree_volume: t.volume },
+    });
   }
 }
 
@@ -730,6 +804,7 @@ export class FootShadeExtension extends LayerExtension {
 
 /** One of each, shared by every layer that uses them: the same extension compares equal, so no shader rebuilds. */
 export const BUILDINGS = new BuildingExtension();
+export const ROOFS = new RoofExtension();
 export const TREES = new TreeExtension();
 export const HAZE_FADE = new HazeFadeExtension();
 export const FOOT_SHADE = new FootShadeExtension();
@@ -780,6 +855,9 @@ const WALL_COLOURS: Record<number, RGB[]> = {
   ],
 };
 
+/** A building's façade (plaster, brick, block, wood, glass: 0 to 4) and roof (the shader's order) where its map data says. */
+export type BuildingLook = { facade?: number; roof?: number };
+
 /** The colours OpenStreetMap's `building:colour` most often names, as #rrggbb. */
 const NAMED: Record<string, string> = {
   white: "#f2f0ea",
@@ -828,18 +906,20 @@ const pickWeighted = (r: number, weights: [number, number][]) => {
  * where it has one), and in the alpha its façade and roof (255 less façade +
  * 5 × roof), which the shader reads.
  */
-export function buildingStyle(seed: number, height: number, colour?: unknown): [number, number, number, number] {
+export function buildingStyle(seed: number, height: number, colour?: unknown, look: BuildingLook = {}): [number, number, number, number] {
   const facade =
-    height > 30 && hash(seed, 1) < 0.55
+    look.facade ??
+    (height > 30 && hash(seed, 1) < 0.55
       ? GLASS
       : pickWeighted(hash(seed, 2), [
           [PLASTER, 0.42],
           [BRICK, 0.28],
           [BLOCK, height > 12 ? 0.25 : 0.1],
           [WOOD, height < 9 ? 0.22 : 0.02],
-        ]);
+        ]));
   const roof =
-    height < 10
+    look.roof ??
+    (height < 10
       ? pickWeighted(hash(seed, 3), [
           [TILES, 0.55],
           [METAL, 0.2],
@@ -852,7 +932,7 @@ export function buildingStyle(seed: number, height: number, colour?: unknown): [
           [FLAT1, 0.2],
           [FLAT3, 0.15],
           [METAL, 0.05],
-        ]);
+        ]));
   const hex = typeof colour === "string" ? (NAMED[colour.toLowerCase()] ?? colour) : null;
   let rgb: RGB;
   if (hex && /^#[0-9a-f]{6}$/i.test(hex)) {

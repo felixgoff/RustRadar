@@ -40,6 +40,7 @@
     hideTrainOperators,
     followTrain,
     unfollowTrain,
+    trafikverketKeyStatus,
   } from "$lib/api";
   import AirportPanel from "$lib/AirportPanel.svelte";
   import FilterPanel from "$lib/FilterPanel.svelte";
@@ -85,6 +86,7 @@
   import { clockAt } from "$lib/time";
   import { delayText, trainColorOf, trainCredits, trainLabel } from "$lib/trains";
   import { RAIL_SPEED_ATTRIBUTION } from "$lib/rail-layer";
+  import { SGL_ATTRIBUTION, SGL_ZOOM } from "$lib/streets-gl";
   import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
   import { conditionsOf, fetchWeather, PRESETS, type Weather } from "$lib/weather";
   import { distanceKm as distanceKmBetween } from "$lib/flightpath";
@@ -150,6 +152,32 @@
   const focus = $derived(settings.mode);
 
   /** Shift+P, I or S, or the mode bar's eye: another kind on or off the map. The focus is always on. */
+  // The trains are Sweden's, from Trafikverket: offered once its key is saved
+  // and Trafikverket has accepted it (asked at the start and when the keys
+  // page closes; while that's unknown, a trains mode already chosen stays).
+  let trafikverketKey = $state<"none" | "invalid" | "ok" | null>(null);
+  let keyRetry = 0;
+  function checkTrafikverketKey() {
+    clearTimeout(keyRetry);
+    if (!isTauri()) {
+      trafikverketKey = "none";
+      return;
+    }
+    trafikverketKeyStatus().then(
+      (status) => (trafikverketKey = status),
+      // Trafikverket out of reach: the key may be fine, ask again shortly
+      () => (keyRetry = window.setTimeout(checkTrafikverketKey, 30_000)),
+    );
+  }
+  const trainsOffered = $derived(trafikverketKey === "ok");
+  $effect(() => {
+    if (trafikverketKey !== "none" && trafikverketKey !== "invalid") return;
+    untrack(() => {
+      if (settings.mode === "trains") settings.mode = "aircraft";
+      if (settings.alsoShow.includes("trains")) settings.alsoShow = settings.alsoShow.filter((k) => k !== "trains");
+    });
+  });
+
   function toggleShown(kind: Mode) {
     if (kind === settings.mode) return;
     const list = settings.alsoShow;
@@ -160,7 +188,7 @@
   let keysOpen = $state(false);
   /** The map controls' open menu. */
   let menu = $state<"layers" | "settings" | null>(null);
-  /** On a phone: how far up the list sheet is, and its height in px. */
+  /** On a phone: how far up the sheet is, and its height in px. */
   let sheetDetent = $state<Detent>("peek");
   let sheetHeight = $state(0);
   /** The keys page opened from a "sign in" prompt: the caret goes to the login, and back to the prompt after. */
@@ -779,7 +807,10 @@
     heading: "Trains in view",
     noun: "trains",
     icon: TrainFront,
-    placeholder: "Train, destination or address",
+    // the mode buttons share a phone's search row
+    get placeholder() {
+      return layout.phone ? "Train or address" : "Train, destination or address";
+    },
     search: () =>
       trainsListed.slice(0, 6).map((t) => ({
         key: t.id,
@@ -796,7 +827,9 @@
     heading: "Ships in view",
     noun: "ships",
     icon: ShipIcon,
-    placeholder: "Ship name, MMSI or address",
+    get placeholder() {
+      return layout.phone ? "Ship or address" : "Ship name, MMSI or address";
+    },
     search: () =>
       shipsListed.slice(0, 6).map((s) => ({
         key: String(s.mmsi),
@@ -1067,6 +1100,22 @@
     keysOpen = true;
   }
 
+  /** A flight, train, ship or airport board is open: on a phone it takes the sheet, and the search steps aside. */
+  const detailOpen = $derived(Boolean(selected || boardCode || selectedShip || selectedTrain));
+  // on a phone the details open lowered, to their summary (a board half up:
+  // its flights are what it's for); the list comes back as high as it was
+  let listDetent: Detent = "peek";
+  $effect.pre(() => {
+    if (!detailOpen) return;
+    untrack(() => {
+      listDetent = sheetDetent;
+      sheetDetent = boardCode && !selected ? "half" : "peek";
+    });
+    return () => {
+      sheetDetent = listDetent;
+    };
+  });
+
   /** Closes whatever is on top (Escape, or Android's back gesture); false when nothing is open. */
   function closeTop(): boolean {
     if (keysOpen) closeKeys();
@@ -1124,6 +1173,7 @@
 
   function closeKeys() {
     keysOpen = false;
+    checkTrafikverketKey();
     const back = keysPrompt;
     keysPrompt = null;
     if (back) requestAnimationFrame(() => back()?.focus());
@@ -1155,10 +1205,10 @@
     b: () => (settings.buildings = !settings.buildings),
     // the focus: Planes, traIns (T tilts), Ships; with Shift, that kind also shown on the map or not
     p: () => (settings.mode = "aircraft"),
-    i: () => (settings.mode = "trains"),
+    i: () => trainsOffered && (settings.mode = "trains"),
     s: () => (settings.mode = "ships"),
     P: () => toggleShown("aircraft"),
-    I: () => toggleShown("trains"),
+    I: () => trainsOffered && toggleShown("trains"),
     S: () => toggleShown("ships"),
     k: () => aircraftOn && (settings.aircraftLabels = !settings.aircraftLabels),
     d: () => (settings.daylight = !settings.daylight),
@@ -1218,6 +1268,8 @@
       settings.railMap && isTauri() && RAIL_SPEED_ATTRIBUTION,
       settings.terrain && TERRAIN_ATTRIBUTION,
       settings.basemap === "realistic" && "Textures: Streets GL (MIT)",
+      settings.basemap === "realistic" && view.zoom >= SGL_ZOOM - 0.5 && SGL_ATTRIBUTION,
+      settings.basemap === "realistic" && "Earth: NASA Blue Marble",
       weatherLive && liveWeather && "Weather: MET Norway",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]
@@ -1237,6 +1289,7 @@
 
   let timers: ReturnType<typeof setInterval>[] = [];
   onMount(() => {
+    checkTrafikverketKey();
     // dev builds: `#@lat,lon,zoom,pitch,bearing` opens the map there
     const at = import.meta.env.DEV ? location.hash.match(/^#@(-?[\d.]+),(-?[\d.]+),([\d.]+)(?:,([\d.]+))?(?:,(-?[\d.]+))?/) : null;
     if (at) {
@@ -1259,6 +1312,7 @@
     timers.forEach(clearInterval);
     clearTimeout(refreshTimer);
     clearTimeout(viewTimer);
+    clearTimeout(keyRetry);
     stopShips();
     stopTrains();
   });
@@ -1266,7 +1320,7 @@
 
 <svelte:window {onkeydown} />
 
-<main class:phone={layout.phone} style:--sheet-h={layout.phone ? `${sheetHeight}px` : null}>
+<main class:phone={layout.phone} class:detail={detailOpen} style:--sheet-h={layout.phone ? `${sheetHeight}px` : null}>
   <Globe
     bind:this={globe}
     flights={shown}
@@ -1290,8 +1344,9 @@
     {hoveredTrainId}
     {hoveredShipMmsi}
     railMap={settings.railMap}
-    trainBlocks={settings.trainBlocks && isTauri()}
+    trainBlocks={settings.railMap && settings.railShows === "blocks" && isTauri()}
     terrain={settings.terrain}
+    tiltShift={settings.tiltShift}
     follow={following}
     followVehicle={followingVehicle}
     {selectedShip}
@@ -1322,6 +1377,7 @@
   {#snippet modeBar()}
     <ModeBar
       bind:mode={settings.mode}
+      offered={{ aircraft: true, trains: trainsOffered || settings.mode === "trains", ships: true }}
       shown={kinds}
       ontoggle={toggleShown}
       counts={{
@@ -1433,19 +1489,20 @@
         <p class="counts">
           <span class="count">{count(filtered.length)}</span>
           {#if filtered.length !== flights.length}of {count(flights.length)}{/if}
+          <span class="noun">flights</span>
           {regional ? "in view" : "worldwide"}
         </p>
       {:else if focus === "trains" && trainsAt}
         <p class="counts">
           <span class="count">{count(trainsListed.length)}</span>
           {#if trainsListed.length !== trains.length}of {count(trains.length)}{/if}
-          in view
+          <span class="noun">trains</span> in view
         </p>
       {:else if focus === "ships" && shipsAt}
         <p class="counts">
           <span class="count">{count(shipsListed.length)}</span>
           {#if shipsListed.length !== ships.length}of {count(ships.length)}{/if}
-          in view
+          <span class="noun">ships</span> in view
         </p>
       {/if}
     </div>
@@ -1514,12 +1571,19 @@
   </section>
   {/snippet}
 
+  <!-- On a phone, one sheet: the list, or in its place the details of what is picked, lowered to their summary so the map stays in view -->
   {#if layout.phone}
-    <BottomSheet bind:detent={sheetDetent} bind:height={sheetHeight} label={focus === "aircraft" ? "Flights" : focus === "trains" ? "Trains" : "Ships"}>
-      {#snippet head()}{@render toolbar()}{/snippet}
-      {@render sheetContent()}
+    <BottomSheet
+      bind:detent={sheetDetent}
+      bind:height={sheetHeight}
+      label={detailOpen ? "Details" : focus === "aircraft" ? "Flights" : focus === "trains" ? "Trains" : "Ships"}
+      clear={detailOpen ? 12 : 64}
+      head={detailOpen ? undefined : listHead}
+    >
+      {#if detailOpen}{@render panels()}{:else}{@render sheetContent()}{/if}
     </BottomSheet>
   {/if}
+  {#snippet listHead()}{@render toolbar()}{/snippet}
 
   {#snippet filterToggle(n: number)}
     <button
@@ -1535,6 +1599,7 @@
     </button>
   {/snippet}
 
+  {#snippet panels()}
   {#if boardCode}
     <!-- kept while a flight from the board is open, so going back keeps its tab and pages -->
     <div hidden={selected !== null}>
@@ -1592,6 +1657,9 @@
       {liveStops}
     />
   {/if}
+  {/snippet}
+
+  {#if !layout.phone}{@render panels()}{/if}
 
   <MapControls
     zoom={view.zoom}
@@ -1607,8 +1675,9 @@
     bind:weather={settings.weather}
     bind:adsb={settings.adsb}
     bind:railMap={settings.railMap}
-    bind:trainBlocks={settings.trainBlocks}
+    bind:railShows={settings.railShows}
     bind:sky={settings.sky}
+    bind:tiltShift={settings.tiltShift}
     bind:terrain={settings.terrain}
     bind:exaggeration={settings.exaggeration}
     {session}
@@ -1634,7 +1703,7 @@
     onsignout={handleSignOut}
   />
 
-  <!-- the train credits come first, so the line's ellipsis can't hide them: Amtraker asks for a prominent link -->
+  <!-- the train credits come first, so the line's ellipsis can't hide them -->
   <p class="attribution" title={[...trainCredit.map((c) => c.text), ...attribution].join(" · ")}>
     {#each trainCredit as c, i (c.url)}
       {i ? " · " : ""}<a href={c.url} onclick={(e) => (e.preventDefault(), openUrl(c.url))}>{c.text}</a>
@@ -1740,6 +1809,10 @@
     font-weight: 650;
     color: var(--text-1);
   }
+  /* beside the mode buttons it goes without saying; in a phone's sheet, under icons alone, it doesn't */
+  .noun {
+    display: none;
+  }
   .alert {
     display: flex;
     gap: var(--space-2);
@@ -1798,8 +1871,9 @@
   .attribution a:hover {
     color: var(--text-1);
   }
-  /* Phones (the query in phone.svelte.ts): the search and mode buttons along
-     the top, the lists and filters in the bottom sheet. */
+  /* Phones (the query in phone.svelte.ts): the search and mode buttons in one
+     row along the top, the lists and filters in the bottom sheet. With
+     something picked, its details take the sheet and the search steps aside. */
   @media (max-width: 899px), (max-height: 500px) {
     .sidebar {
       top: max(var(--space-2), env(safe-area-inset-top, 0px));
@@ -1808,20 +1882,48 @@
       bottom: auto;
       width: auto;
       z-index: 3;
+      transition:
+        transform 220ms var(--ease-out),
+        opacity 220ms var(--ease-out);
+    }
+    .detail .sidebar {
+      transform: translateY(calc(-100% - var(--space-2)));
+      opacity: 0;
+      visibility: hidden;
+      transition:
+        transform 220ms var(--ease-out),
+        opacity 220ms var(--ease-out),
+        visibility 0s 220ms;
     }
     .primary {
-      padding: var(--space-2);
-      gap: var(--space-2);
+      flex-flow: row wrap;
+      align-items: center;
+      padding: var(--space-1);
+      gap: var(--space-1);
+    }
+    .primary > :global(.search) {
+      flex: 1;
+      min-width: 0;
+    }
+    .primary > .alert,
+    .primary > .note {
+      flex-basis: 100%;
     }
     .brand {
       display: none;
     }
-    /* in the sheet's head: the list's own heading gives the count, just below */
-    .toolbar .counts {
-      display: none;
+    /* the sheet's head is its title: the count on the left, the filters on the right */
+    .toolbar {
+      flex-direction: row-reverse;
+    }
+    .counts .count {
+      font-size: var(--text-base);
+    }
+    .noun {
+      display: inline;
     }
     .filter-toggle {
-      height: 30px;
+      height: 32px;
       padding: 0 var(--space-3);
     }
     .list {

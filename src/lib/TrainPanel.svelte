@@ -37,7 +37,7 @@
   let { train, now, following, onfollow, onclose, liveStops = null }: Props = $props();
 
   const kind = $derived(trainLabel(train.kind));
-  /** Names run long ("Amtrak 171 Northeast Regional"): those wrap to a second line instead of losing their end. */
+  /** Names run long ("Arlanda Express 7041"): those wrap to a second line instead of losing their end. */
   const long = $derived(train.name.length > 16);
   const swatch = $derived(`rgb(${trainColorOf(train).join(", ")})`);
   const heading = $derived(headingAt(train, now));
@@ -107,7 +107,7 @@
 </script>
 
 <aside class="panel surface" aria-label="Selected train">
-  <header class="strip" class:bare={!moving}>
+  <header class="strip" class:bare={!moving} data-peek>
     <div class="cell id">
       <h2 class:long title={train.name}>{train.name}</h2>
       <p><span class="swatch" style:background={swatch} aria-hidden="true"></span>{kind} train</p>
@@ -133,7 +133,7 @@
   {/if}
 
   {#if train.destination || delay}
-    <section class="voyage" aria-label="Journey">
+    <section class="voyage" aria-label="Journey" data-peek>
       <div>
         <span class="label">Destination</span>
         {#if train.destination}
@@ -221,7 +221,7 @@
     {/if}
   </section>
 
-  <footer>
+  <footer data-peek>
     <div class="report">
       {#if age.stale}
         <span class="badge warn" title="Reported at {reported}">{age.label}</span>
@@ -239,8 +239,8 @@
         <LocateFixed size={14} strokeWidth={1.75} /> Follow
       </button>
       {#if credit}
-        <button class="button" onclick={() => openUrl(credit.url)} title={credit.url}>
-          {train.source === "amtrak" ? "Amtraker" : sourceName.split(" (")[0]} <ExternalLink size={14} strokeWidth={1.75} />
+        <button class="button source" onclick={() => openUrl(credit.url)} title={credit.url}>
+          {sourceName} <ExternalLink size={14} strokeWidth={1.75} />
         </button>
       {/if}
     </div>
@@ -619,39 +619,31 @@
     padding: 0;
   }
   /* Phones (the query in phone.svelte.ts): a sheet along the bottom */
+  /* Phones (the query in phone.svelte.ts): in the page's bottom sheet, which
+     frames it and lowers it to the parts marked data-peek */
   @media (max-width: 899px), (max-height: 500px) {
     .panel {
-      position: fixed;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      z-index: 5;
+      position: static;
+      flex: 1;
+      min-height: 0;
       width: auto;
-      max-height: 72dvh;
-      border-bottom: 0;
-      border-left: 0;
-      border-right: 0;
-      border-radius: 12px 12px 0 0;
-      padding-bottom: env(safe-area-inset-bottom, 0px);
-      padding-left: env(safe-area-inset-left, 0px);
-      padding-right: env(safe-area-inset-right, 0px);
-      animation-name: rise;
-    }
-    @keyframes rise {
-      from {
-        transform: translateY(24px);
-        opacity: 0;
-      }
-    }
-  }
-  /* a phone on its side: down the right, beside the list */
-  @media (max-height: 500px) and (orientation: landscape) {
-    .panel {
-      top: 0;
-      left: auto;
-      width: min(360px, 50vw);
       max-height: none;
-      border-radius: 12px 0 0 0;
+      border: 0;
+      border-radius: 0;
+      background: none;
+      box-shadow: none;
+      animation: none;
+    }
+    /* the summary first, the picture lower down */
+    .photo {
+      order: 1;
+    }
+    footer {
+      order: 2;
+    }
+    /* the source is credited in the facts and along the bottom of the map */
+    .source {
+      display: none;
     }
   }
 </style>

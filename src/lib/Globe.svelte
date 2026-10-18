@@ -94,6 +94,7 @@
   import { BuildingLayer, buildingHeight } from "./building-layer";
   import {
     BUILDINGS as REALISTIC_BUILDINGS,
+    ROOFS as REALISTIC_ROOFS,
     FOOT_SHADE,
     fromLocal,
     HAZE_FADE,
@@ -105,7 +106,8 @@
     TREES as REALISTIC_TREES,
     UNLIT,
   } from "./realistic";
-  import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES } from "./realistic-ground";
+  import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, sglGroundLayer } from "./realistic-ground";
+  import { SGL_TILES, SGL_ZOOM, sglFetch } from "./streets-gl";
   import { onTexturesReady } from "./realistic-textures";
   import { treeLayers } from "./tree-layer";
   import { PRESETS, type Conditions } from "./weather";
@@ -132,6 +134,7 @@
   import { type RouteCursor, routeAhead, wayToStop } from "./train-route";
   import { CAR_M, carLines, DEFAULT_CARS } from "./train-cars";
   import { CAR_HEIGHT_M, CAR_WIDTH_M, carMeshes, type CarPlace, carPlaces } from "./train-models";
+  import { GROUND as ON_THE_GROUND, levelAt, onStructures, type Level, type Structure } from "./bridges";
   import { isTrackpadScroll, pinched, type PinchEvent, wheelPixels, wrapBearing } from "./trackpad";
 
   interface Props {
@@ -165,6 +168,8 @@
     weather: boolean;
     /** Shaded relief under the map. */
     terrain?: boolean;
+    /** The realistic map's top and bottom out of focus, as through a tilt-shift lens. */
+    tiltShift?: boolean;
     /** The railway network over the map. */
     railMap?: boolean;
     /** Trains to draw on land, over the ships and under the aircraft. */
@@ -216,6 +221,7 @@
     daylight,
     weather,
     terrain = false,
+    tiltShift = false,
     railMap = false,
     trains = [],
     selectedTrain = null,
@@ -1002,9 +1008,17 @@
   // distance fading into the air. Their own shaders light them, so deck.gl's
   // light is kept off them (UNLIT).
   const REALISTIC_BUILDINGS_ZOOM = 13.5;
+  /**
+   * Close in, the ground, buildings and trees are Streets GL's own tiles
+   * (streets-gl.ts: each building's height and materials, each field, wood
+   * and mapped tree), from where deck.gl asks for the only zoom they come in.
+   */
+  const SGL_FROM_ZOOM = SGL_ZOOM - 0.5;
+  const SGL_BUILDING_OPTIONS = { mvt: { layers: ["buildings"], workerUrl: mvtWorkerUrl } };
   /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
   const TREES_ZOOM = 14.5;
   const FACADED = [REALISTIC_BUILDINGS];
+  const ROOFED = [REALISTIC_ROOFS];
   const HAZE_FADED = [HAZE_FADE];
   const FOOT_SHADED = [FOOT_SHADE];
   const TREED = [REALISTIC_TREES];
@@ -1028,13 +1042,14 @@
   /** How much of the sun gets through now, 0 to 1. */
   const sunStrength = () => Math.max(...look.sunColor) / 3.2;
   /** Only the deepest tiles, so a building looks the same in each tile it is in (see `wallColoursOf`). */
-  const realisticBuildingLayer = (url: string, sun: readonly number[]) =>
+  const realisticBuildingLayer = (url: string, sun: readonly number[], sgl: boolean) =>
     new BuildingLayer({
-      id: "buildings-realistic",
-      data: url,
-      minZoom: 14,
-      maxZoom: 14,
-      loadOptions: BUILDING_LOAD_OPTIONS,
+      id: sgl ? "buildings-sgl" : "buildings-realistic",
+      data: sgl ? SGL_TILES : url,
+      minZoom: sgl ? SGL_ZOOM : 14,
+      maxZoom: sgl ? SGL_ZOOM : 14,
+      loadOptions: sgl ? SGL_BUILDING_OPTIONS : BUILDING_LOAD_OPTIONS,
+      ...(sgl ? { fetch: sglFetch as never } : {}),
       extruded: true,
       filled: true,
       stroked: false,
@@ -1052,6 +1067,8 @@
       shadowExtensions: HAZE_FADED,
       footShade: FOOT_SHADE_ALPHA,
       footShadeExtensions: FOOT_SHADED,
+      // Streets GL's tiles say how their roofs are shaped
+      roofExtensions: sgl ? ROOFED : [],
     });
 
   // Night shading, recomputed each minute: four nested bands (sunset and the
@@ -1822,12 +1839,18 @@
   // (expected positions ahead) move along them, and their cars with them.
   const TRAIN_ALPHA = 240;
   const TRAIN_PARAMETERS = { ...NO_CULL, depthWriteEnabled: false } as const;
+  // A train in a tunnel is seen through the ground (and what stands on it), faint.
+  const TUNNEL_TRAIN_ALPHA = 90;
+  const THROUGH_GROUND = { ...NO_CULL, depthWriteEnabled: false, depthCompare: "always" } as const;
+  const inTunnel = (c: ShipColor): ShipColor => [c[0], c[1], c[2], TUNNEL_TRAIN_ALPHA];
   type TrainData = {
     list: Train[];
     positions: [number, number, number][];
     /** Direction of travel as drawn, degrees; null when unknown. */
     headings: (number | null)[];
     colors: ShipColor[];
+    /** On the ground, on a bridge or in a tunnel, where it is drawn. */
+    levels: Level[];
     /** Indices of all trains. */
     all: number[];
     /** Indices of the trains with frames to move along. */
@@ -1848,6 +1871,7 @@
       positions: [],
       headings: [],
       colors: [],
+      levels: [],
       all: [],
       moving: [],
       byId: new Map(),
@@ -1860,6 +1884,7 @@
       data.positions.push([train.lon, train.lat, 0]);
       data.headings.push(train.heading);
       data.colors.push([...trainColorOf(train), TRAIN_ALPHA]);
+      data.levels.push(train.structures?.length ? levelAt([train.lon, train.lat], train.heading, train.structures) : ON_THE_GROUND);
       data.all.push(i);
       data.byId.set(train.id, i);
       if ((train.frames?.length ?? 0) > 1 || data.blends.has(i)) data.moving.push(i);
@@ -1877,6 +1902,7 @@
       const heading = headingAt(train, nowMs);
       data.positions[i] = [lon, lat, 0];
       data.headings[i] = heading;
+      if (train.structures?.length) data.levels[i] = levelAt([lon, lat], heading, train.structures);
     }
     trainMoves++;
   }
@@ -1891,8 +1917,8 @@
   const MIN_CAR_WIDTH_PX = 3;
   const CAR_MESH_MATERIAL = { ambient: 0.45, diffuse: 0.6, shininess: 40, specularColor: [70, 70, 70] as [number, number, number] };
 
-  /** A car on the map, of the train at `train` in the trains' list. */
-  type DrawnCar = CarPlace & { train: number; lead: boolean };
+  /** A car on the map, of the train at `train` in the trains' list; on the ground, a bridge or in a tunnel. */
+  type DrawnCar = CarPlace & { train: number; lead: boolean; level: Level };
 
   /**
    * The cars of the trains in view, as many as their operator says (else
@@ -1914,7 +1940,10 @@
         const behind: [number, number] = [lat - Math.cos(h) / 1000, lon - Math.sin(h) / 1000 / (Math.cos(lat * DEGREES) || 1e-6)];
         places = carPlaces(carLines([[lat, lon, nowMs]], [[lat, lon], behind], count, nowMs));
       }
-      places.forEach((place, k) => cars.push({ ...place, train: i, lead: k === 0 }));
+      const structures: Structure[] = train.structures ?? [];
+      places.forEach((place, k) =>
+        cars.push({ ...place, train: i, lead: k === 0, level: structures.length ? levelAt(place.at, place.heading, structures) : ON_THE_GROUND }),
+      );
     });
     return cars;
   }
@@ -1926,23 +1955,26 @@
     const width = Math.max(CAR_WIDTH_M, MIN_CAR_WIDTH_PX * mpp);
     const height = Math.max(CAR_HEIGHT_M, MIN_CAR_WIDTH_PX * 1.3 * mpp);
     const meshes = carMeshes();
-    return ([true, false] as const).map(
-      (lead) =>
-        new SimpleMeshLayer<DrawnCar>({
-          id: `train-car-meshes-${lead ? "cab" : "coach"}`,
-          data: cars.filter((c) => c.lead === lead),
-          mesh: lead ? meshes.cab : meshes.coach,
-          getPosition: (c) => c.at,
-          getOrientation: (c) => [0, -c.heading, 0],
-          getScale: (c) => [width, c.length, height],
-          getColor: (c) => data.colors[c.train],
-          material: CAR_MESH_MATERIAL,
-          pickable: true,
-          autoHighlight: true,
-          highlightColor: [55, 142, 240, 110],
-          parameters: NO_CULL,
-          updateTriggers: { getPosition: trainMoves, getOrientation: trainMoves, getScale: [trainMoves, width, height] },
-        }),
+    // on the ground and up on bridges; and in tunnels, faint, through the ground
+    return ([true, false] as const).flatMap((lead) =>
+      ([false, true] as const).map(
+        (tunnel) =>
+          new SimpleMeshLayer<DrawnCar>({
+            id: `train-car-meshes-${lead ? "cab" : "coach"}${tunnel ? "-tunnel" : ""}`,
+            data: cars.filter((c) => c.lead === lead && c.level.tunnel === tunnel),
+            mesh: lead ? meshes.cab : meshes.coach,
+            getPosition: (c) => [c.at[0], c.at[1], c.level.height],
+            getOrientation: (c) => [0, -c.heading, 0],
+            getScale: (c) => [width, c.length, height],
+            getColor: (c) => (tunnel ? inTunnel(data.colors[c.train]) : data.colors[c.train]),
+            material: CAR_MESH_MATERIAL,
+            pickable: true,
+            autoHighlight: true,
+            highlightColor: [55, 142, 240, 110],
+            parameters: tunnel ? THROUGH_GROUND : NO_CULL,
+            updateTriggers: { getPosition: trainMoves, getOrientation: trainMoves, getScale: [trainMoves, width, height] },
+          }),
+      ),
     );
   }
 
@@ -1972,7 +2004,7 @@
         getSize: (i) => trainIconSize(list[i].kind, data.headings[i], zoom),
         // on the ground, turned to the way it goes (degrees anticlockwise from north)
         getAngle: (i) => yaw0 - (data.headings[i] ?? 0),
-        getColor: (i) => data.colors[i],
+        getColor: (i) => (data.levels[i].tunnel ? inTunnel(data.colors[i]) : data.colors[i]),
         sizeUnits: "pixels",
         billboard: false,
         pickable: true,
@@ -1980,6 +2012,7 @@
         updateTriggers: {
           getPosition: trainMoves,
           getIcon: trainMoves,
+          getColor: trainMoves,
           getAngle: [trainMoves, yaw0],
           getSize: [trainIconScale(zoom), trainMoves],
         },
@@ -1987,8 +2020,8 @@
     ];
   }
 
-  /** The rail map is coloured by speed limit in the app (its tiles come through the backend). */
-  const railSpeeds = isTauri();
+  /** The rail map is coloured by speed limit in the app (its tiles come through the backend), unless it shows the signal blocks. */
+  const railSpeeds = $derived(isTauri() && !trainBlocks);
   /** The zoom, for what the page shows over the map (the legend). */
   let shownZoom = $state(0);
 
@@ -2084,8 +2117,23 @@
   const IN_BLOCK_M = 12;
   const BLOCK_FREE: [number, number, number, number] = [60, 200, 110, 220];
   const BLOCK_TAKEN: [number, number, number, number] = [235, 64, 52, 240];
+  /** A block's track in a tunnel: at this much of its colour's alpha, dashed. */
+  const BLOCK_TUNNEL_ALPHA = 0.5;
+  const BLOCK_TUNNEL_DASHES: [number, number] = [2.5, 2];
   /** The blocks fetched, for the area asked (padded round the view), and whether all of it was there. */
-  let blockSet: { west: number; south: number; east: number; north: number; list: TrainBlock[]; complete: boolean } | null = null;
+  let blockSet: {
+    west: number;
+    south: number;
+    east: number;
+    north: number;
+    list: TrainBlock[];
+    structures: Structure[];
+    complete: boolean;
+  } | null = null;
+  /** A stretch of a block's track as drawn: in a tunnel or not, up on the bridges along it (`[lon, lat, metres]`). */
+  type BlockRun = { block: string; path: [number, number, number][] };
+  /** The fetched blocks' track as drawn, worked out once for each set. */
+  let blockRuns: { of: TrainBlock[]; above: BlockRun[]; below: BlockRun[] } = { of: [], above: [], below: [] };
   let blocksAsking = false;
   let blocksAskedAt = 0;
   /** Which train is in each block (by block id), worked out now and then. */
@@ -2114,7 +2162,13 @@
     blocksAskedAt = now;
     fetchTrainBlocks(area)
       .then((r) => {
-        blockSet = { ...area, list: r.blocks, complete: r.complete };
+        // while the track or signals load the answer comes back short (often empty): the blocks on
+        // show stay until one has them all, or the map would flick between them and the bare lines
+        if (!r.complete && blockSet && r.blocks.length < blockSet.list.length) {
+          blockSet.complete = false;
+          return;
+        }
+        blockSet = { ...area, list: r.blocks, structures: r.structures ?? [], complete: r.complete };
         blocksTaken.at = 0;
       })
       .catch(() => {})
@@ -2166,22 +2220,53 @@
       blocksTaken = { at: now, by: takenBlocks(list), version: blocksTaken.version + 1 };
     }
     const taken = blocksTaken.by;
-    const lines = list.flatMap((b) => b.lines.map((line) => ({ line, taken: taken.has(b.id) })));
+    if (blockRuns.of !== list) {
+      const structures = blockSet.structures;
+      blockRuns = { of: list, above: [], below: [] };
+      for (const b of list) {
+        for (const line of b.lines) {
+          for (const run of onStructures(line, structures)) (run.tunnel ? blockRuns.below : blockRuns.above).push({ block: b.id, path: run.path });
+        }
+      }
+    }
     // each taken block named once, halfway along its first stretch
     const labels = list
       .filter((b) => taken.has(b.id))
       .map((b) => ({ text: taken.get(b.id)!, at: b.lines[0][Math.floor(b.lines[0].length / 2)] }));
-    const ground = { cullMode: "none", depthWriteEnabled: false, depthCompare: "always" } as const;
+    // on the ground and bridges, under buildings (and road bridges) in front; in
+    // tunnels, faint and dashed, seen through the ground and what stands on it
+    const ground = { cullMode: "none", depthWriteEnabled: false } as const;
+    const top = { ...ground, depthCompare: "always" } as const;
+    const color = (r: BlockRun) => (taken.has(r.block) ? BLOCK_TAKEN : BLOCK_FREE);
+    const width = (r: BlockRun) => (taken.has(r.block) ? 4 : 2.5);
     return [
-      new PathLayer<(typeof lines)[number]>({
+      new PathLayer<BlockRun>({
         id: "train-blocks",
-        data: lines,
-        getPath: (l) => l.line,
-        getColor: (l) => (l.taken ? BLOCK_TAKEN : BLOCK_FREE),
-        getWidth: (l) => (l.taken ? 4 : 2.5),
+        data: blockRuns.above,
+        getPath: (r) => r.path,
+        getColor: color,
+        getWidth: width,
         widthUnits: "pixels",
         capRounded: true,
         parameters: ground,
+        // at its true depth (deck.gl draws each layer a little nearer than the last), for the buildings to hide
+        getPolygonOffset: null,
+        updateTriggers: { getColor: blocksTaken.version, getWidth: blocksTaken.version },
+      }),
+      new PathLayer<BlockRun, PathStyleExtensionProps<BlockRun>>({
+        id: "train-blocks-tunnels",
+        data: blockRuns.below,
+        getPath: (r) => r.path,
+        getColor: (r) => {
+          const c = color(r);
+          return [c[0], c[1], c[2], Math.round(c[3] * BLOCK_TUNNEL_ALPHA)];
+        },
+        getWidth: width,
+        widthUnits: "pixels",
+        extensions: [dashed],
+        getDashArray: BLOCK_TUNNEL_DASHES,
+        dashJustified: true,
+        parameters: top,
         updateTriggers: { getColor: blocksTaken.version, getWidth: blocksTaken.version },
       }),
       new TextLayer<(typeof labels)[number]>({
@@ -2197,7 +2282,7 @@
         getBackgroundColor: [150, 30, 24, 230],
         backgroundPadding: [4, 2],
         billboard: true,
-        parameters: ground,
+        parameters: top,
         updateTriggers: { getText: blocksTaken.version, getPosition: blocksTaken.version },
       }),
     ];
@@ -2428,6 +2513,8 @@
 
     const layers: Layer[] = [earthLayer(basemap)];
     const realistic = basemap === "realistic";
+    /** Close in, Streets GL's own tiles. */
+    const sgl = realistic && flat && zoom >= SGL_FROM_ZOOM;
     // shaded relief goes on the ground, under the map's water, borders, roads and runways
     if (basemap === "satellite") {
       layers.push(imageryLayer());
@@ -2435,7 +2522,8 @@
     } else if (realistic) {
       // drawn from the map's data, as Streets GL does: grass, woods, fields, water, roads and rails
       layers.push(realisticLandLayer(GROUNDED, SURFACE));
-      if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
+      if (sgl) layers.push(sglGroundLayer(mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
+      else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
       // and always in relief: the lie of the land
       layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
     } else {
@@ -2463,17 +2551,18 @@
     if (daylight) layers.push(nightLayer(now));
     const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= (realistic ? REALISTIC_BUILDINGS_ZOOM : 13));
     if (showBuildings) {
-      layers.push(realistic ? realisticBuildingLayer(tileUrl!, realisticShadowSun(now, cLat, cLon)) : buildingLayer(tileUrl!, shadowSun(now)));
+      layers.push(realistic ? realisticBuildingLayer(tileUrl!, realisticShadowSun(now, cLat, cLon), sgl) : buildingLayer(tileUrl!, shadowSun(now)));
     }
     if (realistic && tileUrl && flat && zoom >= TREES_ZOOM) {
-      // out to about as far as the camera is from the point it looks at, the nearest in full detail
+      // out to about as far as the camera is from the point it looks at
       const distance = CAMERA_HEIGHTS * container.clientHeight * mpp;
       layers.push(
         ...treeLayers({
-          url: tileUrl,
+          url: sgl ? SGL_TILES : tileUrl,
+          sgl,
           centre: [cLon, cLat],
-          radius: Math.min(3200, Math.max(700, 1.2 * distance)),
-          detailRadius: Math.min(1000, Math.max(300, 0.45 * distance)),
+          // (Streets GL's tiles are small: fewer of them)
+          radius: Math.min(sgl ? 1400 : 3200, Math.max(700, 1.2 * distance)),
           date: new Date(now),
           extensions: TREED,
           material: UNLIT,
@@ -3446,6 +3535,11 @@
 </script>
 
 <div class="globe" bind:this={container} bind:clientWidth={areaWidth} bind:clientHeight={areaHeight}>
+  {#if tiltShift && basemap === "realistic"}
+    <!-- blurred towards the top and bottom, in two steps: the map behind only, the panels stay sharp -->
+    <div class="tilt-shift" style:--blur="2px" style:--reach="42%" aria-hidden="true"></div>
+    <div class="tilt-shift" style:--blur="5px" style:--reach="22%" aria-hidden="true"></div>
+  {/if}
   {#if hoverCard}
     <HoverCard {...hoverCard} x={pointer.x} y={pointer.y} width={areaWidth} height={areaHeight} />
   {/if}
@@ -3474,6 +3568,19 @@
   .globe {
     position: absolute;
     inset: 0;
+    /* what is layered over the map (the tilt-shift blur) stays under the page's panels */
+    isolation: isolate;
+  }
+  .tilt-shift {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    -webkit-backdrop-filter: blur(var(--blur));
+    backdrop-filter: blur(var(--blur));
+    --fade: linear-gradient(black, transparent var(--reach), transparent calc(100% - var(--reach)), black);
+    -webkit-mask-image: var(--fade);
+    mask-image: var(--fade);
   }
   /* the speed colours, small along the bottom: the lines say the rest close in */
   .speed-legend {

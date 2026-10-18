@@ -1,23 +1,13 @@
 // The trains sidebar: which loaded trains match the search and filters, and
 // in what order. Pure, so the map and the list agree and it can be tested.
-import type { Train, TrainKind, TrainSource } from "./api";
+import type { Train, TrainKind } from "./api";
 import { cosAngle } from "./geo";
 import { TRAIN_KINDS } from "./trains";
 
 export type TrainSort = "delay" | "speed" | "name" | "distance";
 
-/** The regions the train feeds cover, one per source, in the order the list shows them. */
-export const TRAIN_REGIONS: { source: TrainSource; label: string }[] = [
-  { source: "digitraffic", label: "Finland" },
-  { source: "entur", label: "Norway" },
-  { source: "irishrail", label: "Ireland" },
-  { source: "amtrak", label: "USA & Canada" },
-  { source: "vbb", label: "Berlin" },
-];
-
 /** What the coverage note says: where live trains exist at all. */
-export const TRAIN_COVERAGE =
-  "Live trains are available in Finland, Norway, Ireland, the USA and Canada, and around Berlin when zoomed in.";
+export const TRAIN_COVERAGE = "Live trains are shown in Sweden, from Trafikverket.";
 
 /** A train this many minutes late or more counts as delayed (as `delayTone` starts to warn). */
 export const DELAYED_MINUTES = 5;
@@ -25,8 +15,6 @@ export const DELAYED_MINUTES = 5;
 export interface TrainFilters {
   /** Kinds left out; empty shows every kind. Stored as left out, so a kind added later shows. */
   hiddenKinds: TrainKind[];
-  /** Sources (regions) left out. */
-  hiddenSources: TrainSource[];
   /** Operators left out, as trains name them ("" for trains whose operator isn't known); not streamed live either. */
   hiddenOperators: string[];
   delayedOnly: boolean;
@@ -35,7 +23,6 @@ export interface TrainFilters {
 
 export const DEFAULT_TRAIN_FILTERS: TrainFilters = {
   hiddenKinds: [],
-  hiddenSources: [],
   hiddenOperators: [],
   delayedOnly: false,
   sort: "delay",
@@ -49,9 +36,7 @@ export function mergeTrainFilters(saved: unknown): TrainFilters {
   if (!saved || typeof saved !== "object") return f;
   const s = saved as Record<string, unknown>;
   const kinds = new Set<string>(TRAIN_KINDS);
-  const sources = new Set<string>(TRAIN_REGIONS.map((r) => r.source));
   if (Array.isArray(s.hiddenKinds)) f.hiddenKinds = s.hiddenKinds.filter((k) => kinds.has(k)) as TrainKind[];
-  if (Array.isArray(s.hiddenSources)) f.hiddenSources = s.hiddenSources.filter((k) => sources.has(k)) as TrainSource[];
   if (Array.isArray(s.hiddenOperators)) f.hiddenOperators = s.hiddenOperators.filter((o) => typeof o === "string");
   if (typeof s.delayedOnly === "boolean") f.delayedOnly = s.delayedOnly;
   if (SORTS.includes(s.sort as TrainSort)) f.sort = s.sort as TrainSort;
@@ -60,9 +45,7 @@ export function mergeTrainFilters(saved: unknown): TrainFilters {
 
 /** How many filter groups narrow the list, for the badge (the sort is not a filter). */
 export function trainFilterCount(f: TrainFilters): number {
-  return [f.hiddenKinds.length > 0, f.hiddenSources.length > 0, f.hiddenOperators.length > 0, f.delayedOnly].filter(
-    Boolean,
-  ).length;
+  return [f.hiddenKinds.length > 0, f.hiddenOperators.length > 0, f.delayedOnly].filter(Boolean).length;
 }
 
 /** Lower case without accents, so "helsinki" finds "Helsinki" and "oslo s" finds "Oslo S". */
@@ -86,10 +69,9 @@ export const isDelayed = (t: Pick<Train, "delayMinutes">) =>
 /** A predicate for the filters alone: what the map draws. */
 export function trainFilter(f: TrainFilters): (t: Train) => boolean {
   const kinds = new Set(f.hiddenKinds);
-  const sources = new Set(f.hiddenSources);
   const operators = new Set(f.hiddenOperators);
   return (t) =>
-    !kinds.has(t.kind) && !sources.has(t.source) && !operators.has(t.operator ?? "") && (!f.delayedOnly || isDelayed(t));
+    !kinds.has(t.kind) && !operators.has(t.operator ?? "") && (!f.delayedOnly || isDelayed(t));
 }
 
 const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });

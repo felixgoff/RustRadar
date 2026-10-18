@@ -311,8 +311,14 @@ jobs:
           KEY: ${{ secrets.APPLE_API_KEY }}
           TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
         run: |
-          if [ -z "$ISSUER" ] || [ -z "$KEY_ID" ] || [ -z "$KEY" ] || [ -z "$TEAM" ]; then
-            echo "::warning::No App Store Connect secrets (APPLE_API_ISSUER, APPLE_API_KEY_ID, APPLE_API_KEY, APPLE_DEVELOPMENT_TEAM): an unsigned IPA, and nothing for TestFlight."
+          missing=""
+          [ -n "$ISSUER" ] || missing="$missing APPLE_API_ISSUER"
+          [ -n "$KEY_ID" ] || missing="$missing APPLE_API_KEY_ID"
+          [ -n "$KEY" ] || missing="$missing APPLE_API_KEY"
+          [ -n "$TEAM" ] || missing="$missing APPLE_DEVELOPMENT_TEAM"
+          if [ -n "$missing" ]; then
+            echo "::warning::Not uploaded to TestFlight: missing secrets:$missing. An unsigned IPA instead."
+            echo "**iOS:** not uploaded to TestFlight, missing secrets:$missing" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           mkdir -p ~/.appstoreconnect/private_keys

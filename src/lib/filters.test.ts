@@ -34,6 +34,12 @@ describe("mergeSettings", () => {
     expect("legacy" in s).toBe(false);
   });
 
+  test("the old signal-blocks switch becomes the rail map showing the blocks", () => {
+    expect(mergeSettings({ trainBlocks: true })).toMatchObject({ railMap: true, railShows: "blocks" });
+    expect(mergeSettings({ trainBlocks: false }).railShows).toBe("speeds");
+    expect(mergeSettings({ railShows: "tunnels" }).railShows).toBe("speeds");
+  });
+
   test("a setting since removed (airline liveries, now always on) is dropped", () => {
     const s = mergeSettings({ liveries: false, labels: false });
     expect("liveries" in s).toBe(false);

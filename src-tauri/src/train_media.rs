@@ -67,9 +67,6 @@ fn client() -> Result<&'static reqwest::Client, String> {
 fn languages(source: &str) -> &'static [&'static str] {
     match source {
         "trafikverket" => &["sv", "en"],
-        "digitraffic" => &["fi", "en"],
-        "entur" => &["no", "en"],
-        "vbb" => &["de", "en"],
         _ => &["en"],
     }
 }

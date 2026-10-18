@@ -20,6 +20,7 @@ import { COORDINATE_SYSTEM, type Layer } from "@deck.gl/core";
 import { PathStyleExtension } from "@deck.gl/extensions";
 import { MVTLayer, TileLayer } from "@deck.gl/geo-layers";
 import { BitmapLayer, GeoJsonLayer, TextLayer } from "@deck.gl/layers";
+import { bridgeParts, omtDeck, ormDeck, raiseFeatures, type Lines } from "./bridges";
 import { railOverview, railOverviewLayer } from "./rail-overview";
 
 type RGBA = [number, number, number, number];
@@ -107,6 +108,13 @@ const STATION_RING: RGBA = [8, 12, 20, 230];
 // Ground layers: painted in layer order, no depth writes; lines and points
 // are camera-facing quads, which GlobeView would otherwise cull.
 const SURFACE_NO_CULL = { cullMode: "none", depthWriteEnabled: false } as const;
+// Bridges, raised: over the ground layers whatever their order (they don't
+// write depth: what is drawn on the same deck after them would fight with it).
+const RAISED_NO_CULL = { ...SURFACE_NO_CULL, depthCompare: "always" } as const;
+// At their true depth (deck.gl draws each layer a little nearer the camera
+// than the last), so that what writes depth over them, the decks of the
+// roads' bridges, hides them.
+const TRUE_DEPTH = { getPolygonOffset: null } as const;
 const dashed = new PathStyleExtension({ dash: true });
 const RAIL_EXTENSIONS = [dashed];
 
@@ -121,6 +129,18 @@ function loadOptions(layers: string[], workerUrl: string | undefined) {
   }
   return options;
 }
+
+/** A tile of rail lines; in the flat projection, its bridges raised to their decks. */
+const renderNetworkTile = (props: any) => {
+  const data = props.data;
+  const tile = props.tile?.index;
+  const bridges = data?.lines && !Array.isArray(data) && tile ? bridgeParts(data.lines as Lines, tile, omtDeck) : null;
+  if (!bridges) return new GeoJsonLayer(props);
+  return [
+    new GeoJsonLayer({ ...props, data: { ...data, lines: bridges.ground } }),
+    new GeoJsonLayer({ ...props, id: `${props.id}-bridges`, data: { ...data, lines: bridges.raised }, parameters: RAISED_NO_CULL }),
+  ];
+};
 
 /** MVTLayer decodes tiles per projection, so each projection gets its own layer and cache (as the map does). */
 export const railNetworkLayer = (url: string, flat: boolean, zoom: number, workerUrl?: string) =>
@@ -141,7 +161,9 @@ export const railNetworkLayer = (url: string, flat: boolean, zoom: number, worke
     extensions: RAIL_EXTENSIONS,
     getDashArray: railDash,
     dashJustified: true,
+    renderSubLayers: renderNetworkTile,
     parameters: SURFACE_NO_CULL,
+    ...TRUE_DEPTH,
   } as never);
 
 /** Railway stations and halts as small rings. */
@@ -390,12 +412,19 @@ export function speedLabels(features: LineFeature[], size: number, minLength = 0
 const LABEL_TEXT: RGBA = [12, 14, 20, 255];
 function renderSpeedTile(withLabels: boolean) {
   return (props: any) => {
-    const lines = new GeoJsonLayer(props);
     const features = props.data as LineFeature[] | null;
+    // local tiles (the flat projection) are in tile units (0 to 1), and their bridges raised; on the globe, in degrees
+    const local = props.coordinateSystem === COORDINATE_SYSTEM.CARTESIAN;
+    const bridges = local && features?.length ? raiseFeatures(features, props.tile.index, ormDeck) : null;
+    const lines = bridges
+      ? [
+          new GeoJsonLayer({ ...props, data: bridges.ground }),
+          new GeoJsonLayer({ ...props, id: `${props.id}-bridges`, data: bridges.raised, parameters: RAISED_NO_CULL }),
+        ]
+      : new GeoJsonLayer(props);
     if (!withLabels || !features?.length) return lines;
-    // local tiles are in tile units (0 to 1); on the globe, in degrees
     const [[west], [east]] = props.tile.boundingBox;
-    const size = props.coordinateSystem === COORDINATE_SYSTEM.CARTESIAN ? 1 : east - west;
+    const size = local ? 1 : east - west;
     const labels = speedLabels(features, size);
     return [
       lines,
@@ -448,6 +477,7 @@ export const railSpeedLayer = (flat: boolean, zoom: number, workerUrl?: string, 
     dashJustified: true,
     renderSubLayers: zoom >= SPEED_LABEL_MIN_ZOOM ? speedTileRenderers.labelled : speedTileRenderers.plain,
     parameters: SURFACE_NO_CULL,
+    ...TRUE_DEPTH,
   } as never);
 
 export type RailOptions = {

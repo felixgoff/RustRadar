@@ -1,5 +1,6 @@
 // Typed wrappers around the Tauri commands in `src-tauri/src/lib.rs`.
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { Structure } from "./bridges";
 
 export interface LiveFlight {
   id: number;
@@ -597,9 +598,9 @@ export const airlineLogoUrl = (airlineId: number) =>
   `https://cdn.flightradar24.com/assets/airlines/logotypes/${airlineId}.png`;
 
 /** Where a train comes from: one regional public feed each. */
-export type TrainSource = "trafikverket" | "digitraffic" | "amtrak" | "entur" | "irishrail" | "vbb";
+export type TrainSource = "trafikverket";
 
-export type TrainKind = "highSpeed" | "intercity" | "regional" | "suburban" | "metro" | "freight" | "other";
+export type TrainKind = "highSpeed" | "intercity" | "regional" | "suburban" | "other";
 
 /** A train on the move, merged from regional public feeds (no global one exists). */
 /** A position report as the dev map marks it. */
@@ -613,10 +614,10 @@ export interface Sighting {
 }
 
 export interface Train {
-  /** Source-prefixed and stable while the train runs, e.g. `digitraffic:2026-10-13:2`. */
+  /** Source-prefixed and stable while the train runs, e.g. `trafikverket:2026-10-13:523`. */
   id: string;
   source: TrainSource;
-  /** e.g. "IC 1", "H train 1608", "Amtrak 5 California Zephyr", "F4 Oslo S-Bergen". */
+  /** e.g. "SJ Snabbtåg 523", "Pendeltåg 2245". */
   name: string;
   kind: TrainKind;
   lat: number;
@@ -644,15 +645,14 @@ export interface Train {
   cars?: number | null;
   /** The track it has come along, `[lat, lon]` back from the start of `frames`, for its cars. */
   tail?: [number, number][];
+  /** The bridges and tunnels along `tail` and `frames`, for its cars to be drawn up on or down in. */
+  structures?: Structure[];
 }
 
 /**
- * Trains in an area (`west > east` crosses the antimeridian) at a deck.gl
- * zoom, from every regional source covering it (Sweden with a Trafikverket
- * key from the keys page; Finland, Norway, Ireland, the USA and Canada at any
- * zoom; Berlin–Brandenburg from zoom 6). Cached
- * 20–30 s per source in Rust, with backoff; a failing source is left out,
- * and it rejects only when every source in view failed.
+ * Trains in Sweden in an area (`west > east` crosses the antimeridian) at a
+ * deck.gl zoom, from Trafikverket with the key from the keys page. Cached
+ * 10–30 s in Rust (the live streams patch it between), with backoff.
  */
 export const trainsInView = (area: BoundingBox, zoom: number) =>
   invoke<Train[]>("trains_in_view", { ...area, zoom });
@@ -722,9 +722,9 @@ export type TrainRoute = {
 export const trainRoute = (id: string) => invoke<TrainRoute>("train_route", { id });
 /** A signal block: from a main signal to the next its trains meet, `[lon, lat]` stretches (branching where the track does). */
 export type TrainBlock = { id: string; signal: string | null; lines: [number, number][][] };
-/** The blocks starting in an area, close in; while `complete` is false the track or signals are still loading. */
+/** The blocks starting in an area, close in, and the bridges and tunnels round it; while `complete` is false the track or signals are still loading. */
 export const trainBlocks = (area: { west: number; south: number; east: number; north: number }) =>
-  invoke<{ blocks: TrainBlock[]; complete: boolean }>("train_blocks", area);
+  invoke<{ blocks: TrainBlock[]; structures: Structure[]; complete: boolean }>("train_blocks", area);
 /** The trains the map shows close up, streamed live like a followed one (an empty list stops it). */
 export const watchTrains = (ids: string[]) => invoke<void>("watch_trains", { ids });
 
@@ -733,3 +733,6 @@ export const hideTrainOperators = (names: string[]) => invoke<void>("hide_train_
 
 /** Every stop of a train, in order, for sources with its timetable (Trafikverket); empty for the others. */
 export const trainStops = (id: string) => invoke<TrainStop[]>("train_stops", { id });
+
+/** Whether the saved Trafikverket key works: "none" saved, "invalid" (refused) or "ok"; rejects when Trafikverket can't be reached. */
+export const trafikverketKeyStatus = () => invoke<"none" | "invalid" | "ok">("trafikverket_key_status");

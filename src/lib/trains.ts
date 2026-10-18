@@ -14,8 +14,6 @@ const KINDS: Record<TrainKind, { label: string; color: RGB }> = {
   intercity: { label: "Intercity", color: [128, 132, 246] }, // periwinkle
   regional: { label: "Regional", color: [96, 212, 160] }, // mint
   suburban: { label: "Suburban", color: [112, 190, 232] }, // cerulean
-  metro: { label: "Metro", color: [178, 212, 88] }, // lime
-  freight: { label: "Freight", color: [176, 142, 116] }, // taupe
   other: { label: "Other", color: [158, 150, 140] }, // warm grey
 };
 
@@ -62,27 +60,6 @@ export const TRAIN_CREDITS: Record<TrainSource, { text: string; url: string }> =
   trafikverket: {
     text: "Trains in Sweden: Trafikverket, CC0",
     url: "https://data.trafikverket.se/",
-  },
-  digitraffic: {
-    text: "Trains in Finland: Fintraffic / digitraffic.fi, CC BY 4.0",
-    url: "https://www.digitraffic.fi/en/railway-traffic/",
-  },
-  // Amtraker asks for prominent credit linking amtraker.com (not tucked away in settings)
-  amtrak: {
-    text: "Trains in the US and Canada: Amtraker (amtraker.com), ODC-By 1.0",
-    url: "https://amtraker.com",
-  },
-  entur: {
-    text: "Trains in Norway: Entur, NLOD",
-    url: "https://developer.entur.no/",
-  },
-  irishrail: {
-    text: "Trains in Ireland: Iarnród Éireann realtime data, CC BY",
-    url: "https://api.irishrail.ie/realtime/",
-  },
-  vbb: {
-    text: "Trains in Berlin–Brandenburg: VBB via transport.rest",
-    url: "https://v6.vbb.transport.rest/",
   },
 };
 
@@ -169,11 +146,6 @@ export function trainPositionAge(positionUnix: number, nowMs: number): { stale: 
 /** What a source is called in the panel. */
 export const TRAIN_SOURCE_NAMES: Record<TrainSource, string> = {
   trafikverket: "Trafikverket",
-  digitraffic: "Digitraffic (Fintraffic)",
-  amtrak: "Amtraker",
-  entur: "Entur",
-  irishrail: "Irish Rail",
-  vbb: "VBB (transport.rest)",
 };
 
 // --- On the map ---------------------------------------------------------------
@@ -189,14 +161,12 @@ function colourKey(kind: TrainKind, operator?: string | null): string {
   return i >= 0 ? `op${i}` : kind in KINDS ? kind : "other";
 }
 
-/** Base icon length in pixels per kind: long-distance trains a little longer, metros shorter. */
+/** Base icon length in pixels per kind: long-distance trains a little longer, commuter trains shorter. */
 const ICON_PX: Record<TrainKind, number> = {
   highSpeed: 24,
   intercity: 23,
   regional: 21,
   suburban: 20,
-  metro: 18,
-  freight: 22,
   other: 19,
 };
 

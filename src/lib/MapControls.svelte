@@ -12,6 +12,7 @@
   import LayersMenu from "./LayersMenu.svelte";
   import SettingsMenu from "./SettingsMenu.svelte";
   import type { SessionInfo } from "./api";
+  import type { RailShows } from "./filters";
   import type { Basemap } from "./geo";
   import type { Sky } from "./weather";
 
@@ -30,8 +31,9 @@
     weather: boolean;
     adsb: boolean;
     railMap: boolean;
-    trainBlocks: boolean;
+    railShows: RailShows;
     sky: Sky;
+    tiltShift: boolean;
     terrain: boolean;
     exaggeration: number;
     session: SessionInfo | null;
@@ -60,8 +62,9 @@
     weather = $bindable(),
     adsb = $bindable(),
     railMap = $bindable(),
-    trainBlocks = $bindable(),
+    railShows = $bindable(),
     sky = $bindable(),
+    tiltShift = $bindable(),
     terrain = $bindable(),
     exaggeration = $bindable(),
     session,
@@ -136,8 +139,9 @@
           bind:buildings
           bind:labels
           bind:railMap
-          bind:trainBlocks
+          bind:railShows
           bind:sky
+          bind:tiltShift
           {aircraftShown}
           bind:aircraftLabels
           bind:weather
@@ -159,11 +163,20 @@
     </button>
     {#if open === "settings"}
       <section id="settings-popover" class="popover surface menu" aria-label="Settings">
-        <SettingsMenu {labels} bind:labelSize bind:exaggeration bind:adsb />
+        <SettingsMenu
+          {labels}
+          bind:labelSize
+          bind:exaggeration
+          bind:adsb
+          onkeys={() => {
+            close();
+            onkeys();
+          }}
+        />
       </section>
     {/if}
     <button
-      class="icon-button"
+      class="icon-button keys"
       class:signed-in={signedIn}
       aria-label="API keys"
       title={signedIn ? "API keys (signed in to Flightradar24)" : "API keys and Flightradar24 login"}
@@ -272,7 +285,8 @@
     gap: var(--space-3);
   }
   /* Phones (the query in phone.svelte.ts): a slim rail above the bottom sheet;
-     pinching zooms, and the menus open as sheets of their own. */
+     pinching zooms, the keys are in the settings, the compass shows once the
+     map is turned, and the menus open as sheets of their own. */
   @media (max-width: 899px), (max-height: 500px) {
     .controls {
       right: max(var(--space-2), env(safe-area-inset-right, 0px));
@@ -280,6 +294,8 @@
       transition: bottom 220ms var(--ease-out);
     }
     .zoom,
+    .keys,
+    .compass:disabled,
     .desktop-only {
       display: none;
     }
@@ -304,10 +320,10 @@
       }
     }
   }
-  /* a phone on its side: the sheet is on the left, clear of the rail */
+  /* a phone on its side: the sheet is on the left, clear of the rail; the rail clear of the credits */
   @media (max-height: 500px) and (orientation: landscape) {
     .controls {
-      bottom: var(--space-2);
+      bottom: 24px;
     }
   }
 </style>

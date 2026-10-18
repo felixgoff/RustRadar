@@ -83,6 +83,10 @@ pub struct Train {
     /// its cars to be drawn up on or down in.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub structures: Vec<crate::rail::Structure>,
+    /// When it came to a stand at its last stop, Unix seconds: the map drops
+    /// it a little after.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_unix: Option<i64>,
 }
 
 /// A position report as the dev map marks it.
@@ -649,6 +653,7 @@ mod tests {
             cars: None,
             tail: Vec::new(),
             structures: Vec::new(),
+            ended_unix: None,
         };
         let source = Source::Trafikverket;
         let (key, _) = source.request(&Area::WORLD);
@@ -713,6 +718,7 @@ mod tests {
             cars: Some(6),
             tail: Vec::new(),
             structures: Vec::new(),
+            ended_unix: None,
         };
         let json = serde_json::to_value(&t).unwrap();
         for key in ["speedKmh", "delayMinutes", "positionUnix", "frames", "heading", "destination", "operator"] {

@@ -19,6 +19,7 @@ import {
   trainIconSize,
   trainLabel,
   trainPositionAge,
+  trainRunning,
   trainProduct,
 } from "./trains";
 
@@ -224,5 +225,13 @@ describe("products", () => {
     expect(trainProduct({ source: "trafikverket", name: "Öresundståg 1322" })).toBe("Öresundståg");
     expect(trainProduct({ source: "trafikverket", name: "SJ Snabbtåg 531" })).toBe("SJ Snabbtåg");
     expect(trainProduct({ source: "trafikverket", name: "Train 1322" })).toBeNull();
+  });
+});
+
+describe("trainRunning", () => {
+  test("a train is dropped 30 s after it stands at its last stop", () => {
+    expect(trainRunning(train({}), 1e12)).toBe(true);
+    expect(trainRunning(train({ endedUnix: 1000 }), 1_030_000)).toBe(true);
+    expect(trainRunning(train({ endedUnix: 1000 }), 1_030_001)).toBe(false);
   });
 });

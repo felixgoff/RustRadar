@@ -709,9 +709,11 @@ pub fn train(
         .map(|f| (f.0, f.1))
         .or_else(|| crate::rail::snap((report.lat, report.lon)))
         .unwrap_or((report.lat, report.lon));
+    let id = format!("trafikverket:{date}:{}{number}", if advertised.is_some() { "" } else { "~" });
+    let ended_unix = ended_at(&id, service, report, stations).map(|ms| ms / 1000);
     Train {
         // the advertised number and its day are what the stops are looked up by
-        id: format!("trafikverket:{date}:{}{number}", if advertised.is_some() { "" } else { "~" }),
+        id,
         source: "trafikverket",
         name: match &product {
             Some(p) => format!("{p} {number}"),
@@ -746,7 +748,43 @@ pub fn train(
         cars: service.and_then(|s| s.cars),
         tail,
         structures,
+        ended_unix,
     }
+}
+
+/// A train standing this near its last stop has ended its run, metres.
+const AT_END_M: f64 = 500.0;
+/// Standing: slower than this, km/h.
+const STANDING_KMH: f32 = 5.0;
+/// Not before this long ahead of its timetabled arrival there (a train
+/// waiting at the station it later comes back to hasn't ended).
+const END_EARLY_MS: i64 = 20 * 60_000;
+
+/// When the train came to a stand at its run's last stop, Unix ms: the
+/// first report it did, remembered by the train's id; none while it runs
+/// (or moves again).
+fn ended_at(id: &str, run: Option<&Service>, report: &Report, stations: &HashMap<String, Station>) -> Option<i64> {
+    static ENDED: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+    let mut ended = ENDED.get_or_init(Default::default).lock().unwrap();
+    ended.retain(|_, at| report.at_ms - *at < 6 * 3_600_000);
+    if is_at_end(run, report, stations) {
+        Some(*ended.entry(id.to_owned()).or_insert(report.at_ms))
+    } else {
+        ended.remove(id);
+        None
+    }
+}
+
+fn is_at_end(run: Option<&Service>, report: &Report, stations: &HashMap<String, Station>) -> bool {
+    let Some(last) = run.and_then(|r| r.calls.iter().rev().find(|c| c.stops)) else {
+        return false;
+    };
+    let Some((lat, lon)) = stations.get(&last.station).and_then(|s| Some((s.lat?, s.lon?))) else {
+        return false;
+    };
+    report.speed.unwrap_or(0.0) < STANDING_KMH
+        && last.arrive.is_none_or(|t| report.at_ms >= t - END_EARLY_MS)
+        && motion::distance((report.lat, report.lon), (lat, lon)) < AT_END_M
 }
 
 /// A train's cars where its operator doesn't say how many.
@@ -1904,6 +1942,36 @@ mod tests {
     }
 
     #[test]
+    fn a_train_ends_standing_at_its_last_stop() {
+        let stations = HashMap::from([("G".to_owned(), Station { name: "Göteborg C".into(), lat: Some(57.709), lon: Some(11.973) })]);
+        let arrive = 1_000_000_000;
+        let run = Service {
+            calls: vec![
+                Call { station: "Cst".into(), depart: Some(arrive - 3 * 3_600_000), stops: true, ..Default::default() },
+                Call { station: "G".into(), arrive: Some(arrive), stops: true, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let at = |lat: f64, speed: f32, at_ms: i64| Report {
+            advertised: Some("531".into()),
+            operational: None,
+            date: None,
+            lat,
+            lon: 11.973,
+            bearing: None,
+            speed: Some(speed),
+            at_ms,
+        };
+        let id = "test:ends";
+        assert_eq!(ended_at(id, Some(&run), &at(57.6, 0.0, arrive), &stations), None, "standing short of it");
+        assert_eq!(ended_at(id, Some(&run), &at(57.709, 40.0, arrive), &stations), None, "still rolling in");
+        assert_eq!(ended_at(id, Some(&run), &at(57.709, 0.0, arrive - 3_600_000), &stations), None, "long before it is due");
+        assert_eq!(ended_at(id, Some(&run), &at(57.709, 0.0, arrive + 5_000), &stations), Some(arrive + 5_000));
+        assert_eq!(ended_at(id, Some(&run), &at(57.7091, 0.0, arrive + 20_000), &stations), Some(arrive + 5_000), "from when it first stood");
+        assert_eq!(ended_at(id, None, &at(57.709, 0.0, arrive + 5_000), &stations), None, "no timetable: never ended");
+    }
+
+    #[test]
     fn points_read_longitude_first() {
         assert_eq!(point("POINT (18.0582 59.3302)"), Some((59.3302, 18.0582)));
         assert_eq!(point("LINESTRING (1 2, 3 4)"), None);
@@ -2107,6 +2175,7 @@ mod tests {
             cars: None,
             tail: Vec::new(),
             structures: Vec::new(),
+            ended_unix: None,
         };
         let report = |n: &str| Report {
             advertised: None,

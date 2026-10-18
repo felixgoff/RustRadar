@@ -84,7 +84,7 @@
   import { placeView } from "$lib/places";
   import { afterRound, feedFreshness, type FeedClock } from "$lib/freshness";
   import { clockAt } from "$lib/time";
-  import { delayText, trainColorOf, trainCredits, trainLabel } from "$lib/trains";
+  import { delayText, trainColorOf, trainCredits, trainLabel, trainRunning } from "$lib/trains";
   import { RAIL_SPEED_ATTRIBUTION } from "$lib/rail-layer";
   import { SGL_ATTRIBUTION, SGL_ZOOM } from "$lib/streets-gl";
   import { LANDCOVER_ATTRIBUTION } from "$lib/landcover";
@@ -759,7 +759,11 @@
   const listCentre = $derived({ lat: centreLat, lon: centreLon });
   const ORIGIN = { lat: 0, lon: 0 };
 
-  const trainsFiltered = $derived(trains.filter(trainFilter(trainFilters)));
+  // (trains that ended their run go a little after)
+  const trainsFiltered = $derived.by(() => {
+    const keep = trainFilter(trainFilters);
+    return trains.filter((t) => keep(t) && trainRunning(t, now));
+  });
   // the operators left out aren't streamed live either
   $effect(() => {
     const hidden = [...trainFilters.hiddenOperators];

@@ -647,6 +647,8 @@ export interface Train {
   tail?: [number, number][];
   /** The bridges and tunnels along `tail` and `frames`, for its cars to be drawn up on or down in. */
   structures?: Structure[];
+  /** When it came to a stand at its last stop, Unix seconds: the map drops it a little after. */
+  endedUnix?: number | null;
 }
 
 /**

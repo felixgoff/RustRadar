@@ -143,6 +143,12 @@ export function trainPositionAge(positionUnix: number, nowMs: number): { stale: 
     : { stale: false, label: `Position ${ageLabel(age)} ago` };
 }
 
+/** A train is left on the map this long after it stands at its last stop (ms). */
+export const TRAIN_ENDED_MS = 30_000;
+
+/** Whether a train is still shown: not more than {@link TRAIN_ENDED_MS} past the end of its run. */
+export const trainRunning = (train: Train, nowMs: number) => train.endedUnix == null || nowMs - train.endedUnix * 1000 <= TRAIN_ENDED_MS;
+
 /** What a source is called in the panel. */
 export const TRAIN_SOURCE_NAMES: Record<TrainSource, string> = {
   trafikverket: "Trafikverket",

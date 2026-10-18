@@ -714,16 +714,27 @@ const rtreeInject = {
       ? leaf * rl_linear(color.rgb) / max(textureLod(rtree_color, vec3(0.5, 0.5, layer), 16.0).rgb, vec3(1e-3))
       : leaf * pow(color.r / 0.8627, 2.2);
     vec3 v = normalize(rl_eye);
-    // the card's face towards the camera, across it and up it (up the picture: north, on the crown's level card)
+    // the card's face towards the camera, and the way the picture runs across and up it there, from how
+    // its texture coordinates change from pixel to pixel (Streets GL's getTBN): the picture's left is on
+    // the same side of the tree from either side of the card, as its top is
     vec3 card = normalize(rt_n);
     if (dot(card, v) < 0.0) card = -card;
-    vec3 across = normalize(cross(abs(card.z) > 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0), card));
-    vec3 up = cross(card, across);
+    vec3 dp1 = dFdx(-rl_eye);
+    vec3 dp2 = dFdy(-rl_eye);
+    vec2 duv1 = dFdx(geometry.uv);
+    vec2 duv2 = dFdy(geometry.uv);
+    vec3 dp2perp = cross(dp2, card);
+    vec3 dp1perp = cross(card, dp1);
+    float facing = sign(dot(card, cross(dp1, dp2)));
+    vec3 across = (dp2perp * duv1.x + dp1perp * duv2.x) * facing;
+    // (v runs down the picture)
+    vec3 up = -(dp2perp * duv1.y + dp1perp * duv2.y) * facing;
+    float scale = inversesqrt(max(max(dot(across, across), dot(up, up)), 1e-20));
     // reoriented normal mapping: the leaves' normals on the crown's
     vec3 t = texture(rtree_volume, geometry.uv).xyz * 2.0 - 1.0 + vec3(0.0, 0.0, 1.0);
     vec3 u = (texture(rtree_normal, at).xyz * 2.0 - 1.0) * vec3(-1.0, -1.0, 1.0);
     vec3 m = normalize(t * dot(t, u) - u * t.z);
-    vec3 n = normalize(across * m.x + up * m.y + card * max(m.z, 0.05));
+    vec3 n = normalize((across * m.x + up * m.y) * scale + card * max(m.z, 0.05));
     float sun = rl_sunVisible();
     // snow on the tops of the crowns; the inside and underneath shaded
     albedo = mix(albedo, vec3(0.75), rlight.snow * smoothstep(0.2, 0.7, n.z) * 0.8);
@@ -749,6 +760,50 @@ export class TreeExtension extends LayerExtension {
     this.setShaderModuleProps({
       rlight: rlightProps(params),
       rtree: { rtree_color: t.color, rtree_normal: t.normal, rtree_mask: t.mask, rtree_volume: t.volume },
+    });
+  }
+}
+
+const rtshadowModule = {
+  name: "rtshadow",
+  fs: /* glsl */ `\
+layout(std140) uniform rtshadowUniforms {
+  vec4 color;
+} rtshadow;
+`,
+  uniformTypes: { color: "vec4<f32>" },
+} as const;
+
+/**
+ * The trees' shadows: their cards laid on the ground along the sun
+ * (tree-layer.ts), cut to the pictures' shapes, in `treeShadowColor` (RGBA,
+ * 0 to 255), fading into the distance's air. The instances' colours are the
+ * trees' own, for their pictures.
+ */
+export class TreeShadowExtension extends LayerExtension {
+  static extensionName = "RealisticTreeShadowExtension";
+  static defaultProps = { treeShadowColor: [0, 0, 0, 255] };
+
+  getShaders() {
+    return {
+      modules: [rlightModule, rtreeModule, rtshadowModule],
+      inject: {
+        "fs:DECKGL_FILTER_COLOR": /* glsl */ `
+    float code = floor(color.a * 255.0 + 0.5) - 200.0;
+    if (texture(rtree_mask, vec3(geometry.uv, floor(code / 10.0 + 0.01))).r < 0.5) discard;
+    color = vec4(rtshadow.color.rgb, rtshadow.color.a * rl_clear());
+  `,
+      },
+    };
+  }
+
+  draw(this: ExtLayer & { props: { treeShadowColor?: number[] } }, params: DrawParams) {
+    const t = realisticTextures(this.context.device).trees;
+    const c = this.props.treeShadowColor ?? [0, 0, 0, 255];
+    this.setShaderModuleProps({
+      rlight: rlightProps(params),
+      rtree: { rtree_color: t.color, rtree_normal: t.normal, rtree_mask: t.mask, rtree_volume: t.volume },
+      rtshadow: { color: [c[0] / 255, c[1] / 255, c[2] / 255, (c[3] ?? 255) / 255] },
     });
   }
 }
@@ -806,6 +861,7 @@ export class FootShadeExtension extends LayerExtension {
 export const BUILDINGS = new BuildingExtension();
 export const ROOFS = new RoofExtension();
 export const TREES = new TreeExtension();
+export const TREE_SHADOWS = new TreeShadowExtension();
 export const HAZE_FADE = new HazeFadeExtension();
 export const FOOT_SHADE = new FootShadeExtension();
 

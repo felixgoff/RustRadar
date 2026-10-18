@@ -26,7 +26,7 @@ type Properties = Record<string, unknown>;
  * doesn't serve).
  */
 export const sglFetch = (url: string, { loadOptions }: { loadOptions?: Parameters<typeof load>[2] }) =>
-  url.includes(`/${SGL_ZOOM}/`) ? load(url, MVTLoader, loadOptions) : Promise.resolve(null);
+  url.includes(`/vector/${SGL_ZOOM}/`) ? load(url, MVTLoader, loadOptions) : Promise.resolve(null);
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 // (a tile decoded to binary has a number the feature doesn't map as 0, so where 0 can't be meant it is none)

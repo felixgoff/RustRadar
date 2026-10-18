@@ -91,7 +91,7 @@
   import { TAXIWAY_ZOOM, taxiwaysFor } from "./taxiways";
   import { screenAngle } from "./screen";
   import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection, sunlight } from "./shadow";
-  import { BuildingLayer, buildingHeight } from "./building-layer";
+  import { BuildingLayer, buildingHeight, buildingTilesUrl } from "./building-layer";
   import {
     BUILDINGS as REALISTIC_BUILDINGS,
     ROOFS as REALISTIC_ROOFS,
@@ -104,10 +104,14 @@
     setLook,
     skyCss,
     TREES as REALISTIC_TREES,
+    TREE_SHADOWS,
     UNLIT,
   } from "./realistic";
   import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, sglGroundLayer } from "./realistic-ground";
-  import { SGL_TILES, SGL_ZOOM, sglFetch } from "./streets-gl";
+  import { landCoverGroundLayer } from "./landcover-ground";
+  import { sglBuildingFetch } from "./overture";
+  import { roadWidthsVersion, wantRoadWidths } from "./road-widths";
+  import { SGL_TILES, SGL_ZOOM } from "./streets-gl";
   import { onTexturesReady } from "./realistic-textures";
   import { treeLayers } from "./tree-layer";
   import { PRESETS, type Conditions } from "./weather";
@@ -1017,11 +1021,14 @@
   const SGL_BUILDING_OPTIONS = { mvt: { layers: ["buildings"], workerUrl: mvtWorkerUrl } };
   /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
   const TREES_ZOOM = 14.5;
+  /** From here the roads are drawn at their surveyed widths, where Trafikverket has them. */
+  const ROAD_WIDTHS_ZOOM = 14;
   const FACADED = [REALISTIC_BUILDINGS];
   const ROOFED = [REALISTIC_ROOFS];
   const HAZE_FADED = [HAZE_FADE];
   const FOOT_SHADED = [FOOT_SHADE];
   const TREED = [REALISTIC_TREES];
+  const TREE_SHADOWED = [TREE_SHADOWS];
   const GROUNDED = [GROUND_SURFACES];
   /** Shadows in sunshine: a deep blue, the sky's light being all that is left in them. */
   const REALISTIC_SHADOW_COLOR: [number, number, number] = [6, 12, 28];
@@ -1042,6 +1049,26 @@
   /** How much of the sun gets through now, 0 to 1. */
   const sunStrength = () => Math.max(...look.sunColor) / 3.2;
   /** Only the deepest tiles, so a building looks the same in each tile it is in (see `wallColoursOf`). */
+  /** Far out, the backend's quantized buildings (blocks a cell or more across, zooms 10 to 12), until the real ones take over. */
+  const FAR_BUILDINGS_ZOOM = 9.5;
+  const FAR_REALISTIC_COLOR: [number, number, number] = [214, 206, 192];
+  const farBuildingLayer = (realistic: boolean) =>
+    new BuildingLayer({
+      id: "buildings-far",
+      data: buildingTilesUrl(),
+      minZoom: 10,
+      maxZoom: 12,
+      loadOptions: BUILDING_LOAD_OPTIONS,
+      extruded: true,
+      filled: true,
+      stroked: false,
+      getElevation: buildingElevation,
+      getFillColor: realistic ? FAR_REALISTIC_COLOR : BUILDING_COLOR,
+      material: BUILDING_MATERIAL,
+      parameters: NO_CULL,
+      _subLayerProps: BUILDING_SUBLAYER_PROPS,
+      pickable: false,
+    });
   const realisticBuildingLayer = (url: string, sun: readonly number[], sgl: boolean) =>
     new BuildingLayer({
       id: sgl ? "buildings-sgl" : "buildings-realistic",
@@ -1049,7 +1076,8 @@
       minZoom: sgl ? SGL_ZOOM : 14,
       maxZoom: sgl ? SGL_ZOOM : 14,
       loadOptions: sgl ? SGL_BUILDING_OPTIONS : BUILDING_LOAD_OPTIONS,
-      ...(sgl ? { fetch: sglFetch as never } : {}),
+      // (with Overture's heights where Streets GL's tiles have none)
+      ...(sgl ? { fetch: sglBuildingFetch as never } : {}),
       extruded: true,
       filled: true,
       stroked: false,
@@ -2522,8 +2550,12 @@
     } else if (realistic) {
       // drawn from the map's data, as Streets GL does: grass, woods, fields, water, roads and rails
       layers.push(realisticLandLayer(GROUNDED, SURFACE));
-      if (sgl) layers.push(sglGroundLayer(mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
-      else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
+      // where the map's data says nothing, what the land cover has
+      if (flat) layers.push(landCoverGroundLayer(GROUNDED, SURFACE_NO_CULL));
+      // close in, the numbered roads as wide as Trafikverket has them (the app, with its key)
+      if (flat && zoom >= ROAD_WIDTHS_ZOOM) wantRoadWidths(cLon, cLat, render);
+      if (sgl) layers.push(sglGroundLayer(mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
+      else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
       // and always in relief: the lie of the land
       layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
     } else {
@@ -2550,6 +2582,8 @@
     } else freeArenas();
     if (daylight) layers.push(nightLayer(now));
     const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= (realistic ? REALISTIC_BUILDINGS_ZOOM : 13));
+    // (the app's backend makes them)
+    if (buildings && !showBuildings && isTauri() && zoom >= FAR_BUILDINGS_ZOOM) layers.push(farBuildingLayer(realistic));
     if (showBuildings) {
       layers.push(realistic ? realisticBuildingLayer(tileUrl!, realisticShadowSun(now, cLat, cLon), sgl) : buildingLayer(tileUrl!, shadowSun(now)));
     }
@@ -2572,7 +2606,7 @@
                   sun: look.sunDir,
                   color: [...REALISTIC_SHADOW_COLOR, Math.round(Math.min(0.6, 0.55 * sunStrength()) * 255)],
                   parameters: SHADOW_PARAMETERS,
-                  extensions: HAZE_FADED,
+                  extensions: TREE_SHADOWED,
                 }
               : null,
           onLoad: render,

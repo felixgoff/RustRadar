@@ -87,6 +87,10 @@
   import { delayText, trainColorOf, trainCredits, trainLabel } from "$lib/trains";
   import { RAIL_SPEED_ATTRIBUTION } from "$lib/rail-layer";
   import { SGL_ATTRIBUTION, SGL_ZOOM } from "$lib/streets-gl";
+  import { LANDCOVER_ATTRIBUTION } from "$lib/landcover";
+  import { CANOPY_ATTRIBUTION } from "$lib/canopy";
+  import { STREET_TREES_ATTRIBUTION } from "$lib/street-trees";
+  import { OVERTURE_ATTRIBUTION } from "$lib/overture";
   import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
   import { conditionsOf, fetchWeather, PRESETS, type Weather } from "$lib/weather";
   import { distanceKm as distanceKmBetween } from "$lib/flightpath";
@@ -1269,6 +1273,12 @@
       settings.terrain && TERRAIN_ATTRIBUTION,
       settings.basemap === "realistic" && "Textures: Streets GL (MIT)",
       settings.basemap === "realistic" && view.zoom >= SGL_ZOOM - 0.5 && SGL_ATTRIBUTION,
+      settings.basemap === "realistic" && view.zoom >= SGL_ZOOM - 0.5 && OVERTURE_ATTRIBUTION,
+      // the ground where the map leaves it unmapped (the flat map's), and what plants the trees close in (Globe's TREES_ZOOM)
+      settings.basemap === "realistic" && view.zoom >= 12 && LANDCOVER_ATTRIBUTION,
+      settings.basemap === "realistic" && view.zoom >= 14.5 && `${CANOPY_ATTRIBUTION} · ${STREET_TREES_ATTRIBUTION}`,
+      // (Globe's ROAD_WIDTHS_ZOOM; the app asks with the Trafikverket key)
+      settings.basemap === "realistic" && view.zoom >= 14 && isTauri() && "Road widths: Trafikverket NVDB",
       settings.basemap === "realistic" && "Earth: NASA Blue Marble",
       weatherLive && liveWeather && "Weather: MET Norway",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
@@ -1286,6 +1296,23 @@
   const partial = $derived(snapshot?.errors.length ?? 0);
   const retryIn = $derived(Math.max(0, Math.ceil((nextRefreshAt - now) / 1000)));
   const count = (n: number) => n.toLocaleString();
+
+  // dev builds: frames a second, for the corner's readout
+  let fps = $state(0);
+  $effect(() => {
+    if (!import.meta.env.DEV) return;
+    let frames = 0;
+    let since = performance.now();
+    let id = requestAnimationFrame(function tick(now) {
+      frames++;
+      if (now - since >= 1000) {
+        fps = Math.round((frames * 1000) / (now - since));
+        [frames, since] = [0, now];
+      }
+      id = requestAnimationFrame(tick);
+    });
+    return () => cancelAnimationFrame(id);
+  });
 
   let timers: ReturnType<typeof setInterval>[] = [];
   onMount(() => {
@@ -1703,6 +1730,14 @@
     onsignout={handleSignOut}
   />
 
+  {#if import.meta.env.DEV}
+    <!-- where the view is and what it shows, for development -->
+    <pre class="dev-readout">z {view.zoom.toFixed(2)}  pitch {view.pitch.toFixed(0)}°  bearing {view.bearing.toFixed(0)}°
+{view.latitude.toFixed(5)}, {view.longitude.toFixed(5)}
+{settings.basemap}{settings.basemap === "realistic" && view.zoom >= SGL_ZOOM - 0.5 ? " · Streets GL" : ""}  {fps} fps
+{count(flights.length)} aircraft · {count(trains.length)} trains · {count(ships.length)} ships</pre>
+  {/if}
+
   <!-- the train credits come first, so the line's ellipsis can't hide them -->
   <p class="attribution" title={[...trainCredit.map((c) => c.text), ...attribution].join(" · ")}>
     {#each trainCredit as c, i (c.url)}
@@ -1848,15 +1883,29 @@
     font-size: var(--text-sm);
     color: var(--text-2);
   }
+  .dev-readout {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    margin: 0;
+    padding: 4px 6px;
+    border-radius: var(--radius-sm);
+    background: oklch(0.15 0 0 / 0.75);
+    color: var(--text-2);
+    font: 10px/1.35 var(--font-mono, ui-monospace, monospace);
+    pointer-events: none;
+    z-index: 5;
+  }
   .attribution {
     position: absolute;
     right: 0;
     bottom: 0;
     max-width: calc(100% - 352px);
-    padding: 3px var(--space-2);
+    padding: 1px var(--space-1);
     border-top-left-radius: var(--radius-sm);
-    background: oklch(0.15 0 0 / 0.85);
-    font-size: var(--text-xs);
+    background: oklch(0.15 0 0 / 0.6);
+    font-size: 8px;
+    line-height: 1.3;
     color: var(--text-3);
     white-space: nowrap;
     overflow: hidden;
@@ -1944,7 +1993,7 @@
       left: 0;
       max-width: none;
       border-radius: 0;
-      font-size: 10px;
+      font-size: 7px;
       z-index: 2;
     }
   }

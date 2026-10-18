@@ -345,6 +345,11 @@ jobs:
           bun tauri ios init --ci
           # the Xcode project starts with Tauri's logo: the app's own icon over it
           bun tauri icon src-tauri/icons/icon.png
+          # App Store Connect refuses an app icon with an alpha channel, which
+          # tauri icon leaves in: the same icons flattened onto white
+          # (src-tauri/icons/ios, made from its output with Pillow:
+          # Image.new("RGB", size, "white").paste(icon, mask=alpha))
+          cp src-tauri/icons/ios/*.png src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/
 
       # Without the App Store Connect secrets: an unsigned IPA, for sideloading
       # tools (AltStore, Sideloadly) that sign it with the user's own Apple ID.
@@ -378,7 +383,8 @@ jobs:
   mobile-release:
     name: Attach phone builds
     needs: [version, bundle, android, ios]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # whichever phone builds there are, on the release the desktop bundles made (one phone's failure doesn't hold back the other's)
+    if: ${{ !cancelled() && needs.bundle.result == 'success' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

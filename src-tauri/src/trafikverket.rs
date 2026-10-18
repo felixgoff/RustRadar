@@ -44,7 +44,7 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-fn includes(fields: &[&str]) -> String {
+pub(crate) fn includes(fields: &[&str]) -> String {
     fields.iter().map(|f| format!("<INCLUDE>{f}</INCLUDE>")).collect()
 }
 
@@ -171,7 +171,7 @@ fn stations_query() -> String {
 }
 
 /// The rows of each query in the answer, in order.
-fn results(body: &str) -> Result<Vec<Value>, String> {
+pub(crate) fn results(body: &str) -> Result<Vec<Value>, String> {
     let json: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
     let results = json["RESPONSE"]["RESULT"].as_array().cloned().unwrap_or_default();
     if let Some(error) = results.iter().find_map(|r| r["ERROR"]["MESSAGE"].as_str()) {
@@ -180,7 +180,7 @@ fn results(body: &str) -> Result<Vec<Value>, String> {
     Ok(results)
 }
 
-fn rows<'a>(result: &'a Value, kind: &str) -> &'a [Value] {
+pub(crate) fn rows<'a>(result: &'a Value, kind: &str) -> &'a [Value] {
     result[kind].as_array().map(Vec::as_slice).unwrap_or_default()
 }
 
@@ -957,7 +957,7 @@ pub async fn trafikverket_key_status() -> crate::CmdResult<&'static str> {
     }
 }
 
-async fn post(http: &reqwest::Client, key: &str, queries: &str) -> Result<String, String> {
+pub(crate) async fn post(http: &reqwest::Client, key: &str, queries: &str) -> Result<String, String> {
     let sent = request(key, queries);
     let call = crate::devlog::start("Trafikverket", "POST", URL, Some(&sent));
     let response = match http.post(URL).header("content-type", "text/xml; charset=utf-8").body(sent).send().await {

@@ -725,6 +725,14 @@ export type TrainBlock = { id: string; signal: string | null; lines: [number, nu
 /** The blocks starting in an area, close in, and the bridges and tunnels round it; while `complete` is false the track or signals are still loading. */
 export const trainBlocks = (area: { west: number; south: number; east: number; north: number }) =>
   invoke<{ blocks: TrainBlock[]; structures: Structure[]; complete: boolean }>("train_blocks", area);
+/** A stretch of a numbered Swedish road, from Trafikverket's road database: its line, width (metres) and whether it is paved. */
+export interface RoadPiece {
+  line: [number, number][];
+  width: number;
+  paved: boolean;
+}
+/** The numbered roads' stretches around a point (none without a Trafikverket key, or outside Sweden). */
+export const roadWidths = (lon: number, lat: number) => invoke<RoadPiece[]>("road_widths", { lon, lat });
 /** The trains the map shows close up, streamed live like a followed one (an empty list stops it). */
 export const watchTrains = (ids: string[]) => invoke<void>("watch_trains", { ids });
 

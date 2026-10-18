@@ -73,13 +73,17 @@ export const textureLayer = {
 export type BuildingTextures = { color: Texture; normal: Texture; mask: Texture; glow: Texture };
 export type GroundTextures = { color: Texture; normal: Texture };
 export type TreeTextures = { color: Texture; normal: Texture; mask: Texture; volume: Texture };
-/** `earth`: the whole Earth, cloud-free, for the land's colour zoomed out (its alpha is 0 until it loads: not used). */
+/**
+ * `earth`: the whole Earth, cloud-free, for the land's colour zoomed out (its alpha is 0 until it loads: not used);
+ * `night`: its lights at night, for the globe's night side (black until it loads).
+ */
 export type RealisticTextures = {
   buildings: BuildingTextures;
   ground: GroundTextures;
   trees: TreeTextures;
   water: Texture;
   earth: Texture;
+  night: Texture;
   ready: boolean;
 };
 
@@ -208,29 +212,33 @@ export function realisticTextures(device: Device): RealisticTextures {
     trees: { ...standIns(device, ["color", "normal"] as const), mask: blank(device), volume: flatNormal(device) },
     water: waterStandIn,
     earth: device.createTexture({ format: "rgba8unorm", width: 1, height: 1, data: new Uint8Array(4) } as never),
+    night: device.createTexture({ format: "rgba8unorm", width: 1, height: 1, data: new Uint8Array([0, 0, 0, 255]) } as never),
     ready: false,
   };
   state = { device, textures };
   const mine = state;
   void (async () => {
     try {
-      const [buildings, ground, trees, water, earth, volume] = await Promise.all([
+      const [buildings, ground, trees, water, earth, volume, night] = await Promise.all([
         loadSet(device, BUILDING_TEXTURES, BUILDING_KINDS),
         loadSet(device, GROUND_TEXTURES, GROUND_KINDS),
         loadSet(device, TREE_TEXTURES, TREE_KINDS),
         bitmap(`${BASE}water.normal.webp`),
         bitmap(`${BASE}earth.color.webp`),
         bitmap(`${BASE}tree-volume.normal.webp`),
+        bitmap(`${BASE}earth.night.webp`),
       ]);
       if (state !== mine) return;
       const waterTexture = texture2d(device, water, "rgba8unorm");
       // round the world east to west; not over the poles
       const earthTexture = texture2d(device, earth, "rgba8unorm-srgb", { ...SAMPLER, addressModeV: "clamp-to-edge" });
+      const nightTexture = texture2d(device, night, "rgba8unorm-srgb", { ...SAMPLER, addressModeV: "clamp-to-edge" });
       const volumeTexture = texture2d(device, volume, "rgba8unorm", { ...SAMPLER, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
       for (const old of [textures.buildings, textures.ground, textures.trees]) for (const t of Object.values(old)) t.destroy();
       textures.water.destroy();
       textures.earth.destroy();
-      Object.assign(textures, { buildings, ground, trees: { ...trees, volume: volumeTexture }, water: waterTexture, earth: earthTexture, ready: true });
+      textures.night.destroy();
+      Object.assign(textures, { buildings, ground, trees: { ...trees, volume: volumeTexture }, water: waterTexture, earth: earthTexture, night: nightTexture, ready: true });
       for (const listener of listeners) listener();
     } catch (error) {
       // the stand-ins stay: plain surfaces, lit as ever

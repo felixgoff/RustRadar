@@ -91,6 +91,7 @@
   import { CANOPY_ATTRIBUTION } from "$lib/canopy";
   import { STREET_TREES_ATTRIBUTION } from "$lib/street-trees";
   import { OVERTURE_ATTRIBUTION } from "$lib/overture";
+  import { CLOUDS_ATTRIBUTION } from "$lib/clouds";
   import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
   import { conditionsOf, fetchWeather, PRESETS, type Weather } from "$lib/weather";
   import { distanceKm as distanceKmBetween } from "$lib/flightpath";
@@ -1279,7 +1280,9 @@
       settings.basemap === "realistic" && view.zoom >= 14.5 && `${CANOPY_ATTRIBUTION} · ${STREET_TREES_ATTRIBUTION}`,
       // (Globe's ROAD_WIDTHS_ZOOM; the app asks with the Trafikverket key)
       settings.basemap === "realistic" && view.zoom >= 14 && isTauri() && "Road widths: Trafikverket NVDB",
-      settings.basemap === "realistic" && "Earth: NASA Blue Marble",
+      settings.basemap === "realistic" && (settings.daylight ? "Earth: NASA Blue Marble, Black Marble" : "Earth: NASA Blue Marble"),
+      // (Globe's clouds: from about 15 km up)
+      settings.basemap === "realistic" && view.zoom < 11 && CLOUDS_ATTRIBUTION,
       weatherLive && liveWeather && "Weather: MET Norway",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",
     ]

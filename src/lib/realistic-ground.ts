@@ -422,6 +422,7 @@ uniform mediump sampler2DArray rground_color;
 uniform mediump sampler2DArray rground_normal;
 uniform sampler2D rground_water;
 uniform sampler2D rground_earth;
+uniform sampler2D rground_night;
 in vec2 rg_e;
 ${table("GS_LAYER", (s) => (s.texture === "water" ? -1 : textureLayer.ground(s.texture)))}
 ${table("GS_METRES", (s) => s.metres)}
@@ -550,6 +551,13 @@ const groundInject = {
         n = normalize(mix(n, vec3(0.0, 0.0, 1.0), wet * 0.6));
       }
       vec3 lit = rl_shade(albedo, n, v, rough, 0.0, 1.0, rl_sunVisible());
+    #ifndef RL_LINE
+      // from far over the globe, its towns' lights where the sun has set (NASA's Black Marble)
+      if (rlight.globe > 0.0) {
+        float dark = 1.0 - smoothstep(-0.12, 0.03, rl_sun.z);
+        lit += rl_linear(texture(rground_night, rg_e).rgb) * 0.55 * rlight.globe * dark;
+      }
+    #endif
       color = vec4(rl_display(rl_aerial(lit)), 1.0);
     }
   }
@@ -583,6 +591,7 @@ export class GroundExtension extends LayerExtension {
         rground_normal: textures.ground.normal,
         rground_water: textures.water,
         rground_earth: textures.earth,
+        rground_night: textures.night,
       },
     });
   }

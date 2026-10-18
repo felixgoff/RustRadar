@@ -49,6 +49,12 @@ export const PRESETS: Record<Exclude<Sky, "live">, Conditions> = {
 
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 
+/** Between two weathers: `a` at 0, `b` at 1. */
+export function mixConditions(a: Conditions, b: Conditions, t: number): Conditions {
+  const m = (k: keyof Conditions) => a[k] + (b[k] - a[k]) * clamp01(t);
+  return { sun: m("sun"), cloud: m("cloud"), haze: m("haze"), wet: m("wet"), snow: m("snow"), cloudShadows: m("cloudShadows") };
+}
+
 /** The light's conditions in some weather. */
 export function conditionsOf(w: Weather): Conditions {
   const symbol = w.symbol;

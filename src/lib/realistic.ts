@@ -58,6 +58,11 @@ export type Look = {
   night: number;
   /** Brightening before the screen's gamma: under cloud a little, at night more. */
   exposure: number;
+  /**
+   * 0 close in to 1 from far out over the globe, where each place has its own
+   * day: its sky's light only where the sun is up there, its towns' lights where it isn't.
+   */
+  globe: number;
 };
 
 /** The sun's light above the air, as the shading's units go. */
@@ -100,7 +105,11 @@ const CLEAR_AIR = 2.2e-5;
  */
 export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 1000): Look {
   const sunUp = Math.max(-1, Math.min(1, sun[2]));
-  const altDeg = Math.asin(sunUp) / DEG;
+  // from far out each place on the globe has its own day (the shaders light it): the light's
+  // colours are the day's, as with the sun well up, whatever the time in the middle of the view
+  const globe = smooth(150_000, 600_000, cameraMetres);
+  const realAlt = Math.asin(sunUp) / DEG;
+  const altDeg = realAlt + (Math.max(realAlt, 35) - realAlt) * globe;
   // daylight from 6° below the horizon (civil twilight) to full from 15° up
   const day = smooth(-6, 15, altDeg);
   const sunColor = scale(transmittance(altDeg, c.haze), SUN * c.sun * smooth(-0.8, 3, altDeg));
@@ -148,6 +157,7 @@ export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 10
     cloudShadow: c.cloudShadows * 0.85,
     night,
     exposure: adapt * (1 + 2.2 * (1 - day)),
+    globe,
   };
 }
 
@@ -243,6 +253,7 @@ layout(std140) uniform rlightUniforms {
   vec2 anchor;
   float night;
   float time;
+  float globe;
 } rlight;
 `;
 
@@ -301,9 +312,18 @@ float rl_cells(vec2 t) {
 vec3 rl_toSun() {
   return normalize(rl_sun);
 }
-// the sun's light here: none where the globe has turned away from it
+// the sun's light here: none where the globe has turned away from it (from far out, dimming
+// and reddening through the evening as its light comes through more air)
 vec3 rl_sunLight() {
-  return rlight.sunColor * smoothstep(-0.02, 0.02, rl_sun.z);
+  float up = rl_sun.z;
+  float far = rlight.globe;
+  vec3 dusk = mix(vec3(1.0), vec3(1.0, 0.62, 0.38), far * (1.0 - smoothstep(0.0, 0.3, up)));
+  return rlight.sunColor * dusk * smoothstep(mix(-0.02, -0.03, far), mix(0.02, 0.22, far), up);
+}
+// how much of the day's sky light there is here: all of it, but from far over the globe only where the
+// sun is up here, fading through twilight to a little at night
+float rl_dayHere() {
+  return mix(1.0, mix(0.015, 1.0, smoothstep(-0.12, 0.12, rl_sun.z)), rlight.globe);
 }
 // the sky's light from a direction, with the sun's glow round it; below the horizon, the ground's
 vec3 rl_sky(vec3 dir) {
@@ -311,11 +331,11 @@ vec3 rl_sky(vec3 dir) {
   vec3 sky = mix(rlight.skyHorizon, rlight.skyZenith, sqrt(max(up, 0.0)));
   float toSun = max(dot(dir, rl_toSun()), 0.0);
   sky += rl_sunLight() * (0.04 * pow(toSun, 6.0) + 0.5 * pow(toSun, 900.0));
-  return mix(sky, rlight.groundColor, smoothstep(0.0, -0.2, up));
+  return mix(sky, rlight.groundColor, smoothstep(0.0, -0.2, up)) * rl_dayHere();
 }
 // all the light a surface facing \`n\` gets from the sky: grey, as Streets GL has it (a little less facing down)
 vec3 rl_irradiance(vec3 n) {
-  return vec3(rlight.ambient) * mix(0.6, 1.0, clamp(0.5 + 0.5 * n.z, 0.0, 1.0));
+  return vec3(rlight.ambient * rl_dayHere()) * mix(0.6, 1.0, clamp(0.5 + 0.5 * n.z, 0.0, 1.0));
 }
 // the split-sum environment BRDF (Karis's fit for mobile, as Streets GL has it)
 vec2 rl_envBRDF(float NdotV, float roughness) {
@@ -361,7 +381,7 @@ vec3 rl_aerial(vec3 c) {
   float t = rl_clear();
   vec3 toHere = -rl_eye / max(length(rl_eye), 1e-3);
   float forward = pow(max(dot(toHere, rl_toSun()), 0.0), 8.0);
-  vec3 air = rlight.hazeColor + rl_sunLight() * 0.06 * forward;
+  vec3 air = rlight.hazeColor * rl_dayHere() + rl_sunLight() * 0.06 * forward;
   return c * t + air * (1.0 - t);
 }
 // how much of the sun the clouds let through here, drifting with the wind
@@ -432,6 +452,7 @@ const rlightModule = {
     anchor: "vec2<f32>",
     night: "f32",
     time: "f32",
+    globe: "f32",
   },
 } as const;
 
@@ -490,6 +511,7 @@ function rlightProps(params: DrawParams) {
     anchor: [lng, lat],
     night: look.night,
     time: (performance.now() / 1000) % 100_000,
+    globe: look.globe,
   };
 }
 
@@ -808,6 +830,32 @@ export class TreeShadowExtension extends LayerExtension {
   }
 }
 
+/**
+ * The clouds (clouds.ts) on a picture of the satellites' infrared: its grey
+ * to how much cloud there is (the warm ground clear), white, lit by the sun
+ * where it is up there and fading into the night.
+ */
+export class CloudExtension extends LayerExtension {
+  static extensionName = "RealisticCloudExtension";
+
+  getShaders() {
+    return {
+      modules: [rlightModule],
+      inject: {
+        "fs:DECKGL_FILTER_COLOR": /* glsl */ `
+    float cover = smoothstep(0.33, 0.62, color.r) * color.a;
+    vec3 lit = vec3(0.9) * (rl_sunLight() * max(rl_toSun().z, 0.0) + vec3(rlight.ambient * rl_dayHere()));
+    color = vec4(rl_display(rl_aerial(lit)), cover);
+  `,
+      },
+    };
+  }
+
+  draw(this: ExtLayer, params: DrawParams) {
+    this.setShaderModuleProps({ rlight: rlightProps(params) });
+  }
+}
+
 /** A material that leaves the colour as it is, for layers lit by these extensions instead. */
 export const UNLIT = { ambient: 1, diffuse: 0, shininess: 1, specularColor: [0, 0, 0] as RGB };
 
@@ -862,6 +910,7 @@ export const BUILDINGS = new BuildingExtension();
 export const ROOFS = new RoofExtension();
 export const TREES = new TreeExtension();
 export const TREE_SHADOWS = new TreeShadowExtension();
+export const CLOUDS = new CloudExtension();
 export const HAZE_FADE = new HazeFadeExtension();
 export const FOOT_SHADE = new FootShadeExtension();
 

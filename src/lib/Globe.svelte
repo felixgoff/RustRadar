@@ -104,6 +104,7 @@
     setLook,
     skyCss,
     TREES as REALISTIC_TREES,
+    CLOUDS as REALISTIC_CLOUDS,
     TREE_SHADOWS,
     UNLIT,
   } from "./realistic";
@@ -114,7 +115,8 @@
   import { SGL_TILES, SGL_ZOOM } from "./streets-gl";
   import { onTexturesReady } from "./realistic-textures";
   import { treeLayers } from "./tree-layer";
-  import { PRESETS, type Conditions } from "./weather";
+  import { mixConditions, PRESETS, type Conditions } from "./weather";
+  import { CLOUD_BOUNDS, cloudPicture } from "./clouds";
   import HoverCard from "./HoverCard.svelte";
   import { flightDetails, isRateLimited } from "./api";
   import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
@@ -2558,6 +2560,9 @@
       else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
       // and always in relief: the lie of the land
       layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
+      const clouds = smoothstep(CLOUDS_FROM_M, CLOUDS_FULL_M, cameraAltitude(zoom, cLat, pitch));
+      const picture = clouds > 0 ? cloudPicture(render) : null;
+      if (picture) layers.push(cloudLayer(picture, clouds));
     } else {
       layers.push(landLayer());
       if (terrain) layers.push(...terrainLayers({ flat, zoom, basemap }));
@@ -2580,7 +2585,8 @@
       }
       for (const volume of measured) layers.push(...measuredLayers(volume, ex, lift));
     } else freeArenas();
-    if (daylight) layers.push(nightLayer(now));
+    // (the realistic map lights its night side itself: each place by its own sun)
+    if (daylight && !realistic) layers.push(nightLayer(now));
     const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= (realistic ? REALISTIC_BUILDINGS_ZOOM : 13));
     // (the app's backend makes them)
     if (buildings && !showBuildings && isTauri() && zoom >= FAR_BUILDINGS_ZOOM) layers.push(farBuildingLayer(realistic));
@@ -3440,6 +3446,33 @@
    * keep up with the camera. With it the sky behind the map: its gradient to
    * the horizon wherever the tilt puts that, the sun's glow when it is in view.
    */
+  /** The camera's height above the ground, metres (from how far it is from the middle of the view, and its tilt). */
+  const cameraAltitude = (zoom: number, latitude: number, pitch: number) =>
+    container ? CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude) * Math.cos(pitch * DEGREES) : Infinity;
+  /** The weather's look fades out as the camera climbs through the clouds, metres. */
+  const CLOUD_BASE_M = 3000;
+  const CLOUD_TOP_M = 9000;
+  /** The clouds seen from above fade in as the camera climbs from here to there, metres. */
+  const CLOUDS_FROM_M = 15_000;
+  const CLOUDS_FULL_M = 60_000;
+  const smoothstep = (a: number, b: number, x: number) => {
+    const t = clamp01((x - a) / (b - a));
+    return t * t * (3 - 2 * t);
+  };
+  // The clouds as they are now (clouds.ts), on the ground from far out: under the map's
+  // own lines, trains and aircraft, which stay to be read
+  const cloudLayer = (picture: ImageBitmap, opacity: number) =>
+    new BitmapLayer({
+      id: "clouds",
+      image: picture,
+      bounds: CLOUD_BOUNDS,
+      _imageCoordinateSystem: COORDINATE_SYSTEM.LNGLAT,
+      opacity,
+      extensions: [REALISTIC_CLOUDS],
+      parameters: SURFACE_NO_CULL,
+      pickable: false,
+    });
+
   function updateLook() {
     if (basemap !== "realistic" || !container) {
       if (shownSky && container) container.style.background = shownSky = "";
@@ -3447,8 +3480,10 @@
     }
     const { latitude, longitude, zoom, pitch, bearing } = view;
     const sun = sceneSun(daylight, localSun(sunDirection(Date.now()), latitude, longitude));
+    // the weather's own look only under the clouds: above them the air is clear and the sun out
+    const weatherHere = mixConditions(sky ?? PRESETS.sunny, PRESETS.sunny, smoothstep(CLOUD_BASE_M, CLOUD_TOP_M, cameraAltitude(zoom, latitude, pitch)));
     // the haze is set against how far the camera is from the middle of the view
-    setLook(lookFor(sky ?? PRESETS.sunny, sun, CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude)));
+    setLook(lookFor(weatherHere, sun, CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude)));
     // deck.gl's camera sees 2·atan(1/3) (about 37°) top to bottom
     const halfFov = Math.atan(1 / 3) / DEGREES;
     const tilt = Math.max(1, pitch);

@@ -116,7 +116,7 @@
   import { onTexturesReady } from "./realistic-textures";
   import { treeLayers } from "./tree-layer";
   import { mixConditions, PRESETS, type Conditions } from "./weather";
-  import { CLOUD_BOUNDS, cloudPicture } from "./clouds";
+  import { CLOUD_BOUNDS, CLOUD_HEIGHT_M, cloudPicture, cloudStrips } from "./clouds";
   import HoverCard from "./HoverCard.svelte";
   import { flightDetails, isRateLimited } from "./api";
   import { HoverLoader, hoverInfo, routeProgress } from "./hover-details";
@@ -2560,9 +2560,9 @@
       else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
       // and always in relief: the lie of the land
       layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
-      const clouds = smoothstep(CLOUDS_FROM_M, CLOUDS_FULL_M, cameraAltitude(zoom, cLat, pitch));
+      const clouds = smoothstep(CLOUDS_GONE_M, CLOUDS_FULL_M, cameraAltitude(zoom, cLat, pitch));
       const picture = clouds > 0 ? cloudPicture(render) : null;
-      if (picture) layers.push(cloudLayer(picture, clouds));
+      if (picture) layers.push(...cloudLayers(picture, clouds, flat, cLat));
     } else {
       layers.push(landLayer());
       if (terrain) layers.push(...terrainLayers({ flat, zoom, basemap }));
@@ -3457,29 +3457,38 @@
   /** The camera's height above the ground, metres (from how far it is from the middle of the view, and its tilt). */
   const cameraAltitude = (zoom: number, latitude: number, pitch: number) =>
     container ? CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude) * Math.cos(pitch * DEGREES) : Infinity;
-  /** The weather's look fades out as the camera climbs through the clouds, metres. */
-  const CLOUD_BASE_M = 3000;
-  const CLOUD_TOP_M = 9000;
-  /** The clouds seen from above fade in as the camera climbs from here to there, metres. */
-  const CLOUDS_FROM_M = 15_000;
-  const CLOUDS_FULL_M = 60_000;
+  /** The weather's own look under the clouds, the sun's above them: from here up to them, metres. */
+  const WEATHER_UP_TO_M = CLOUD_HEIGHT_M * 0.3;
+  /** The clouds fade away as the camera comes down from here to there, near them, metres. */
+  const CLOUDS_FULL_M = CLOUD_HEIGHT_M * 3;
+  const CLOUDS_GONE_M = CLOUD_HEIGHT_M * 1.2;
   const smoothstep = (a: number, b: number, x: number) => {
     const t = clamp01((x - a) / (b - a));
     return t * t * (3 - 2 * t);
   };
-  // The clouds as they are now (clouds.ts), on the ground from far out: under the map's
-  // own lines, trains and aircraft, which stay to be read
-  const cloudLayer = (picture: ImageBitmap, opacity: number) =>
-    new BitmapLayer({
-      id: "clouds",
-      image: picture,
-      bounds: CLOUD_BOUNDS,
-      _imageCoordinateSystem: COORDINATE_SYSTEM.LNGLAT,
-      opacity,
-      extensions: [REALISTIC_CLOUDS],
-      parameters: SURFACE_NO_CULL,
-      pickable: false,
-    });
+  // The clouds as they are now (clouds.ts), at their height: drawn over the ground but under the
+  // map's own lines, trains and aircraft, which stay to be read (so not hidden behind them)
+  const CLOUD_PARAMETERS = { ...NO_CULL, depthWriteEnabled: false, depthCompare: "always" } as const;
+  const cloudLayers = (picture: ImageBitmap, opacity: number, flat: boolean, lat: number) => {
+    const [west, south, east, north] = CLOUD_BOUNDS;
+    const h = CLOUD_HEIGHT_M;
+    // the globe is drawn in a mesh fine enough for the picture's degrees; the flat map, in strips
+    const pieces = flat
+      ? cloudStrips(picture, lat)
+      : [{ bounds: [[west, south, h], [west, north, h], [east, north, h], [east, south, h]], image: picture }];
+    return pieces.map(
+      (piece, i) =>
+        new BitmapLayer({
+          id: `clouds-${flat ? "flat" : "globe"}-${i}`,
+          image: piece.image as never,
+          bounds: piece.bounds as never,
+          opacity,
+          extensions: [REALISTIC_CLOUDS],
+          parameters: CLOUD_PARAMETERS,
+          pickable: false,
+        }),
+    );
+  };
 
   function updateLook() {
     if (basemap !== "realistic" || !container) {
@@ -3489,7 +3498,7 @@
     const { latitude, longitude, zoom, pitch, bearing } = view;
     const sun = sceneSun(daylight, localSun(sunDirection(Date.now()), latitude, longitude));
     // the weather's own look only under the clouds: above them the air is clear and the sun out
-    const weatherHere = mixConditions(sky ?? PRESETS.sunny, PRESETS.sunny, smoothstep(CLOUD_BASE_M, CLOUD_TOP_M, cameraAltitude(zoom, latitude, pitch)));
+    const weatherHere = mixConditions(sky ?? PRESETS.sunny, PRESETS.sunny, smoothstep(WEATHER_UP_TO_M, CLOUD_HEIGHT_M, cameraAltitude(zoom, latitude, pitch)));
     // the haze is set against how far the camera is from the middle of the view
     setLook(lookFor(weatherHere, sun, CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude)));
     // deck.gl's camera sees 2·atan(1/3) (about 37°) top to bottom

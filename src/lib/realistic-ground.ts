@@ -11,6 +11,7 @@ import { MVTLayer } from "@deck.gl/geo-layers";
 import { GeoJsonLayer, PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import type { Device } from "@luma.gl/core";
 import { bridgeParts, omtDeck, type Lines, type TileIndex } from "./bridges";
+import { LC } from "./landcover";
 import { SGL_TILES, SGL_ZOOM, sglFetch, sglPath } from "./streets-gl";
 import { realisticLight } from "./realistic";
 import { type GROUND_TEXTURES, realisticTextures, textureLayer } from "./realistic-textures";
@@ -113,6 +114,26 @@ const AREAS: Record<string, RGBA> = {
   platform: paint(9),
   pier: paint(16),
   bridge: paint(9),
+};
+
+/**
+ * The paint of land cover's classes (landcover.ts) where the map's data has
+ * nothing: woods, felled woods, mires, fields, grass, scrub, heath, bare
+ * rock, ice. Towns and water are left to the map's own data.
+ */
+export const LAND_COVER_PAINTS: Partial<Record<number, RGBA>> = {
+  [LC.CONIFERS]: AREAS.wood,
+  [LC.MIXED]: AREAS.wood,
+  [LC.BROADLEAVES]: AREAS.wood,
+  [LC.FOREST]: AREAS.wood,
+  [LC.CLEARCUT]: AREAS.heath,
+  [LC.WETLAND]: AREAS.wetland,
+  [LC.ARABLE]: AREAS.farmland,
+  [LC.GRASS]: AREAS.meadow,
+  [LC.SHRUB]: AREAS.scrub,
+  [LC.HEATH]: AREAS.heath,
+  [LC.BARE]: AREAS.rock,
+  [LC.SNOW]: AREAS.ice,
 };
 
 type Properties = Record<string, unknown>;

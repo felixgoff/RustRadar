@@ -108,6 +108,7 @@
     UNLIT,
   } from "./realistic";
   import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, sglGroundLayer } from "./realistic-ground";
+  import { landCoverGroundLayer } from "./landcover-ground";
   import { SGL_TILES, SGL_ZOOM, sglFetch } from "./streets-gl";
   import { onTexturesReady } from "./realistic-textures";
   import { treeLayers } from "./tree-layer";
@@ -2524,6 +2525,8 @@
     } else if (realistic) {
       // drawn from the map's data, as Streets GL does: grass, woods, fields, water, roads and rails
       layers.push(realisticLandLayer(GROUNDED, SURFACE));
+      // where the map's data says nothing, what the land cover has
+      if (flat) layers.push(landCoverGroundLayer(GROUNDED, SURFACE_NO_CULL));
       if (sgl) layers.push(sglGroundLayer(mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
       else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
       // and always in relief: the lie of the land

@@ -52,3 +52,20 @@ test("a town's register file, back to its trees in a tile", async () => {
   expect(found[0].x).toBeGreaterThan(0);
   expect(found[0].x).toBeLessThan(1);
 });
+
+test("land cover traced into rounded outlines: a wood and a field, towns and water left out", async () => {
+  const { coverOutlines } = await import("./landcover-ground");
+  const size = 32;
+  const classes = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) classes[y * size + x] = x < 12 ? LC.CONIFERS : x < 24 ? LC.ARABLE : LC.BUILT;
+  // a scrap of heath too small to keep
+  classes[5 * size + 5] = LC.HEATH;
+  const areas = coverOutlines({ size, classes });
+  expect(areas).toHaveLength(2);
+  const xs = areas.map((a) => a.polygon[0].map(([x]) => x));
+  // the wood's outline about its 12 columns, the field's from there to 24
+  expect(Math.max(...xs[0])).toBeGreaterThan(10);
+  expect(Math.max(...xs[0])).toBeLessThan(14);
+  expect(Math.min(...xs[1])).toBeGreaterThan(10);
+  expect(Math.max(...xs[1])).toBeLessThan(26);
+});

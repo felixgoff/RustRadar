@@ -1,6 +1,6 @@
 //! Buildings far out, quantized: the map draws each building only from zoom
 //! 13, where OpenFreeMap's tiles have them. Further out this makes its own
-//! tiles for zooms 10 to 12, in the same form (OpenMapTiles' `building` layer,
+//! tiles for zooms 9 to 12, in the same form (OpenMapTiles' `building` layer,
 //! `render_height`), so the map's building layer draws them as it does the
 //! rest, only coarser.
 //!
@@ -9,10 +9,12 @@
 //!   cells (about 10 m each in Sweden). Zoom 13 says nothing of heights, so
 //!   each cell is as tall as its neighbourhood is built up: 5 m where houses
 //!   stand apart, up to 20 m where the town is solid.
-//! - Zooms 11 and 10: the four grids under each, halved: a cell is built
+//! - Zooms 11 to 9: the four grids under each, halved: a cell is built
 //!   where two of its four are, as tall as the tallest of them.
-//! - Each grid back to outlines: runs of cells of a height along each row,
-//!   joined with the same runs in the rows below, as rectangles.
+//! - Each grid back to outlines: its cells in bands of height (low, middling,
+//!   tall), each band softened and traced (marching squares) and simplified,
+//!   so the outlines follow the town's own lines and angles, the taller bands
+//!   standing inside the lower.
 //!
 //! Grids are kept in memory and on disk (a month), so a place is worked out
 //! once; served to the map as `buildingtiles://localhost/{z}/{x}/{y}`.
@@ -27,7 +29,7 @@ use crate::rail::{fields, packed};
 
 /// The zoom OpenFreeMap's footprints are read at, and the zooms made from them.
 const SOURCE_ZOOM: u32 = 13;
-const MIN_ZOOM: u32 = 10;
+const MIN_ZOOM: u32 = 9;
 const MAX_ZOOM: u32 = 12;
 /// Cells across a grid, and a vector tile's units across a cell.
 const CELLS: usize = 256;
@@ -37,7 +39,7 @@ const UNITS: u32 = EXTENT / CELLS as u32;
 const NEAR: usize = 5;
 const LOW_M: f64 = 5.0;
 const HIGH_M: f64 = 20.0;
-/// Heights are kept in steps of this many metres (fewer, larger rectangles).
+/// Heights are kept in steps of this many metres.
 const STEP_M: u8 = 2;
 const TILEJSON: &str = "https://tiles.openfreemap.org/planet";
 const TILEJSON_TTL: Duration = Duration::from_secs(24 * 3600);
@@ -333,37 +335,137 @@ async fn make((z, x, y): Key) -> Result<Grid, String> {
 
 // ------------------------------------------------------------------ back to outlines
 
-/// A grid's buildings as rectangles: cells from `(i0, j0)` to `(i1, j1)` (not included), and their height.
-pub fn rectangles(grid: &Grid) -> Vec<(usize, usize, usize, usize, u8)> {
-    let mut done = Vec::new();
-    // the rectangles still growing down: by their run's start, end and height
-    let mut open: HashMap<(usize, usize, u8), usize> = HashMap::new();
-    for j in 0..=CELLS {
-        let mut runs = Vec::new();
-        if j < CELLS {
-            let row = &grid[j * CELLS..(j + 1) * CELLS];
-            let mut i = 0;
-            while i < CELLS {
-                let h = row[i];
-                let start = i;
-                while i < CELLS && row[i] == h {
-                    i += 1;
-                }
-                if h > 0 {
-                    runs.push((start, i, h));
-                }
+/// The heights the outlines are drawn in steps of: each band the cells at least as tall as
+/// its first number, drawn as tall as its second, the taller inside the lower.
+const BANDS: [(u8, u8); 3] = [(1, 7), (10, 12), (15, 18)];
+/// Outlines smaller than this many cells are left out; they are simplified to within this many.
+const MIN_RING_CELLS: f64 = 1.2;
+/// Where the softened cells are traced: under a half, so houses a cell or two apart join into
+/// one outline (a street of them, from far out) and a house alone keeps a little more than its cell.
+const TRACE_AT: f32 = 0.3;
+const SIMPLIFY_CELLS: f64 = 0.45;
+
+/// Twice a ring's signed area, positive clockwise with y down (a vector tile's outer rings).
+fn signed_area2(ring: &[(f64, f64)]) -> f64 {
+    (0..ring.len()).map(|i| {
+        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+        a.0 * b.1 - b.0 * a.1
+    }).sum()
+}
+
+/// A line simplified to within `tol` (Douglas–Peucker), its ends kept.
+fn simplify(points: &[(f64, f64)], tol: f64) -> Vec<(f64, f64)> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+    let mut stack = vec![(0, points.len() - 1)];
+    while let Some((a, b)) = stack.pop() {
+        let (p, q) = (points[a], points[b]);
+        let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+        let len = dx.hypot(dy).max(1e-9);
+        let (mut far, mut at) = (0.0, a);
+        for (i, r) in points.iter().enumerate().take(b).skip(a + 1) {
+            let d = ((r.0 - p.0) * dy - (r.1 - p.1) * dx).abs() / len;
+            if d > far {
+                (far, at) = (d, i);
             }
         }
-        let mut next = HashMap::with_capacity(runs.len());
-        for run in runs {
-            next.insert(run, open.remove(&run).unwrap_or(j));
+        if far > tol {
+            keep[at] = true;
+            stack.push((a, at));
+            stack.push((at, b));
         }
-        for ((i0, i1, h), j0) in open.drain() {
-            done.push((i0, j0, i1, j, h));
-        }
-        open = next;
     }
-    done
+    points.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
+}
+
+/// A closed ring simplified: split at its farthest point from its first, each half simplified.
+fn simplify_ring(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let first = ring[0];
+    let far = (1..ring.len())
+        .max_by(|&a, &b| {
+            let d = |p: (f64, f64)| (p.0 - first.0).hypot(p.1 - first.1);
+            d(ring[a]).total_cmp(&d(ring[b]))
+        })
+        .unwrap_or(0);
+    if far == 0 {
+        return ring.to_vec();
+    }
+    let mut a = simplify(&ring[..=far], SIMPLIFY_CELLS);
+    let mut tail: Vec<(f64, f64)> = ring[far..].to_vec();
+    tail.push(first);
+    let b = simplify(&tail, SIMPLIFY_CELLS);
+    a.pop();
+    a.extend_from_slice(&b[..b.len() - 1]);
+    a
+}
+
+/// A traced ring cleaned up: its repeats and closing point gone, simplified; none if too small to keep.
+fn clean_ring(mut points: Vec<(f64, f64)>) -> Option<Vec<(f64, f64)>> {
+    points.dedup();
+    if points.len() > 1 && points.first() == points.last() {
+        points.pop();
+    }
+    if points.len() < 3 || signed_area2(&points).abs() / 2.0 < MIN_RING_CELLS {
+        return None;
+    }
+    let points = simplify_ring(&points);
+    (points.len() >= 3 && signed_area2(&points).abs() / 2.0 >= MIN_RING_CELLS).then_some(points)
+}
+
+/// A building's outline from the grid: its outer ring then its courtyards (cells across, y down,
+/// the outer clockwise), and how tall it is drawn.
+pub type Outline = (Vec<Vec<(f64, f64)>>, u8);
+
+/// A grid's buildings as outlines: each height band's cells softened and traced (marching
+/// squares), so they follow the town's own lines and angles rather than the cells' edges.
+pub fn outlines(grid: &Grid) -> Vec<Outline> {
+    let mut out = Vec::new();
+    for &(from, height) in &BANDS {
+        let mask: Vec<f32> = grid.iter().map(|&h| f32::from(u8::from(h >= from))).collect();
+        if !mask.iter().any(|&v| v > 0.0) {
+            continue;
+        }
+        // softened over a cell's neighbours, so corners round off and steps become slopes
+        let mut field = vec![0f32; CELLS * CELLS];
+        for j in 0..CELLS {
+            for i in 0..CELLS {
+                let (mut sum, mut n) = (0.0, 0.0);
+                for jj in j.saturating_sub(1)..(j + 2).min(CELLS) {
+                    for ii in i.saturating_sub(1)..(i + 2).min(CELLS) {
+                        sum += mask[jj * CELLS + ii];
+                        n += 1.0;
+                    }
+                }
+                field[j * CELLS + i] = (sum / n + mask[j * CELLS + i]) / 2.0;
+            }
+        }
+        let Ok(contours) = contour::ContourBuilder::new(CELLS, CELLS, true).contours(&field, &[TRACE_AT]) else { continue };
+        for c in contours {
+            for polygon in &c.geometry().0 {
+                let exterior: Vec<(f64, f64)> = polygon.exterior().0.iter().map(|p| (f64::from(p.x), f64::from(p.y))).collect();
+                let Some(mut outer) = clean_ring(exterior) else { continue };
+                if signed_area2(&outer) < 0.0 {
+                    outer.reverse();
+                }
+                let mut rings = vec![outer];
+                for hole in polygon.interiors() {
+                    let points: Vec<(f64, f64)> = hole.0.iter().map(|p| (f64::from(p.x), f64::from(p.y))).collect();
+                    if let Some(mut h) = clean_ring(points) {
+                        if signed_area2(&h) > 0.0 {
+                            h.reverse();
+                        }
+                        rings.push(h);
+                    }
+                }
+                out.push((rings, height));
+            }
+        }
+    }
+    out
 }
 
 fn varint(out: &mut Vec<u8>, mut v: u64) {
@@ -397,47 +499,47 @@ const fn zigzag(v: i64) -> u64 {
     ((v << 1) ^ (v >> 63)) as u64
 }
 
-/// A grid as a vector tile: one `building` layer of rectangles with `render_height` and `render_min_height`.
+/// A grid as a vector tile: one `building` layer of outlines with `render_height` and `render_min_height`.
 pub fn encode(grid: &Grid) -> Vec<u8> {
-    let rects = rectangles(grid);
-    if rects.is_empty() {
+    let shapes = outlines(grid);
+    if shapes.is_empty() {
         return Vec::new();
     }
-    let mut heights: Vec<u8> = rects.iter().map(|r| r.4).collect();
+    let mut heights: Vec<u8> = shapes.iter().map(|s| s.1).collect();
     heights.sort_unstable();
     heights.dedup();
     let mut layer = Vec::new();
     tag(&mut layer, 15, 0);
     varint(&mut layer, 2);
     bytes_field(&mut layer, 1, b"building");
-    for (n, &(i0, j0, i1, j1, h)) in rects.iter().enumerate() {
-        let (x0, y0, x1, y1) = ((i0 as u32 * UNITS) as i64, (j0 as u32 * UNITS) as i64, (i1 as u32 * UNITS) as i64, (j1 as u32 * UNITS) as i64);
+    let unit = f64::from(UNITS);
+    for (n, (rings, h)) in shapes.iter().enumerate() {
         let mut feature = Vec::new();
         tag(&mut feature, 1, 0);
         varint(&mut feature, n as u64 + 1);
         // render_height: its value; render_min_height: the first value after the heights (0)
-        let value = heights.binary_search(&h).unwrap_or(0) as u64;
+        let value = heights.binary_search(h).unwrap_or(0) as u64;
         packed_field(&mut feature, 2, &[0, value, 1, heights.len() as u64]);
         tag(&mut feature, 3, 0);
         varint(&mut feature, 3);
-        // clockwise with y down: along the top, down the east side, back along the bottom
-        packed_field(
-            &mut feature,
-            4,
-            &[
-                (1 << 3) | 1,
-                zigzag(x0),
-                zigzag(y0),
-                (3 << 3) | 2,
-                zigzag(x1 - x0),
-                0,
-                0,
-                zigzag(y1 - y0),
-                zigzag(x0 - x1),
-                0,
-                (1 << 3) | 7,
-            ],
-        );
+        // each ring: MoveTo its first point, LineTo the rest, ClosePath (zigzag deltas, the cursor carried on)
+        let (mut cx, mut cy) = (0i64, 0i64);
+        let mut commands = Vec::new();
+        for ring in rings {
+            let points: Vec<(i64, i64)> = ring.iter().map(|&(x, y)| ((x * unit).round() as i64, (y * unit).round() as i64)).collect();
+            for (k, &(x, y)) in points.iter().enumerate() {
+                if k == 0 {
+                    commands.push((1 << 3) | 1);
+                } else if k == 1 {
+                    commands.push(((points.len() as u64 - 1) << 3) | 2);
+                }
+                commands.push(zigzag(x - cx));
+                commands.push(zigzag(y - cy));
+                (cx, cy) = (x, y);
+            }
+            commands.push((1 << 3) | 7);
+        }
+        packed_field(&mut feature, 4, &commands);
         bytes_field(&mut layer, 2, &feature);
     }
     bytes_field(&mut layer, 3, b"render_height");
@@ -532,34 +634,84 @@ mod tests {
     }
 
     #[test]
-    fn rectangles_cover_the_grid_exactly() {
+    fn outlines_follow_the_blocks_at_their_own_angles() {
         let mut g = vec![0u8; CELLS * CELLS];
-        for j in 10..20 {
-            for i in 5..15 {
-                g[j * CELLS + i] = 10;
+        // a square block 20 cells across, and a diagonal one
+        for j in 10..30 {
+            for i in 10..30 {
+                g[j * CELLS + i] = 8;
             }
         }
-        for i in 30..40 {
-            g[12 * CELLS + i] = 6;
+        for k in 0..40 {
+            for w in 0..6 {
+                g[(100 + k) * CELLS + 100 + k + w] = 8;
+            }
         }
-        let rects = rectangles(&g);
-        assert_eq!(rects.len(), 2);
-        assert!(rects.contains(&(5, 10, 15, 20, 10)));
-        assert!(rects.contains(&(30, 12, 40, 13, 6)));
+        let shapes = outlines(&g);
+        assert_eq!(shapes.len(), 2);
+        let area = |r: &[(f64, f64)]| signed_area2(r) / 2.0;
+        // the square: about its 400 cells (a little more: traced outside its middle), its corners rounded off
+        let square = shapes.iter().find(|(r, _)| r[0].iter().all(|p| p.0 < 50.0)).unwrap();
+        assert!((area(&square.0[0]) - 420.0).abs() < 40.0, "{}", area(&square.0[0]));
+        // the diagonal: its long sides run at 45°, not along the cells
+        let diagonal = shapes.iter().find(|(r, _)| r[0].iter().all(|p| p.0 > 50.0)).unwrap();
+        let ring = &diagonal.0[0];
+        let slanted = (0..ring.len()).any(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            dx.hypot(dy) > 10.0 && (dx.abs() - dy.abs()).abs() < 0.3 * dx.hypot(dy)
+        });
+        assert!(slanted, "{ring:?}");
+        assert!(ring.len() < 30, "simplified: {}", ring.len());
     }
 
     #[test]
-    fn the_tile_reads_back_as_its_rectangles() {
+    fn tall_parts_stand_inside_the_low() {
         let mut g = vec![0u8; CELLS * CELLS];
+        for j in 10..40 {
+            for i in 10..40 {
+                g[j * CELLS + i] = if (20..30).contains(&i) && (20..30).contains(&j) { 18 } else { 6 };
+            }
+        }
+        let mut heights: Vec<u8> = outlines(&g).iter().map(|s| s.1).collect();
+        heights.sort_unstable();
+        assert_eq!(heights, vec![7, 12, 18]);
+    }
+
+    #[test]
+    fn a_courtyard_is_a_hole() {
+        let mut g = vec![0u8; CELLS * CELLS];
+        for j in 10..40 {
+            for i in 10..40 {
+                if !((20..30).contains(&i) && (20..30).contains(&j)) {
+                    g[j * CELLS + i] = 6;
+                }
+            }
+        }
+        let shapes = outlines(&g);
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].0.len(), 2);
+        assert!(signed_area2(&shapes[0].0[0]) > 0.0 && signed_area2(&shapes[0].0[1]) < 0.0);
+    }
+
+    #[test]
+    fn the_tile_reads_back_as_its_outlines() {
+        let mut g = vec![0u8; CELLS * CELLS];
+        // (low enough to be one band's: one outline)
         for j in 10..20 {
             for i in 5..15 {
-                g[j * CELLS + i] = 10;
+                g[j * CELLS + i] = 8;
             }
         }
         let (rings, extent) = footprints(&encode(&g));
         assert_eq!(extent, 4096.0);
         assert_eq!(rings.len(), 1);
-        assert_eq!(rings[0], vec![(80.0, 160.0), (240.0, 160.0), (240.0, 320.0), (80.0, 320.0)]);
+        // about the block's 10 by 10 cells, 16 units each
+        let (xs, ys): (Vec<f64>, Vec<f64>) = rings[0].iter().copied().unzip();
+        let (x0, x1) = (xs.iter().copied().fold(f64::MAX, f64::min), xs.iter().copied().fold(f64::MIN, f64::max));
+        let (y0, y1) = (ys.iter().copied().fold(f64::MAX, f64::min), ys.iter().copied().fold(f64::MIN, f64::max));
+        assert!((x0 - 80.0).abs() < 24.0 && (x1 - 240.0).abs() < 24.0, "{x0} {x1}");
+        assert!((y0 - 160.0).abs() < 24.0 && (y1 - 320.0).abs() < 24.0, "{y0} {y1}");
         assert!(encode(&vec![0u8; CELLS * CELLS]).is_empty());
     }
 
@@ -569,8 +721,8 @@ mod tests {
     async fn real_buildings() {
         let g = make((12, 2198, 1281)).await.unwrap();
         let built = g.iter().filter(|&&h| h > 0).count();
-        let rects = rectangles(&g).len();
-        println!("{built} cells built, {rects} rectangles, {} bytes", encode(&g).len());
+        let shapes = outlines(&g).len();
+        println!("{built} cells built, {shapes} outlines, {} bytes", encode(&g).len());
         assert!(built > 1000);
     }
 }

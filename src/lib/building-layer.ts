@@ -13,7 +13,7 @@ import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import type { BinaryFeatureCollection } from "@loaders.gl/schema";
 import { Geometry } from "@luma.gl/engine";
 import { BUILDING_SHADOW_ALPHA, buildingShadows, shadowStep } from "./building-shadow";
-import { buildingStyle, type BuildingLook } from "./realistic";
+import { buildingStyle, type BuildingLook, roofColour } from "./realistic";
 import { pitched, roofParts } from "./roofs";
 import { sglBuilding } from "./streets-gl";
 import { localSun, SHADOW_MIN_ALPHA, sunlight } from "./shadow";
@@ -26,7 +26,7 @@ type Properties = Record<string, unknown>;
 
 /**
  * The backend's tiles of buildings far out, quantized (building_lod.rs), zooms
- * 10 to 12. Windows and Android webviews reach custom protocols as `http://<scheme>.localhost`.
+ * 9 to 12. Windows and Android webviews reach custom protocols as `http://<scheme>.localhost`.
  */
 export function buildingTilesUrl(userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent): string {
   return /Windows|Android/.test(userAgent) ? "http://buildingtiles.localhost/{z}/{x}/{y}" : "buildingtiles://localhost/{z}/{x}/{y}";
@@ -147,6 +147,8 @@ export type BuildingLayerProps = {
   shadowStrength: number;
   /** Each building its own look (`buildingStyle`: its colour, and its façade and roof), in place of `getFillColor`. */
   wallColours: boolean;
+  /** Each building in its roof's colour (`roofColour`), as it is seen from far out, in place of `getFillColor`. */
+  roofColours: boolean;
   /** How dark the ground is at the foot of the walls (0: not drawn), and the extensions it is drawn with. */
   footShade: number;
   footShadeExtensions: unknown[];
@@ -162,6 +164,7 @@ const defaultProps: DefaultProps<BuildingLayerProps> = {
   shadowStrength: 1,
   roofExtensions: { type: "array", value: [], compare: true },
   wallColours: false,
+  roofColours: false,
   footShade: 0,
   footShadeExtensions: { type: "array", value: [], compare: true },
 };
@@ -179,6 +182,26 @@ function wallColoursOf(tile: { index: { x: number; y: number; z: number } }) {
     const { startIndices, attributes } = info.data;
     const { value, size } = attributes.getPolygon;
     return styleAt(tile.index, value, startIndices[info.index] * size, feature?.properties ?? {});
+  };
+}
+
+/**
+ * Each building's roof colour in a tile (`roofColour`), picked by where its
+ * outline starts, as `wallColoursOf` picks its look: in the tile's own units
+ * (binary tiles, the flat map's), or in degrees (GeoJSON, the globe's).
+ */
+function roofColoursOf(tile: { index: { x: number; y: number; z: number } }) {
+  return (feature: { properties: Properties; geometry?: { coordinates: unknown } } | null, info: { index: number; data: BinaryPolygons | unknown[] }) => {
+    let [gx, gy] = [info.index, 0];
+    if (!Array.isArray(info.data)) {
+      const { value, size } = info.data.attributes.getPolygon;
+      const at = info.data.startIndices[info.index] * size;
+      [gx, gy] = [Math.round((tile.index.x + value[at]) * 4096), Math.round((tile.index.y + value[at + 1]) * 4096)];
+    } else {
+      const first = (feature?.geometry?.coordinates as unknown[] | undefined)?.flat(3) as number[] | undefined;
+      if (first?.length) [gx, gy] = [Math.round(first[0] * 1e5), Math.round(first[1] * 1e5)];
+    }
+    return roofColour(Math.imul(gx, 73_856_093) ^ Math.imul(gy, 19_349_663), buildingHeight(feature?.properties ?? {}));
   };
 }
 
@@ -326,6 +349,7 @@ export class BuildingLayer extends MVTLayer<Properties, BuildingLayerProps> {
 
   renderSubLayers(props: Parameters<MVTLayer["renderSubLayers"]>[0]): Layer | null | LayersList {
     if (this.props.wallColours) (props as unknown as { getFillColor: unknown }).getFillColor = wallColoursOf(props.tile as never);
+    if (this.props.roofColours) (props as unknown as { getFillColor: unknown }).getFillColor = roofColoursOf(props.tile as never);
     // sets the tile's model matrix and coordinate system on `props`
     const buildings = super.renderSubLayers(props);
     const { sun, shadowColor, shadowParameters, shadowExtensions, shadowStrength, footShade, footShadeExtensions } = this.props;

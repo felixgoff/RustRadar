@@ -1006,6 +1006,34 @@ const pickWeighted = (r: number, weights: [number, number][]) => {
 };
 
 /**
+ * A building's roof as seen from far out, sRGB: its roof (as `buildingStyle`
+ * picks it by `seed` and height) in its texture's mean colour under the
+ * building shader's tint for it, terracotta or slate tiles, grey-blue or
+ * copper metal, the greys of tar, concrete, eternit and the flat roofs.
+ */
+export function roofColour(seed: number, height: number): RGB {
+  const roof =
+    height < 10
+      ? pickWeighted(hash(seed, 3), [
+          [TILES, 0.55],
+          [METAL, 0.2],
+          [ETERNIT, 0.15],
+          [TAR, 0.1],
+        ])
+      : pickWeighted(hash(seed, 3), [
+          [TAR, 0.35],
+          [CONCRETE, 0.25],
+          [FLAT1, 0.2],
+          [FLAT3, 0.15],
+          [METAL, 0.05],
+        ]);
+  const which = hash(seed, 6);
+  if (roof === TILES) return which < 0.75 ? [190, 117, 93] : [131, 131, 141];
+  if (roof === METAL) return which < 0.8 ? [169, 181, 190] : [140, 174, 163];
+  return ({ [TAR]: [64, 64, 64], [CONCRETE]: [139, 139, 139], [ETERNIT]: [88, 86, 84], [FLAT1]: [100, 99, 100], [FLAT3]: [142, 144, 144] } as Record<number, RGB>)[roof];
+}
+
+/**
  * A building's look, picked by `seed` (the same each time it is loaded) and
  * its height: its wall colour (the one OpenStreetMap maps for it, toned down,
  * where it has one), and in the alpha its façade and roof (255 less façade +

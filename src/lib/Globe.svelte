@@ -1050,9 +1050,8 @@
   /** How much of the sun gets through now, 0 to 1. */
   const sunStrength = () => Math.max(...look.sunColor) / 3.2;
   /** Only the deepest tiles, so a building looks the same in each tile it is in (see `wallColoursOf`). */
-  /** Far out, the backend's quantized buildings (blocks a cell or more across, zooms 10 to 12), until the real ones take over. */
-  const FAR_BUILDINGS_ZOOM = 9.5;
-  const FAR_REALISTIC_COLOR: [number, number, number] = [214, 206, 192];
+  /** Far out, the backend's quantized buildings (traced outlines of the blocks, zooms 9 to 12), until the real ones take over. */
+  const FAR_BUILDINGS_ZOOM = 8.5;
   const farBuildingLayer = (realistic: boolean) =>
     new BuildingLayer({
       id: "buildings-far",
@@ -1065,7 +1064,9 @@
       filled: true,
       stroked: false,
       getElevation: buildingElevation,
-      getFillColor: realistic ? FAR_REALISTIC_COLOR : BUILDING_COLOR,
+      // on the realistic map each in its roof's colour (from far out the roofs are what show)
+      getFillColor: BUILDING_COLOR,
+      roofColours: realistic,
       material: BUILDING_MATERIAL,
       parameters: NO_CULL,
       _subLayerProps: BUILDING_SUBLAYER_PROPS,
@@ -2561,7 +2562,7 @@
       else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
       // and always in relief: the lie of the land
       layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
-      const clouds = smoothstep(CLOUDS_GONE_M, CLOUDS_FULL_M, cameraAltitude(zoom, cLat, pitch));
+      const clouds = 1 - smoothstep(CLOUDS_FULL_ZOOM, CLOUDS_GONE_ZOOM, zoom);
       const picture = clouds > 0 ? cloudPicture(render) : null;
       if (picture) layers.push(...cloudLayers(picture, clouds, flat, cLat));
     } else {
@@ -3460,9 +3461,9 @@
     container ? CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude) * Math.cos(pitch * DEGREES) : Infinity;
   /** The weather's own look under the clouds, the sun's above them: from here up to them, metres. */
   const WEATHER_UP_TO_M = CLOUD_HEIGHT_M * 0.3;
-  /** The clouds fade away as the camera comes down from here to there, near them, metres. */
-  const CLOUDS_FULL_M = CLOUD_HEIGHT_M * 3;
-  const CLOUDS_GONE_M = CLOUD_HEIGHT_M * 1.2;
+  /** The clouds fade away as the view zooms in from here, gone by there. */
+  const CLOUDS_FULL_ZOOM = 5.5;
+  const CLOUDS_GONE_ZOOM = 6.5;
   const smoothstep = (a: number, b: number, x: number) => {
     const t = clamp01((x - a) / (b - a));
     return t * t * (3 - 2 * t);

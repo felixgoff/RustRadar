@@ -17,7 +17,10 @@ import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { load } from "@loaders.gl/core";
 import { MVTLoader } from "@loaders.gl/mvt";
 import { shadowStep } from "./building-shadow";
+import { canopy, type CanopyGrid, tallestNear } from "./canopy";
+import { classAt, landCover, type LandGrid, LC, wooded } from "./landcover";
 import { SGL_ZOOM, sglPath, sglTree } from "./streets-gl";
+import { REGISTER_KINDS, type RegisteredTree, streetTrees } from "./street-trees";
 import { treeCard } from "./tree-models";
 
 /** Tiles are planted from this zoom's data, OpenFreeMap's deepest. */
@@ -292,8 +295,30 @@ export type TileTrees = { conifers: Instances; broadleaves: Instances };
 
 type Tile = { x: number; y: number; z: number };
 
+/**
+ * What else is known of a tile's ground: its land cover (landcover.ts) and
+ * how tall its trees really are (canopy.ts), each to the tile's own corners.
+ */
+export type Surroundings = { land?: LandGrid | null; canopy?: CanopyGrid | null; registered?: RegisteredTree[] };
+
+/** Covers a canopy's heights place trees in, where they really are: residential streets to cemeteries, and woods. */
+const PLACED_BY_CANOPY = new Set([1, 2, 3, 4, 5, 6, 10, 11, 12]);
+/** Where the canopy is, the trees are sought this far apart, metres (closer than any cover plants them). */
+const CANOPY_STEP_M = 7;
+/** A tree is taken to stand where the canopy is this tall, metres (a wood's are left out lower: clearings). */
+const CANOPY_TREE_M = 3;
+const CANOPY_WOOD_M = 2;
+/** Unmapped land with this tall a canopy grows trees, metres. */
+const CANOPY_UNMAPPED_M = 4;
+/** No other tree within this many metres of a town's registered one (it is that tree); a mapped one, this many. */
+const REGISTERED_CLEAR_M = 4.5;
+const REGISTERED_MAPPED_M = 3;
+/** The salts of the trees the canopy or the land cover alone place, on unmapped land. */
+const UNMAPPED_CANOPY = 20;
+const UNMAPPED_WOOD = 21;
+
 /** A tile's trees from its decoded features (MVTLoader, `coordinates: "local"`: 0 to 1 across, y down). */
-export function plantTile(features: Feature[], tile: Tile, date: Date): TileTrees {
+export function plantTile(features: Feature[], tile: Tile, date: Date, around: Surroundings = {}): TileTrees {
   const cover = new Uint8Array(GRID * GRID);
   const blocked = new Uint8Array(GRID * GRID);
   const n = 2 ** tile.z;
@@ -314,7 +339,8 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
   }
   // mapped trees, one by one, and in rows (Streets GL's tiles)
   const mapped = features.filter((f) => (f.properties.layerName === "point" && f.properties.type === "tree") || f.properties.type === "treeRow");
-  if (!present.size && !mapped.length) return { conifers: empty(), broadleaves: empty() };
+  const { land, canopy: heights, registered = [] } = around;
+  if (!present.size && !mapped.length && !heights && !land && !registered.length) return { conifers: empty(), broadleaves: empty() };
   // where nothing may
   for (const f of features) {
     const block = blockOf(f.properties, f.geometry.type);
@@ -324,6 +350,21 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
 
   // conifers: a third in the south of Sweden, three quarters in the north; the same pattern elsewhere by latitude
   const woodConifers = Math.min(0.8, Math.max(0.15, 0.35 + (Math.abs(midLat) - 56) * 0.12));
+  /** A wood's share of conifers at `x, y`: as its land cover says, else `fallback`. */
+  const conifersAt = (x: number, y: number, fallback: number) => {
+    const c = land ? classAt(land, x, y) : LC.NONE;
+    return c === LC.CONIFERS ? 0.95 : c === LC.MIXED ? 0.5 : c === LC.BROADLEAVES ? 0.05 : fallback;
+  };
+  // the canopy's pixels, and how many of them make two metres (a crown's middle may miss the point)
+  const near = heights ? Math.max(0, Math.round(2 / (tileMetres / heights.size))) : 0;
+  const canopyAt = (x: number, y: number) => (heights ? tallestNear(heights, x, y, near) : 0);
+  /** A tree's height from the canopy where it is (a little under it, as the canopy is its tallest), else its cover's. */
+  const tallAt = (x: number, y: number, h: number, fallback: [number, number]): [number, number] => {
+    const top = canopyAt(x, y);
+    if (top < CANOPY_TREE_M) return fallback;
+    const t = Math.min(45, top * (0.86 + 0.14 * h));
+    return [t, t];
+  };
   const leaves = leafPhase(date, midLat);
   type Tree = {
     x: number;
@@ -364,9 +405,45 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
     const tall = height[0] + (height[1] - height[0]) * h(4);
     trees.push({ x, y, rank, conifer, height: tall, width, yaw: h(10) * 2 * Math.PI, colour, species, retint });
   };
+  // the towns' registered trees, each where it stands, of its kind, its crown as wide as recorded
+  // (kept in cells about 5 m across, to find them by)
+  const taken = new Map<number, [number, number][]>();
+  const cells = Math.max(1, Math.round(tileMetres / REGISTERED_CLEAR_M));
+  const cellOf = (x: number, y: number) => Math.floor(y * cells) * cells + Math.floor(x * cells);
+  for (const [k, t] of registered.entries()) {
+    if (t.x < 0 || t.x >= 1 || t.y < 0 || t.y >= 1) continue;
+    const h = (salt: number) => hash2(Math.round((tile.x + t.x) * 65536), Math.round((tile.y + t.y) * 65536), 1301 + salt);
+    const which = [undefined, FIR, 0, h(12) < 0.5 ? 2 : 3, 4][t.kind] ?? undefined;
+    // as tall as the canopy has it there, else as its crown suggests; as wide as its crown (the picture's crown about three quarters of it)
+    const fromCrown = Math.min(28, Math.max(3, t.crown * 1.5 + 1));
+    const tall = tallAt(t.x, t.y, h(4), t.crown > 0 ? [fromCrown, fromCrown] : [7, 14]);
+    const across = Math.min(1.2, Math.max(0.75, t.crown / (((tall[0] + tall[1]) / 2) * 0.75)));
+    const wide: [number, number] = t.crown > 0 ? [across, across] : [0.9, 1.2];
+    grow(t.x, t.y, h, t.kind === REGISTER_KINDS.CONIFER ? 1 : 0, tall, wide, -1 - k * 1e-9, which);
+    const cell = cellOf(t.x, t.y);
+    const list = taken.get(cell);
+    if (list) list.push([t.x, t.y]);
+    else taken.set(cell, [[t.x, t.y]]);
+  }
+  /** Whether a registered tree stands within `m` metres. */
+  const nearRegistered = (x: number, y: number, m: number) => {
+    if (!taken.size) return false;
+    const r = m / tileMetres;
+    const [cx, cy] = [Math.floor(x * cells), Math.floor(y * cells)];
+    for (let j = Math.max(0, cy - 1); j <= Math.min(cells - 1, cy + 1); j++) {
+      for (let i = Math.max(0, cx - 1); i <= Math.min(cells - 1, cx + 1); i++) {
+        for (const [tx, ty] of taken.get(j * cells + i) ?? []) if (Math.hypot(tx - x, ty - y) < r) return true;
+      }
+    }
+    return false;
+  };
   for (const code of present) {
     const c = COVERS[code];
-    const step = c.spacing / tileMetres;
+    // where the canopy says, the trees where they really stand: sought closer together, each where it is tall enough
+    const placed = heights !== undefined && heights !== null && PLACED_BY_CANOPY.has(code);
+    const wood = code >= 10;
+    const chance = placed && !wood ? 1 : c.chance;
+    const step = (placed && !wood ? CANOPY_STEP_M : c.spacing) / tileMetres;
     // this cover's grid, in the world's tile units at this zoom: cells whose middle falls in the tile
     const [i0, i1] = [Math.floor(tile.x / step), Math.ceil((tile.x + 1) / step)];
     const [j0, j1] = [Math.floor(tile.y / step), Math.ceil((tile.y + 1) / step)];
@@ -374,13 +451,45 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
     for (let j = j0; j < j1; j++) {
       for (let i = i0; i < i1; i++) {
         const h = (salt: number) => hash2(i, j, code * 16 + salt);
-        if (h(0) >= c.chance) continue;
+        if (h(0) >= chance) continue;
         const x = (i + 0.5 + jitter * (h(1) - 0.5)) * step - tile.x;
         const y = (j + 0.5 + jitter * (h(2) - 0.5)) * step - tile.y;
         if (x < 0 || x >= 1 || y < 0 || y >= 1) continue;
         const cell = Math.floor(y * GRID) * GRID + Math.floor(x * GRID);
         if (cover[cell] !== code || blocked[cell]) continue;
-        grow(x, y, h, c.conifers ?? woodConifers, c.height, c.width, h(9));
+        if (placed && canopyAt(x, y) < (wood ? CANOPY_WOOD_M : CANOPY_TREE_M)) continue;
+        if (nearRegistered(x, y, REGISTERED_CLEAR_M)) continue;
+        const conifers = c.conifers ?? conifersAt(x, y, woodConifers);
+        grow(x, y, h, conifers, placed ? tallAt(x, y, h(4), c.height) : c.height, c.width, h(9));
+      }
+    }
+  }
+  // unmapped land: trees where the canopy has them (else where the land cover has woods), of the land's kind
+  if (heights || land) {
+    const byCanopy = Boolean(heights);
+    const salt = byCanopy ? UNMAPPED_CANOPY : UNMAPPED_WOOD;
+    const wood = COVERS[10];
+    const step = (byCanopy ? CANOPY_STEP_M : wood.spacing) / tileMetres;
+    const [i0, i1] = [Math.floor(tile.x / step), Math.ceil((tile.x + 1) / step)];
+    const [j0, j1] = [Math.floor(tile.y / step), Math.ceil((tile.y + 1) / step)];
+    for (let j = j0; j < j1; j++) {
+      for (let i = i0; i < i1; i++) {
+        const h = (s: number) => hash2(i, j, salt * 16 + s);
+        if (!byCanopy && h(0) >= wood.chance) continue;
+        const x = (i + 0.5 + 0.7 * (h(1) - 0.5)) * step - tile.x;
+        const y = (j + 0.5 + 0.7 * (h(2) - 0.5)) * step - tile.y;
+        if (x < 0 || x >= 1 || y < 0 || y >= 1) continue;
+        const cell = Math.floor(y * GRID) * GRID + Math.floor(x * GRID);
+        if (cover[cell] || blocked[cell]) continue;
+        const kind = land ? classAt(land, x, y) : LC.NONE;
+        if (kind === LC.WATER || kind === LC.ARABLE) continue;
+        if (nearRegistered(x, y, REGISTERED_CLEAR_M)) continue;
+        if (byCanopy) {
+          if (canopyAt(x, y) < CANOPY_UNMAPPED_M) continue;
+          // in a wood as the land cover says; else a garden's or a street's tree
+          const forest = wooded(kind);
+          grow(x, y, h, conifersAt(x, y, forest ? woodConifers : 0.2), tallAt(x, y, h(4), wood.height), forest ? wood.width : [0.9, 1.25], h(9));
+        } else if (wooded(kind)) grow(x, y, h, conifersAt(x, y, woodConifers), wood.height, wood.width, h(9));
       }
     }
   }
@@ -389,14 +498,16 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
   for (const f of mapped) {
     const p = f.properties;
     const sort = sglTree(p);
-    const tall: [number, number] = Number(p.height) > 0 ? [Number(p.height), Number(p.height)] : [7, 14];
+    const mappedTall = Number(p.height) > 0 ? Number(p.height) : 0;
     const at = (x: number, y: number, k: number) => {
       if (x < 0 || x >= 1 || y < 0 || y >= 1) return;
+      if (nearRegistered(x, y, REGISTERED_MAPPED_M)) return;
       const [gx, gy] = [Math.round((tile.x + x) * 65536), Math.round((tile.y + y) * 65536)];
       const h = (salt: number) => hash2(gx, gy, 977 + k * 31 + salt);
       // (a linden either of Streets GL's two; a broadleaf not said, any of them)
       const which = { fir: FIR, beech: 0, linden: h(12) < 0.5 ? 2 : 3, oak: 4, broadleaf: undefined }[sort];
-      grow(x, y, h, 0, tall, [0.9, 1.2], -1, which);
+      // as tall as mapped, else as the canopy has it there
+      grow(x, y, h, 0, mappedTall ? [mappedTall, mappedTall] : tallAt(x, y, h(4), [7, 14]), [0.9, 1.2], -1, which);
     };
     if (f.geometry.type === "Point") {
       const [x, y] = f.geometry.coordinates as number[];
@@ -467,11 +578,14 @@ let loading = 0;
 async function plant(url: string, layers: string[], tile: Tile, date: Date, entry: Entry, onLoad: () => void) {
   loading++;
   try {
-    const features = (await load(url, MVTLoader, {
-      worker: false,
-      mvt: { shape: "geojson", coordinates: "local", layers },
-    })) as unknown as Feature[];
-    const trees = plantTile(features, tile, date);
+    // the tile, and what is known of its ground (each may be missing: the trees are planted without it)
+    const [features, land, heights, registered] = await Promise.all([
+      load(url, MVTLoader, { worker: false, mvt: { shape: "geojson", coordinates: "local", layers } }) as unknown as Promise<Feature[]>,
+      landCover(tile).catch(() => null),
+      canopy(tile).catch(() => null),
+      streetTrees(tile).catch(() => []),
+    ]);
+    const trees = plantTile(features, tile, date, { land, canopy: heights, registered });
     const data = (t: Instances) => ({
       length: t.length,
       attributes: {

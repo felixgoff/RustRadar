@@ -87,6 +87,9 @@
   import { delayText, trainColorOf, trainCredits, trainLabel } from "$lib/trains";
   import { RAIL_SPEED_ATTRIBUTION } from "$lib/rail-layer";
   import { SGL_ATTRIBUTION, SGL_ZOOM } from "$lib/streets-gl";
+  import { LANDCOVER_ATTRIBUTION } from "$lib/landcover";
+  import { CANOPY_ATTRIBUTION } from "$lib/canopy";
+  import { STREET_TREES_ATTRIBUTION } from "$lib/street-trees";
   import { TERRAIN_ATTRIBUTION } from "$lib/terrain-layer";
   import { conditionsOf, fetchWeather, PRESETS, type Weather } from "$lib/weather";
   import { distanceKm as distanceKmBetween } from "$lib/flightpath";
@@ -1269,6 +1272,8 @@
       settings.terrain && TERRAIN_ATTRIBUTION,
       settings.basemap === "realistic" && "Textures: Streets GL (MIT)",
       settings.basemap === "realistic" && view.zoom >= SGL_ZOOM - 0.5 && SGL_ATTRIBUTION,
+      // what plants the trees close in (Globe's TREES_ZOOM)
+      settings.basemap === "realistic" && view.zoom >= 14.5 && `${LANDCOVER_ATTRIBUTION} · ${CANOPY_ATTRIBUTION} · ${STREET_TREES_ATTRIBUTION}`,
       settings.basemap === "realistic" && "Earth: NASA Blue Marble",
       weatherLive && liveWeather && "Weather: MET Norway",
       "Map, names and buildings: OpenFreeMap, © OpenMapTiles, © OpenStreetMap contributors",

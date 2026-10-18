@@ -26,7 +26,18 @@ type RGBA = [number, number, number, number];
  * whether snow lies on it (1) or turns to slush (0.5), and whether rain makes
  * it shine.
  */
-type Surface = { texture: (typeof GROUND_TEXTURES)[number] | "water"; metres: number; rough: number; snow: number; paved?: boolean };
+type Surface = {
+  texture: (typeof GROUND_TEXTURES)[number] | "water";
+  metres: number;
+  rough: number;
+  snow: number;
+  paved?: boolean;
+  /** Drawn in this colour (linear) instead of its texture: the roads and paths, plain. */
+  flat?: [number, number, number];
+};
+
+/** A road's plain colour (linear): asphalt's. */
+const ROAD: [number, number, number] = [0.075, 0.075, 0.08];
 
 /** The surfaces, by the id a feature's colour carries in its alpha (255 less the id); each texture's metres as Streets GL lays it. */
 const SURFACES: Record<number, Surface> = {
@@ -53,17 +64,18 @@ const SURFACES: Record<number, Surface> = {
   // a field as mapped (Streets GL's tiles): its crop and the lie of its rows in its colour
   17: { texture: "farmland0", metres: 50, rough: 0.95, snow: 1 },
   // lines: laid along them
-  32: { texture: "road", metres: 0, rough: 0.8, snow: 0.5, paved: true },
-  33: { texture: "road-unmarked", metres: 0, rough: 0.8, snow: 0.5, paved: true },
-  34: { texture: "dirt", metres: 0, rough: 0.95, snow: 1 },
+  // (roads and paths in plain colours, the railways' tracks and the piers' boards in their textures)
+  32: { texture: "road", metres: 0, rough: 0.8, snow: 0.5, paved: true, flat: ROAD },
+  33: { texture: "road-unmarked", metres: 0, rough: 0.8, snow: 0.5, paved: true, flat: ROAD },
+  34: { texture: "dirt", metres: 0, rough: 0.95, snow: 1, flat: [0.26, 0.2, 0.13] },
   35: { texture: "railway", metres: 0, rough: 0.8, snow: 0.5 },
-  39: { texture: "tram", metres: 0, rough: 0.8, snow: 0.5, paved: true },
+  39: { texture: "tram", metres: 0, rough: 0.8, snow: 0.5, paved: true, flat: ROAD },
   40: { texture: "wood", metres: 0, rough: 0.8, snow: 1 },
   // lines with a texture of the world's
-  36: { texture: "pavement", metres: 10, rough: 0.8, snow: 0.5, paved: true },
-  37: { texture: "asphalt", metres: 20, rough: 0.8, snow: 0.5, paved: true },
-  38: { texture: "gravel", metres: 8, rough: 0.9, snow: 1 },
-  41: { texture: "cycleway", metres: 8, rough: 0.8, snow: 0.5, paved: true },
+  36: { texture: "pavement", metres: 10, rough: 0.8, snow: 0.5, paved: true, flat: [0.3, 0.3, 0.29] },
+  37: { texture: "asphalt", metres: 20, rough: 0.8, snow: 0.5, paved: true, flat: ROAD },
+  38: { texture: "gravel", metres: 8, rough: 0.9, snow: 1, flat: [0.32, 0.29, 0.25] },
+  41: { texture: "cycleway", metres: 8, rough: 0.8, snow: 0.5, paved: true, flat: [0.2, 0.1, 0.085] },
 };
 const FARMLAND = 3;
 const FIELD = 17;
@@ -429,6 +441,9 @@ ${table("GS_METRES", (s) => s.metres)}
 ${table("GS_ROUGH", (s) => s.rough)}
 ${table("GS_SNOW", (s) => s.snow)}
 ${table("GS_PAVED", (s) => (s.paved ? 1 : 0))}
+${table("GS_FLAT_R", (s) => s.flat?.[0] ?? -1)}
+${table("GS_FLAT_G", (s) => s.flat?.[1] ?? -1)}
+${table("GS_FLAT_B", (s) => s.flat?.[2] ?? -1)}
 `;
 
 const groundInject = {
@@ -527,6 +542,11 @@ const groundInject = {
         // a little unevenness over tens of metres, so the repeats don't show (gone where it would only speckle)
         float grain = 1.0 - smoothstep(0.25, 1.0, rl_cells(rl_t * 32.0));
         albedo = c.rgb * tint * (1.0 + 0.28 * grain * (rl_noise(rl_t, 32.0) - 0.5));
+        // a road or path: its plain colour, flat
+        if (GS_FLAT_R[i] >= 0.0) {
+          albedo = vec3(GS_FLAT_R[i], GS_FLAT_G[i], GS_FLAT_B[i]) * tint;
+          n = vec3(0.0, 0.0, 1.0);
+        }
         // Zoomed out the map's data hardly says what the land is (desert, savanna and tundra would all be
         // grass): there its colour is the Earth's own, from the picture of it, taking over as a pixel grows
         // past 100 m or so. Closer in, land nothing is mapped on keeps the Earth's colour where that is

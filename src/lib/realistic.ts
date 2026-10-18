@@ -818,6 +818,9 @@ const WALL_COLOURS: Record<number, RGB[]> = {
   ],
 };
 
+/** A building's façade (plaster, brick, block, wood, glass: 0 to 4) and roof (the shader's order) where its map data says. */
+export type BuildingLook = { facade?: number; roof?: number };
+
 /** The colours OpenStreetMap's `building:colour` most often names, as #rrggbb. */
 const NAMED: Record<string, string> = {
   white: "#f2f0ea",
@@ -866,18 +869,20 @@ const pickWeighted = (r: number, weights: [number, number][]) => {
  * where it has one), and in the alpha its façade and roof (255 less façade +
  * 5 × roof), which the shader reads.
  */
-export function buildingStyle(seed: number, height: number, colour?: unknown): [number, number, number, number] {
+export function buildingStyle(seed: number, height: number, colour?: unknown, look: BuildingLook = {}): [number, number, number, number] {
   const facade =
-    height > 30 && hash(seed, 1) < 0.55
+    look.facade ??
+    (height > 30 && hash(seed, 1) < 0.55
       ? GLASS
       : pickWeighted(hash(seed, 2), [
           [PLASTER, 0.42],
           [BRICK, 0.28],
           [BLOCK, height > 12 ? 0.25 : 0.1],
           [WOOD, height < 9 ? 0.22 : 0.02],
-        ]);
+        ]));
   const roof =
-    height < 10
+    look.roof ??
+    (height < 10
       ? pickWeighted(hash(seed, 3), [
           [TILES, 0.55],
           [METAL, 0.2],
@@ -890,7 +895,7 @@ export function buildingStyle(seed: number, height: number, colour?: unknown): [
           [FLAT1, 0.2],
           [FLAT3, 0.15],
           [METAL, 0.05],
-        ]);
+        ]));
   const hex = typeof colour === "string" ? (NAMED[colour.toLowerCase()] ?? colour) : null;
   let rgb: RGB;
   if (hex && /^#[0-9a-f]{6}$/i.test(hex)) {

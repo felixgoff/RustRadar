@@ -11,7 +11,8 @@ import { MVTLayer } from "@deck.gl/geo-layers";
 import { PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import type { BinaryFeatureCollection } from "@loaders.gl/schema";
 import { BUILDING_SHADOW_ALPHA, buildingShadows, shadowStep } from "./building-shadow";
-import { buildingStyle } from "./realistic";
+import { buildingStyle, type BuildingLook } from "./realistic";
+import { sglBuilding } from "./streets-gl";
 import { localSun, SHADOW_MIN_ALPHA, sunlight } from "./shadow";
 
 const DEG = Math.PI / 180;
@@ -20,9 +21,38 @@ const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6_378_137;
 
 type Properties = Record<string, unknown>;
 
-/** A building's height as drawn, metres: OpenFreeMap's `render_height`, 6 m when it has none. */
+/**
+ * A building's height as drawn, metres: OpenFreeMap's `render_height`, 6 m
+ * when it has none; Streets GL's (streets-gl.ts) to halfway up its roof (the
+ * roofs are drawn flat), and none for one that stands on others or on posts
+ * (drawn from the ground, it would fill what is under it).
+ */
 export function buildingHeight(properties: Properties): number {
+  if (properties.layerName === "buildings") {
+    const b = sglBuilding(properties);
+    return b.minHeight >= 2 ? 0 : b.height - b.roofHeight / 2;
+  }
   return properties.hide_3d ? 0 : Number(properties.render_height ?? 6);
+}
+
+const SGL_FACADES = { plaster: 0, brick: 1, cementBlock: 2, wood: 3, glass: 4 } as const;
+const SGL_ROOFS = { tar: 0, concrete: 1, metal: 2, glass: 2, tiles: 3, thatch: 3, eternit: 4, grass: 6 } as const;
+
+/** A building's look as mapped: its walls' colour, and from Streets GL's tiles its façade and roof where they say. */
+function lookOf(properties: Properties): { colour: unknown; look?: BuildingLook } {
+  if (properties.layerName !== "buildings") return { colour: properties.colour };
+  const b = sglBuilding(properties);
+  return {
+    colour: b.colour,
+    look: { facade: b.facade && SGL_FACADES[b.facade], roof: b.roof && SGL_ROOFS[b.roof] },
+  };
+}
+
+/** A feature's properties in binary tile data: its string ones, and its numeric ones (stored per vertex). */
+function propertiesAt(data: { properties: unknown[]; featureIds: { value: ArrayLike<number> }; numericProps?: Record<string, { value: ArrayLike<number> }> }, vertex: number): Properties {
+  const own = { ...((data.properties[data.featureIds.value[vertex]] ?? {}) as Properties) };
+  for (const key in data.numericProps ?? {}) own[key] = data.numericProps![key].value[vertex];
+  return own;
 }
 
 type ShadowData = {
@@ -62,17 +92,7 @@ function tileShadows(content: BinaryFeatureCollection, tile: TileProps["tile"], 
   const starts = polygons.polygonIndices.value;
   const count = starts.length - 1;
   const heights = new Float32Array(count);
-  const ids = polygons.featureIds.value;
-  const numeric = polygons.numericProps ?? {};
-  const properties: Properties = {};
-  for (let p = 0; p < count; p++) {
-    const vertex = starts[p];
-    // the drawn layer reads a feature's string properties and its numeric ones (stored per vertex) together
-    const own = (polygons.properties[ids[vertex]] ?? {}) as Properties;
-    properties.hide_3d = numeric.hide_3d ? numeric.hide_3d.value[vertex] : own.hide_3d;
-    properties.render_height = numeric.render_height ? numeric.render_height.value[vertex] : own.render_height;
-    heights[p] = buildingHeight(properties);
-  }
+  for (let p = 0; p < count; p++) heights[p] = buildingHeight(propertiesAt(polygons as never, starts[p]));
   const mesh = buildingShadows(
     {
       positions: polygons.positions.value,
@@ -140,7 +160,8 @@ function wallColoursOf(tile: { index: { x: number; y: number; z: number } }) {
     const gx = Math.round((x + value[vertex]) * 4096);
     const gy = Math.round((y + value[vertex + 1]) * 4096);
     const properties = feature?.properties ?? {};
-    return buildingStyle(Math.imul(gx, 73_856_093) ^ Math.imul(gy, 19_349_663), buildingHeight(properties), properties.colour);
+    const { colour, look } = lookOf(properties);
+    return buildingStyle(Math.imul(gx, 73_856_093) ^ Math.imul(gy, 19_349_663), buildingHeight(properties), colour, look);
   };
 }
 

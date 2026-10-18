@@ -17,6 +17,7 @@ import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { load } from "@loaders.gl/core";
 import { MVTLoader } from "@loaders.gl/mvt";
 import { Geometry } from "@luma.gl/engine";
+import { SGL_ZOOM, sglPath, sglTree } from "./streets-gl";
 import { treeCard } from "./tree-models";
 
 /** Tiles are planted from this zoom's data, OpenFreeMap's deepest. */
@@ -63,6 +64,9 @@ const COVERS: Cover[] = [
   { spacing: 5.5, chance: 0.42, conifers: 0.2, height: [2.2, 4.5], width: [1.1, 1.5] },
   // 10: woods and forests
   { spacing: 6.2, chance: 0.92, conifers: null, height: [13, 24], width: [0.85, 1.15] },
+  // 11, 12: woods mapped broadleaved, or needleleaved (Streets GL's tiles say)
+  { spacing: 6.2, chance: 0.92, conifers: 0.05, height: [13, 24], width: [0.85, 1.15] },
+  { spacing: 6.2, chance: 0.92, conifers: 0.97, height: [13, 24], width: [0.85, 1.15] },
 ];
 const ORCHARD = 7;
 
@@ -72,6 +76,12 @@ type Feature = { geometry: { type: string; coordinates: unknown }; properties: P
 /** The cover a feature is, if trees grow in it (0 if not). */
 export function coverOf(p: Properties): number {
   const [layer, cls, sub] = [p.layerName, p.class, p.subclass];
+  // Streets GL's tiles (streets-gl.ts): woods by their leaves, scrub, gardens
+  if (layer === "natural") {
+    if (p.type === "forest") return p.leafType === "broadleaved" ? 11 : p.leafType === "needleleaved" ? 12 : 10;
+    return p.type === "scrub" ? 9 : 0;
+  }
+  if (layer === "common") return p.type === "garden" ? 4 : 0;
   if (layer === "landcover") {
     if (cls === "wood") return 10;
     if (cls === "wetland") return 8;
@@ -111,11 +121,22 @@ const CLEARANCE: Record<string, number> = {
   bridge: 5,
 };
 
+/** Paved or kept clear, in Streets GL's tiles. */
+const SGL_BARE = new Set(["parking", "pitch", "playground", "dogPark", "bridge", "construction", "brownfield", "apron", "helipad", "pier", "sand", "rock"]);
+
 /** Where nothing grows: a polygon to fill (true), a line's clearance in metres, or nothing (0). */
 export function blockOf(p: Properties, geometryType: string): number | true {
   const [layer, cls] = [p.layerName, String(p.class ?? "")];
   const polygon = geometryType.endsWith("Polygon");
-  if (layer === "building" || layer === "water") return polygon ? true : 0;
+  if (layer === "building" || layer === "buildings" || layer === "water") return polygon ? true : 0;
+  // Streets GL's tiles: car parks, pitches and the like; roads and railways their own width and a little
+  if (layer === "common") return polygon && SGL_BARE.has(String(p.type)) ? true : 0;
+  if (layer === "highways") {
+    if (polygon) return true;
+    if (p.type === "railway") return CLEARANCE.rail;
+    const path = sglPath(p);
+    return path ? (path.width ?? 2) / 2 + 1.5 : 0;
+  }
   if (layer === "landuse") return polygon && (cls === "railway" || cls === "pitch" || cls === "playground") ? true : 0;
   if (layer === "transportation") {
     if (cls.endsWith("_construction") || cls === "ferry") return 0;
@@ -291,7 +312,9 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
     for (const polygon of polygonsOf(f.geometry)) fillPolygon(cover, polygon, code);
     present.add(code);
   }
-  if (!present.size) return { conifers: empty(), broadleaves: empty() };
+  // mapped trees, one by one, and in rows (Streets GL's tiles)
+  const mapped = features.filter((f) => (f.properties.layerName === "point" && f.properties.type === "tree") || f.properties.type === "treeRow");
+  if (!present.size && !mapped.length) return { conifers: empty(), broadleaves: empty() };
   // where nothing may
   for (const f of features) {
     const block = blockOf(f.properties, f.geometry.type);
@@ -316,6 +339,31 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
     retint: boolean;
   };
   const trees: Tree[] = [];
+  /** A tree at `x, y` (the tile's 0 to 1) of these heights and widths, its own choices from `h`; a conifer, and which, if not `h`'s. */
+  const grow = (x: number, y: number, h: (salt: number) => number, conifers: number, height: [number, number], wide: [number, number], rank: number, kind?: number) => {
+    const conifer = kind === undefined ? h(3) < conifers : kind === FIR;
+    let colour: RGB = SUMMER_AS_DRAWN;
+    let width = wide[0] + (wide[1] - wide[0]) * h(5);
+    const species = kind ?? (conifer ? FIR : BROADLEAVES[Math.floor(h(11) * BROADLEAVES.length)]);
+    let retint = false;
+    if (!conifer) {
+      // each tree turns in its own time: pick its look by the season's shares
+      const r = h(7);
+      const pick = (list: RGB[]) => list[Math.floor(h(6) * list.length)];
+      // (in summer, the picture's own green)
+      retint = r < leaves.bare + leaves.autumn + leaves.spring;
+      if (r < leaves.bare) {
+        colour = pick(BARE);
+        width *= 0.82;
+      } else if (r < leaves.bare + leaves.autumn) colour = pick(AUTUMN);
+      else if (retint) colour = pick(SPRING);
+    }
+    // a little variety in brightness, tree to tree
+    const v = 0.88 + 0.24 * h(8);
+    colour = colour.map((ch) => Math.min(255, Math.round(ch * v))) as RGB;
+    const tall = height[0] + (height[1] - height[0]) * h(4);
+    trees.push({ x, y, rank, conifer, height: tall, width, yaw: h(10) * 2 * Math.PI, colour, species, retint });
+  };
   for (const code of present) {
     const c = COVERS[code];
     const step = c.spacing / tileMetres;
@@ -332,28 +380,37 @@ export function plantTile(features: Feature[], tile: Tile, date: Date): TileTree
         if (x < 0 || x >= 1 || y < 0 || y >= 1) continue;
         const cell = Math.floor(y * GRID) * GRID + Math.floor(x * GRID);
         if (cover[cell] !== code || blocked[cell]) continue;
-        const conifer = h(3) < (c.conifers ?? woodConifers);
-        const height = c.height[0] + (c.height[1] - c.height[0]) * h(4);
-        let colour: RGB = SUMMER_AS_DRAWN;
-        let width = c.width[0] + (c.width[1] - c.width[0]) * h(5);
-        const species = conifer ? FIR : BROADLEAVES[Math.floor(h(11) * BROADLEAVES.length)];
-        let retint = false;
-        if (!conifer) {
-          // each tree turns in its own time: pick its look by the season's shares
-          const r = h(7);
-          const pick = (list: RGB[]) => list[Math.floor(h(6) * list.length)];
-          // (in summer, the picture's own green)
-          retint = r < leaves.bare + leaves.autumn + leaves.spring;
-          if (r < leaves.bare) {
-            colour = pick(BARE);
-            width *= 0.82;
-          } else if (r < leaves.bare + leaves.autumn) colour = pick(AUTUMN);
-          else if (retint) colour = pick(SPRING);
+        grow(x, y, h, c.conifers ?? woodConifers, c.height, c.width, h(9));
+      }
+    }
+  }
+  // each mapped tree where it is, of its kind (any broadleaf where it doesn't say); a row's every 10 m or so
+  const ROW_M = 10;
+  for (const f of mapped) {
+    const p = f.properties;
+    const sort = sglTree(p);
+    const tall: [number, number] = Number(p.height) > 0 ? [Number(p.height), Number(p.height)] : [7, 14];
+    const at = (x: number, y: number, k: number) => {
+      if (x < 0 || x >= 1 || y < 0 || y >= 1) return;
+      const [gx, gy] = [Math.round((tile.x + x) * 65536), Math.round((tile.y + y) * 65536)];
+      const h = (salt: number) => hash2(gx, gy, 977 + k * 31 + salt);
+      // (a linden either of Streets GL's two; a broadleaf not said, any of them)
+      const which = { fir: FIR, beech: 0, linden: h(12) < 0.5 ? 2 : 3, oak: 4, broadleaf: undefined }[sort];
+      grow(x, y, h, 0, tall, [0.9, 1.2], -1, which);
+    };
+    if (f.geometry.type === "Point") {
+      const [x, y] = f.geometry.coordinates as number[];
+      at(x, y, 0);
+    } else {
+      for (const line of linesOf(f.geometry)) {
+        let carry = 0;
+        for (let i = 1; i < line.length; i++) {
+          const [[x0, y0], [x1, y1]] = [line[i - 1], line[i]];
+          const metres = Math.hypot(x1 - x0, y1 - y0) * tileMetres;
+          for (let d = carry; d < metres; d += ROW_M) at(x0 + ((x1 - x0) * d) / metres, y0 + ((y1 - y0) * d) / metres, i);
+          carry = (carry - metres) % ROW_M;
+          if (carry < 0) carry += ROW_M;
         }
-        // a little variety in brightness, tree to tree
-        const v = 0.88 + 0.24 * h(8);
-        colour = colour.map((ch) => Math.min(255, Math.round(ch * v))) as RGB;
-        trees.push({ x, y, rank: h(9), conifer, height, width, yaw: h(10) * 2 * Math.PI, colour, species, retint });
       }
     }
   }
@@ -393,6 +450,7 @@ function empty(): Instances {
 // --------------------------------------------------------------- tiles
 
 const TREE_LAYERS = ["landcover", "landuse", "water", "building", "transportation"];
+const SGL_TREE_LAYERS = ["natural", "common", "water", "buildings", "highways", "point"];
 
 /** A tile's trees as layer data, made once so the layers' data compares equal from frame to frame. */
 type TileData = Record<keyof TileTrees, { length: number; attributes: object }>;
@@ -401,17 +459,17 @@ type TileShadows = { key: string; data: { length: number; attributes: object } }
 type Entry = { trees: TileTrees | null; data: TileData | null; shadows: TileShadows | null; failed?: boolean; used: number };
 /** Planted tiles, by `z/x/y`; the least recently used go once there are more than this. */
 const cache = new Map<string, Entry>();
-const MAX_CACHED = 48;
+const MAX_CACHED = 128;
 /** At most this many tiles loading at once. */
 const MAX_LOADING = 3;
 let loading = 0;
 
-async function plant(url: string, tile: Tile, date: Date, entry: Entry, onLoad: () => void) {
+async function plant(url: string, layers: string[], tile: Tile, date: Date, entry: Entry, onLoad: () => void) {
   loading++;
   try {
     const features = (await load(url, MVTLoader, {
       worker: false,
-      mvt: { shape: "geojson", coordinates: "local", layers: TREE_LAYERS },
+      mvt: { shape: "geojson", coordinates: "local", layers },
     })) as unknown as Feature[];
     const trees = plantTile(features, tile, date);
     const data = (t: Instances) => ({
@@ -433,9 +491,9 @@ async function plant(url: string, tile: Tile, date: Date, entry: Entry, onLoad: 
   }
 }
 
-/** The tiles at `TREE_TILE_ZOOM` within `radius` metres of `[lon, lat]`, nearest first, with their distances. */
-export function tilesAround(lon: number, lat: number, radius: number): { tile: Tile; distance: number }[] {
-  const n = 2 ** TREE_TILE_ZOOM;
+/** The tiles at `zoom` within `radius` metres of `[lon, lat]`, nearest first, with their distances. */
+export function tilesAround(lon: number, lat: number, radius: number, zoom = TREE_TILE_ZOOM): { tile: Tile; distance: number }[] {
+  const n = 2 ** zoom;
   const tx = ((lon + 180) / 360) * n;
   const ty = ((1 - Math.log(Math.tan(lat * DEG) + 1 / Math.cos(lat * DEG)) / Math.PI) / 2) * n;
   const tileMetres = (EARTH_CIRCUMFERENCE * Math.cos(lat * DEG)) / n;
@@ -448,7 +506,7 @@ export function tilesAround(lon: number, lat: number, radius: number): { tile: T
       const dx = Math.max(x - tx, 0, tx - (x + 1));
       const dy = Math.max(y - ty, 0, ty - (y + 1));
       const distance = Math.hypot(dx, dy) * tileMetres;
-      if (distance <= radius) out.push({ tile: { x: ((x % n) + n) % n, y, z: TREE_TILE_ZOOM }, distance });
+      if (distance <= radius) out.push({ tile: { x: ((x % n) + n) % n, y, z: zoom }, distance });
     }
   }
   return out.sort((a, b) => a.distance - b.distance);
@@ -522,8 +580,10 @@ export type TreeShadowOptions = {
 };
 
 export type TreeOptions = {
-  /** OpenFreeMap's tile URL template, `{z}/{x}/{y}`. */
+  /** The tiles' URL template, `{z}/{x}/{y}`: OpenFreeMap's, or Streets GL's (with `sgl`). */
   url: string;
+  /** The tiles are Streets GL's (streets-gl.ts), at their zoom. */
+  sgl?: boolean;
   /** Plant around here, `[lon, lat]`, out to `radius` metres. */
   centre: [number, number];
   radius: number;
@@ -539,10 +599,10 @@ export type TreeOptions = {
 };
 
 /** The trees around the view, one layer per tile and kind of tree. */
-export function treeLayers({ url, centre, radius, date, extensions, material, shadow, onLoad }: TreeOptions): Layer[] {
+export function treeLayers({ url, sgl, centre, radius, date, extensions, material, shadow, onLoad }: TreeOptions): Layer[] {
   const layers: Layer[] = [];
   const now = performance.now();
-  for (const { tile } of tilesAround(centre[0], centre[1], radius)) {
+  for (const { tile } of tilesAround(centre[0], centre[1], radius, sgl ? SGL_ZOOM : TREE_TILE_ZOOM)) {
     const key = `${tile.z}/${tile.x}/${tile.y}`;
     let entry = cache.get(key);
     if (!entry) {
@@ -550,7 +610,7 @@ export function treeLayers({ url, centre, radius, date, extensions, material, sh
       entry = { trees: null, data: null, shadows: null, used: now };
       cache.set(key, entry);
       const tileUrl = url.replace("{z}", String(tile.z)).replace("{x}", String(tile.x)).replace("{y}", String(tile.y));
-      void plant(tileUrl, tile, date, entry, onLoad);
+      void plant(tileUrl, sgl ? SGL_TREE_LAYERS : TREE_LAYERS, tile, date, entry, onLoad);
     }
     entry.used = now;
     if (!entry.data || !entry.trees) continue;

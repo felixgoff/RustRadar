@@ -105,7 +105,8 @@
     TREES as REALISTIC_TREES,
     UNLIT,
   } from "./realistic";
-  import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES } from "./realistic-ground";
+  import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, sglGroundLayer } from "./realistic-ground";
+  import { SGL_TILES, SGL_ZOOM, sglFetch } from "./streets-gl";
   import { onTexturesReady } from "./realistic-textures";
   import { treeLayers } from "./tree-layer";
   import { PRESETS, type Conditions } from "./weather";
@@ -1006,6 +1007,13 @@
   // distance fading into the air. Their own shaders light them, so deck.gl's
   // light is kept off them (UNLIT).
   const REALISTIC_BUILDINGS_ZOOM = 13.5;
+  /**
+   * Close in, the ground, buildings and trees are Streets GL's own tiles
+   * (streets-gl.ts: each building's height and materials, each field, wood
+   * and mapped tree), from where deck.gl asks for the only zoom they come in.
+   */
+  const SGL_FROM_ZOOM = SGL_ZOOM - 0.5;
+  const SGL_BUILDING_OPTIONS = { mvt: { layers: ["buildings"], workerUrl: mvtWorkerUrl } };
   /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
   const TREES_ZOOM = 14.5;
   const FACADED = [REALISTIC_BUILDINGS];
@@ -1032,13 +1040,14 @@
   /** How much of the sun gets through now, 0 to 1. */
   const sunStrength = () => Math.max(...look.sunColor) / 3.2;
   /** Only the deepest tiles, so a building looks the same in each tile it is in (see `wallColoursOf`). */
-  const realisticBuildingLayer = (url: string, sun: readonly number[]) =>
+  const realisticBuildingLayer = (url: string, sun: readonly number[], sgl: boolean) =>
     new BuildingLayer({
-      id: "buildings-realistic",
-      data: url,
-      minZoom: 14,
-      maxZoom: 14,
-      loadOptions: BUILDING_LOAD_OPTIONS,
+      id: sgl ? "buildings-sgl" : "buildings-realistic",
+      data: sgl ? SGL_TILES : url,
+      minZoom: sgl ? SGL_ZOOM : 14,
+      maxZoom: sgl ? SGL_ZOOM : 14,
+      loadOptions: sgl ? SGL_BUILDING_OPTIONS : BUILDING_LOAD_OPTIONS,
+      ...(sgl ? { fetch: sglFetch as never } : {}),
       extruded: true,
       filled: true,
       stroked: false,
@@ -2500,6 +2509,8 @@
 
     const layers: Layer[] = [earthLayer(basemap)];
     const realistic = basemap === "realistic";
+    /** Close in, Streets GL's own tiles. */
+    const sgl = realistic && flat && zoom >= SGL_FROM_ZOOM;
     // shaded relief goes on the ground, under the map's water, borders, roads and runways
     if (basemap === "satellite") {
       layers.push(imageryLayer());
@@ -2507,7 +2518,8 @@
     } else if (realistic) {
       // drawn from the map's data, as Streets GL does: grass, woods, fields, water, roads and rails
       layers.push(realisticLandLayer(GROUNDED, SURFACE));
-      if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
+      if (sgl) layers.push(sglGroundLayer(mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
+      else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL));
       // and always in relief: the lie of the land
       layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
     } else {
@@ -2535,16 +2547,18 @@
     if (daylight) layers.push(nightLayer(now));
     const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= (realistic ? REALISTIC_BUILDINGS_ZOOM : 13));
     if (showBuildings) {
-      layers.push(realistic ? realisticBuildingLayer(tileUrl!, realisticShadowSun(now, cLat, cLon)) : buildingLayer(tileUrl!, shadowSun(now)));
+      layers.push(realistic ? realisticBuildingLayer(tileUrl!, realisticShadowSun(now, cLat, cLon), sgl) : buildingLayer(tileUrl!, shadowSun(now)));
     }
     if (realistic && tileUrl && flat && zoom >= TREES_ZOOM) {
       // out to about as far as the camera is from the point it looks at
       const distance = CAMERA_HEIGHTS * container.clientHeight * mpp;
       layers.push(
         ...treeLayers({
-          url: tileUrl,
+          url: sgl ? SGL_TILES : tileUrl,
+          sgl,
           centre: [cLon, cLat],
-          radius: Math.min(3200, Math.max(700, 1.2 * distance)),
+          // (Streets GL's tiles are small: fewer of them)
+          radius: Math.min(sgl ? 1400 : 3200, Math.max(700, 1.2 * distance)),
           date: new Date(now),
           extensions: TREED,
           material: UNLIT,

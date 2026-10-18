@@ -13,6 +13,7 @@ import type { Device } from "@luma.gl/core";
 import { bridgeParts, omtDeck, type Lines, type TileIndex } from "./bridges";
 import { LC } from "./landcover";
 import { SGL_TILES, SGL_ZOOM, sglFetch, sglPath } from "./streets-gl";
+import { imageryTexture } from "./imagery";
 import { realisticLight } from "./realistic";
 import { withRoadWidths } from "./road-widths";
 import { type GROUND_TEXTURES, realisticTextures, textureLayer } from "./realistic-textures";
@@ -417,12 +418,24 @@ const table = (name: string, value: (s: Surface) => number) =>
     value(SURFACES[i] ?? SURFACES[0]).toFixed(3),
   ).join(", ")});`;
 
+// where the imagery's picture lies (imagery.ts), web mercator units: west, north, size, and whether there is one;
+// on the globe absolute, on the flat map from the layer's origin
+const groundBlock = /* glsl */ `\
+layout(std140) uniform rgroundUniforms {
+  vec4 imageryGlobe;
+  vec4 imageryFlat;
+} rground;
+`;
+
 const groundFs = /* glsl */ `\
+${groundBlock}
 uniform mediump sampler2DArray rground_color;
 uniform mediump sampler2DArray rground_normal;
 uniform sampler2D rground_water;
 uniform sampler2D rground_earth;
+uniform sampler2D rground_imagery;
 in vec2 rg_e;
+in vec2 rg_s;
 ${table("GS_LAYER", (s) => (s.texture === "water" ? -1 : textureLayer.ground(s.texture)))}
 ${table("GS_METRES", (s) => s.metres)}
 ${table("GS_ROUGH", (s) => s.rough)}
@@ -436,6 +449,14 @@ const groundInject = {
     // where it is on the picture of the Earth: on the globe, its own place; on the flat map (close in) the view's centre is near enough
     vec2 rg_ll = project.projectionMode == PROJECTION_MODE_GLOBE ? geometry.worldPosition.xy : rlight.anchor;
     rg_e = vec2((rg_ll.x + 180.0) / 360.0, (90.0 - rg_ll.y) / 180.0);
+    // and on the imagery's picture
+    if (project.projectionMode == PROJECTION_MODE_GLOBE) {
+      vec2 ll = radians(geometry.worldPosition.xy);
+      vec2 m = vec2(ll.x + 3.14159265, 3.14159265 + log(tan(0.78539816 + 0.5 * clamp(ll.y, -1.484, 1.484)))) * (512.0 / 6.28318531);
+      rg_s = vec2(m.x - rground.imageryGlobe.x, rground.imageryGlobe.y - m.y) / rground.imageryGlobe.z;
+    } else {
+      rg_s = vec2(geometry.position.x - rground.imageryFlat.x, rground.imageryFlat.y - geometry.position.y) / rground.imageryFlat.z;
+    }
   }
   `,
   "fs:DECKGL_FILTER_COLOR": /* glsl */ `
@@ -540,6 +561,15 @@ const groundInject = {
           albedo = mix(albedo, earth.rgb * dot(albedo, LUM) / max(dot(mean, LUM), 1e-4), dry);
         }
         if (i != ${ICE}) albedo = mix(albedo, earth.rgb, far);
+        // between the two, the land's own colour from the imagery, where there is any yet (lit as the rest);
+        // the roads, railways and rivers still drawn over it
+      #ifndef RL_LINE
+        if (rground.imageryGlobe.w > 0.5 && i != ${ICE}) {
+          vec4 s = texture(rground_imagery, rg_s);
+          float inside = step(0.0, rg_s.x) * step(rg_s.x, 1.0) * step(0.0, rg_s.y) * step(rg_s.y, 1.0);
+          albedo = mix(albedo, s.rgb, s.a * inside * smoothstep(2.5, 12.0, rl_cells(rl_t) * rlight.periodMetres));
+        }
+      #endif
         // snow lies on the land, slush on the roads; rain darkens what is paved and makes it shine
         // (the weather where the camera is: not the whole world's, zoomed out)
         float snow = i == ${ICE} ? 1.0 : rlight.snow * GS_SNOW[i] * (1.0 - far);
@@ -558,8 +588,9 @@ const groundInject = {
 
 const groundModule = {
   name: "rground",
-  vs: "out vec2 rg_e;\n",
+  vs: `${groundBlock}out vec2 rg_e;\nout vec2 rg_s;\n`,
   fs: groundFs,
+  uniformTypes: { imageryGlobe: "vec4<f32>", imageryFlat: "vec4<f32>" },
 } as const;
 
 type ExtLayer = Layer & { context: { device: Device }; setShaderModuleProps(props: object): void };
@@ -576,6 +607,16 @@ export class GroundExtension extends LayerExtension {
 
   draw(this: ExtLayer, params: Parameters<typeof realisticLight.props>[0]) {
     const textures = realisticTextures(this.context.device);
+    const imagery = imageryTexture(this.context.device);
+    // the imagery's place: on the flat map from the layer's origin (as the shaders measure)
+    let globe = [0, 0, 1, 0];
+    let flat = [0, 0, 1, 0];
+    if (imagery) {
+      const { west, north, size } = imagery.rect;
+      const origin = realisticLight.origin(params);
+      globe = [west, north, size, 1];
+      flat = origin ? [west - origin[0], north - origin[1], size, 1] : globe;
+    }
     this.setShaderModuleProps({
       rlight: realisticLight.props(params),
       rground: {
@@ -583,6 +624,9 @@ export class GroundExtension extends LayerExtension {
         rground_normal: textures.ground.normal,
         rground_water: textures.water,
         rground_earth: textures.earth,
+        rground_imagery: imagery?.texture ?? textures.earth,
+        imageryGlobe: globe,
+        imageryFlat: flat,
       },
     });
   }

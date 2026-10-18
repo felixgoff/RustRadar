@@ -570,9 +570,9 @@ type TileShadows = { key: string; data: { length: number; attributes: object } }
 type Entry = { trees: TileTrees | null; data: TileData | null; shadows: TileShadows | null; failed?: boolean; used: number };
 /** Planted tiles, by `z/x/y`; the least recently used go once there are more than this. */
 const cache = new Map<string, Entry>();
-const MAX_CACHED = 128;
+const MAX_CACHED = 256;
 /** At most this many tiles loading at once. */
-const MAX_LOADING = 3;
+const MAX_LOADING = 4;
 let loading = 0;
 
 async function plant(url: string, layers: string[], tile: Tile, date: Date, entry: Entry, onLoad: () => void) {

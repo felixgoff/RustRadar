@@ -1021,7 +1021,7 @@
    */
   const SGL_BUILDING_OPTIONS = { mvt: { layers: ["buildings"], workerUrl: mvtWorkerUrl } };
   /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
-  const TREES_ZOOM = 14.5;
+  const TREES_ZOOM = 14;
   /** From here the roads are drawn at their surveyed widths, where Trafikverket has them. */
   const ROAD_WIDTHS_ZOOM = 14;
   const FACADED = [REALISTIC_BUILDINGS];
@@ -2614,7 +2614,7 @@
           sgl,
           centre: [cLon, cLat],
           // (Streets GL's tiles are small: fewer of them)
-          radius: Math.min(sgl ? 1400 : 3200, Math.max(700, 1.2 * distance)),
+          radius: Math.min(sgl ? 2400 : 4800, Math.max(900, 1.6 * distance)),
           date: new Date(now),
           extensions: TREED,
           material: UNLIT,

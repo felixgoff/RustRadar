@@ -94,6 +94,7 @@
   import { BuildingLayer, buildingHeight } from "./building-layer";
   import {
     BUILDINGS as REALISTIC_BUILDINGS,
+    ROOFS as REALISTIC_ROOFS,
     FOOT_SHADE,
     fromLocal,
     HAZE_FADE,
@@ -1017,6 +1018,7 @@
   /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
   const TREES_ZOOM = 14.5;
   const FACADED = [REALISTIC_BUILDINGS];
+  const ROOFED = [REALISTIC_ROOFS];
   const HAZE_FADED = [HAZE_FADE];
   const FOOT_SHADED = [FOOT_SHADE];
   const TREED = [REALISTIC_TREES];
@@ -1065,6 +1067,8 @@
       shadowExtensions: HAZE_FADED,
       footShade: FOOT_SHADE_ALPHA,
       footShadeExtensions: FOOT_SHADED,
+      // Streets GL's tiles say how their roofs are shaped
+      roofExtensions: sgl ? ROOFED : [],
     });
 
   // Night shading, recomputed each minute: four nested bands (sunset and the

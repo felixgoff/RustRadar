@@ -584,7 +584,8 @@ const rbuildInject = {
       // (whole tiles to the textures' period, so they meet where it repeats)
       layer = 9.0 + roof;
       float metres = roof < 0.5 ? 4.0 : roof < 1.5 ? 10.0 : roof < 2.5 ? 4.0 : roof < 3.5 ? 3.0 : roof < 4.5 ? 5.0 : 18.0;
-      uv = rl_t * max(1.0, floor(rlight.periodMetres / metres + 0.5));
+      // a pitched roof's (RoofExtension) lie along its own face, in metres
+      uv = rb_info.z > 0.5 ? rb_uv / metres : rl_t * max(1.0, floor(rlight.periodMetres / metres + 0.5));
       // Streets GL's roof colours: tiles terracotta (or slate), metal pale grey-blue (or copper),
       // concrete grey; its flat roofs a little under their textures' white, so the sun doesn't burn them out;
       // tar and eternit darker
@@ -593,6 +594,8 @@ const rbuildInject = {
         : roof > 0.5 && roof < 1.5 ? vec3(0.497)
         : roof > 4.5 ? vec3(0.8)
         : vec3(0.55);
+      // one with its own colour mapped
+      if (rb_info.z > 1.5) tint = rl_linear(rb_tint);
     }
     // (the images are stored top row first: v runs up them)
     vec3 at = vec3(uv.x, -uv.y, layer);
@@ -621,6 +624,39 @@ const rbuildInject = {
 };
 
 type ExtLayer = Layer & { context: { device: Device }; setShaderModuleProps(props: object): void };
+
+// Pitched roofs (roofs.ts) as meshes: each corner says what it is (its face's
+// code and own colour, as a building's; a roof or a gable), and the building
+// shading above does the rest.
+const roofInject = {
+  "vs:#decl": "in vec4 rr_info;\n",
+  "vs:#main-end": /* glsl */ `
+    rb_tint = colors;
+    rb_n = geometry.normal;
+    rb_uv = texCoords;
+    rb_tangent = normalize(cross(vec3(0.0, 0.0, 1.0), rb_n) + vec3(1e-6, 0.0, 0.0));
+    rb_z = 10.0;
+    rb_info = rr_info;
+  `,
+  "fs:DECKGL_FILTER_COLOR": rbuildInject["fs:DECKGL_FILTER_COLOR"],
+};
+
+/** Pitched roofs (roofs.ts) on their SimpleMeshLayer, shaded as the buildings are; the mesh carries `rr_info`. */
+export class RoofExtension extends LayerExtension {
+  static extensionName = "RealisticRoofExtension";
+
+  getShaders() {
+    return { modules: [rlightModule, rbuildModule], inject: roofInject };
+  }
+
+  draw(this: ExtLayer, params: DrawParams) {
+    const textures = realisticTextures(this.context.device).buildings;
+    this.setShaderModuleProps({
+      rlight: rlightProps(params),
+      rbuild: { rbuild_color: textures.color, rbuild_normal: textures.normal, rbuild_mask: textures.mask, rbuild_glow: textures.glow },
+    });
+  }
+}
 
 /** Buildings with Streets GL's façades and roofs, lit as the realistic map is: for their SolidPolygonLayer. */
 export class BuildingExtension extends LayerExtension {
@@ -768,6 +804,7 @@ export class FootShadeExtension extends LayerExtension {
 
 /** One of each, shared by every layer that uses them: the same extension compares equal, so no shader rebuilds. */
 export const BUILDINGS = new BuildingExtension();
+export const ROOFS = new RoofExtension();
 export const TREES = new TreeExtension();
 export const HAZE_FADE = new HazeFadeExtension();
 export const FOOT_SHADE = new FootShadeExtension();

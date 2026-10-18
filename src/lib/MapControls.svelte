@@ -33,6 +33,7 @@
     railMap: boolean;
     railShows: RailShows;
     sky: Sky;
+    tiltShift: boolean;
     terrain: boolean;
     exaggeration: number;
     session: SessionInfo | null;
@@ -63,6 +64,7 @@
     railMap = $bindable(),
     railShows = $bindable(),
     sky = $bindable(),
+    tiltShift = $bindable(),
     terrain = $bindable(),
     exaggeration = $bindable(),
     session,
@@ -139,6 +141,7 @@
           bind:railMap
           bind:railShows
           bind:sky
+          bind:tiltShift
           {aircraftShown}
           bind:aircraftLabels
           bind:weather

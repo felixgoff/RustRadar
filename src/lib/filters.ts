@@ -128,6 +128,8 @@ export interface Settings {
   railShows: RailShows;
   /** The realistic map's weather: live where the map is looking, or one chosen. */
   sky: Sky;
+  /** The realistic map's top and bottom out of focus, as through a tilt-shift lens. */
+  tiltShift: boolean;
   /** Relief from the AWS Terrain Tiles (Mapzen). */
   terrain: boolean;
   exaggeration: number;
@@ -147,6 +149,7 @@ export const DEFAULT_SETTINGS: Settings = {
   railMap: false,
   railShows: "speeds",
   sky: "live",
+  tiltShift: false,
   terrain: false,
   exaggeration: 10,
 };

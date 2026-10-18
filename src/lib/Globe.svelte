@@ -166,6 +166,8 @@
     weather: boolean;
     /** Shaded relief under the map. */
     terrain?: boolean;
+    /** The realistic map's top and bottom out of focus, as through a tilt-shift lens. */
+    tiltShift?: boolean;
     /** The railway network over the map. */
     railMap?: boolean;
     /** Trains to draw on land, over the ships and under the aircraft. */
@@ -217,6 +219,7 @@
     daylight,
     weather,
     terrain = false,
+    tiltShift = false,
     railMap = false,
     trains = [],
     selectedTrain = null,
@@ -3514,6 +3517,11 @@
 </script>
 
 <div class="globe" bind:this={container} bind:clientWidth={areaWidth} bind:clientHeight={areaHeight}>
+  {#if tiltShift && basemap === "realistic"}
+    <!-- blurred towards the top and bottom, in two steps: the map behind only, the panels stay sharp -->
+    <div class="tilt-shift" style:--blur="2px" style:--reach="42%" aria-hidden="true"></div>
+    <div class="tilt-shift" style:--blur="5px" style:--reach="22%" aria-hidden="true"></div>
+  {/if}
   {#if hoverCard}
     <HoverCard {...hoverCard} x={pointer.x} y={pointer.y} width={areaWidth} height={areaHeight} />
   {/if}
@@ -3542,6 +3550,19 @@
   .globe {
     position: absolute;
     inset: 0;
+    /* what is layered over the map (the tilt-shift blur) stays under the page's panels */
+    isolation: isolate;
+  }
+  .tilt-shift {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    -webkit-backdrop-filter: blur(var(--blur));
+    backdrop-filter: blur(var(--blur));
+    --fade: linear-gradient(black, transparent var(--reach), transparent calc(100% - var(--reach)), black);
+    -webkit-mask-image: var(--fade);
+    mask-image: var(--fade);
   }
   /* the speed colours, small along the bottom: the lines say the rest close in */
   .speed-legend {

@@ -16,6 +16,7 @@
     railShows: RailShows;
     /** The realistic map's weather. */
     sky: Sky;
+    tiltShift: boolean;
     /** The aircraft are on the map (the focus or shown with it): their own layers apply. */
     aircraftShown: boolean;
     aircraftLabels: boolean;
@@ -31,6 +32,7 @@
     railMap = $bindable(),
     railShows = $bindable(),
     sky = $bindable(),
+    tiltShift = $bindable(),
     aircraftShown,
     aircraftLabels = $bindable(),
     weather = $bindable(),
@@ -62,6 +64,7 @@
   {#if basemap === "realistic"}
     <!-- live: the weather where the map is looking -->
     <Segmented legend="Weather" name="sky" options={SKIES} bind:value={sky} columns={3} />
+    <ToggleRow label="Tilt-shift" hint="Top and bottom blurred, like a miniature" bind:checked={tiltShift} />
   {/if}
   <ToggleRow label="Terrain" hint="Mountains and valleys in relief" key="E" bind:checked={terrain} />
   <ToggleRow label="3D buildings" hint="Appear at street level" key="B" bind:checked={buildings} />

@@ -1344,6 +1344,7 @@
     railMap={settings.railMap}
     trainBlocks={settings.railMap && settings.railShows === "blocks" && isTauri()}
     terrain={settings.terrain}
+    tiltShift={settings.tiltShift}
     follow={following}
     followVehicle={followingVehicle}
     {selectedShip}
@@ -1674,6 +1675,7 @@
     bind:railMap={settings.railMap}
     bind:railShows={settings.railShows}
     bind:sky={settings.sky}
+    bind:tiltShift={settings.tiltShift}
     bind:terrain={settings.terrain}
     bind:exaggeration={settings.exaggeration}
     {session}

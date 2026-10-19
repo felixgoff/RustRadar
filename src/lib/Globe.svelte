@@ -44,7 +44,7 @@
   } from "@deck.gl/layers";
   import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
   import { SphereGeometry } from "@luma.gl/engine";
-  import type { Device } from "@luma.gl/core";
+  import type { Device, Texture } from "@luma.gl/core";
   import { load } from "@loaders.gl/core";
   import { MVTLoader } from "@loaders.gl/mvt";
   // decode vector tiles off the main thread with a bundled worker, not one from a CDN
@@ -92,7 +92,8 @@
   import { TAXIWAY_ZOOM, taxiwaysFor } from "./taxiways";
   import { screenAngle } from "./screen";
   import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection, sunlight } from "./shadow";
-  import { BuildingLayer, buildingHeight, buildingTilesUrl } from "./building-layer";
+  import { BuildingLayer, type BuildingSource, buildingHeight, buildingTilesUrl } from "./building-layer";
+  import type { Lod } from "./lod-tileset";
   import RainOverlay from "./RainOverlay.svelte";
   import {
     BUILDINGS as REALISTIC_BUILDINGS,
@@ -112,12 +113,13 @@
     UNLIT,
     aimMapEye,
   } from "./realistic";
-  import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, sglGroundLayer } from "./realistic-ground";
+  import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, cityGroundLayer } from "./realistic-ground";
   import { landCoverGroundLayer } from "./landcover-ground";
   import { sglBuildingFetch } from "./overture";
   import { roadWidthsVersion, wantRoadWidths } from "./road-widths";
   import { SGL_FROM_ZOOM, SGL_TILES, SGL_ZOOM } from "./streets-gl";
   import { onTexturesReady } from "./realistic-textures";
+  import { loadKtx2 } from "./ktx2";
   import { treeLayers } from "./tree-layer";
   import { mixConditions, PRESETS, type Conditions } from "./weather";
   import { CLOUD_BOUNDS, CLOUD_HEIGHT_M, cloudPicture, cloudStrips } from "./clouds";
@@ -989,42 +991,13 @@
     }
     return buildingSun;
   }
-  const buildingLayer = (url: string, sun: readonly number[]) =>
-    new BuildingLayer({
-      id: "buildings",
-      data: url,
-      minZoom: 13,
-      maxZoom: 14,
-      loadOptions: BUILDING_LOAD_OPTIONS,
-      extruded: true,
-      filled: true,
-      stroked: false,
-      getElevation: buildingElevation,
-      getFillColor: BUILDING_COLOR,
-      material: BUILDING_MATERIAL,
-      parameters: NO_CULL,
-      // Vector tiles wind outlines clockwise with y pointing down, which in
-      // the tile's own numbers is counter-clockwise: said so, the walls get
-      // outward normals and are lit from the side the light is on.
-      _subLayerProps: BUILDING_SUBLAYER_PROPS,
-      // their shadows, on the ground under them and under the aircraft's
-      sun,
-      shadowColor: SHADOW_COLOR,
-      shadowParameters: SHADOW_PARAMETERS,
-    });
-
   // The realistic map, as Streets GL draws a city: its ground from the map's
   // data (realistic-ground.ts), buildings with façades and roofs (realistic.ts),
   // trees (tree-layer.ts), lit by the sun and the sky through the weather, the
   // distance fading into the air. Their own shaders light them, so deck.gl's
-  // light is kept off them (UNLIT).
-  const REALISTIC_BUILDINGS_ZOOM = 13.5;
-  /**
-   * Close in, the ground, buildings and trees are Streets GL's own tiles
-   * (streets-gl.ts: each building's height and materials, each field, wood
-   * and mapped tree), from where deck.gl asks for the only zoom they come in.
-   */
-  const SGL_BUILDING_OPTIONS = { mvt: { layers: ["buildings"], workerUrl: mvtWorkerUrl } };
+  // light is kept off them (UNLIT). Close in, the ground and trees are Streets
+  // GL's own tiles (streets-gl.ts: each field, wood and mapped tree), from
+  // where deck.gl asks for the only zoom they come in.
   /** Trees from here: further out they would be specks, and the ground's woods show where they are anyway. */
   const TREES_ZOOM = 14;
   /** From here the roads are drawn at their surveyed widths, where Trafikverket has them. */
@@ -1078,41 +1051,67 @@
       _subLayerProps: BUILDING_SUBLAYER_PROPS,
       pickable: false,
     });
-  /** Whether the layer drawn as `id` last frame had all its tiles in view loaded. */
-  // (deck.gl's layer manager is protected in its types, not in fact)
-  type Layers = { layerManager?: { getLayers(o: { layerIds: string[] }): { id: string; isLoaded: boolean }[] } };
-  const layerLoaded = (id: string) => Boolean((deck as unknown as Layers | undefined)?.layerManager?.getLayers({ layerIds: [id] }).find((l) => l.id === id)?.isLoaded);
-  const realisticBuildingLayer = (url: string, sun: readonly number[], sgl: boolean) =>
-    new BuildingLayer({
-      id: sgl ? "buildings-sgl" : "buildings-realistic",
-      data: sgl ? SGL_TILES : url,
-      // (deck.gl hides a tile layer under its minZoom: from where they are to show)
-      minZoom: sgl ? SGL_FROM_ZOOM : REALISTIC_BUILDINGS_ZOOM,
-      maxZoom: sgl ? SGL_ZOOM : 14,
-      loadOptions: sgl ? SGL_BUILDING_OPTIONS : BUILDING_LOAD_OPTIONS,
+  /**
+   * Close in (the flat map), buildings by their distance from the camera
+   * (lod-tileset.ts): Streets GL's, each with its height, materials and roof,
+   * within a few kilometres; OpenFreeMap's further; the backend's blocks far
+   * off. A coarser tile stays until the finer ones over it are in, so nothing
+   * goes missing meanwhile, and none are drawn twice.
+   */
+  const CITY_LOD: Lod = { levels: [9, 10, 11, 12, 14, 16], bias: 0.5, maxDistance: 80_000 };
+  /** The realistic ground the same way: Streets GL's close by, OpenMapTiles' at every zoom they have further off. */
+  const GROUND_LOD: Lod = { levels: [9, 10, 11, 12, 13, 14, 16], bias: 0.5, maxDistance: 80_000 };
+  /** Tiles from here on cast shadows and get pitched roofs; the far ones are only buildings. */
+  const CITY_CLOSE_ZOOM = 14;
+  let citySources: { key: string; sources: BuildingSource[] } = { key: "", sources: [] };
+  function cityBuildingSources(url: string, realistic: boolean): BuildingSource[] {
+    const key = `${url} ${realistic}`;
+    if (citySources.key !== key) {
+      const sources: BuildingSource[] = [];
+      if (isTauri()) sources.push({ zooms: [9, 10, 11, 12], url: buildingTilesUrl(), layers: ["building"] });
+      sources.push({ zooms: [14], url, layers: ["building"] });
       // (with Overture's heights where Streets GL's tiles have none)
-      ...(sgl ? { fetch: sglBuildingFetch as never } : {}),
+      if (realistic) sources.push({ zooms: [SGL_ZOOM], url: SGL_TILES, layers: ["buildings"], fetch: sglBuildingFetch as never });
+      citySources = { key, sources };
+    }
+    return citySources.sources;
+  }
+  const cityBuildingLayer = (url: string, realistic: boolean, sun: readonly number[]) =>
+    new BuildingLayer({
+      id: realistic ? "buildings-city-realistic" : "buildings-city",
+      // (each tile's own source, `sources`; this only says the layer has tiles)
+      data: url,
+      sources: cityBuildingSources(url, realistic),
+      lod: CITY_LOD,
+      closeFromZoom: CITY_CLOSE_ZOOM,
+      maxZoom: realistic ? SGL_ZOOM : 14,
+      loadOptions: BUILDING_LOAD_OPTIONS,
+      maxRequests: 8,
       extruded: true,
       filled: true,
       stroked: false,
       getElevation: buildingElevation,
-      wallColours: true,
-      material: UNLIT,
       parameters: NO_CULL,
+      // (outlines counter-clockwise in the tiles' own numbers: walls with outward normals)
       _subLayerProps: BUILDING_SUBLAYER_PROPS,
-      extensions: FACADED,
+      pickable: false,
       sun,
-      // in steps, so the tiles aren't redrawn for every flicker of the light
-      shadowStrength: Math.round(sunStrength() * REALISTIC_SHADOW_STRENGTH * 20) / 20,
-      shadowColor: REALISTIC_SHADOW_COLOR,
       shadowParameters: SHADOW_PARAMETERS,
-      shadowExtensions: HAZE_FADED,
-      footShade: FOOT_SHADE_ALPHA,
-      footShadeExtensions: FOOT_SHADED,
-      // Streets GL's tiles say how their roofs are shaped
-      roofExtensions: sgl ? ROOFED : [],
-      // (the map's own are drawn until these are in: drawn again then)
-      onViewportLoad: sgl ? render : undefined,
+      ...(realistic
+        ? {
+            wallColours: true,
+            material: UNLIT,
+            extensions: FACADED,
+            // in steps, so the tiles aren't redrawn for every flicker of the light
+            shadowStrength: Math.round(sunStrength() * REALISTIC_SHADOW_STRENGTH * 20) / 20,
+            shadowColor: REALISTIC_SHADOW_COLOR,
+            shadowExtensions: HAZE_FADED,
+            footShade: FOOT_SHADE_ALPHA,
+            footShadeExtensions: FOOT_SHADED,
+            // Streets GL's tiles say how their roofs are shaped
+            roofExtensions: ROOFED,
+          }
+        : { getFillColor: BUILDING_COLOR, material: BUILDING_MATERIAL, shadowColor: SHADOW_COLOR }),
     });
 
   // Night shading, recomputed each minute: four nested bands (sunset and the
@@ -1256,6 +1255,23 @@
   let arenasVersion = -1;
   /** deck.gl's GPU device, for the arenas' buffers; set once it has one. */
   let device: Device | null = null;
+  /** The aircraft's icon atlases as GPU textures, by URL: null while one loads (or if it failed). */
+  const atlases = new Map<string, Texture | null>();
+  function atlas(url: string): Texture | null {
+    if (!device) return null;
+    if (!atlases.has(url)) {
+      atlases.set(url, null);
+      const sampler = { addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", magFilter: "linear", minFilter: "linear", mipmapFilter: "linear" };
+      loadKtx2(device, url, { srgb: false, array: false, sampler }).then(
+        (texture) => {
+          atlases.set(url, texture);
+          render();
+        },
+        (e) => console.warn("aircraft icons:", e),
+      );
+    }
+    return atlases.get(url) ?? null;
+  }
   /** The first thing that stopped the map drawing, shown with a way to report it. */
   let mapError = $state<{ message: string; stack: string } | null>(null);
   function reportMapError(e: unknown) {
@@ -2576,9 +2592,9 @@
       if (flat) layers.push(landCoverGroundLayer(GROUNDED, SURFACE_NO_CULL));
       // close in, the numbered roads as wide as Trafikverket has them (the app, with its key)
       if (flat && zoom >= ROAD_WIDTHS_ZOOM) wantRoadWidths(cLon, cLat, render);
-      // Streets GL's ground close in; the map's own under it until Streets GL's tiles are in (not empty meanwhile)
-      if (tileUrl && (!sgl || !layerLoaded("ground-sgl"))) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
-      if (sgl) layers.push(sglGroundLayer(mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion(), render));
+      // on the flat map Streets GL's ground close by and the map's own further off, by distance; on the globe the map's
+      if (tileUrl && flat) layers.push(cityGroundLayer(tileUrl, GROUND_LOD, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
+      else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
       // and always in relief: the lie of the land
       layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
       const clouds = 1 - smoothstep(CLOUDS_FULL_ZOOM, CLOUDS_GONE_ZOOM, zoom);
@@ -2608,15 +2624,9 @@
     } else freeArenas();
     // (the realistic map lights its night side itself: each place by its own sun)
     if (daylight && !realistic) layers.push(nightLayer(now));
-    const showBuildings = Boolean(tileUrl && buildings && flat && zoom >= (realistic ? REALISTIC_BUILDINGS_ZOOM : 13));
-    // (the app's backend makes them)
-    if (buildings && !showBuildings && isTauri() && zoom >= FAR_BUILDINGS_ZOOM) layers.push(farBuildingLayer(realistic));
-    if (showBuildings && realistic) {
-      const sun = realisticShadowSun(now, cLat, cLon);
-      // close in Streets GL's, and the map's own until those are in
-      if (!sgl || !layerLoaded("buildings-sgl")) layers.push(realisticBuildingLayer(tileUrl!, sun, false));
-      if (sgl) layers.push(realisticBuildingLayer(tileUrl!, sun, true));
-    } else if (showBuildings) layers.push(buildingLayer(tileUrl!, shadowSun(now)));
+    // on the globe the backend's blocks (the app's backend makes them); on the flat map all of them, by distance
+    if (buildings && !flat && isTauri() && zoom >= FAR_BUILDINGS_ZOOM) layers.push(farBuildingLayer(realistic));
+    if (buildings && flat && tileUrl) layers.push(cityBuildingLayer(tileUrl, realistic, realistic ? realisticShadowSun(now, cLat, cLon) : shadowSun(now)));
     if (realistic && tileUrl && flat && zoom >= TREES_ZOOM) {
       // out to about as far as the camera is from the point it looks at
       const distance = CAMERA_HEIGHTS * container.clientHeight * mpp;
@@ -2893,14 +2903,16 @@
       });
       // a thin dark border under every silhouette, so they stand out on bright
       // weather and imagery and from each other where traffic is dense
-      if (aircraftModels.outlineAtlas) {
+      const outlineAtlas = aircraftModels.outlineAtlas && atlas(aircraftModels.outlineAtlas);
+      const iconAtlas = atlas(aircraftModels.iconAtlas!);
+      if (outlineAtlas && iconAtlas) {
         layers.push(
           new IconLayer<LiveFlight>({
             id: "aircraft-icon-outlines",
             data: icons,
             getPosition: (_, { index }) => iconPositions[index],
             getIcon: (_, { index }) => iconNames[index],
-            iconAtlas: aircraftModels.outlineAtlas,
+            iconAtlas: outlineAtlas as never,
             iconMapping: aircraftModels.outlineMapping,
             // the same silhouette size, in a cell padded for the border
             getSize: (_, { index }) => screenPx(iconSizes[index]) * 1.06 * aircraftModels.outlineScale,
@@ -2917,13 +2929,13 @@
           }),
         );
       }
-      layers.push(
+      if (iconAtlas) layers.push(
         new IconLayer<LiveFlight>({
           id: "aircraft-icons",
           data: icons,
           getPosition: (_, { index }) => iconPositions[index],
           getIcon: (_, { index }) => iconNames[index],
-          iconAtlas: aircraftModels.iconAtlas!,
+          iconAtlas: iconAtlas as never,
           iconMapping: aircraftModels.iconMapping,
           // the silhouettes are drawn 94% of the way across their cell
           getSize: (_, { index }) => screenPx(iconSizes[index]) * 1.06,

@@ -15,6 +15,8 @@ import { readTriangles } from "./gltf1.mjs";
 const SOURCE = "https://raw.githubusercontent.com/Flightradar24/fr24-3d-models/master/models";
 const CACHE = new URL("../../.cache/fr24-models/", import.meta.url);
 const OUT = new URL("../../static/aircraft/", import.meta.url);
+// the icon atlases, which scripts/compress-textures.mjs makes static/aircraft/*.ktx2
+const ATLASES = new URL("../../textures/aircraft/", import.meta.url);
 
 /** Triangle budget per level of detail. */
 const LODS = [220, 2600];
@@ -814,10 +816,11 @@ icons.forEach((mask, i) => {
 index.icon.outline = { cell: OUTLINE_CELL, pad: OUTLINE_PAD };
 
 mkdirSync(OUT, { recursive: true });
+mkdirSync(ATLASES, { recursive: true });
 writeFileSync(new URL("meshes.bin", OUT), Buffer.concat(meshes));
-writeFileSync(new URL("icons.png", OUT), png(columns * ICON, rows * ICON, atlas));
+writeFileSync(new URL("icons.png", ATLASES), png(columns * ICON, rows * ICON, atlas));
 const outlinePng = png(columns * OUTLINE_CELL, rows * OUTLINE_CELL, outlines);
-writeFileSync(new URL("icons-outline.png", OUT), outlinePng);
+writeFileSync(new URL("icons-outline.png", ATLASES), outlinePng);
 writeFileSync(new URL("index.json", OUT), JSON.stringify(index));
 console.log(
   `\n${index.icon.names.length} models · meshes.bin ${(Buffer.concat(meshes).length / 1024).toFixed(0)} KB · ` +

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Builds the realistic map's textures (static/realistic/) from Streets GL's
+Builds the realistic map's textures (textures/realistic/, which
+scripts/compress-textures.mjs makes the app's) from Streets GL's
 (https://github.com/StrandedKitty/streets-gl, MIT licence, © StrandedKitty):
 
     python3 scripts/realistic-textures.py path/to/streets-gl
@@ -147,7 +148,7 @@ def main() -> None:
         sys.exit(__doc__)
     repo = Path(sys.argv[1])
     root = repo / "src/resources/textures"
-    out = Path(__file__).resolve().parent.parent / "static" / "realistic"
+    out = Path(__file__).resolve().parent.parent / "textures" / "realistic"
     out.mkdir(parents=True, exist_ok=True)
     # the ground's roughness is its surface's (realistic-ground.ts), so it needs no masks
     # (the Earth's picture is earth-texture.py's)

@@ -170,10 +170,10 @@ class AircraftModels {
         ]),
       );
     this.iconMapping = mapping(cell);
-    this.iconAtlas = `${BASE}/icons.png`;
+    this.iconAtlas = `${BASE}/icons.ktx2`;
     if (outline) {
       this.outlineMapping = mapping(outline.cell);
-      this.outlineAtlas = `${BASE}/icons-outline.png`;
+      this.outlineAtlas = `${BASE}/icons-outline.ktx2`;
       this.outlineScale = outline.cell / cell;
     }
     this.loaded = true;

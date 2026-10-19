@@ -1,18 +1,18 @@
 // The realistic map's textures: Streets GL's (github.com/StrandedKitty/streets-gl,
 // MIT licence, © StrandedKitty; static/realistic/LICENSE-streets-gl.txt), built
-// into static/realistic/ by scripts/realistic-textures.py. Each set is texture
+// by scripts/realistic-textures.py and compress-textures.mjs into
+// static/realistic/, as GPU-compressed KTX2 files (ktx2.ts). Each set is texture
 // arrays, a layer per surface: its colour (sRGB) and its normal map; the
 // buildings' also their mask (roughness, metalness, and where the building's
 // own colour tints it) and where their windows light up at night; the trees'
 // (a picture of each whole tree) also their shape, as a mask, and the one
 // normal map of a crown's volume they share.
 //
-// Every image is opaque, and decoded exactly as stored: a browser may
-// premultiply an image's colour by its alpha as it decodes it (Safari does),
-// which loses the colour wherever the alpha is 0. The images are uploaded the
-// way they are stored, top row first; the shaders turn them the right way up.
+// Every image is opaque. The images are uploaded the way they are stored, top
+// row first; the shaders turn them the right way up.
 
 import type { Device, Texture } from "@luma.gl/core";
+import { loadKtx2 } from "./ktx2";
 
 /** The buildings' layers, in the order the shaders index them. */
 export const BUILDING_TEXTURES = [
@@ -99,34 +99,19 @@ const SAMPLER = {
 
 type Kind = "color" | "normal" | "mask" | "glow";
 
-/** A texture array of `images`, all one size, mipmapped; or until they load, a 1×1 stand-in for their kind. */
-function textureArray(device: Device, images: ImageBitmap[] | null, kind: Kind): Texture {
+/** Until the textures load, a 1×1 stand-in for a kind. */
+function standIn(device: Device, kind: Kind): Texture {
   // the colour is sRGB, filtered in linear light; the rest are data
   const format = kind === "color" ? "rgba8unorm-srgb" : "rgba8unorm";
-  if (!images) {
-    return device.createTexture({
-      dimension: "2d-array",
-      format,
-      width: 1,
-      height: 1,
-      depth: 1,
-      sampler: SAMPLER,
-      data: new Uint8Array(STAND_IN[kind]),
-    } as never);
-  }
-  const size = images[0].width;
-  const texture = device.createTexture({
+  return device.createTexture({
     dimension: "2d-array",
     format,
-    width: size,
-    height: size,
-    depth: images.length,
-    mipLevels: Math.floor(Math.log2(size)) + 1,
+    width: 1,
+    height: 1,
+    depth: 1,
     sampler: SAMPLER,
+    data: new Uint8Array(STAND_IN[kind]),
   } as never);
-  images.forEach((image, z) => texture.copyExternalImage({ image, z, width: size, height: size, depth: 1 }));
-  (texture as unknown as { generateMipmapsWebGL(): void }).generateMipmapsWebGL();
-  return texture;
 }
 
 /** A 1×1 array of nothing: no tree's shape. */
@@ -135,28 +120,6 @@ const blank = (device: Device) =>
 /** A 1×1 flat normal map. */
 const flatNormal = (device: Device) =>
   device.createTexture({ format: "rgba8unorm", width: 1, height: 1, sampler: SAMPLER, data: new Uint8Array(STAND_IN.normal) } as never);
-
-/** A plain 2D texture of `image`, mipmapped. */
-function texture2d(device: Device, image: ImageBitmap, format: string, sampler: object = SAMPLER): Texture {
-  const texture = device.createTexture({
-    format,
-    width: image.width,
-    height: image.height,
-    mipLevels: Math.floor(Math.log2(Math.max(image.width, image.height))) + 1,
-    sampler,
-  } as never);
-  texture.copyExternalImage({ image, width: image.width, height: image.height });
-  (texture as unknown as { generateMipmapsWebGL(): void }).generateMipmapsWebGL();
-  image.close();
-  return texture;
-}
-
-/** An image's pixels exactly as stored (no premultiplying, no colour conversion: normal maps are data). */
-async function bitmap(url: string): Promise<ImageBitmap> {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`${url}: ${response.status}`);
-  return createImageBitmap(await response.blob(), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
-}
 
 const STAND_IN: Record<Kind, [number, number, number, number]> = {
   color: [255, 255, 255, 255],
@@ -167,21 +130,17 @@ const STAND_IN: Record<Kind, [number, number, number, number]> = {
   glow: [0, 0, 0, 255],
 };
 
-async function loadSet<K extends Kind>(device: Device, names: readonly string[], kinds: readonly K[]): Promise<Record<K, Texture>> {
-  const images = await Promise.all(kinds.map((kind) => Promise.all(names.map((n) => bitmap(`${BASE}${n}.${kind}.webp`)))));
-  const set = {} as Record<K, Texture>;
-  kinds.forEach((kind, i) => {
-    set[kind] = textureArray(device, images[i], kind);
-    for (const image of images[i]) image.close();
-  });
-  return set;
+/** A set's textures: an array of a kind's layers each, from static/realistic/<set>.<kind>.ktx2. */
+async function loadSet<K extends Kind>(device: Device, set: string, kinds: readonly K[]): Promise<Record<K, Texture>> {
+  const textures = await Promise.all(kinds.map((kind) => loadKtx2(device, `${BASE}${set}.${kind}.ktx2`, { srgb: kind === "color", array: true, sampler: SAMPLER })));
+  return Object.fromEntries(kinds.map((kind, i) => [kind, textures[i]])) as Record<K, Texture>;
 }
 
 const BUILDING_KINDS = ["color", "normal", "mask", "glow"] as const;
 const GROUND_KINDS = ["color", "normal"] as const;
 const TREE_KINDS = ["color", "normal", "mask"] as const;
 const standIns = <K extends Kind>(device: Device, kinds: readonly K[]) =>
-  Object.fromEntries(kinds.map((kind) => [kind, textureArray(device, null, kind)])) as Record<K, Texture>;
+  Object.fromEntries(kinds.map((kind) => [kind, standIn(device, kind)])) as Record<K, Texture>;
 
 let state: { device: Device; textures: RealisticTextures } | null = null;
 const listeners = new Set<() => void>();
@@ -219,21 +178,23 @@ export function realisticTextures(device: Device): RealisticTextures {
   const mine = state;
   void (async () => {
     try {
-      const [buildings, ground, trees, water, earth, volume, night] = await Promise.all([
-        loadSet(device, BUILDING_TEXTURES, BUILDING_KINDS),
-        loadSet(device, GROUND_TEXTURES, GROUND_KINDS),
-        loadSet(device, TREE_TEXTURES, TREE_KINDS),
-        bitmap(`${BASE}water.normal.webp`),
-        bitmap(`${BASE}earth.color.webp`),
-        bitmap(`${BASE}tree-volume.normal.webp`),
-        bitmap(`${BASE}earth.night.webp`),
-      ]);
-      if (state !== mine) return;
-      const waterTexture = texture2d(device, water, "rgba8unorm");
       // round the world east to west; not over the poles
-      const earthTexture = texture2d(device, earth, "rgba8unorm-srgb", { ...SAMPLER, addressModeV: "clamp-to-edge" });
-      const nightTexture = texture2d(device, night, "rgba8unorm-srgb", { ...SAMPLER, addressModeV: "clamp-to-edge" });
-      const volumeTexture = texture2d(device, volume, "rgba8unorm", { ...SAMPLER, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
+      const globe = { ...SAMPLER, addressModeV: "clamp-to-edge" };
+      const plain = (name: string, srgb: boolean, sampler: object = SAMPLER) => loadKtx2(device, `${BASE}${name}.ktx2`, { srgb, array: false, sampler });
+      const [buildings, ground, trees, waterTexture, earthTexture, volumeTexture, nightTexture] = await Promise.all([
+        loadSet(device, "building", BUILDING_KINDS),
+        loadSet(device, "ground", GROUND_KINDS),
+        loadSet(device, "tree", TREE_KINDS),
+        plain("water.normal", false),
+        plain("earth.color", true, globe),
+        plain("tree-volume.normal", false, { ...SAMPLER, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        plain("earth.night", true, globe),
+      ]);
+      if (state !== mine) {
+        for (const set of [buildings, ground, trees]) for (const t of Object.values(set)) t.destroy();
+        for (const t of [waterTexture, earthTexture, volumeTexture, nightTexture]) t.destroy();
+        return;
+      }
       for (const old of [textures.buildings, textures.ground, textures.trees]) for (const t of Object.values(old)) t.destroy();
       textures.water.destroy();
       textures.earth.destroy();

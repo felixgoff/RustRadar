@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Builds the realistic map's picture of the Earth's lights at night
-(static/realistic/earth.night.webp), which the globe's night side glows with,
+(textures/realistic/earth.night.webp), which the globe's night side glows with,
 from NASA's Black Marble 2016 (public domain; NASA Earth Observatory, Joshua
 Stevens, Miguel Román, Suomi NPP VIIRS):
 
@@ -23,7 +23,7 @@ import numpy as np
 from PIL import Image
 
 WIDTH, HEIGHT = 4096, 2048
-OUT = Path(__file__).resolve().parent.parent / "static/realistic/earth.night.webp"
+OUT = Path(__file__).resolve().parent.parent / "textures/realistic/earth.night.webp"
 # below this brightness (0 to 1) it is the dark ground, not a light
 FLOOR = 0.16
 

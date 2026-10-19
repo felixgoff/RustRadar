@@ -661,10 +661,23 @@ const rbuildInject = {
     vec3 at = vec3(uv.x, -uv.y, layer);
     // the textures coarser further off (past a kilometre and a half, a mip level each doubling)
     float detail = clamp(log2(length(rl_eye) / 1500.0), 0.0, 4.0);
+    // how big a bay and a storey are on screen: the side, in pixels, of a square of the same area
+    // (here, where the wall and roof branches have joined: the derivatives hold)
+    vec2 du = dFdx(uv);
+    vec2 dv = dFdy(uv);
+    float cellPx = inversesqrt(max(abs(du.x * dv.y - du.y * dv.x), 1e-12));
+    // windows from 10 px a bay, fading out under that, gone under 5 px: there the plain wall
+    float near = smoothstep(5.0, 10.0, cellPx);
     vec3 c = texture(rbuild_color, at, detail).rgb;
     vec3 nm = texture(rbuild_normal, at, detail).xyz * 2.0 - 1.0;
     vec3 m = texture(rbuild_mask, at, detail).rgb;
-    float glow = texture(rbuild_glow, at, detail).r;
+    // a wall with windows (the same all over each wall: the samples' derivatives hold in here too)
+    if (wall && facade < 3.5 && rb_info.y > 0.5) {
+      vec3 plain = vec3(at.xy, facade * 2.0);
+      c = mix(texture(rbuild_color, plain, detail).rgb, c, near);
+      nm = mix(texture(rbuild_normal, plain, detail).xyz * 2.0 - 1.0, nm, near);
+      m = mix(texture(rbuild_mask, plain, detail).rgb, m, near);
+    }
     vec3 albedo = c * mix(vec3(1.0), tint, m.b);
     if (!wall) albedo = mix(albedo, vec3(0.8), rlight.snow * 0.92);
     // the texture's u runs along the wall (or east), its v up the wall (or north)
@@ -677,9 +690,15 @@ const rbuildInject = {
     float ao = wall ? mix(0.55, 1.0, smoothstep(0.0, 2.5, rb_z)) : 1.0;
     float roughness = mix(m.r, 0.18, rlight.wet * 0.5);
     vec3 lit = rl_shade(albedo, n, v, roughness, m.g, ao, rl_sunVisible());
-    // at night about half the windows are lit, warm, some brighter
-    float pick = rl_hash(floor(uv) + rb_tint.xy * 41.0, 1021.0);
-    lit += glow * step(0.48, pick) * rlight.night * mix(vec3(1.0, 0.62, 0.3), vec3(1.0, 0.84, 0.62), step(0.85, pick)) * 0.28;
+    // at night about half the windows are lit, warm, some brighter; where they are too small to tell
+    // apart, their light evened out over the wall (the windows' share of it, lit on average)
+    if (rlight.night > 0.0) {
+      float pick = rl_hash(floor(uv) + rb_tint.xy * 41.0, 1021.0);
+      float glow = texture(rbuild_glow, at, detail).r;
+      vec3 each = glow * step(0.48, pick) * mix(vec3(1.0, 0.62, 0.3), vec3(1.0, 0.84, 0.62), step(0.85, pick));
+      vec3 evened = textureLod(rbuild_glow, vec3(0.5, 0.5, layer), 16.0).r * vec3(0.52, 0.355, 0.204);
+      lit += mix(evened, each, near) * rlight.night * 0.28;
+    }
     color = vec4(rl_display(rl_aerial(lit)), 1.0);
   }
   `,

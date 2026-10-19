@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Builds the realistic map's picture of the whole Earth (static/realistic/
+Builds the realistic map's picture of the whole Earth (textures/realistic/
 earth.color.webp), which colours the land zoomed out where the map's own data
 says nothing (deserts, savanna, tundra), from NASA's Blue Marble: Next
 Generation (public domain; NASA Earth Observatory, Reto Stöckli), cloud-free,
@@ -27,7 +27,7 @@ import numpy as np
 from PIL import Image
 
 WIDTH, HEIGHT = 4096, 2048
-OUT = Path(__file__).resolve().parent.parent / "static/realistic/earth.color.webp"
+OUT = Path(__file__).resolve().parent.parent / "textures/realistic/earth.color.webp"
 
 
 def to_linear(c):

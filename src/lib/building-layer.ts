@@ -7,13 +7,14 @@
 // loads or the `sun` prop changes (the caller steps it every minute or so).
 
 import { COORDINATE_SYSTEM, type DefaultProps, type Layer, type LayersList } from "@deck.gl/core";
-import { MVTLayer } from "@deck.gl/geo-layers";
+import type { MVTLayer } from "@deck.gl/geo-layers";
 import { PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import type { BinaryFeatureCollection } from "@loaders.gl/schema";
 import { Geometry } from "@luma.gl/engine";
 import { BUILDING_SHADOW_ALPHA, buildingShadows, shadowStep } from "./building-shadow";
 import { buildingStyle, type BuildingLook, roofColour } from "./realistic";
+import { LodMVTLayer, type TileSource } from "./lod-tileset";
 import { pitched, roofParts } from "./roofs";
 import { sglBuilding } from "./streets-gl";
 import { localSun, SHADOW_MIN_ALPHA, sunlight } from "./shadow";
@@ -135,7 +136,16 @@ function tileShadows(content: BinaryFeatureCollection, tile: TileProps["tile"], 
   };
 }
 
+/**
+ * Where a zoom's buildings come from: Streets GL's at 16, OpenMapTiles' at
+ * 14, the backend's at 9 to 12. Their features say which they are
+ * (`layerName`), so the accessors read each as its source has it.
+ */
+export type BuildingSource = TileSource;
+
 export type BuildingLayerProps = {
+  /** Tiles from this zoom on cast shadows, shade the feet of their walls and get pitched roofs; coarser ones, far off, don't. */
+  closeFromZoom: number;
   /** The sun's direction from the Earth's centre (`sunDirection`); null casts no shadows. */
   sun: readonly number[] | null;
   /** Shadow colour; the alpha comes from the sun's altitude. */
@@ -158,6 +168,7 @@ export type BuildingLayerProps = {
 };
 
 const defaultProps: DefaultProps<BuildingLayerProps> = {
+  closeFromZoom: 0,
   sun: { type: "array", value: null, compare: false },
   shadowColor: { type: "color", value: [0, 0, 0] },
   shadowParameters: { type: "object", value: {}, compare: false },
@@ -321,11 +332,11 @@ const RECAST_BUDGET_MS = 4;
 /** The band of shade along the foot of a wall, metres across (half under the building). */
 const FOOT_SHADE_M = 5;
 
-type CastTile = { content: unknown; layers: unknown[] | null; isVisible: boolean };
+type CastTile = { content: unknown; layers: unknown[] | null; isVisible: boolean; index: { z: number } };
 
-export class BuildingLayer extends MVTLayer<Properties, BuildingLayerProps> {
+export class BuildingLayer extends LodMVTLayer<Properties, BuildingLayerProps> {
   static layerName = "BuildingLayer";
-  static defaultProps = defaultProps as never;
+  static defaultProps = { ...(LodMVTLayer.defaultProps as object), ...defaultProps } as never;
 
   /** When this frame's recasting budget runs out, and whether it has recast a tile yet. */
   private recastUntil = 0;
@@ -350,7 +361,7 @@ export class BuildingLayer extends MVTLayer<Properties, BuildingLayerProps> {
     const tiles = (this.state.tileset?.tiles ?? []) as unknown as CastTile[];
     /** On screen, with shadows cast under an older sun (the others are recast when they come back). */
     const stale = (tile: CastTile) =>
-      Boolean(sun && tile.isVisible && tile.layers && tile.content && !Array.isArray(tile.content) && shadowCache.get(tile.content)?.sun !== sun);
+      Boolean(sun && tile.isVisible && tile.index.z >= this.props.closeFromZoom && tile.layers && tile.content && !Array.isArray(tile.content) && shadowCache.get(tile.content)?.sun !== sun);
     for (const tile of tiles) {
       // rebuilt below, if there is time for its shadows
       if (stale(tile) && this.shadowsOf(tile.content as BinaryFeatureCollection, tile as never, sun!)) tile.layers = null;
@@ -362,7 +373,8 @@ export class BuildingLayer extends MVTLayer<Properties, BuildingLayerProps> {
   }
 
   renderSubLayers(props: Parameters<MVTLayer["renderSubLayers"]>[0]): Layer | null | LayersList {
-    if (this.props.wallColours) (props as unknown as { getFillColor: unknown }).getFillColor = wallColoursOf(props.tile as never);
+    // (GeoJSON, on the globe, has no outlines in the tile's units to pick by)
+    if (this.props.wallColours && !Array.isArray(props.data)) (props as unknown as { getFillColor: unknown }).getFillColor = wallColoursOf(props.tile as never);
     if (this.props.roofColours) (props as unknown as { getFillColor: unknown }).getFillColor = roofColoursOf(props.tile as never);
     // sets the tile's model matrix and coordinate system on `props`
     const buildings = super.renderSubLayers(props);
@@ -370,6 +382,8 @@ export class BuildingLayer extends MVTLayer<Properties, BuildingLayerProps> {
     const content = props.data as BinaryFeatureCollection | unknown[] | null;
     if (!content || Array.isArray(content)) return buildings;
     const tile = props.tile as TileProps["tile"];
+    // far off, only the buildings
+    if (tile.index.z < this.props.closeFromZoom) return buildings;
     const shadow = sun && shadowStrength > 0 ? (this.shadowsOf(content, tile, sun) ?? shadowCache.get(content))?.shadow : null;
     const tileProps = props as unknown as TileProps;
     const ground: Layer[] = [];
@@ -423,7 +437,8 @@ export class BuildingLayer extends MVTLayer<Properties, BuildingLayerProps> {
         }),
       );
     }
-    const roofs = this.props.roofExtensions.length ? tileRoofs(content, tile as never) : null;
+    // (only Streets GL's tiles say how their roofs are shaped)
+    const roofs = this.props.roofExtensions.length && isSgl(content) ? tileRoofs(content, tile as never) : null;
     const over: Layer[] = [];
     if (roofs) {
       over.push(
@@ -444,6 +459,9 @@ export class BuildingLayer extends MVTLayer<Properties, BuildingLayerProps> {
     return ground.length || over.length ? [...ground, buildings, ...over] : buildings;
   }
 }
+
+/** Whether a tile is Streets GL's (its features in its `buildings` layer). */
+const isSgl = (content: BinaryFeatureCollection) => (content.polygons?.properties?.[0] as Properties | undefined)?.layerName === "buildings";
 
 const ONE = [0];
 const ORIGIN: [number, number, number] = [0, 0, 0];

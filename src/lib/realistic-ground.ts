@@ -12,7 +12,8 @@ import { GeoJsonLayer, PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import type { Device } from "@luma.gl/core";
 import { bridgeParts, omtDeck, type Lines, type TileIndex } from "./bridges";
 import { LC } from "./landcover";
-import { SGL_FROM_ZOOM, SGL_TILES, SGL_ZOOM, sglFetch, sglPath } from "./streets-gl";
+import { type Lod, LodMVTLayer, type TileSource } from "./lod-tileset";
+import { SGL_TILES, SGL_ZOOM, sglFetch, sglPath } from "./streets-gl";
 import { realisticLight } from "./realistic";
 import { withRoadWidths } from "./road-widths";
 import { type GROUND_TEXTURES, realisticTextures, textureLayer } from "./realistic-textures";
@@ -771,22 +772,42 @@ export const groundLayer = (url: string, flat: boolean, workerUrl: string, exten
 };
 
 const SGL_GROUND_LAYERS = ["common", "natural", "water", "highways"];
-const sglOptions = new Map<string, object>();
+/** OpenMapTiles' ground at zooms up to 14 and Streets GL's at 16, each where the other's isn't (tiles by distance). */
+let citySources: { key: string; sources: TileSource[] } = { key: "", sources: [] };
+const cityGroundSources = (url: string) => {
+  if (citySources.key !== url) {
+    citySources = {
+      key: url,
+      sources: [
+        { zooms: [9, 10, 11, 12, 13, 14], url, layers: GROUND_LAYERS },
+        { zooms: [SGL_ZOOM], url: SGL_TILES, layers: SGL_GROUND_LAYERS, fetch: sglFetch as never },
+      ],
+    };
+  }
+  return citySources.sources;
+};
+const renderCityGround = (props: { tile: { index: { z: number } } }) =>
+  // far out, the main roads and rivers stay a hairline; Streets GL's close in as wide as they are
+  new GroundTile({ ...props, lineWidthMinPixels: props.tile.index.z >= SGL_ZOOM ? 0 : 0.6 } as never);
 
-/** The ground close in from Streets GL's tiles (streets-gl.ts): each field, garden and road as mapped. Flat projection only. */
-export const sglGroundLayer = (workerUrl: string, extensions: unknown[], parameters: object, roadsVersion = 0, onViewportLoad?: () => void) => {
-  let options = sglOptions.get(workerUrl);
-  if (!options) sglOptions.set(workerUrl, (options = { mvt: { layers: SGL_GROUND_LAYERS, workerUrl } }));
-  return new MVTLayer({
-    id: "ground-sgl",
-    data: SGL_TILES,
+/**
+ * The flat map's ground, its tiles by their distance from the camera (`lod`,
+ * lod-tileset.ts): Streets GL's, each field, garden and road as mapped,
+ * close by; OpenMapTiles' further off. A coarser tile stays until the finer
+ * ones over it are in (the ground under them showing through otherwise).
+ */
+export const cityGroundLayer = (url: string, lod: Lod, workerUrl: string, extensions: unknown[], parameters: object, roadsVersion = 0) => {
+  let options = loadOptions.get(workerUrl);
+  if (!options) loadOptions.set(workerUrl, (options = { mvt: { layers: GROUND_LAYERS, workerUrl } }));
+  return new LodMVTLayer({
+    id: "ground-city",
+    data: url,
+    sources: cityGroundSources(url),
+    lod,
     roadsVersion,
-    onViewportLoad,
-    minZoom: SGL_FROM_ZOOM,
     maxZoom: SGL_ZOOM,
     loadOptions: options,
-    fetch: sglFetch as never,
-    renderSubLayers: renderGround as never,
+    renderSubLayers: renderCityGround as never,
     getFillColor: areaPaint as never,
     getLineColor: linePaint as never,
     getLineWidth: lineWidth as never,

@@ -2175,8 +2175,23 @@
   const BLOCKS_MIN_ZOOM = 13;
   /** A train drawn this near a block's track is in it, metres. */
   const IN_BLOCK_M = 12;
-  const BLOCK_FREE: [number, number, number, number] = [60, 200, 110, 220];
-  const BLOCK_TAKEN: [number, number, number, number] = [235, 64, 52, 240];
+  const BLOCK_FREE: [number, number, number, number] = [60, 200, 110, 230];
+  const BLOCK_TAKEN: [number, number, number, number] = [235, 64, 52, 255];
+  /** Under every block's line, so it reads on any map. */
+  const BLOCK_CASING: [number, number, number, number] = [16, 18, 24, 200];
+  /** A signal's aspect, as worked out from the blocks: its own taken, the next one taken, or neither. */
+  type Aspect = "stop" | "caution" | "clear";
+  const ASPECT_COLOR: Record<Aspect, [number, number, number, number]> = {
+    stop: [235, 64, 52, 255],
+    caution: [250, 196, 40, 255],
+    clear: [60, 200, 110, 255],
+  };
+  /** Signals' names show from this zoom. */
+  const SIGNAL_NAMES_ZOOM = 15.5;
+  /** A block's end this near another's start leads into it, metres. */
+  const BLOCK_JOIN_M = 6;
+  /** A main signal, where its block starts, and the blocks a train passing it goes on into. */
+  type BlockSignal = { block: string; name: string | null; at: [number, number]; next: string[] };
   /** A block's track in a tunnel: at this much of its colour's alpha, dashed. */
   const BLOCK_TUNNEL_ALPHA = 0.5;
   const BLOCK_TUNNEL_DASHES: [number, number] = [2.5, 2];
@@ -2193,7 +2208,7 @@
   /** A stretch of a block's track as drawn: in a tunnel or not, up on the bridges along it (`[lon, lat, metres]`). */
   type BlockRun = { block: string; path: [number, number, number][] };
   /** The fetched blocks' track as drawn, worked out once for each set. */
-  let blockRuns: { of: TrainBlock[]; above: BlockRun[]; below: BlockRun[] } = { of: [], above: [], below: [] };
+  let blockRuns: { of: TrainBlock[]; above: BlockRun[]; below: BlockRun[]; signals: BlockSignal[] } = { of: [], above: [], below: [], signals: [] };
   let blocksAsking = false;
   let blocksAskedAt = 0;
   /** Which train is in each block (by block id), worked out now and then. */
@@ -2282,13 +2297,14 @@
     const taken = blocksTaken.by;
     if (blockRuns.of !== list) {
       const structures = blockSet.structures;
-      blockRuns = { of: list, above: [], below: [] };
+      blockRuns = { of: list, above: [], below: [], signals: signalsOf(list) };
       for (const b of list) {
         for (const line of b.lines) {
           for (const run of onStructures(line, structures)) (run.tunnel ? blockRuns.below : blockRuns.above).push({ block: b.id, path: run.path });
         }
       }
     }
+    const aspect = (s: BlockSignal): Aspect => (taken.has(s.block) ? "stop" : s.next.some((n) => taken.has(n)) ? "caution" : "clear");
     // each taken block named once, halfway along its first stretch
     const labels = list
       .filter((b) => taken.has(b.id))
@@ -2298,8 +2314,20 @@
     const ground = { cullMode: "none", depthWriteEnabled: false } as const;
     const top = { ...ground, depthCompare: "always" } as const;
     const color = (r: BlockRun) => (taken.has(r.block) ? BLOCK_TAKEN : BLOCK_FREE);
-    const width = (r: BlockRun) => (taken.has(r.block) ? 4 : 2.5);
+    const width = (r: BlockRun) => (taken.has(r.block) ? 5 : 3);
     return [
+      new PathLayer<BlockRun>({
+        id: "train-blocks-casing",
+        data: blockRuns.above,
+        getPath: (r) => r.path,
+        getColor: BLOCK_CASING,
+        getWidth: (r) => width(r) + 3,
+        widthUnits: "pixels",
+        capRounded: true,
+        parameters: ground,
+        getPolygonOffset: null,
+        updateTriggers: { getWidth: blocksTaken.version },
+      }),
       new PathLayer<BlockRun>({
         id: "train-blocks",
         data: blockRuns.above,
@@ -2329,6 +2357,40 @@
         parameters: top,
         updateTriggers: { getColor: blocksTaken.version, getWidth: blocksTaken.version },
       }),
+      // each block's signal at its start, lit as the blocks say, over everything
+      new ScatterplotLayer<BlockSignal>({
+        id: "train-signals",
+        data: blockRuns.signals,
+        getPosition: (s) => s.at,
+        getFillColor: (s) => ASPECT_COLOR[aspect(s)],
+        getLineColor: BLOCK_CASING,
+        getRadius: 6,
+        radiusUnits: "pixels",
+        stroked: true,
+        getLineWidth: 2,
+        lineWidthUnits: "pixels",
+        billboard: true,
+        pickable: true,
+        parameters: top,
+        updateTriggers: { getFillColor: blocksTaken.version },
+      }),
+      new TextLayer<BlockSignal>({
+        id: "train-signal-names",
+        data: view.zoom >= SIGNAL_NAMES_ZOOM ? blockRuns.signals.filter((s) => s.name) : [],
+        getPosition: (s) => s.at,
+        getText: (s) => s.name!,
+        getColor: [235, 238, 245, 255],
+        getSize: 10,
+        sizeUnits: "pixels",
+        fontFamily: "ui-monospace, monospace",
+        getTextAnchor: "start",
+        getPixelOffset: [10, 0],
+        background: true,
+        getBackgroundColor: [16, 18, 24, 200],
+        backgroundPadding: [3, 1],
+        billboard: true,
+        parameters: top,
+      }),
       new TextLayer<(typeof labels)[number]>({
         id: "train-block-labels",
         data: labels,
@@ -2346,6 +2408,32 @@
         updateTriggers: { getText: blocksTaken.version, getPosition: blocksTaken.version },
       }),
     ];
+  }
+
+  /** Each block's signal, and the blocks whose start one of its track's ends meets. */
+  function signalsOf(list: TrainBlock[]): BlockSignal[] {
+    // the blocks by where they start, in cells of about 100 m
+    const cell = (p: [number, number]) => `${Math.round(p[0] * 1000)},${Math.round(p[1] * 1000)}`;
+    const starts = new Map<string, TrainBlock[]>();
+    for (const b of list) {
+      const key = cell(b.lines[0][0]);
+      starts.set(key, [...(starts.get(key) ?? []), b]);
+    }
+    return list.map((b) => {
+      const next = new Set<string>();
+      for (const line of b.lines) {
+        const end = line[line.length - 1];
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = -1; dy <= 1; dy++) {
+            const key = `${Math.round(end[0] * 1000) + dx},${Math.round(end[1] * 1000) + dy}`;
+            for (const o of starts.get(key) ?? []) {
+              if (o.id !== b.id && metresBetween({ lon: end[0], lat: end[1] }, { lon: o.lines[0][0][0], lat: o.lines[0][0][1] }) <= BLOCK_JOIN_M) next.add(o.id);
+            }
+          }
+        }
+      }
+      return { block: b.id, name: b.signal, at: b.lines[0][0], next: [...next] };
+    });
   }
 
   /** Metres between two places (flat: fine over a few km). */
@@ -3311,6 +3399,20 @@
       const age = trainPositionAge(train.positionUnix, Date.now());
       return {
         html: `<div class="tt-head">${escape(train.name)}</div><div class="tt-sub">${escape(kind)}</div>${where ? `<div class="tt-sub">${escape(where)}</div>` : ""}<div class="tt-sub${age.stale ? " tt-warn" : ""}">${escape(age.label)}</div>`,
+        className: "aircraft-tooltip",
+      };
+    }
+    if (info.layer?.id === "train-signals" && info.object) {
+      const signal = info.object as BlockSignal;
+      const by = blocksTaken.by;
+      const ahead = signal.next.filter((n) => by.has(n)).map((n) => by.get(n)!);
+      const [head, sub] = by.has(signal.block)
+        ? ["Stop", `${by.get(signal.block)} in the block after it`]
+        : ahead.length
+          ? ["Caution", `${ahead.join(", ")} in the next block`]
+          : ["Clear", "No train in the block after it"];
+      return {
+        html: `<div class="tt-head">${escape(signal.name ? `Signal ${signal.name}` : "Main signal")} · ${head}</div><div class="tt-sub">${escape(sub)}</div><div class="tt-sub">From where the trains are, not the signal itself</div>`,
         className: "aircraft-tooltip",
       };
     }

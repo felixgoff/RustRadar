@@ -127,7 +127,8 @@ export function sglBuilding(p: Properties): SglBuilding {
   const levels = some(p.levels);
   const minLevel = num(p.minLevel);
   if (height !== null) roofHeight = Math.min(roofHeight, height - (minHeight ?? 0));
-  if (height === null) height = (levels ?? minLevel ?? 1) * LEVEL + roofHeight;
+  // (a tile decoded to binary has 0 for a minLevel not mapped: then one level, not none)
+  if (height === null) height = (levels ?? (minLevel ? minLevel + 1 : 1)) * LEVEL + roofHeight;
   if (minHeight === null) minHeight = Math.min((minLevel ?? 0) * LEVEL, height);
   // a roof on posts: only its roof
   if (p.buildingType === "roof") minHeight = Math.max(minHeight, height - Math.max(roofHeight, 1));

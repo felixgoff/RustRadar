@@ -7,6 +7,9 @@ describe("sglBuilding", () => {
     expect(sglBuilding({ levels: 3 })).toMatchObject({ height: 12, minHeight: 0, roofHeight: 0, roofType: "flat" });
     expect(sglBuilding({ levels: 2, roofType: "gabled" })).toMatchObject({ height: 12, roofHeight: 4, roofType: "gabled" });
     expect(sglBuilding({}).height).toBe(4);
+    // as a tile decoded to binary has a building nothing is mapped for: one level, not none
+    expect(sglBuilding({ height: 0, levels: 0, minLevel: 0 }).height).toBe(4);
+    expect(sglBuilding({ minLevel: 2 })).toMatchObject({ height: 12, minHeight: 8 });
   });
 
   test("a mapped height holds its roof", () => {

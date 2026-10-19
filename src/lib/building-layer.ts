@@ -35,14 +35,15 @@ export function buildingTilesUrl(userAgent = typeof navigator === "undefined" ? 
 /**
  * A building's height as drawn, metres: OpenFreeMap's `render_height`, 6 m
  * when it has none; Streets GL's (streets-gl.ts) to its eaves when its roof
- * is pitched (roofs.ts builds it), else to halfway up its roof, and none for
- * one that stands on others or on posts (drawn from the ground, it would fill
- * what is under it).
+ * is pitched (roofs.ts builds it), else to halfway up its roof. A part
+ * raised over a passage or on others is drawn from the ground (better filled
+ * under than flat); only a roof on posts is none (a block would stand where
+ * the open space under it is).
  */
 export function buildingHeight(properties: Properties): number {
   if (properties.layerName === "buildings") {
     const b = sglBuilding(properties);
-    if (b.minHeight >= 2) return 0;
+    if (properties.buildingType === "roof") return 0;
     return b.height - (pitched(b.roofType) ? b.roofHeight : b.roofHeight / 2);
   }
   return properties.hide_3d ? 0 : Number(properties.render_height ?? 6);
@@ -52,7 +53,7 @@ export function buildingHeight(properties: Properties): number {
 function castHeight(properties: Properties): number {
   if (properties.layerName !== "buildings") return buildingHeight(properties);
   const b = sglBuilding(properties);
-  return b.minHeight >= 2 ? 0 : b.height - b.roofHeight / 2;
+  return properties.buildingType === "roof" ? 0 : b.height - b.roofHeight / 2;
 }
 
 const SGL_FACADES = { plaster: 0, brick: 1, cementBlock: 2, wood: 3, glass: 4 } as const;
@@ -251,7 +252,7 @@ function tileRoofs(content: BinaryFeatureCollection, tile: TileProps["tile"] & {
       const properties = propertiesAt(polygons as never, from);
       if (properties.layerName !== "buildings") continue;
       const b = sglBuilding(properties);
-      if (!pitched(b.roofType) || b.roofHeight <= 0 || b.minHeight >= 2) continue;
+      if (!pitched(b.roofType) || b.roofHeight <= 0 || properties.buildingType === "roof") continue;
       // its rings, in metres (the tile's y runs south)
       while (r < rings.length && rings[r] < from) r++;
       const own: [number, number][][] = [];

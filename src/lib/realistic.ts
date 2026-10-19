@@ -94,6 +94,8 @@ const luminance = (c: readonly number[]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.07
 const CLEAR_DAYLIGHT = 1.84;
 /** The clear air's own haze, per metre: Streets GL's atmosphere at the ground (about 2 % a kilometre). */
 const CLEAR_AIR = 2.2e-5;
+/** How thick falling rain's veil is, against the camera's distance (fog's is up to 0.86). */
+const RAIN_MIST = 0.2;
 
 /**
  * The light in some weather with the sun towards `sun` (east, north, up),
@@ -138,6 +140,8 @@ export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 10
   const fogColour = scale([0.7, 0.71, 0.72], Math.max(day, 0.02));
   const hazeColor = mix(skyHorizon, mix(skyLight, fogColour, 0.5), fog);
   const camera = Math.max(cameraMetres, 50);
+  // falling rain: a grey veil from some way out, thickening with the distance (lighter than fog)
+  const rainMist = c.rain * (1 - fog);
   // a clear day as Streets GL shows it; a grey one taken a little brighter, as a camera would (more so at night)
   const daylight = luminance(sunColor) * Math.max(sunUp, 0) + ambient;
   const adapt = Math.min(1.8, Math.max(1, Math.sqrt(CLEAR_DAYLIGHT / Math.max(daylight, 1e-3))));
@@ -150,8 +154,11 @@ export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 10
     groundColor,
     ambient,
     hazeColor,
-    hazeDensity: Math.min(Math.min(c.haze, CLEAR_AIR) * (1 - fog) + c.haze * fog, (0.22 + 0.64 * fog) / camera),
-    hazeStart: fog * 0.5 * camera,
+    hazeDensity: Math.max(
+      Math.min(Math.min(c.haze, CLEAR_AIR) * (1 - fog) + c.haze * fog, (0.22 + 0.64 * fog) / camera),
+      (rainMist * RAIN_MIST) / camera,
+    ),
+    hazeStart: Math.max(fog * 0.5, rainMist * 0.3) * camera,
     wet: c.wet,
     snow: c.snow,
     cloudShadow: c.cloudShadows * 0.85,
@@ -162,7 +169,7 @@ export function lookFor(c: Conditions, sun: readonly number[], cameraMetres = 10
 }
 
 /** The light this frame: the map sets it before each frame. */
-export const look: Look = lookFor({ sun: 1, cloud: 0.05, haze: 2e-5, wet: 0, snow: 0, cloudShadows: 0 }, [0.4, -0.55, 0.73]);
+export const look: Look = lookFor({ sun: 1, cloud: 0.05, haze: 2e-5, wet: 0, snow: 0, cloudShadows: 0, rain: 0 }, [0.4, -0.55, 0.73]);
 
 export function setLook(next: Look) {
   Object.assign(look, next);
@@ -466,6 +473,7 @@ const rlightModule = {
 
 type Viewport = {
   resolution?: number;
+  orthographic?: boolean;
   longitude?: number;
   latitude?: number;
   cameraPosition: number[];
@@ -498,18 +506,20 @@ function rlightProps(params: DrawParams) {
   const viewport = projectProps.viewport;
   const [lng, lat] = [Math.fround(viewport.longitude ?? 0), Math.fround(viewport.latitude ?? 0)];
   let at: [number, number];
-  // the map's own view is the globe's; a flat one is deck.gl's, drawing what is draped on the 3D terrain from above
-  const cover = !viewport.resolution;
+  // deck.gl drawing what is draped on the 3D terrain, from straight above (its own orthographic view)
+  const cover = Boolean(viewport.orthographic);
   let eye = [0, 0, 0];
-  if (!cover) {
+  if (viewport.resolution) {
     // the globe: from the view's centre (the shader measures from it)
     at = mercator(lng, lat);
   } else {
     // the flat map: from deck.gl's origin for the layer
     const { commonOrigin } = project.getUniforms(projectProps as never) as { commonOrigin: number[] };
     at = [commonOrigin[0], commonOrigin[1]];
-    const p = viewport.projectPosition(mapEye);
-    eye = [p[0] - commonOrigin[0], p[1] - commonOrigin[1], p[2] - (commonOrigin[2] ?? 0)];
+    if (cover) {
+      const p = viewport.projectPosition(mapEye);
+      eye = [p[0] - commonOrigin[0], p[1] - commonOrigin[1], p[2] - (commonOrigin[2] ?? 0)];
+    }
   }
   // towards the sun in the globe's common space (x, y and z are the Earth's y, −x and z)
   const sun = fromLocal(look.sunDir, lat, lng);

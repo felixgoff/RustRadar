@@ -128,6 +128,19 @@ describe("realistic map: weather", () => {
     // rain below freezing is snow
     expect(weather({ cloud: 1, precipitation: 0.5, symbol: "rain", temperature: -1 }).snow).toBe(1);
   });
+
+  test("rain falls (more in a downpour), and veils the distance; fog more", () => {
+    expect(weather({ cloud: 1, precipitation: 0.2, symbol: "lightrain" }).rain).toBeGreaterThan(0.3);
+    expect(weather({ cloud: 1, precipitation: 3, symbol: "heavyrain" }).rain).toBe(1);
+    expect(weather({ cloud: 1, fog: 0.9, symbol: "fog" }).rain).toBe(0);
+    const clearAt = (l: ReturnType<typeof lookFor>, m: number) => Math.exp(-Math.max(m - l.hazeStart, 0) * l.hazeDensity);
+    const [cloudy, rain, fog] = (["cloudy", "rain", "fog"] as const).map((k) => lookFor(PRESETS[k], [0.4, -0.55, 0.73], 1500));
+    // three times as far off as the middle of the view
+    expect(clearAt(rain, 4500)).toBeLessThan(clearAt(cloudy, 4500) - 0.2);
+    expect(clearAt(fog, 4500)).toBeLessThan(clearAt(rain, 4500));
+    // and near the camera all is clear
+    expect(clearAt(rain, 300)).toBe(1);
+  });
 });
 
 describe("realistic map: the ground", () => {

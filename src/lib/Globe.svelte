@@ -93,6 +93,7 @@
   import { screenAngle } from "./screen";
   import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection, sunlight } from "./shadow";
   import { BuildingLayer, buildingHeight, buildingTilesUrl } from "./building-layer";
+  import RainOverlay from "./RainOverlay.svelte";
   import {
     BUILDINGS as REALISTIC_BUILDINGS,
     ROOFS as REALISTIC_ROOFS,
@@ -2560,7 +2561,7 @@
     const realistic = basemap === "realistic";
     if (relief) {
       layers.push(terrainSurfaceLayer(terrainWorkerUrl, realistic ? TERRAIN_AIRED : []));
-      if (realistic) aimMapEye(new GlobeViewport({ ...view, width: container.clientWidth, height: container.clientHeight }));
+      if (realistic) aimMapEye(viewportOf(view));
     }
     /** Close in, Streets GL's own tiles. */
     const sgl = realistic && flat && zoom >= SGL_FROM_ZOOM;
@@ -3524,9 +3525,17 @@
     );
   };
 
+  /** The rain falling in front of the camera (RainOverlay), in steps so the drops aren't started anew every frame. */
+  let rainShown = $state({ amount: 0, pitch: 0, night: 0 });
+  function showRain(amount: number, pitch: number, night: number) {
+    const next = { amount: Math.round(amount * 20) / 20, pitch: Math.round(pitch / 10) * 10, night: Math.round(night * 10) / 10 };
+    if (next.amount !== rainShown.amount || next.pitch !== rainShown.pitch || next.night !== rainShown.night) rainShown = next;
+  }
+
   function updateLook() {
     if (basemap !== "realistic" || !container) {
       if (shownSky && container) container.style.background = shownSky = "";
+      showRain(0, 0, 0);
       return;
     }
     const { latitude, longitude, zoom, pitch, bearing } = view;
@@ -3535,6 +3544,8 @@
     const weatherHere = mixConditions(sky ?? PRESETS.sunny, PRESETS.sunny, smoothstep(WEATHER_UP_TO_M, CLOUD_HEIGHT_M, cameraAltitude(zoom, latitude, pitch)));
     // the haze is set against how far the camera is from the middle of the view
     setLook(lookFor(weatherHere, sun, CAMERA_HEIGHTS * container.clientHeight * metersPerPixel(zoom, latitude)));
+    // (only under the clouds, as the rest of the weather)
+    showRain(weatherHere.rain, pitch, look.night);
     // deck.gl's camera sees 2·atan(1/3) (about 37°) top to bottom
     const halfFov = Math.atan(1 / 3) / DEGREES;
     const tilt = Math.max(1, pitch);
@@ -3660,6 +3671,7 @@
     <div class="tilt-shift" style:--blur="2px" style:--reach="42%" aria-hidden="true"></div>
     <div class="tilt-shift" style:--blur="5px" style:--reach="22%" aria-hidden="true"></div>
   {/if}
+  <RainOverlay amount={rainShown.amount} pitch={rainShown.pitch} night={rainShown.night} />
   {#if hoverCard}
     <HoverCard {...hoverCard} x={pointer.x} y={pointer.y} width={areaWidth} height={areaHeight} />
   {/if}

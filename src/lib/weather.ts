@@ -37,14 +37,16 @@ export type Conditions = {
   snow: number;
   /** Shadows of clouds drifting over the ground, in broken cloud. */
   cloudShadows: number;
+  /** Rain falling, 0 to 1: a mist in the distance, and drops in front of the camera. */
+  rain: number;
 };
 
 export const PRESETS: Record<Exclude<Sky, "live">, Conditions> = {
-  sunny: { sun: 1, cloud: 0.05, haze: 2e-5, wet: 0, snow: 0, cloudShadows: 0 },
-  cloudy: { sun: 0, cloud: 1, haze: 7e-5, wet: 0, snow: 0, cloudShadows: 0 },
-  rain: { sun: 0, cloud: 1, haze: 1.8e-4, wet: 1, snow: 0, cloudShadows: 0 },
-  fog: { sun: 0.04, cloud: 1, haze: 4.5e-3, wet: 0.35, snow: 0, cloudShadows: 0 },
-  snow: { sun: 0, cloud: 1, haze: 1.4e-4, wet: 0, snow: 1, cloudShadows: 0 },
+  sunny: { sun: 1, cloud: 0.05, haze: 2e-5, wet: 0, snow: 0, cloudShadows: 0, rain: 0 },
+  cloudy: { sun: 0, cloud: 1, haze: 7e-5, wet: 0, snow: 0, cloudShadows: 0, rain: 0 },
+  rain: { sun: 0, cloud: 1, haze: 1.8e-4, wet: 1, snow: 0, cloudShadows: 0, rain: 1 },
+  fog: { sun: 0.04, cloud: 1, haze: 4.5e-3, wet: 0.35, snow: 0, cloudShadows: 0, rain: 0 },
+  snow: { sun: 0, cloud: 1, haze: 1.4e-4, wet: 0, snow: 1, cloudShadows: 0, rain: 0 },
 };
 
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
@@ -52,7 +54,7 @@ const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 /** Between two weathers: `a` at 0, `b` at 1. */
 export function mixConditions(a: Conditions, b: Conditions, t: number): Conditions {
   const m = (k: keyof Conditions) => a[k] + (b[k] - a[k]) * clamp01(t);
-  return { sun: m("sun"), cloud: m("cloud"), haze: m("haze"), wet: m("wet"), snow: m("snow"), cloudShadows: m("cloudShadows") };
+  return { sun: m("sun"), cloud: m("cloud"), haze: m("haze"), wet: m("wet"), snow: m("snow"), cloudShadows: m("cloudShadows"), rain: m("rain") };
 }
 
 /** The light's conditions in some weather. */
@@ -76,6 +78,8 @@ export function conditionsOf(w: Weather): Conditions {
     snow: snowing ? 1 : 0,
     // most in broken cloud, none under a clear or an overcast sky
     cloudShadows: clamp01(4 * sun * (1 - sun)) * clamp01(w.cloud * 2),
+    // a drizzle shows, a downpour more
+    rain: raining ? 0.35 + 0.65 * rain : 0,
   };
 }
 

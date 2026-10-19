@@ -106,16 +106,88 @@ export function distanceTileIndices(viewport: Viewport, lod: Lod, zRange: number
 
 type Opts = { lod?: Lod; tileSize: number; zoomOffset: number; minZoom?: number; extent?: unknown };
 
-/** A tileset that picks its tiles by distance (`lod` in its options; without one, deck.gl's own way). */
+/** While zooming, the tiles of the view this many zoom levels further on load ahead. */
+const LOOK_AHEAD_ZOOM = 1;
+/** At most this many tiles loaded ahead at once. */
+const MAX_AHEAD = 32;
+/** Tiles loaded ahead come after every tile in view (deck.gl's in-view ones are below 2e8). */
+const AHEAD_PRIORITY = 2e8;
+
+type Camera = { longitude: number; latitude: number; zoom: number };
+type TileHeader = { id: string; isSelected: boolean; isVisible: boolean };
+/** Tileset2D's own parts this one uses. */
+type Inside = {
+  opts: Opts;
+  _cache: Map<string, TileHeader>;
+  _getTile(index: Index, create: boolean): TileHeader;
+  _rebuildTree(): void;
+  _getTileDistancePriority(tile: TileHeader): number;
+};
+
+/**
+ * A tileset that picks its tiles by distance (`lod` in its options; without
+ * one, deck.gl's own way), and while the view zooms, loads ahead the tiles of
+ * where it is heading: as it moves on, a level further in or out, so they
+ * are there when it arrives. Those wait for every tile in view, and are
+ * dropped if it turns another way first.
+ */
 export class LodTileset extends Tileset2D {
+  private last: Camera | null = null;
+  private ahead = new Set<string>();
+
+  constructor(opts: ConstructorParameters<typeof Tileset2D>[0]) {
+    super(opts);
+    // (deck.gl's own drops every tile out of view: those loading ahead wait instead; it is private, so set here)
+    const own = this as unknown as { _getRequestPriority(tile: TileHeader): number };
+    const theirs = own._getRequestPriority;
+    own._getRequestPriority = (tile) =>
+      !tile.isSelected && !tile.isVisible && this.ahead.has(tile.id)
+        ? AHEAD_PRIORITY + (this as unknown as Inside)._getTileDistancePriority(tile)
+        : theirs.call(this, tile);
+  }
+
   getTileIndices(args: Parameters<Tileset2D["getTileIndices"]>[0]) {
     const { viewport, zRange } = args;
-    const opts = (this as unknown as { opts: Opts }).opts;
+    const opts = (this as unknown as Inside).opts;
     if (!opts.lod || !viewport.isGeospatial) return super.getTileIndices(args);
     // (the layer is hidden under its minZoom: nothing to load then)
     if (Number.isFinite(opts.minZoom) && !opts.extent && viewport.zoom < opts.minZoom!) return [];
-    return distanceTileIndices(viewport, opts.lod, (zRange as number[] | null) ?? null, Math.log2(TILE_SIZE / opts.tileSize) + opts.zoomOffset);
+    const offset = Math.log2(TILE_SIZE / opts.tileSize) + opts.zoomOffset;
+    this.loadAhead(viewport, opts.lod, (zRange as number[] | null) ?? null, offset);
+    return distanceTileIndices(viewport, opts.lod, (zRange as number[] | null) ?? null, offset);
   }
+
+  private loadAhead(viewport: Viewport, lod: Lod, zRange: number[] | null, offset: number) {
+    const now = viewport as unknown as Camera & { width: number; height: number; pitch: number; bearing: number };
+    const last = this.last;
+    this.last = { longitude: now.longitude, latitude: now.latitude, zoom: now.zoom };
+    const dz = last ? now.zoom - last.zoom : 0;
+    if (!last || Math.abs(dz) < 1e-3) return;
+    // on as it is going (the point it zooms on moving with it), until a level further
+    const k = Math.min(LOOK_AHEAD_ZOOM / Math.abs(dz), 50);
+    const Class = viewport.constructor as new (props: object) => Viewport;
+    const there = new Class({
+      width: now.width,
+      height: now.height,
+      pitch: now.pitch,
+      bearing: now.bearing,
+      longitude: now.longitude + (now.longitude - last.longitude) * k,
+      latitude: Math.max(-85, Math.min(85, now.latitude + (now.latitude - last.latitude) * k)),
+      zoom: now.zoom + Math.sign(dz) * LOOK_AHEAD_ZOOM,
+    });
+    const inside = this as unknown as Inside;
+    const ahead = new Set<string>();
+    for (const index of distanceTileIndices(there, lod, zRange, offset)) {
+      if (ahead.size >= MAX_AHEAD) break;
+      const id = this.getTileId(index);
+      if (inside._cache.has(id) && !this.ahead.has(id)) continue;
+      ahead.add(id);
+      inside._getTile(index, true);
+    }
+    this.ahead = ahead;
+    if (ahead.size) inside._rebuildTree();
+  }
+
 }
 
 type RefineTile = {

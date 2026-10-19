@@ -92,7 +92,7 @@
   import { TAXIWAY_ZOOM, taxiwaysFor } from "./taxiways";
   import { screenAngle } from "./screen";
   import { localSun, SHADOW_MIN_ALPHA, shadowMatrix, shadowOpacity, sunDirection, sunlight } from "./shadow";
-  import { BuildingLayer, type BuildingSource, buildingHeight, buildingTilesUrl } from "./building-layer";
+  import { BuildingLayer, type BuildingSource, buildingHeight } from "./building-layer";
   import type { Lod } from "./lod-tileset";
   import RainOverlay from "./RainOverlay.svelte";
   import {
@@ -1028,48 +1028,24 @@
   }
   /** How much of the sun gets through now, 0 to 1. */
   const sunStrength = () => Math.max(...look.sunColor) / 3.2;
-  /** Only the deepest tiles, so a building looks the same in each tile it is in (see `wallColoursOf`). */
-  /** Far out, the backend's quantized buildings (traced outlines of the blocks, zooms 9 to 12), until the real ones take over. */
-  const FAR_BUILDINGS_ZOOM = 8.5;
-  const farBuildingLayer = (realistic: boolean) =>
-    new BuildingLayer({
-      id: "buildings-far",
-      data: buildingTilesUrl(),
-      // (deck.gl hides a tile layer under its minZoom: from where they are to show)
-      minZoom: FAR_BUILDINGS_ZOOM,
-      maxZoom: 12,
-      loadOptions: BUILDING_LOAD_OPTIONS,
-      extruded: true,
-      filled: true,
-      stroked: false,
-      getElevation: buildingElevation,
-      // on the realistic map each in its roof's colour (from far out the roofs are what show)
-      getFillColor: BUILDING_COLOR,
-      roofColours: realistic,
-      material: BUILDING_MATERIAL,
-      parameters: NO_CULL,
-      _subLayerProps: BUILDING_SUBLAYER_PROPS,
-      pickable: false,
-    });
   /**
    * Close in (the flat map), buildings by their distance from the camera
    * (lod-tileset.ts): Streets GL's, each with its height, materials and roof,
-   * within a few kilometres; OpenFreeMap's further; the backend's blocks far
-   * off. A coarser tile stays until the finer ones over it are in, so nothing
+   * within a few kilometres; OpenFreeMap's further, and furthest (its zoom-13
+   * tiles) flat, each only its roof. A coarser tile stays until the finer ones over it are in, so nothing
    * goes missing meanwhile, and none are drawn twice.
    */
-  const CITY_LOD: Lod = { levels: [9, 10, 11, 12, 14, 16], bias: 0.5, maxDistance: 80_000 };
+  const CITY_LOD: Lod = { levels: [13, 14, 16], bias: 0.5, maxDistance: 25_000 };
   /** The realistic ground the same way: Streets GL's close by, OpenMapTiles' at every zoom they have further off. */
   const GROUND_LOD: Lod = { levels: [9, 10, 11, 12, 13, 14, 16], bias: 0.5, maxDistance: 80_000 };
-  /** Tiles from here on cast shadows and get pitched roofs; the far ones are only buildings. */
+  /** Tiles from here on stand up, cast shadows and get pitched roofs; the far ones are flat roofs. */
   const CITY_CLOSE_ZOOM = 14;
   let citySources: { key: string; sources: BuildingSource[] } = { key: "", sources: [] };
   function cityBuildingSources(url: string, realistic: boolean): BuildingSource[] {
     const key = `${url} ${realistic}`;
     if (citySources.key !== key) {
       const sources: BuildingSource[] = [];
-      if (isTauri()) sources.push({ zooms: [9, 10, 11, 12], url: buildingTilesUrl(), layers: ["building"] });
-      sources.push({ zooms: [14], url, layers: ["building"] });
+      sources.push({ zooms: [13, 14], url, layers: ["building"] });
       // (with Overture's heights where Streets GL's tiles have none)
       if (realistic) sources.push({ zooms: [SGL_ZOOM], url: SGL_TILES, layers: ["buildings"], fetch: sglBuildingFetch as never });
       citySources = { key, sources };
@@ -2713,7 +2689,6 @@
     // (the realistic map lights its night side itself: each place by its own sun)
     if (daylight && !realistic) layers.push(nightLayer(now));
     // on the globe the backend's blocks (the app's backend makes them); on the flat map all of them, by distance
-    if (buildings && !flat && isTauri() && zoom >= FAR_BUILDINGS_ZOOM) layers.push(farBuildingLayer(realistic));
     if (buildings && flat && tileUrl) layers.push(cityBuildingLayer(tileUrl, realistic, realistic ? realisticShadowSun(now, cLat, cLon) : shadowSun(now)));
     if (realistic && tileUrl && flat && zoom >= TREES_ZOOM) {
       // out to about as far as the camera is from the point it looks at

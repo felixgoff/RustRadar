@@ -26,14 +26,6 @@ const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6_378_137;
 type Properties = Record<string, unknown>;
 
 /**
- * The backend's tiles of buildings far out, quantized (building_lod.rs), zooms
- * 9 to 12. Windows and Android webviews reach custom protocols as `http://<scheme>.localhost`.
- */
-export function buildingTilesUrl(userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent): string {
-  return /Windows|Android/.test(userAgent) ? "http://buildingtiles.localhost/{z}/{x}/{y}" : "buildingtiles://localhost/{z}/{x}/{y}";
-}
-
-/**
  * A building's height as drawn, metres: OpenFreeMap's `render_height`, 6 m
  * when it has none; Streets GL's (streets-gl.ts) to its eaves when its roof
  * is pitched (roofs.ts builds it), else to halfway up its roof. A part
@@ -138,7 +130,7 @@ function tileShadows(content: BinaryFeatureCollection, tile: TileProps["tile"], 
 
 /**
  * Where a zoom's buildings come from: Streets GL's at 16, OpenMapTiles' at
- * 14, the backend's at 9 to 12. Their features say which they are
+ * 13 and 14. Their features say which they are
  * (`layerName`), so the accessors read each as its source has it.
  */
 export type BuildingSource = TileSource;
@@ -376,14 +368,16 @@ export class BuildingLayer extends LodMVTLayer<Properties, BuildingLayerProps> {
     // (GeoJSON, on the globe, has no outlines in the tile's units to pick by)
     if (this.props.wallColours && !Array.isArray(props.data)) (props as unknown as { getFillColor: unknown }).getFillColor = wallColoursOf(props.tile as never);
     if (this.props.roofColours) (props as unknown as { getFillColor: unknown }).getFillColor = roofColoursOf(props.tile as never);
+    // far off, flat: only the roofs show from there
+    const far = (props.tile as TileProps["tile"]).index.z < this.props.closeFromZoom;
+    if (far) (props as unknown as { extruded: boolean }).extruded = false;
     // sets the tile's model matrix and coordinate system on `props`
     const buildings = super.renderSubLayers(props);
     const { sun, shadowColor, shadowParameters, shadowExtensions, shadowStrength, footShade, footShadeExtensions } = this.props;
     const content = props.data as BinaryFeatureCollection | unknown[] | null;
     if (!content || Array.isArray(content)) return buildings;
     const tile = props.tile as TileProps["tile"];
-    // far off, only the buildings
-    if (tile.index.z < this.props.closeFromZoom) return buildings;
+    if (far) return buildings;
     const shadow = sun && shadowStrength > 0 ? (this.shadowsOf(content, tile, sun) ?? shadowCache.get(content))?.shadow : null;
     const tileProps = props as unknown as TileProps;
     const ground: Layer[] = [];

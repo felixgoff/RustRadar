@@ -11,7 +11,7 @@
 // @deck.gl/* are pinned for it.
 
 import { _GlobeViewport as GlobeViewport, type DefaultProps, type Viewport } from "@deck.gl/core";
-import { _getURLFromTemplate as urlOf, MVTLayer, type MVTLayerProps, _Tileset2D as Tileset2D } from "@deck.gl/geo-layers";
+import { _getURLFromTemplate as urlOf, MVTLayer, type MVTLayerProps, TileLayer, _Tileset2D as Tileset2D } from "@deck.gl/geo-layers";
 import { AxisAlignedBoundingBox, CullingVolume, makeOrientedBoundingBoxFromPoints, Plane } from "@math.gl/culling";
 
 const TILE_SIZE = 512;
@@ -296,5 +296,17 @@ export class LodMVTLayer<D = Record<string, unknown>, P extends object = object>
     };
     const fetch = (source.fetch ?? (this.props as MVTLayerProps).fetch) as (url: string, options: object) => Promise<never>;
     return fetch(url, { propName: "data", layer: this, loadOptions, signal: loadProps.signal });
+  }
+}
+
+/** A TileLayer whose tiles are picked by their distance from the camera (`lod`), as LodMVTLayer's. */
+export class LodTileLayer<D = unknown, P extends object = object> extends TileLayer<D, P & { lod: Lod | null }> {
+  static layerName = "LodTileLayer";
+  static defaultProps = { lod: lodDefaults.lod, TilesetClass: LodTileset } as never;
+
+  _getTilesetOptions() {
+    const options = super._getTilesetOptions();
+    const { lod } = this.props as unknown as LodProps;
+    return (lod ? { ...options, lod, refinementStrategy: keepCoarserUntilIn } : options) as typeof options;
   }
 }

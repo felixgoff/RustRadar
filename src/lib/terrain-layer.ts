@@ -19,11 +19,21 @@
 import { COORDINATE_SYSTEM, type Layer, LayerExtension } from "@deck.gl/core";
 import { TerrainLayer, TileLayer } from "@deck.gl/geo-layers";
 import { BitmapLayer } from "@deck.gl/layers";
+import { parse } from "@loaders.gl/core";
+import { type Lod, LodTileLayer } from "./lod-tileset";
 
 /** Terrarium-encoded elevation tiles, keyless (AWS Open Data, Mapzen Terrain Tiles). */
 export const TERRARIUM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
 /** The deepest zoom the terrarium tiles exist at; deeper tiles are overzoomed. */
 export const TERRARIUM_MAX_ZOOM = 15;
+/**
+ * The 3D surface's heights: Mapterhorn's (mapterhorn.com), terrarium in 512 px
+ * WebP: Copernicus GLO-30 (30 m) everywhere to zoom 12, and deeper the
+ * national lidar models it has (Sweden's: Lantmäteriet's 1 m, to zoom 16;
+ * Norway's, Denmark's, Finland's, much of Europe's). Where it has none, its
+ * deeper tiles are missing (404) and Mapzen's stand in (`terrainFetch`).
+ */
+export const MAPTERHORN_URL = "https://tiles.mapterhorn.com/{z}/{x}/{y}.webp";
 /** deck.gl `elevationDecoder` for terrarium PNGs. */
 export const TERRARIUM_DECODER = { rScaler: 256, gScaler: 1, bScaler: 1 / 256, offset: -32768 } as const;
 
@@ -34,7 +44,7 @@ export const TERRARIUM_DECODER = { rScaler: 256, gScaler: 1, bScaler: 1 / 256, o
  * `TERRAIN_ATTRIBUTION_FULL`, for an about/credits view.
  */
 export const TERRAIN_ATTRIBUTION =
-  "Terrain: Mapzen Terrain Tiles (AWS Open Data): USGS 3DEP, SRTM, GMTED2010; NOAA ETOPO1; Copernicus EU-DEM; and others";
+  "Terrain: © Mapterhorn (Lantmäteriet, Kartverket, Copernicus GLO-30 and others); Mapzen Terrain Tiles (AWS Open Data): USGS 3DEP, SRTM, GMTED2010; NOAA ETOPO1; Copernicus EU-DEM; and others";
 export const TERRAIN_ATTRIBUTION_FULL = [
   "Mapzen",
   "ArcticDEM terrain data DEM(s) were created from DigitalGlobe, Inc., imagery and funded under National Science Foundation awards 1043681, 1559691, and 1542736",
@@ -203,6 +213,41 @@ async function pixels(blob: Blob): Promise<ImageData> {
   return pixelContext!.getImageData(0, 0, width, height, { colorSpace: "srgb" });
 }
 
+/** The zoom the ground's height under the camera is read at (GLO-30's: 30 m, plenty for where to aim). */
+const GROUND_ZOOM = 12;
+/** Height tiles read for `groundHeight`, by `x/y` (null: none there, or loading). */
+const groundTiles = new Map<string, Float32Array | null>();
+
+/**
+ * The ground's height at a place, metres, from Mapterhorn's tiles; null until
+ * its tile has loaded (`onLoad` is called then).
+ */
+export function groundHeight(lon: number, lat: number, onLoad: () => void): number | null {
+  const n = 2 ** GROUND_ZOOM;
+  const r = (Math.max(-85, Math.min(85, lat)) * Math.PI) / 180;
+  const x = (((lon + 180) / 360) % 1) * n;
+  const y = ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n;
+  const key = `${Math.floor(x)}/${Math.floor(y)}`;
+  if (!groundTiles.has(key)) {
+    groundTiles.set(key, null);
+    // a handful is all a camera needs
+    if (groundTiles.size > 16) groundTiles.delete(groundTiles.keys().next().value!);
+    fetch(`https://tiles.mapterhorn.com/${GROUND_ZOOM}/${key}.webp`)
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+      .then(pixels)
+      .then((image) => {
+        groundTiles.set(key, decodeTerrarium(image.data));
+        onLoad();
+      })
+      .catch(() => {});
+  }
+  const heights = groundTiles.get(key);
+  if (!heights) return null;
+  const size = Math.round(Math.sqrt(heights.length));
+  const [px, py] = [Math.min(size - 1, Math.floor((x % 1) * size)), Math.min(size - 1, Math.floor((y % 1) * size))];
+  return Math.max(0, heights[py * size + px]);
+}
+
 /** A terrarium tile shaded into a transparent hillshade image; null where there is no tile. */
 async function hillshadeTile({ index, url, signal }: TileRequest): Promise<ImageBitmap | null> {
   if (!url) return null;
@@ -322,12 +367,59 @@ class SeaLevelExtension extends LayerExtension {
 const SEA_LEVEL = new SeaLevelExtension();
 
 /**
- * The 3D surface's deepest tiles: about 5 m a pixel, finer than most of the
- * data (~30 m), and each a texture of what is draped on it (deck.gl's, up to
- * 2048 px: well under a metre a pixel). Deeper would only make more tiles to
- * mesh and drape.
+ * The 3D surface's tiles by their distance from the camera (lod-tileset.ts),
+ * every zoom to Mapterhorn's deepest (Sweden's 1 m model: about 0.7 m a
+ * pixel there), each a texture of what is draped on it: fine close by,
+ * coarse to the horizon.
  */
-const SURFACE_MAX_ZOOM = 14;
+const SURFACE_LOD: Lod = { levels: Array.from({ length: 17 }, (_, z) => z), bias: 0.5 };
+/** Mapzen's tiles, where Mapterhorn has none this deep. */
+const MAPZEN_TERRARIUM = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/";
+
+/** A height tile: Mapterhorn's, or where it has none, Mapzen's of the same place (a quarter of the pixels). */
+async function terrainFetch(url: string, { layer, loadOptions, signal }: { layer: Layer; loadOptions?: object; signal?: AbortSignal }) {
+  let response = await fetch(url, { signal });
+  const zxy = url.match(/(\d+\/\d+\/\d+)\.webp$/)?.[1];
+  if (response.status === 404 && zxy) response = await fetch(`${MAPZEN_TERRARIUM}${zxy}.png`, { signal });
+  if (!response.ok) throw new Error(`${url}: ${response.status}`);
+  return parse(response, layer.props.loaders as never, loadOptions as never);
+}
+
+type MeshTile = { content: [{ header: { boundingBox: [number[], number[]] } } | null, unknown] | null };
+
+/**
+ * A TerrainLayer whose tiles are picked by their distance from the camera.
+ * The heights its tiles span widen as each loads (deck.gl's own waits for
+ * every tile in view, which out to the horizon may be never): until then the
+ * tiles are taken to lie at sea level, and those close under a camera up in
+ * the hills fall out of view.
+ */
+class LodTerrainLayer extends TerrainLayer {
+  static layerName = "LodTerrainLayer";
+
+  renderLayers() {
+    const tiles = super.renderLayers();
+    if (!(tiles instanceof TileLayer)) return tiles;
+    const onTileLoad = tiles.props.onTileLoad;
+    return new LodTileLayer({
+      ...tiles.props,
+      lod: SURFACE_LOD,
+      onTileLoad: (tile: MeshTile) => {
+        this.widen(tile);
+        onTileLoad?.(tile as never);
+      },
+    } as never);
+  }
+
+  private widen(tile: MeshTile) {
+    const box = tile.content?.[0]?.header.boundingBox;
+    if (!box) return;
+    const range = (this.state as { zRange: [number, number] | null }).zRange;
+    if (!range || box[0][2] < range[0] || box[1][2] > range[1]) {
+      this.setState({ zRange: [Math.min(box[0][2], range?.[0] ?? Infinity), Math.max(box[1][2], range?.[1] ?? -Infinity)] });
+    }
+  }
+}
 
 /**
  * The ground in 3D: the elevation as a surface, which the map's other layers
@@ -336,15 +428,16 @@ const SURFACE_MAX_ZOOM = 14;
  * it; its own colour only shows where nothing is.
  */
 export const terrainSurfaceLayer = (workerUrl: string, extensions: unknown[] = NO_EXTENSIONS) =>
-  new TerrainLayer({
+  new LodTerrainLayer({
     id: "terrain-surface",
-    elevationData: TERRARIUM_URL,
+    elevationData: MAPTERHORN_URL,
     elevationDecoder: TERRARIUM_DECODER,
-    // out to the horizon, where coarser tiles are asked for
+    fetch: terrainFetch as never,
     minZoom: 0,
-    maxZoom: SURFACE_MAX_ZOOM,
-    tileSize: TILE_SIZE,
-    meshMaxError: 4,
+    maxZoom: SURFACE_LOD.levels.length - 1,
+    tileSize: 512,
+    // (in metres: the 1 m model's detail, not its noise)
+    meshMaxError: 2,
     color: MESH_COLOR,
     material: false,
     operation: "terrain+draw",

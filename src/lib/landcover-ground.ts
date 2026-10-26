@@ -102,6 +102,8 @@ export const landCoverGroundLayer = (extensions: unknown[], parameters: object) 
     maxZoom: 14,
     tileSize: 256,
     maxRequests: 4,
+    // (on the tile layer, so they reach the tiles' layers with any added to it: the 3D terrain's)
+    extensions: extensions as never,
     getTileData: async ({ index }: { index: { x: number; y: number; z: number } }) => {
       const grid = await landCover(index);
       return grid ? placed(index, grid) : null;
@@ -113,7 +115,7 @@ export const landCoverGroundLayer = (extensions: unknown[], parameters: object) 
             data: props.data,
             getPolygon: (d) => d.polygon as never,
             getFillColor: (d) => d.paint,
-            extensions: extensions as never,
+            extensions: (props as unknown as { extensions: never }).extensions,
             parameters,
           })
         : null,

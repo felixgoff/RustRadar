@@ -129,7 +129,7 @@
   import { reference } from "./reference.svelte";
   import { offsetEastNorth, shipMeshes, shipPlacement, type ShipClass } from "./ship-models";
   import { shipAtlas, shipColor, shipIcon, shipIconScale, shipIconSize, shipKindLabel } from "./ships";
-  import { terrainLayers, terrainSurfaceLayer } from "./terrain-layer";
+  import { groundHeight, terrainLayers, terrainSurfaceLayer } from "./terrain-layer";
   import terrainWorkerUrl from "@loaders.gl/terrain/terrain-worker.js?url";
   import { RAIL_MIN_ZOOM, railLayers, SPEED_BANDS, SPEED_UNKNOWN } from "./rail-layer";
   import {
@@ -2636,8 +2636,8 @@
     }
 
     const layers: Layer[] = [earthLayer(basemap)];
-    // the ground in 3D on the flat map (on the globe it would hardly show): everything else stands on it (`onTerrain`)
-    const relief = terrain && flat;
+    // the ground in 3D, on the globe as on the flat map: everything else stands on it (`onTerrain`)
+    const relief = terrain;
     const realistic = basemap === "realistic";
     if (relief) {
       layers.push(terrainSurfaceLayer(terrainWorkerUrl, realistic ? TERRAIN_AIRED : []));
@@ -3149,6 +3149,8 @@
     }
     return null;
   }
+  /** How far the camera's aim moves to the ground's height under it each frame. */
+  const GROUND_EASE = 0.3;
   /** Following a train or ship: the camera flies there, then keeps it in the middle. */
   let vehicleLocked = false;
   $effect(() => {
@@ -3194,6 +3196,15 @@
       // `position` is the flat projection's; GlobeViewState doesn't declare it
       const grounded: ViewState = { ...view, position: [0, 0, 0] };
       deck?.setProps({ initialViewState: { ...grounded, ...LIMITS } });
+    }
+    // with the ground in 3D the camera aims at it, not at the sea under it (inside the hills)
+    if (!(follow && selected)) {
+      const ground = terrain && view.zoom > FLAT_ABOVE_ZOOM ? groundHeight(view.longitude, view.latitude, render) : 0;
+      const at = view.position?.[2] ?? 0;
+      if (ground !== null && Math.abs(ground - at) > 0.5 && Date.now() > transitionUntil) {
+        view = { ...view, position: [0, 0, at + (ground - at) * GROUND_EASE] };
+        deck?.setProps({ initialViewState: { ...view, ...limits() } });
+      }
     }
     // released from a lock closer or flatter than the free camera allows: ease back within its limits
     const locked = Boolean(follow && selected);
@@ -3675,8 +3686,8 @@
       // a layer that fails (a shader the GPU driver rejects, say) is reported, not just logged
       onError: (error) => reportMapError(error),
       onViewStateChange: ({ viewState }) => {
-        const { longitude, latitude, zoom, bearing = 0, pitch = 0 } = viewState as Partial<ViewState>;
-        view = { longitude: longitude!, latitude: latitude!, zoom: zoom!, bearing, pitch };
+        const { longitude, latitude, zoom, bearing = 0, pitch = 0, position } = viewState as Partial<ViewState>;
+        view = { longitude: longitude!, latitude: latitude!, zoom: zoom!, bearing, pitch, position };
         if (Math.floor(view.zoom * 2) !== Math.floor(shownZoom * 2)) shownZoom = view.zoom;
         // a gesture while locked on is re-aimed in the same frame, not on the next tick
         const locked = follow && selected && Date.now() > transitionUntil;

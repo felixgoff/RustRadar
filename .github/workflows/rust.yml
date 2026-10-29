@@ -86,7 +86,7 @@ jobs:
   # Installers for every platform via tauri-action.
   bundle:
     name: Bundle (${{ matrix.name }})
-    needs: version
+    needs: [check, version]
     permissions:
       contents: write # needed to create the draft release on tags
     strategy:
@@ -196,7 +196,7 @@ jobs:
   # release goes out with no APK and a warning.
   android:
     name: Android APK
-    needs: version
+    needs: [check, version]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -283,7 +283,7 @@ jobs:
   # is unsigned, for sideloading tools that sign it themselves.
   ios:
     name: iOS
-    needs: version
+    needs: [check, version]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

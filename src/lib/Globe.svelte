@@ -1266,7 +1266,11 @@
       mapError?.stack ?? "",
     ].join("\n");
   }
+  /** Set once WebGL drops the context: every GPU resource is gone with it. */
+  let contextLost = false;
   function retryMap() {
+    // a fresh page builds a new context; settings and filters are saved
+    if (contextLost) return location.reload();
     mapError = null;
     render();
   }
@@ -3476,9 +3480,10 @@
     container.addEventListener("wheel", onWheel, { capture: true, passive: false });
     for (const [type, handler] of PINCH_HANDLERS) container.addEventListener(type, handler as EventListener, { capture: true });
     // a lost WebGL context draws nothing until it's restored
-    container.querySelector("canvas")?.addEventListener("webglcontextlost", () =>
-      reportMapError(new Error("The graphics context was lost (WebGL context lost)")),
-    );
+    container.querySelector("canvas")?.addEventListener("webglcontextlost", () => {
+      contextLost = true;
+      reportMapError(new Error("The graphics context was lost (WebGL context lost)"));
+    });
     onviewchange?.(view);
     frame = requestAnimationFrame(loop);
     // the label font must be loaded before deck.gl rasterises its glyph atlas

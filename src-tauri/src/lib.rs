@@ -460,7 +460,7 @@ async fn airline_colors(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<HashMap<String, Option<liveries::LogoColors>>> {
-    let path = cache_file(&app, "livery-colors.json")?;
+    let path = cache_file(&app, "livery-colors-2.json")?;
     let mut slot = state.colors.lock().await;
     let cache = slot.get_or_insert_with(|| liveries::read_cache(&path));
     let wanted: Vec<String> = iatas
@@ -475,19 +475,16 @@ async fn airline_colors(
         .collect();
     if !missing.is_empty() {
         let fr24 = state.client();
-        let fetched: Vec<(String, Option<liveries::LogoColors>)> =
+        let fetched: Vec<Option<(String, Option<liveries::LogoColors>)>> =
             futures_util::stream::iter(missing)
                 .map(|code| {
                     let http = fr24.http().clone();
-                    async move {
-                        let colors = liveries::fetch(&http, &code).await;
-                        (code, colors)
-                    }
+                    async move { liveries::fetch(&http, &code).await.ok().map(|colors| (code, colors)) }
                 })
                 .buffer_unordered(6)
                 .collect()
                 .await;
-        cache.extend(fetched);
+        cache.extend(fetched.into_iter().flatten());
         liveries::write_cache(&path, cache);
     }
     Ok(wanted
@@ -697,7 +694,8 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
-                let mut fr24 = Fr24::clone(&state.client());
+                let before = state.client();
+                let mut fr24 = Fr24::clone(&before);
                 let creds = (!saved.fr24_email.is_empty() && !saved.fr24_password.is_empty()).then_some(
                     fr24::auth::Credentials::UsernamePassword {
                         username: saved.fr24_email,
@@ -705,7 +703,13 @@ pub fn run() {
                     },
                 );
                 match fr24.login(creds).await {
-                    Ok(Some(_)) => *state.fr24.write().unwrap() = Arc::new(fr24),
+                    Ok(Some(_)) => {
+                        // a sign-in or sign-out made meanwhile wins
+                        let mut slot = state.fr24.write().unwrap();
+                        if Arc::ptr_eq(&slot, &before) {
+                            *slot = Arc::new(fr24);
+                        }
+                    }
                     Ok(None) => {}
                     Err(e) => eprintln!("fr24 login failed, continuing anonymously: {e}"),
                 }

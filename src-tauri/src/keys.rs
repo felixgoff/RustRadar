@@ -2,7 +2,8 @@
 //! `keys.json` in the app's config folder so they survive a restart. Plain
 //! text, like the file the page exports: the folder is the user's own.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -83,7 +84,11 @@ pub fn save_keys(app: AppHandle, keys: Keys) -> Result<Keys, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't open {}: {e}", dir.display()))?;
     }
     let json = serde_json::to_string_pretty(&keys).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| format!("Couldn't save {}: {e}", path.display()))?;
+    // a crash mid-write must not leave the old keys half-overwritten
+    let tmp = path.with_extension("json.tmp");
+    write_private(&tmp, json.as_bytes())
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| format!("Couldn't save {}: {e}", path.display()))?;
     *cell().write().unwrap() = keys.clone();
     Ok(keys)
 }
@@ -112,4 +117,17 @@ mod tests {
         assert_eq!(keys.fr24_password, " secret ");
         assert_eq!(keys.trafikverket, "key");
     }
+}
+
+/// Readable by the user alone: the file holds a password.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // a leftover file would keep its old permissions
+    let _ = std::fs::remove_file(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }

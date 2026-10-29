@@ -896,6 +896,11 @@
       // the aircraft left the map while the request was out: drop what it brought
       if (!aircraftOn) return;
       snapshot = next;
+      // the launch sign-in finishes after the page first asked: the feed tells which client it used
+      if (session && next.authenticated !== session.authenticated)
+        sessionInfo()
+          .then((s) => (session = s))
+          .catch(() => {});
       // aircraft are drawn on the feed's clock, so a wrong system clock can't misplace them
       motion.syncClock(snapshot.serverTimeMs);
       regional = area !== null;

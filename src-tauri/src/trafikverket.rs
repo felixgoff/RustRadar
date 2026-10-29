@@ -1529,16 +1529,17 @@ pub fn watch(ids: &[String]) {
 /// the set changes (once it settles) and closed when it empties.
 pub fn start_view_streams(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut running: Option<(Vec<String>, tauri::async_runtime::JoinHandle<()>)> = None;
+        // the trains and the key the stream runs with: a new key restarts it too
+        let mut running: Option<(Vec<String>, String, tauri::async_runtime::JoinHandle<()>)> = None;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let key = crate::keys::current().trafikverket;
             let (numbers, since) = watched().lock().unwrap().clone();
             let wanted = if key.is_empty() || !crate::trains::trafikverket_wanted() { Vec::new() } else { numbers };
-            if running.as_ref().is_some_and(|(n, _)| *n == wanted) || since.elapsed() < WATCH_SETTLE {
+            if running.as_ref().is_some_and(|(n, k, _)| *n == wanted && *k == key) || since.elapsed() < WATCH_SETTLE {
                 continue;
             }
-            if let Some((_, task)) = running.take() {
+            if let Some((_, _, task)) = running.take() {
                 task.abort();
             }
             if wanted.is_empty() {
@@ -1547,15 +1548,15 @@ pub fn start_view_streams(app: tauri::AppHandle) {
             if crate::devlog::ENABLED {
                 eprintln!("[stream] view: {} trains", wanted.len());
             }
-            let (app, query, key) = (app.clone(), trains_query(&wanted), key.clone());
+            let (app, query, stream_key) = (app.clone(), trains_query(&wanted), key.clone());
             let task = tauri::async_runtime::spawn(async move {
                 loop {
-                    let still = || crate::keys::current().trafikverket == key;
-                    stream_positions(&app, &key, &query, "view", still, |_| {}).await;
+                    let still = || crate::keys::current().trafikverket == stream_key;
+                    stream_positions(&app, &stream_key, &query, "view", still, |_| {}).await;
                     tokio::time::sleep(RECONNECT).await;
                 }
             });
-            running = Some((wanted, task));
+            running = Some((wanted, key, task));
         }
     });
 }

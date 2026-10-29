@@ -120,11 +120,21 @@ fn form_encode(s: &str) -> String {
     out
 }
 
+/// Overpass reports a timeout or lack of memory as a 200 with no elements and
+/// an error remark: that is a failure, not an empty area.
+pub fn overpass_failed(json: &Value) -> Result<(), String> {
+    match json["remark"].as_str() {
+        Some(remark) if remark.contains("error") => Err(format!("Overpass: {remark}")),
+        _ => Ok(()),
+    }
+}
+
 /// The centrelines in an Overpass `out geom` JSON answer. Ways with fewer than
 /// two located points, other aeroways and areas (closed runway polygons tagged
 /// `area=yes`) are left out.
 pub fn parse(body: &str) -> Result<Vec<Line>, String> {
     let json: Value = serde_json::from_str(body).map_err(|e| format!("bad Overpass answer: {e}"))?;
+    overpass_failed(&json)?;
     let elements = json["elements"].as_array().ok_or("the Overpass answer has no elements")?;
     let round = |v: f64| (v * 1e7).round() / 1e7;
     Ok(elements
@@ -182,7 +192,10 @@ async fn fetch(lat: f64, lon: f64) -> Result<Vec<Line>, String> {
             Err(e) => Err(e),
         };
         match text {
-            Ok(text) => return parse(&text),
+            Ok(text) => match parse(&text) {
+                Ok(lines) => return Ok(lines),
+                Err(e) => last_error = e,
+            },
             Err(e) => last_error = format!("couldn't download taxiways: {e}"),
         }
     }
@@ -308,6 +321,14 @@ mod tests {
         assert_eq!(lines[1].r#ref.as_deref(), Some("04L/22R"));
         assert_eq!(lines[2].kind, Kind::Taxilane);
         assert_eq!(lines[2].r#ref, None);
+    }
+
+    #[test]
+    fn an_error_remark_is_a_failure() {
+        let timed_out = r#"{"elements": [], "remark": "runtime error: Query timed out in \"query\" at line 1 after 26 seconds."}"#;
+        assert!(parse(timed_out).is_err());
+        assert!(crate::osm_platforms::parse(timed_out).is_err());
+        assert!(parse(r#"{"elements": []}"#).unwrap().is_empty(), "an empty area is still fine");
     }
 
     #[test]

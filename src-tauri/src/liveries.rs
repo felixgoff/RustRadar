@@ -39,14 +39,18 @@ pub fn write_cache(path: &Path, cache: &ColorCache) {
     }
 }
 
-/// Square airline logos keyed by IATA code.
-pub async fn fetch(http: &reqwest::Client, iata: &str) -> Option<LogoColors> {
+/// Square airline logos keyed by IATA code. `Err`: the download failed and
+/// may work later, so it isn't cached; `Ok(None)`: the airline has no usable logo.
+pub async fn fetch(http: &reqwest::Client, iata: &str) -> Result<Option<LogoColors>, ()> {
     let url = format!("https://pics.avs.io/120/120/{iata}.png");
-    let response = http.get(url).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
+    let response = http.get(url).send().await.map_err(|_| ())?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
     }
-    dominant_colors(&response.bytes().await.ok()?)
+    if !response.status().is_success() {
+        return Err(());
+    }
+    Ok(dominant_colors(&response.bytes().await.map_err(|_| ())?))
 }
 
 /// The two most prominent distinct colours of a logo, ignoring transparency

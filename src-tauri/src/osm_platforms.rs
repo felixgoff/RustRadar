@@ -167,6 +167,7 @@ async fn fetch(station: (f64, f64)) -> Result<Vec<Platform>, String> {
 /// The platforms in an Overpass answer (`out tags geom`) that say which tracks they serve.
 pub fn parse(body: &str) -> Result<Vec<Platform>, String> {
     let v: Value = serde_json::from_str(body).map_err(|e| format!("not Overpass JSON: {e}"))?;
+    crate::taxiways::overpass_failed(&v)?;
     let points = |geometry: &Value| -> Vec<(f64, f64)> {
         geometry
             .as_array()

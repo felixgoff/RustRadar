@@ -3,7 +3,7 @@
  * trains running straight through the middle of the view, to see how trains
  * are drawn. Never in the app itself.
  */
-import type { Train, TrainKind } from "./api";
+import type { Train, TrainKind, TrainShape } from "./api";
 
 const M_PER_DEG = 111_320;
 
@@ -15,10 +15,14 @@ function ahead(at: [number, number], heading: number, m: number): [number, numbe
 }
 
 export function demoTrains(centre: { latitude: number; longitude: number }, nowMs: number): Train[] {
-  const runs: { heading: number; cars: number; kind: TrainKind; operator: string; offset: number; speed: number }[] = [
-    { heading: 70, cars: 3, kind: "regional", operator: "Skånetrafiken", offset: 0, speed: 14 },
-    { heading: 250, cars: 6, kind: "highSpeed", operator: "SJ", offset: 40, speed: 22 },
-    { heading: 160, cars: 12, kind: "intercity", operator: "Öresundståg", offset: -60, speed: 0 },
+  // one of each shape
+  const runs: { heading: number; cars: number; kind: TrainKind; operator: string; offset: number; speed: number; shape: TrainShape }[] = [
+    { heading: 70, cars: 3, kind: "regional", operator: "Skånetrafiken", offset: 0, speed: 14, shape: "regional" },
+    { heading: 250, cars: 6, kind: "highSpeed", operator: "SJ", offset: 40, speed: 22, shape: "highSpeed" },
+    { heading: 160, cars: 12, kind: "intercity", operator: "Öresundståg", offset: -60, speed: 0, shape: "regional" },
+    { heading: 340, cars: 4, kind: "regional", operator: "SJ", offset: 90, speed: 0, shape: "doubleDeck" },
+    { heading: 20, cars: 8, kind: "intercity", operator: "Snälltåget", offset: -110, speed: 0, shape: "loco" },
+    { heading: 110, cars: 1, kind: "regional", operator: "Inlandsbanan", offset: 140, speed: 0, shape: "railcar" },
   ];
   return runs.map((r, n) => {
     const start = ahead(ahead([centre.latitude, centre.longitude], r.heading + 90, r.offset), r.heading, -40);
@@ -41,6 +45,7 @@ export function demoTrains(centre: { latitude: number; longitude: number }, nowM
       frames,
       cars: r.cars,
       tail,
+      shape: r.shape,
     };
   });
 }

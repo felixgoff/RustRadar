@@ -33,6 +33,22 @@ pub enum Category {
     S = 3,
 }
 
+/// How the map draws its cars (train-models.ts).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Shape {
+    /// A long, pointed nose.
+    HighSpeed,
+    /// Two rows of windows.
+    DoubleDeck,
+    /// A multiple unit with a short, rounded nose.
+    Regional,
+    /// A locomotive in front of its coaches.
+    Loco,
+    /// A single railcar with a blunt cab.
+    Railcar,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainClass {
@@ -40,6 +56,7 @@ pub struct TrainClass {
     pub vehicle: &'static str,
     pub top_kmh: f64,
     pub category: Category,
+    pub shape: Shape,
 }
 
 impl TrainClass {
@@ -49,27 +66,28 @@ impl TrainClass {
     }
 }
 
-const fn class(vehicle: &'static str, top_kmh: f64, category: Category) -> TrainClass {
-    TrainClass { vehicle, top_kmh, category }
+const fn class(vehicle: &'static str, top_kmh: f64, category: Category, shape: Shape) -> TrainClass {
+    TrainClass { vehicle, top_kmh, category, shape }
 }
 
 use Category::{A, B, C};
+use Shape::{DoubleDeck, HighSpeed, Loco, Railcar, Regional};
 
 // Vehicles, with their top speeds from the line book (pages B4–B5).
-const X31: TrainClass = class("X31–32 (Öresundståg)", 180.0, B);
-const X55: TrainClass = class("X2 / X55", 200.0, B);
-const X40: TrainClass = class("X40 / X55 / Rc6 + coaches", 160.0, A);
-const RC6: TrainClass = class("Rc6 + coaches", 160.0, A);
-const X74: TrainClass = class("X74", 200.0, C);
-const X3: TrainClass = class("X3", 200.0, B);
-const X62: TrainClass = class("X62", 180.0, B);
-const X60: TrainClass = class("X60–61", 160.0, B);
-const REGINA: TrainClass = class("X50–53 (Regina)", 180.0, B);
-const X61: TrainClass = class("X61 / X11–14", 160.0, B);
-const Y31: TrainClass = class("Y31–32 / X61", 140.0, B);
-const Y1: TrainClass = class("Y1", 130.0, A);
+const X31: TrainClass = class("X31–32 (Öresundståg)", 180.0, B, Regional);
+const X55: TrainClass = class("X2 / X55", 200.0, B, HighSpeed);
+const X40: TrainClass = class("X40 / X55 / Rc6 + coaches", 160.0, A, DoubleDeck);
+const RC6: TrainClass = class("Rc6 + coaches", 160.0, A, Loco);
+const X74: TrainClass = class("X74", 200.0, C, HighSpeed);
+const X3: TrainClass = class("X3", 200.0, B, HighSpeed);
+const X62: TrainClass = class("X62", 180.0, B, Regional);
+const X60: TrainClass = class("X60–61", 160.0, B, Regional);
+const REGINA: TrainClass = class("X50–53 (Regina)", 180.0, B, Regional);
+const X61: TrainClass = class("X61 / X11–14", 160.0, B, Regional);
+const Y31: TrainClass = class("Y31–32 / X61", 140.0, B, Regional);
+const Y1: TrainClass = class("Y1", 130.0, A, Railcar);
 /// Anything not known: a locomotive-hauled train at the common 160 km/h.
-pub const DEFAULT: TrainClass = class("unknown", 160.0, A);
+pub const DEFAULT: TrainClass = class("unknown", 160.0, A, Regional);
 
 /// By product code, as Trafikverket sends it.
 const BY_CODE: &[(&str, TrainClass)] = &[("PNA044", X31)];
@@ -129,5 +147,7 @@ mod tests {
         assert_eq!(class_of(None, Some("SJ Nattåg")).category, A);
         assert_eq!(class_of(None, Some("Something new")), DEFAULT);
         assert!(!known(None, None));
+        assert_eq!(class_of(None, Some("SJ Snabbtåg")).shape, Shape::HighSpeed);
+        assert_eq!(class_of(None, Some("SJ Nattåg")).shape, Shape::Loco);
     }
 }

@@ -601,6 +601,8 @@ export const airlineLogoUrl = (airlineId: number) =>
 export type TrainSource = "trafikverket";
 
 export type TrainKind = "highSpeed" | "intercity" | "regional" | "suburban" | "other";
+/** How a train's cars are drawn, from the vehicles its product runs with (train_class.rs). */
+export type TrainShape = "highSpeed" | "doubleDeck" | "regional" | "loco" | "railcar";
 
 /** A train on the move, merged from regional public feeds (no global one exists). */
 /** A position report as the dev map marks it. */
@@ -649,6 +651,8 @@ export interface Train {
   structures?: Structure[];
   /** When it came to a stand at its last stop, Unix seconds: the map drops it a little after. */
   endedUnix?: number | null;
+  /** How its cars are drawn; regional where not known. */
+  shape?: TrainShape;
 }
 
 /**

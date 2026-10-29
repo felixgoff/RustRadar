@@ -146,7 +146,7 @@
   } from "./trains";
   import { type RouteCursor, routeAhead, wayToStop } from "./train-route";
   import { CAR_M, carLines, DEFAULT_CARS } from "./train-cars";
-  import { CAR_HEIGHT_M, CAR_WIDTH_M, carMeshes, type CarPlace, carPlaces } from "./train-models";
+  import { CAR_HEIGHT_M, CAR_WIDTH_M, carMesh, type CarPlace, carPlaces } from "./train-models";
   import { GROUND as ON_THE_GROUND, levelAt, onStructures, type Level, type Structure } from "./bridges";
   import { isTrackpadScroll, pinched, type PinchEvent, wheelPixels, wrapBearing } from "./trackpad";
 
@@ -1958,7 +1958,7 @@
   const CAR_MESH_MATERIAL = { ambient: 0.45, diffuse: 0.6, shininess: 40, specularColor: [70, 70, 70] as [number, number, number] };
 
   /** A car on the map, of the train at `train` in the trains' list; on the ground, a bridge or in a tunnel. */
-  type DrawnCar = CarPlace & { train: number; lead: boolean; level: Level };
+  type DrawnCar = CarPlace & { train: number; mesh: ReturnType<typeof carMesh>; level: Level };
 
   /**
    * The cars of the trains in view, as many as their operator says (else
@@ -1982,7 +1982,7 @@
       }
       const structures: Structure[] = train.structures ?? [];
       places.forEach((place, k) =>
-        cars.push({ ...place, train: i, lead: k === 0, level: structures.length ? levelAt(place.at, place.heading, structures) : ON_THE_GROUND }),
+        cars.push({ ...place, train: i, mesh: carMesh(k === 0, train.shape), level: structures.length ? levelAt(place.at, place.heading, structures) : ON_THE_GROUND }),
       );
     });
     return cars;
@@ -1994,15 +1994,15 @@
     // never thinner than a few pixels, so a train far off is still seen whole
     const width = Math.max(CAR_WIDTH_M, MIN_CAR_WIDTH_PX * mpp);
     const height = Math.max(CAR_HEIGHT_M, MIN_CAR_WIDTH_PX * 1.3 * mpp);
-    const meshes = carMeshes();
-    // on the ground and up on bridges; and in tunnels, faint, through the ground
-    return ([true, false] as const).flatMap((lead) =>
+    // a layer per mesh the cars in view take, on the ground and up on bridges; and in tunnels, faint, through the ground
+    const meshes = new Map(cars.map((c) => [c.mesh.key, c.mesh.mesh]));
+    return [...meshes].flatMap(([key, mesh]) =>
       ([false, true] as const).map(
         (tunnel) =>
           new SimpleMeshLayer<DrawnCar>({
-            id: `train-car-meshes-${lead ? "cab" : "coach"}${tunnel ? "-tunnel" : ""}`,
-            data: cars.filter((c) => c.lead === lead && c.level.tunnel === tunnel),
-            mesh: lead ? meshes.cab : meshes.coach,
+            id: `train-car-meshes-${key}${tunnel ? "-tunnel" : ""}`,
+            data: cars.filter((c) => c.mesh.key === key && c.level.tunnel === tunnel),
+            mesh,
             getPosition: (c) => [c.at[0], c.at[1], c.level.height],
             getOrientation: (c) => [0, -c.heading, 0],
             getScale: (c) => [width, c.length, height],

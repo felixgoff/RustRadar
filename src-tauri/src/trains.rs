@@ -87,6 +87,9 @@ pub struct Train {
     /// it a little after.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_unix: Option<i64>,
+    /// How its cars are drawn, from the vehicles its product runs with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<crate::train_class::Shape>,
 }
 
 /// A position report as the dev map marks it.
@@ -654,6 +657,7 @@ mod tests {
             tail: Vec::new(),
             structures: Vec::new(),
             ended_unix: None,
+            shape: None,
         };
         let source = Source::Trafikverket;
         let (key, _) = source.request(&Area::WORLD);
@@ -719,6 +723,7 @@ mod tests {
             tail: Vec::new(),
             structures: Vec::new(),
             ended_unix: None,
+            shape: None,
         };
         let json = serde_json::to_value(&t).unwrap();
         for key in ["speedKmh", "delayMinutes", "positionUnix", "frames", "heading", "destination", "operator"] {

@@ -1,11 +1,14 @@
 // @ts-ignore bun's types are not a dependency; the runner provides the module
 import { describe, expect, test } from "bun:test";
+import type { TrainShape } from "./api";
 import { carArrays, carPlaces } from "./train-models";
+
+const SHAPES: TrainShape[] = ["highSpeed", "doubleDeck", "regional", "loco", "railcar"];
 
 describe("train models", () => {
   test("a car is a closed unit box of triangles, its body taking the train's colour", () => {
-    for (const lead of [false, true]) {
-      const a = carArrays(lead);
+    for (const [lead, shape] of SHAPES.flatMap((shape) => [false, true].map((lead) => [lead, shape] as const))) {
+      const a = carArrays(lead, shape);
       expect(a.positions.length % 9).toBe(0);
       expect(a.normals.length).toBe(a.positions.length);
       expect(a.colors.length).toBe(a.positions.length);
@@ -21,6 +24,21 @@ describe("train models", () => {
       expect(a.colors.some((c) => c === 1)).toBe(true);
       expect(a.colors.some((c) => c < 0.25)).toBe(true);
     }
+  });
+
+  test("the shapes differ where their vehicles do", () => {
+    // where the roof ends: further back for a longer nose
+    const roofEnd = (shape: TrainShape) => {
+      const p = carArrays(true, shape).positions;
+      return Math.max(...p.filter((_, i) => i % 3 === 1 && p[i + 1] === 1));
+    };
+    expect(roofEnd("highSpeed")).toBeLessThan(roofEnd("regional"));
+    expect(roofEnd("regional")).toBeLessThan(roofEnd("loco"));
+    // window bands: two rows on a double-decker's coaches, none along a locomotive
+    const dark = (lead: boolean, shape: TrainShape) => carArrays(lead, shape).colors.filter((c) => c === 0.16).length;
+    expect(dark(false, "doubleDeck")).toBe(2 * dark(false, "regional"));
+    expect(dark(true, "loco")).toBe(0);
+    expect(dark(false, "loco")).toBe(dark(false, "regional"));
   });
 
   test("each car lies halfway along it, pointing from its back to its front", () => {

@@ -777,6 +777,7 @@ pub fn train(
         tail,
         structures,
         ended_unix,
+        shape: class.map(|c| c.shape),
     }
 }
 
@@ -2270,6 +2271,7 @@ mod tests {
             tail: Vec::new(),
             structures: Vec::new(),
             ended_unix: None,
+            shape: None,
         };
         let report = |n: &str| Report {
             advertised: None,

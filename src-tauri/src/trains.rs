@@ -90,6 +90,9 @@ pub struct Train {
     /// How its cars are drawn, from the vehicles its product runs with.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shape: Option<crate::train_class::Shape>,
+    /// The 3D model its cars are drawn with, where there is one for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<&'static str>,
 }
 
 /// A position report as the dev map marks it.
@@ -658,6 +661,7 @@ mod tests {
             structures: Vec::new(),
             ended_unix: None,
             shape: None,
+            model: None,
         };
         let source = Source::Trafikverket;
         let (key, _) = source.request(&Area::WORLD);
@@ -724,6 +728,7 @@ mod tests {
             structures: Vec::new(),
             ended_unix: None,
             shape: None,
+            model: None,
         };
         let json = serde_json::to_value(&t).unwrap();
         for key in ["speedKmh", "delayMinutes", "positionUnix", "frames", "heading", "destination", "operator"] {

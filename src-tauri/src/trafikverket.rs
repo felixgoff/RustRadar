@@ -778,6 +778,10 @@ pub fn train(
         structures,
         ended_unix,
         shape: class.map(|c| c.shape),
+        model: service.and_then(|s| {
+            let calls: Vec<&str> = s.calls.iter().filter_map(|c| stations.get(&c.station)).map(|st| st.name.as_str()).collect();
+            crate::train_class::model_of(s.product_code.as_deref(), s.product.as_deref(), s.owner.as_deref(), &calls)
+        }),
     }
 }
 
@@ -2272,6 +2276,7 @@ mod tests {
             structures: Vec::new(),
             ended_unix: None,
             shape: None,
+            model: None,
         };
         let report = |n: &str| Report {
             advertised: None,

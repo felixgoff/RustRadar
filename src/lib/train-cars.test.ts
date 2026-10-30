@@ -34,6 +34,14 @@ describe("carLines", () => {
     expect(lonM(cars[1][0][0])).toBeCloseTo(-2 * CAR_M + 2.5, 0);
   });
 
+  test("cars of their own lengths, the gap between each", () => {
+    // a 15 m locomotive and a 25 m coach, standing at 0 m
+    const [loco, coach] = carLines(frames, tail, 2, 0, (k) => (k === 0 ? 15 : 25));
+    expect(lonM(loco[0][0])).toBeCloseTo(-15, 0);
+    expect(lonM(coach[coach.length - 1][0])).toBeCloseTo(-17.5, 0);
+    expect(lonM(coach[0][0])).toBeCloseTo(-42.5, 0);
+  });
+
   test("no frames, no cars", () => {
     expect(carLines([], tail, 3, 0)).toEqual([]);
   });

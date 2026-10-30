@@ -25,6 +25,8 @@ export function carLines(
   tail: LatLon[],
   cars: number,
   nowMs: number,
+  /** Each car's length, metres, where it isn't a coach's (`CAR_M` less the gap between). */
+  lengthOf: (car: number) => number = () => CAR_M - GAP_M,
 ): [number, number][][] {
   if (!frames.length) return [];
   // the way it has come and goes: the tail reversed, up to the frames' start, then the frames
@@ -60,12 +62,14 @@ export function carLines(
     return [path[i - 1][0] + (path[i][0] - path[i - 1][0]) * k, path[i - 1][1] + (path[i][1] - path[i - 1][1]) * k];
   };
   const out: [number, number][][] = [];
+  let front = head;
   for (let c = 0; c < Math.max(1, cars); c++) {
-    const [front, back] = [head - c * CAR_M, head - (c + 1) * CAR_M + GAP_M];
+    const back = front - lengthOf(c);
     const line: LatLon[] = [point(back)];
     for (let i = 0; i < path.length; i++) if (at[i] > back && at[i] < front) line.push(path[i]);
     line.push(point(front));
     out.push(line.map(([lat, lon]) => [lon, lat]));
+    front = back - GAP_M;
   }
   return out;
 }

@@ -13,7 +13,8 @@
     "test": "bun test src",
     "tauri": "tauri",
     "bump": "node scripts/version.mjs",
-    "build:aircraft": "node scripts/aircraft/build.mjs"
+    "build:aircraft": "node scripts/aircraft/build.mjs",
+    "build:trains": "node scripts/trains/build.mjs"
   },
   "license": "MIT",
   "dependencies": {

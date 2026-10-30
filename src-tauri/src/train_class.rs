@@ -129,6 +129,37 @@ pub fn class_of(code: Option<&str>, name: Option<&str>) -> TrainClass {
     BY_NAME.iter().find(|(k, _)| name.contains(k)).map_or(DEFAULT, |(_, c)| *c)
 }
 
+/// The 3D model a train is drawn with (static/trains, built by
+/// scripts/trains/build.mjs), by its product, operator and the stations it
+/// calls at; `None` draws the plain cars of its `Shape`. Liveries are the
+/// operators', so a model is only taken where the operator matches.
+pub fn model_of(code: Option<&str>, name: Option<&str>, operator: Option<&str>, stations: &[&str]) -> Option<&'static str> {
+    let name = name.unwrap_or_default().to_lowercase();
+    let operator = operator.unwrap_or_default().to_lowercase();
+    let sj = operator.starts_with("sj");
+    let class = class_of(code, Some(&name));
+    if class == X31 {
+        Some("contessa")
+    } else if sj && name.contains("snabbtåg") {
+        // the X55 runs SJ's high-speed trains up the coast to Sundsvall and Umeå; the X2000 the rest
+        let north = ["sundsvall", "härnösand", "örnsköldsvik", "umeå"];
+        let up_north = stations.iter().any(|s| north.iter().any(|n| s.to_lowercase().starts_with(n)));
+        Some(if up_north { "x55" } else { "x2000" })
+    } else if sj && class == X40 {
+        Some("x40")
+    } else if sj && class == RC6 {
+        Some("sj-intercity")
+    } else if class == X60 {
+        Some("x60")
+    } else if name.contains("pågatåg") {
+        Some("x61-skane")
+    } else if name.contains("västtåg") {
+        Some("x61-vasttrafik")
+    } else {
+        None
+    }
+}
+
 /// Whether the table knows the product (by code or name).
 pub fn known(code: Option<&str>, name: Option<&str>) -> bool {
     class_of(code, name) != DEFAULT
@@ -149,5 +180,20 @@ mod tests {
         assert!(!known(None, None));
         assert_eq!(class_of(None, Some("SJ Snabbtåg")).shape, Shape::HighSpeed);
         assert_eq!(class_of(None, Some("SJ Nattåg")).shape, Shape::Loco);
+    }
+
+    #[test]
+    fn models_by_product_operator_and_route() {
+        let model = |name, operator, stations: &[&str]| model_of(None, Some(name), Some(operator), stations);
+        assert_eq!(model("SJ Snabbtåg", "SJ", &["Stockholm C", "Göteborg C"]), Some("x2000"));
+        assert_eq!(model("SJ Snabbtåg", "SJ", &["Stockholm C", "Sundsvall C", "Umeå C"]), Some("x55"));
+        assert_eq!(model("SJ Regional", "SJ", &[]), Some("x40"));
+        assert_eq!(model("SJ Intercity", "SJ", &[]), Some("sj-intercity"));
+        assert_eq!(model("Snälltåget", "Snälltåget", &[]), None, "another operator's livery");
+        assert_eq!(model("Öresundståg", "Transdev", &[]), Some("contessa"));
+        assert_eq!(model("Pendeltåg", "SJ Stockholmståg", &[]), Some("x60"));
+        assert_eq!(model("Pågatåg", "Arriva", &[]), Some("x61-skane"));
+        assert_eq!(model("Västtåg", "SJ Götalandståg", &[]), Some("x61-vasttrafik"));
+        assert_eq!(model("Norrtåg", "Vy", &[]), None);
     }
 }

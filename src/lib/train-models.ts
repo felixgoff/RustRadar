@@ -131,6 +131,57 @@ export function carMesh(lead: boolean, shape: TrainShape = "regional"): { key: s
 }
 const meshes = new Map<string, Geometry>();
 
+/** A model's car (scripts/trains/build.mjs): in the unit box like the plain cars, and its length in metres. */
+export type ModelCar = { key: string; mesh: Geometry; length: number };
+
+type PackedCar = { length: number; vertices: number; positions: number; normals: number; colors: number };
+
+const trainModels = new Map<string, ModelCar[]>();
+let loadingModels: Promise<void> | null = null;
+
+/** Fetches the trains' 3D models once; until they arrive (or if they can't) the plain cars are drawn. */
+export function loadTrainModels(): Promise<void> {
+  loadingModels ??= Promise.all([
+    fetch("/trains/index.json").then((r) => r.json() as Promise<{ models: Record<string, { cars: PackedCar[] }> }>),
+    fetch("/trains/meshes.bin").then((r) => r.arrayBuffer()),
+  ])
+    .then(([index, buffer]) => {
+      for (const [name, { cars }] of Object.entries(index.models)) {
+        trainModels.set(
+          name,
+          cars.map((car, i) => {
+            const count = car.vertices * 3;
+            // normals and colours ship as bytes; the GPU wants floats
+            const normals = Float32Array.from(new Int8Array(buffer, car.normals, count), (v) => v / 127);
+            const colors = Float32Array.from(new Uint8Array(buffer, car.colors, count), (v) => v / 255);
+            const mesh = new Geometry({
+              topology: "triangle-list",
+              attributes: {
+                positions: { size: 3, value: new Float32Array(buffer, car.positions, count) },
+                normals: { size: 3, value: normals },
+                colors: { size: 3, value: colors },
+              },
+            });
+            return { key: `${name}-${i}`, mesh, length: car.length };
+          }),
+        );
+      }
+    })
+    .catch((e) => console.warn("train models unavailable:", e));
+  return loadingModels;
+}
+
+/**
+ * Car `k` of a train of `count` cars drawn with `model`: its leading car
+ * first, its last car last and the middle one between; `null` without the
+ * model (not loaded, or none for the train).
+ */
+export function modelCar(model: string | undefined, k: number, count: number): ModelCar | null {
+  const cars = model ? trainModels.get(model) : undefined;
+  if (!cars) return null;
+  return cars[k === 0 ? 0 : k === count - 1 ? 2 : 1];
+}
+
 /** A car laid on the map: its middle `[lon, lat]`, the way it points (degrees clockwise from north), and its length. */
 export type CarPlace = { at: [number, number]; heading: number; length: number };
 

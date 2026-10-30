@@ -63,9 +63,17 @@ export const TRAIN_CREDITS: Record<TrainSource, { text: string; url: string }> =
   },
 };
 
-/** The credits for the sources of these trains, once each. */
-export const trainCredits = (trains: readonly Pick<Train, "source">[]) =>
-  [...new Set(trains.map((t) => t.source))].filter((s) => s in TRAIN_CREDITS).map((s) => TRAIN_CREDITS[s]);
+/** The 3D train models' maker, credited (as he asked) wherever they are drawn. */
+export const MODEL_CREDIT = {
+  text: "3D trains: Lardman",
+  url: "https://3dwarehouse.sketchup.com/user/1082279160696486794315506/Lardman",
+};
+
+/** The credits for the sources of these trains, once each, and the models' maker where any has a model. */
+export const trainCredits = (trains: readonly Pick<Train, "source" | "model">[]) => [
+  ...[...new Set(trains.map((t) => t.source))].filter((s) => s in TRAIN_CREDITS).map((s) => TRAIN_CREDITS[s]),
+  ...(trains.some((t) => t.model) ? [MODEL_CREDIT] : []),
+];
 
 type Frames = Train["frames"];
 

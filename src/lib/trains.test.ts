@@ -9,6 +9,7 @@ import {
   nextStop,
   positionAt,
   stopView,
+  MODEL_CREDIT,
   TRAIN_CREDITS,
   TRAIN_KINDS,
   TRAIN_SOURCE_NAMES,
@@ -132,6 +133,7 @@ describe("credits and wording", () => {
   test("one credit per source in view", () => {
     const credits = trainCredits([train({ source: "trafikverket" }), train({ source: "trafikverket" })]);
     expect(credits).toEqual([TRAIN_CREDITS.trafikverket]);
+    expect(trainCredits([train({ source: "trafikverket", model: "x2000" })])).toEqual([TRAIN_CREDITS.trafikverket, MODEL_CREDIT]);
     expect(TRAIN_CREDITS.trafikverket.text).toContain("CC0");
   });
 

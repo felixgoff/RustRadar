@@ -653,6 +653,8 @@ export interface Train {
   endedUnix?: number | null;
   /** How its cars are drawn; regional where not known. */
   shape?: TrainShape;
+  /** The 3D model its cars are drawn with (static/trains), where there is one for it. */
+  model?: string;
 }
 
 /**

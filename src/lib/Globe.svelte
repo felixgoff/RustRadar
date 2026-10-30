@@ -146,7 +146,7 @@
   } from "./trains";
   import { type RouteCursor, routeAhead, wayToStop } from "./train-route";
   import { CAR_M, carLines, DEFAULT_CARS } from "./train-cars";
-  import { CAR_HEIGHT_M, CAR_WIDTH_M, carMesh, type CarPlace, carPlaces } from "./train-models";
+  import { CAR_HEIGHT_M, CAR_WIDTH_M, carMesh, type CarPlace, carPlaces, loadTrainModels, modelCar } from "./train-models";
   import { GROUND as ON_THE_GROUND, levelAt, onStructures, type Level, type Structure } from "./bridges";
   import { isTrackpadScroll, pinched, type PinchEvent, wheelPixels, wrapBearing } from "./trackpad";
 
@@ -1955,10 +1955,11 @@
   const CARS_MIN_PX = 9;
   /** A 3D car is never thinner than this (px), and a little taller. */
   const MIN_CAR_WIDTH_PX = 3;
+  const MODEL_WHITE: ShipColor = [255, 255, 255, 255];
   const CAR_MESH_MATERIAL = { ambient: 0.45, diffuse: 0.6, shininess: 40, specularColor: [70, 70, 70] as [number, number, number] };
 
   /** A car on the map, of the train at `train` in the trains' list; on the ground, a bridge or in a tunnel. */
-  type DrawnCar = CarPlace & { train: number; mesh: ReturnType<typeof carMesh>; level: Level };
+  type DrawnCar = CarPlace & { train: number; mesh: ReturnType<typeof carMesh>; level: Level; modelled: boolean };
 
   /**
    * The cars of the trains in view, as many as their operator says (else
@@ -1974,15 +1975,18 @@
       const [lon, lat] = data.positions[i];
       if (lon < west - 0.01 || lon > east + 0.01 || lat < south - 0.01 || lat > north + 0.01) return;
       const count = Math.max(1, train.cars ?? DEFAULT_CARS);
-      let places = carPlaces(carLines(train.frames ?? [], train.tail ?? [], count, nowMs));
+      // a train with a model of its own: its cars, each as long as the real one
+      const model = (k: number) => modelCar(train.model, k, count);
+      const lengthOf = model(0) ? (k: number) => model(k)!.length : undefined;
+      let places = carPlaces(carLines(train.frames ?? [], train.tail ?? [], count, nowMs, lengthOf));
       if (places.length !== count) {
         const h = (data.headings[i] ?? 0) * DEGREES;
         const behind: [number, number] = [lat - Math.cos(h) / 1000, lon - Math.sin(h) / 1000 / (Math.cos(lat * DEGREES) || 1e-6)];
-        places = carPlaces(carLines([[lat, lon, nowMs]], [[lat, lon], behind], count, nowMs));
+        places = carPlaces(carLines([[lat, lon, nowMs]], [[lat, lon], behind], count, nowMs, lengthOf));
       }
       const structures: Structure[] = train.structures ?? [];
       places.forEach((place, k) =>
-        cars.push({ ...place, train: i, mesh: carMesh(k === 0, train.shape), level: structures.length ? levelAt(place.at, place.heading, structures) : ON_THE_GROUND }),
+        cars.push({ ...place, train: i, mesh: model(k) ?? carMesh(k === 0, train.shape), modelled: lengthOf !== undefined, level: structures.length ? levelAt(place.at, place.heading, structures) : ON_THE_GROUND }),
       );
     });
     return cars;
@@ -1995,8 +1999,8 @@
     const width = Math.max(CAR_WIDTH_M, MIN_CAR_WIDTH_PX * mpp);
     const height = Math.max(CAR_HEIGHT_M, MIN_CAR_WIDTH_PX * 1.3 * mpp);
     // a layer per mesh the cars in view take, on the ground and up on bridges; and in tunnels, faint, through the ground
-    const meshes = new Map(cars.map((c) => [c.mesh.key, c.mesh.mesh]));
-    return [...meshes].flatMap(([key, mesh]) =>
+    const meshes = new Map(cars.map((c) => [c.mesh.key, c]));
+    return [...meshes].flatMap(([key, { mesh: { mesh }, modelled }]) =>
       ([false, true] as const).map(
         (tunnel) =>
           new SimpleMeshLayer<DrawnCar>({
@@ -2006,7 +2010,11 @@
             getPosition: (c) => [c.at[0], c.at[1], c.level.height],
             getOrientation: (c) => [0, -c.heading, 0],
             getScale: (c) => [width, c.length, height],
-            getColor: (c) => (tunnel ? inTunnel(data.colors[c.train]) : data.colors[c.train]),
+            // a model wears its own livery; the plain cars take the operator's colour
+            getColor: (c) => {
+              const color = modelled ? MODEL_WHITE : data.colors[c.train];
+              return tunnel ? inTunnel(color) : color;
+            },
             material: CAR_MESH_MATERIAL,
             pickable: true,
             autoHighlight: true,
@@ -3493,6 +3501,7 @@
     });
     // the published aircraft shapes; the built-in ones draw until they land
     aircraftModels.load().then(render);
+    loadTrainModels().then(render);
     fetch(OPENFREEMAP)
       .then((r) => r.json())
       .then((tilejson: { tiles: string[] }) => {

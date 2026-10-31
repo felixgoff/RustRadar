@@ -51,5 +51,8 @@
     "svelte-check": "^4.6.0",
     "typescript": "~6.0.3",
     "vite": "^8.0.16"
+  },
+  "patchedDependencies": {
+    "@deck.gl/extensions@9.4.0": "patches/@deck.gl%2Fextensions@9.4.0.patch"
   }
 }

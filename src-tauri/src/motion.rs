@@ -135,8 +135,6 @@ const BEHIND_M: f64 = 2_000.0;
 const PLATFORM_M: f64 = 300.0;
 /// Slower than this near its stop, a train is arriving there (not running through), m/s.
 const ARRIVING_V: f64 = 22.0;
-/// How hard a train pulling in along a platform brakes, m/s².
-const PLATFORM_BRAKE: f64 = 0.8;
 /// Slower than this and braking at least this hard (m/s, m/s²), a train is coming to a stop.
 const STOPPING_V: f64 = 11.0;
 const STOPPING_BRAKE: f64 = 0.25;
@@ -568,6 +566,8 @@ struct Real {
     t_ms: i64,
     /// m/s: reported, else from how far it went since the report before.
     speed: Option<f64>,
+    /// The speed is reported (not only the average since the report before).
+    said: bool,
     heading: Option<f64>,
     /// The heading is seen (it moved between reports), not only reported.
     seen: bool,
@@ -620,7 +620,8 @@ fn read(latest: &Fix, prev: Option<&Fix>, stops: &[Stop]) -> Real {
             Some((p.speed.filter(valid)? - latest.speed.filter(valid)?) / ((latest.t_ms - p.t_ms) as f64 / 1000.0))
         })
         .filter(|a| (BRAKING.0..=BRAKING.1).contains(a));
-    Real { at, t_ms: latest.t_ms, speed, heading, seen: seen.is_some(), standing, next, at_stop, braking }
+    let said = latest.speed.is_some_and(|v| valid(&v));
+    Real { at, t_ms: latest.t_ms, speed, said, heading, seen: seen.is_some(), standing, next, at_stop, braking }
 }
 
 /// A place a way is found through: where, which stop (none: the report).
@@ -820,8 +821,15 @@ fn layout(
     let through_report = || -> Option<Layout> {
         let mut with = targets.clone();
         with.insert(lead, Target { at: r_at, stop: None });
-        let found = find(track, d.at, d_heading, &with, reach, only)?;
+        let mut found = find(track, d.at, d_heading, &with, reach, only)?;
         let p0 = found.reached.iter().find(|(_, t)| t.stop.is_none()).map(|r| r.0)?;
+        // a stop the real train is pulling in past isn't on the way on through it: behind
+        let passed = |t: &Target| {
+            t.stop.is_some_and(|i| !found.reached.iter().any(|r| r.1.stop == Some(i)))
+                && real.heading.is_some_and(|h| ahead_of(t.at, r_at, h) < 0.0)
+        };
+        let missed: Vec<Target> = with.iter().filter(|t| passed(t)).copied().collect();
+        found.behind.extend(missed);
         Some(Layout::new(found, Some(0.0), p0, r_at, standing_at))
     };
     // from the report through the drawn train: it is ahead
@@ -941,7 +949,9 @@ impl Predicted {
 
 /// Where the real train stops for good: where it stands; else the first
 /// station on its way it calls at (one just behind the report as it pulls
-/// in along the platform: a little on, as soon as it can stop). And whether
+/// in along the platform: where it is seen, as how much further it rolls
+/// isn't known, and could take it past the platform's end). Never past the
+/// station's point unless seen there, so it stops at its platform. And whether
 /// that is only the station's point, not where it is seen to stop (its
 /// trains can stop a way short of it).
 fn hold_of(layout: &Layout, real: &Real, stops: &[Stop], v0: f64) -> Option<(f64, bool)> {
@@ -965,31 +975,30 @@ fn hold_of(layout: &Layout, real: &Real, stops: &[Stop], v0: f64) -> Option<(f64
 fn hold_at_station(layout: &Layout, real: &Real, stops: &[Stop], v0: f64) -> Option<(f64, bool)> {
     let p0 = layout.p0;
     // past a station's point and slowing: pulling in along its platform (going at a
-    // steady speed, or faster, it is on its way out); not saying, until due to leave
-    let arriving = |i: usize| {
-        v0 < ARRIVING_V
-            && match (real.speed, real.braking) {
-                (_, Some(_)) => true,
-                (Some(_), None) => false,
-                (None, None) => stops[i].depart_ms.is_none_or(|d| d > real.t_ms),
-            }
+    // steady speed, or faster, it is on its way out); not saying (its speed since the
+    // report before is no telling how fast it goes now), until due to leave
+    let arriving = |i: usize| match (real.said, real.braking) {
+        (_, Some(_)) => v0 < ARRIVING_V,
+        (true, None) => false,
+        (false, None) => stops[i].depart_ms.is_none_or(|d| d > real.t_ms),
     };
-    let pulling_in = p0 + v0 * v0 / (2.0 * PLATFORM_BRAKE);
     let calls = |i: usize| i >= real.next && stops.get(i).is_some_and(|s| !s.pass);
     if layout.behind.iter().any(|(d, i)| calls(*i) && *d < PLATFORM_M && arriving(*i)) {
-        return Some((pulling_in, false));
+        return Some((p0, false));
     }
     for m in layout.marks.iter().filter(|m| calls(m.stop)) {
         if m.at > p0 + ARRIVED_M {
             // braking into it: where it will stop, as it brakes, if that is along its platform
+            // short of the point (braking gently, on average since the report before, it
+            // brakes harder later on: at the point, not past it)
             let stops_at = real.braking.map(|a| p0 + v0 * v0 / (2.0 * a));
-            if let Some(at) = stops_at.filter(|at| (at - m.at).abs() <= PLATFORM_M) {
+            if let Some(at) = stops_at.filter(|at| *at < m.at && m.at - at <= PLATFORM_M) {
                 return Some((at.max(p0 + ARRIVED_M), false));
             }
             return Some((m.at, true));
         }
         if p0 - m.at < PLATFORM_M && arriving(m.stop) {
-            return Some((pulling_in, false));
+            return Some((p0, false));
         }
     }
     None
@@ -1804,7 +1813,105 @@ mod tests {
         let prev = fix(800.0, NOW - 20_000, Some(12.0));
         let f = sim(None, &fix(1_040.0, NOW, Some(4.0)), Some(&prev), &stops, NOW, &track);
         let end = x_of((f.last().unwrap().0, f.last().unwrap().1));
-        assert!(end > 1_040.0 && end < 1_100.0, "stops soon: {end}");
+        assert!(end > 1_039.5 && end < 1_100.0, "stops soon: {end}");
+    }
+
+    /// Drawn as the map does: anew on every report (heard 2 s after it was
+    /// made, the one before it as `prev`) and every minute between, up to
+    /// `until`. How far on it ever is, and where it ends.
+    fn drawn_through(reports: &[Fix], stops: &[Stop], until: i64) -> (f64, f64) {
+        let track = rails(160.0);
+        let (mut frames, mut heard, mut last_sim): (Option<Vec<Frame>>, usize, i64) = (None, 0, i64::MIN);
+        let mut furthest = f64::NEG_INFINITY;
+        let mut x = f64::NAN;
+        for now in (reports[0].t_ms + 2_000..=until).step_by(1000) {
+            let fresh = heard < reports.len() && reports[heard].t_ms + 2_000 <= now;
+            heard += usize::from(fresh);
+            if fresh || now - last_sim >= 60_000 {
+                let prev = heard.checked_sub(2).map(|i| reports[i]);
+                frames = Some(sim(frames.as_deref(), &reports[heard - 1], prev.as_ref(), stops, now, &track));
+                last_sim = now;
+            }
+            let f = frames.as_ref().unwrap();
+            x = x_of(sample(f, now).map_or((f[0].0, f[0].1), |s| s.0));
+            furthest = furthest.max(x);
+        }
+        (furthest, x)
+    }
+
+    #[test]
+    fn reported_without_its_speed_at_its_station_it_stops_there() {
+        // every minute, no speed: the average since the report before (20 m/s) isn't how
+        // fast it goes now, 2 m short of the station's point (pulling in, not on its way out)
+        let stops = [call(3_000.0, NOW + 150_000), far()];
+        let reports = [
+            fix(325.0, NOW, None),
+            fix(1_825.0, NOW + 60_000, None),
+            fix(2_998.0, NOW + 120_000, None),
+            fix(3_000.0, NOW + 180_000, Some(0.0)),
+        ];
+        let (furthest, end) = drawn_through(&reports, &stops, NOW + 300_000);
+        assert!(furthest < 3_000.5, "never past the station: {furthest:.0} m");
+        assert!((end - 3_000.0).abs() < 0.5, "stands there: {end:.0}");
+    }
+
+    #[test]
+    fn seen_braking_gently_it_still_stops_by_its_station() {
+        // braking 0.2 m/s² on average over the minute between reports (it braked harder,
+        // later): no further than the station's point, not 280 m on where that would stop it
+        let stops = [call(3_000.0, NOW + 150_000), far()];
+        let reports = [
+            fix(0.0, NOW, Some(25.0)),
+            fix(1_500.0, NOW + 60_000, Some(25.0)),
+            fix(2_902.0, NOW + 120_000, Some(12.5)),
+            fix(3_000.0, NOW + 180_000, Some(0.0)),
+        ];
+        let (furthest, end) = drawn_through(&reports, &stops, NOW + 300_000);
+        assert!(furthest < 3_000.5, "never past the station: {furthest:.0} m");
+        assert!((end - 3_000.0).abs() < 0.5, "stands there: {end:.0}");
+    }
+
+    #[test]
+    fn pulling_in_past_its_point_it_stops_no_further_than_seen() {
+        // seen at 15 m/s, braking, 100 m past the platform's middle: it stops there (where it
+        // stands is told by the next report), not 140 m on, past the platform's end
+        let stops = [call(3_000.0, NOW + 150_000), far()];
+        let reports = [
+            fix(2_000.0, NOW, Some(25.0)),
+            fix(3_100.0, NOW + 50_000, Some(15.0)),
+            fix(3_150.0, NOW + 110_000, Some(0.0)),
+        ];
+        let (furthest, end) = drawn_through(&reports, &stops, NOW + 300_000);
+        assert!(furthest < 3_150.5, "never past where it stood: {furthest:.0} m");
+        assert!((end - 3_150.0).abs() < 0.5, "stands there: {end:.0}");
+    }
+
+    #[test]
+    fn drawn_standing_past_its_stations_point_facing_no_way_it_stays() {
+        // drawn standing 23 m past the station's point, which way it faces not known; the
+        // real train is just ahead, pulling in (its speed not said): the station, behind
+        // them both, is still the one it stops at
+        let track = rails(160.0);
+        let stops = [call(3_000.0, NOW + 150_000), far()];
+        let p = at(3_023.0);
+        let drawn = [(p.0, p.1, NOW - 10_000), (p.0, p.1, NOW + HORIZON_MS)];
+        let prev = fix(1_675.0, NOW - 90_000, None);
+        let f = sim(Some(&drawn), &fix(3_024.0, NOW - 30_000, None), Some(&prev), &stops, NOW, &track);
+        let end = x_of((f.last().unwrap().0, f.last().unwrap().1));
+        assert!(end < 3_024.5, "stays: {end:.0}");
+    }
+
+    #[test]
+    fn its_frames_ending_short_of_its_station_it_stops_there_still() {
+        // one report at speed: the horizon ends as it brakes in; worked out again a minute
+        // on and on, it stops at the station and stays
+        let stops = [call(3_500.0, NOW + 150_000), far()];
+        let (furthest, end) = drawn_through(&[fix(0.0, NOW, Some(30.0))], &stops, NOW + 400_000);
+        assert!(furthest < 3_500.5 && (end - 3_500.0).abs() < 0.5, "{furthest:.0}, {end:.0}");
+        // a place it only passes: on through
+        let stops = [Stop { pass: true, ..call(3_500.0, NOW + 150_000) }, far()];
+        let (furthest, _) = drawn_through(&[fix(0.0, NOW, Some(30.0))], &stops, NOW + 400_000);
+        assert!(furthest > 6_000.0, "{furthest:.0}");
     }
 
     #[test]

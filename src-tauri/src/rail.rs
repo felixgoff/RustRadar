@@ -6,7 +6,9 @@
 //! track as mapped in OpenStreetMap, with its `maxspeed` and its `track_ref`
 //! (the platform track's number). The same tiles are what the map draws the
 //! rail network from (through the `railtiles:` protocol, see `serve`), at the
-//! zoom routing uses, so a train on the track is on the line drawn.
+//! zoom routing uses, so a train on the track is on the line drawn. The
+//! protocol also serves stations' platforms, at their own zoom, for the
+//! realistic map's ground.
 //!
 //! Tiles are fetched in the background and kept, in memory and on disk; a
 //! route is only made from tiles already here, so asking never waits on the
@@ -27,6 +29,10 @@ use crate::motion::{ahead, course, distance};
 pub mod blocks;
 
 const TILES: &str = "https://openrailwaymap.app/railway_line_high,railway_text_km";
+/// Stations' platforms (`standard_railway_platforms`), as OpenRailwayMap's own map asks for them.
+const PLATFORM_TILES: &str = "https://openrailwaymap.app/standard_railway_platforms,standard_railway_platform_edges";
+/// The only zoom platforms are served at (OpenRailwayMap has them from it on).
+const PLATFORM_ZOOM: u32 = 15;
 const REFERER: &str = "https://github.com/felixgoff/RustRadar";
 /// The zoom routing uses, and the deepest the map draws (it scales the
 /// tiles up beyond): their lines are within a metre of the full detail.
@@ -451,7 +457,7 @@ fn to_disk(z: u32, x: u32, y: u32, bytes: &[u8]) {
 }
 
 /// A tile's bytes: from memory, else disk, else OpenRailwayMap. Empty where
-/// there is no railway.
+/// there is no railway. At `PLATFORM_ZOOM`, the platforms' tile.
 pub async fn tile_bytes(z: u32, x: u32, y: u32) -> Result<Arc<Vec<u8>>, String> {
     if let Some((at, b)) = store().lock().unwrap().bytes.get_mut(&(z, x, y)) {
         *at = Instant::now();
@@ -462,7 +468,7 @@ pub async fn tile_bytes(z: u32, x: u32, y: u32) -> Result<Arc<Vec<u8>>, String> 
         Some((bytes, false)) => Some(bytes),
         None => None,
     };
-    let url = format!("{TILES}/{z}/{x}/{y}");
+    let url = format!("{}/{z}/{x}/{y}", if z == PLATFORM_ZOOM { PLATFORM_TILES } else { TILES });
     let call = crate::devlog::start("OpenRailwayMap", "GET", &url, None);
     let fetched = async {
         let response = client().ok_or("no HTTP client")?.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -502,7 +508,8 @@ fn remember(z: u32, x: u32, y: u32, bytes: Vec<u8>) -> Arc<Vec<u8>> {
     bytes
 }
 
-/// The `railtiles:` protocol the map draws the network from: `/{z}/{x}/{y}`.
+/// The `railtiles:` protocol the map draws the network from: `/{z}/{x}/{y}`
+/// (and at `PLATFORM_ZOOM`, stations' platforms).
 pub async fn serve(path: &str) -> tauri::http::Response<Vec<u8>> {
     let respond = |status: u16, body: Vec<u8>| {
         tauri::http::Response::builder()
@@ -514,7 +521,7 @@ pub async fn serve(path: &str) -> tauri::http::Response<Vec<u8>> {
     };
     let parts: Vec<u32> = path.trim_matches('/').split('/').filter_map(|p| p.parse().ok()).collect();
     let [z, x, y] = parts[..] else { return respond(400, Vec::new()) };
-    if !(MIN_ZOOM..=ZOOM).contains(&z) || x >= 1 << z || y >= 1 << z {
+    if !((MIN_ZOOM..=ZOOM).contains(&z) || z == PLATFORM_ZOOM) || x >= 1 << z || y >= 1 << z {
         return respond(204, Vec::new());
     }
     match tile_bytes(z, x, y).await {

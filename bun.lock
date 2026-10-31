@@ -41,6 +41,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "@deck.gl/extensions@9.4.0": "patches/@deck.gl%2Fextensions@9.4.0.patch",
+  },
   "packages": {
     "@deck.gl/core": ["@deck.gl/core@9.4.0", "", { "dependencies": { "@loaders.gl/core": "^4.4.3", "@loaders.gl/images": "^4.4.3", "@luma.gl/core": "^9.4.0", "@luma.gl/engine": "^9.4.0", "@luma.gl/gpgpu": "^9.4.0", "@luma.gl/shadertools": "^9.4.0", "@luma.gl/webgl": "^9.4.0", "@math.gl/core": "^4.1.0", "@math.gl/sun": "^4.1.0", "@math.gl/types": "^4.1.0", "@math.gl/web-mercator": "^4.1.0", "@probe.gl/env": "^4.1.1", "@probe.gl/log": "^4.1.1", "@probe.gl/stats": "^4.1.1", "@types/offscreencanvas": "^2019.6.4", "gl-matrix": "^3.0.0", "mjolnir.js": "^3.1.1" } }, "sha512-0isP+x2eGNxteO7lT650lYO7oiAYXAu4aF1jG+BMi8aKYh38HtPugLq1TlQTravIXzBSi5Oe1oZNuVj8h4ZEjA=="],
 

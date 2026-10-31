@@ -1,0 +1,43 @@
+diff --git a/node_modules/@deck.gl/extensions/.bun-tag-57d53d32e8cc526a b/.bun-tag-57d53d32e8cc526a
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@deck.gl/extensions/.bun-tag-8e5d5ba6f47d0561 b/.bun-tag-8e5d5ba6f47d0561
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@deck.gl/extensions/.bun-tag-a82e60169b8b0311 b/.bun-tag-a82e60169b8b0311
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/terrain/terrain-cover.js b/dist/terrain/terrain-cover.js
+index 4b673c301c0df77397a77c04c3aa71fccd8012ad..fe0506c572cc75fd7a9a7e3e393b1aa228a1fdb5 100644
+--- a/dist/terrain/terrain-cover.js
++++ b/dist/terrain/terrain-cover.js
+@@ -102,7 +102,14 @@ export class TerrainCover {
+         if (!this.targetBoundsCommon) {
+             return false;
+         }
+-        const newZoom = Math.ceil(viewport.zoom + 0.5);
++        let newZoom = Math.ceil(viewport.zoom + 0.5);
++        // RustRadar: a tile's texture at its own zoom (1024 px a 512 px tile), not the view's, which gave far
++        // tiles 2048 px each and near ones 256; the deepest tiles, which close in can fill the screen, finer with
++        // the view, about a pixel for a pixel of the screen where it looks
++        const tileZoom = this.tile?.index?.z;
++        if (tileZoom !== undefined) {
++            newZoom = tileZoom < maxZoomOf(targetLayer) ? tileZoom + 1 : Math.max(tileZoom + 1, Math.round(viewport.zoom));
++        }
+         // If the terrain layer is bound to a tile, always render a texture that cover the whole tile.
+         // Otherwise, use the smaller of layer bounds and the viewport bounds.
+         if (this.tile) {
+@@ -177,6 +184,13 @@ function getIntersectingLayers(sourceTile, layers) {
+         return true;
+     });
+ }
++/** The deepest zoom of the tile layer a layer is drawn for. */
++function maxZoomOf(layer) {
++    while (layer && layer.props.maxZoom == null) {
++        layer = layer.parent;
++    }
++    return layer?.props.maxZoom ?? Infinity;
++}
+ /** If layer is the descendent of a TileLayer, return the corresponding tile. */
+ function getTile(layer) {
+     while (layer) {

@@ -1,6 +1,6 @@
 // Trains on the map: colours and names per kind, motion between refreshes,
 // and the credits each source asks for.
-import type { Train, TrainKind, TrainSource, TrainStop } from "./api";
+import type { Train, TrainBlock, TrainKind, TrainSource, TrainStop } from "./api";
 import { ageLabel } from "./freshness";
 
 export type RGB = [number, number, number];
@@ -296,4 +296,46 @@ export function trainProduct(train: Pick<Train, "source" | "name">): string | nu
   if (train.source !== "trafikverket" || train.name.startsWith("Train ")) return null;
   const product = train.name.replace(/\s+\S+$/, "").trim();
   return product && product !== train.name ? product : null;
+}
+
+/** A train drawn this near a block's track is in it, metres. */
+const IN_BLOCK_M = 12;
+/**
+ * A train stays in the block it was in while that block's track is at most
+ * this much further from it than the nearest block's, metres. Blocks overlap
+ * (one runs on through a crossover onto the track beside its own), so the
+ * nearest of two at the same place flips as the train moves along; this is
+ * more than it strays from its track as drawn (a metre), less than the 4.5 m
+ * to the next track over.
+ */
+const KEEP_BLOCK_M = 2;
+
+/** The nearest a point is to a line of `[lon, lat]` points, metres (flat). */
+function metresToLine(p: [number, number], line: [number, number][]): number {
+  const k = Math.cos((p[1] * Math.PI) / 180);
+  let best = Infinity;
+  for (let i = 1; i < line.length; i++) {
+    const [ax, ay] = [(line[i - 1][0] - p[0]) * k, line[i - 1][1] - p[1]];
+    const [dx, dy] = [(line[i][0] - line[i - 1][0]) * k, line[i][1] - line[i - 1][1]];
+    const len2 = dx * dx + dy * dy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+    best = Math.min(best, Math.hypot(ax + dx * t, ay + dy * t) * 111_320);
+  }
+  return best;
+}
+
+/**
+ * The block a train drawn at `p` (`[lon, lat]`) is in: the one it was in
+ * (`was`) while it is still on that block's track, else the nearest, if near
+ * enough; null when none is.
+ */
+export function blockAt(p: [number, number], blocks: readonly Pick<TrainBlock, "id" | "lines">[], was?: string): string | null {
+  let best: { id: string; d: number } | null = null;
+  let kept = Infinity;
+  for (const block of blocks) {
+    const d = Math.min(...block.lines.map((line) => metresToLine(p, line)));
+    if (block.id === was) kept = d;
+    if (d <= IN_BLOCK_M && (!best || d < best.d)) best = { id: block.id, d };
+  }
+  return best && kept <= Math.min(IN_BLOCK_M, best.d + KEEP_BLOCK_M) ? was! : (best?.id ?? null);
 }

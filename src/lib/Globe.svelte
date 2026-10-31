@@ -113,7 +113,7 @@
     UNLIT,
     aimMapEye,
   } from "./realistic";
-  import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, cityGroundLayer } from "./realistic-ground";
+  import { GROUND_SURFACES, groundLayer, landLayer as realisticLandLayer, POLES, cityGroundLayer, railGroundLayers } from "./realistic-ground";
   import { landCoverGroundLayer } from "./landcover-ground";
   import { sglBuildingFetch } from "./overture";
   import { roadWidthsVersion, wantRoadWidths } from "./road-widths";
@@ -133,6 +133,7 @@
   import terrainWorkerUrl from "@loaders.gl/terrain/terrain-worker.js?url";
   import { RAIL_MIN_ZOOM, railLayers, SPEED_BANDS, SPEED_UNKNOWN } from "./rail-layer";
   import {
+    blockAt,
     delayText,
     headingAt,
     positionAt,
@@ -1952,7 +1953,7 @@
    * any larger, the cars would run off the track known behind the train, so
    * there a train is one icon lying on the ground along its way.
    */
-  const CARS_MIN_PX = 9;
+  const CARS_MIN_PX = 3;
   /** A 3D car is never thinner than this (px), and a little taller. */
   const MIN_CAR_WIDTH_PX = 3;
   const MODEL_WHITE: ShipColor = [255, 255, 255, 255];
@@ -2161,8 +2162,6 @@
 
   /** Signal blocks show from this zoom (the signals are only mapped close in). */
   const BLOCKS_MIN_ZOOM = 13;
-  /** A train drawn this near a block's track is in it, metres. */
-  const IN_BLOCK_M = 12;
   const BLOCK_FREE: [number, number, number, number] = [60, 200, 110, 230];
   const BLOCK_TAKEN: [number, number, number, number] = [235, 64, 52, 255];
   /** Under every block's line, so it reads on any map. */
@@ -2199,8 +2198,13 @@
   let blockRuns: { of: TrainBlock[]; above: BlockRun[]; below: BlockRun[]; signals: BlockSignal[] } = { of: [], above: [], below: [], signals: [] };
   let blocksAsking = false;
   let blocksAskedAt = 0;
-  /** Which train is in each block (by block id), worked out now and then. */
-  let blocksTaken: { at: number; by: Map<string, string>; version: number } = { at: 0, by: new Map(), version: 0 };
+  /** Which train is in each block (by block id), and each train's block (by train id), worked out now and then. */
+  let blocksTaken: { at: number; by: Map<string, string>; of: Map<string, string>; version: number } = {
+    at: 0,
+    by: new Map(),
+    of: new Map(),
+    version: 0,
+  };
 
   /** The view's bounds, close in (the flat projection), `[west, south, east, north]`. */
   function viewBounds(): [number, number, number, number] | null {
@@ -2238,39 +2242,22 @@
       .finally(() => (blocksAsking = false));
   }
 
-  /** The nearest a point is to a line of `[lon, lat]` points, metres (flat). */
-  function metresToLine(p: [number, number], line: [number, number][]): number {
-    const k = Math.cos((p[1] * Math.PI) / 180);
-    let best = Infinity;
-    for (let i = 1; i < line.length; i++) {
-      const [ax, ay] = [(line[i - 1][0] - p[0]) * k, line[i - 1][1] - p[1]];
-      const [dx, dy] = [(line[i][0] - line[i - 1][0]) * k, line[i][1] - line[i - 1][1]];
-      const len2 = dx * dx + dy * dy;
-      const t = len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
-      best = Math.min(best, Math.hypot(ax + dx * t, ay + dy * t) * 111_320);
-    }
-    return best;
-  }
-
-  /** Each block a train is drawn in: the nearest block's track to it, if near enough. */
-  function takenBlocks(list: TrainBlock[]): Map<string, string> {
+  /** Each block a train is drawn in (`blockAt`: it stays in the one it was in, `was` by train id), and each train's block. */
+  function takenBlocks(list: TrainBlock[], was: Map<string, string>): { by: Map<string, string>; of: Map<string, string> } {
     const by = new Map<string, string>();
+    const of = new Map<string, string>();
     const b = viewBounds();
-    if (!trainData || !b) return by;
+    if (!trainData || !b) return { by, of };
     const [west, south, east, north] = b;
     trainData.list.forEach((train, i) => {
       const p: [number, number] = [trainData!.positions[i][0], trainData!.positions[i][1]];
       if (p[0] < west || p[0] > east || p[1] < south || p[1] > north) return;
-      let best: { id: string; d: number } | null = null;
-      for (const block of list) {
-        for (const line of block.lines) {
-          const d = metresToLine(p, line);
-          if (d <= IN_BLOCK_M && (!best || d < best.d)) best = { id: block.id, d };
-        }
-      }
-      if (best) by.set(best.id, by.has(best.id) ? `${by.get(best.id)}, ${train.name}` : train.name);
+      const block = blockAt(p, list, was.get(train.id));
+      if (!block) return;
+      of.set(train.id, block);
+      by.set(block, by.has(block) ? `${by.get(block)}, ${train.name}` : train.name);
     });
-    return by;
+    return { by, of };
   }
 
   /** The signal blocks round the view: green free, red taken, with the train taking each. */
@@ -2280,7 +2267,7 @@
     const list = blockSet.list;
     const now = Date.now();
     if (now - blocksTaken.at > 500) {
-      blocksTaken = { at: now, by: takenBlocks(list), version: blocksTaken.version + 1 };
+      blocksTaken = { at: now, ...takenBlocks(list, blocksTaken.of), version: blocksTaken.version + 1 };
     }
     const taken = blocksTaken.by;
     if (blockRuns.of !== list) {
@@ -2671,6 +2658,8 @@
       // on the flat map Streets GL's ground close by and the map's own further off, by distance; on the globe the map's
       if (tileUrl && flat) layers.push(cityGroundLayer(tileUrl, GROUND_LOD, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
       else if (tileUrl) layers.push(groundLayer(tileUrl, flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, roadWidthsVersion()));
+      // over it in the app, the railways the trains run on, and close in their stations' platforms, standing up
+      layers.push(...railGroundLayers(flat, mvtWorkerUrl, GROUNDED, SURFACE_NO_CULL, NO_CULL));
       // and always in relief: the lie of the land
       layers.push(...terrainLayers({ flat, zoom, basemap, opacity: terrain ? 1.4 : 1, extensions: HAZE_FADED }));
       const clouds = 1 - smoothstep(CLOUDS_FULL_ZOOM, CLOUDS_GONE_ZOOM, zoom);
@@ -3161,6 +3150,8 @@
     }
     return null;
   }
+  /** The ground was in 3D at the last frame. */
+  let wasTerrain = false;
   /** How far the camera's aim moves to the ground's height under it each frame. */
   const GROUND_EASE = 0.3;
   /** Following a train or ship: the camera flies there, then keeps it in the middle. */
@@ -3229,6 +3220,12 @@
     }
     wasLocked = locked;
     deck?.setProps({ layers: buildLayers() });
+    // deck.gl keeps the mark of the 3D terrain on the layers that were on it (sublayers too, only its layer manager has them all), and goes on hiding those it draped there
+    if (wasTerrain && !terrain) {
+      const all = (deck as unknown as { layerManager: { getLayers(): Layer[] } } | null)?.layerManager.getLayers() ?? [];
+      for (const l of all) delete (l.state as { terrainDrawMode?: string }).terrainDrawMode;
+    }
+    wasTerrain = terrain;
   }
 
   /** Re-render on an interval that depends on zoom: motion is invisible zoomed out. */

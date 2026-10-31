@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { Train, TrainKind } from "./api";
 import { shipColor } from "./ships";
 import {
+  blockAt,
   delayText,
   delayTone,
   headingAt,
@@ -235,5 +236,46 @@ describe("trainRunning", () => {
     expect(trainRunning(train({}), 1e12)).toBe(true);
     expect(trainRunning(train({ endedUnix: 1000 }), 1_030_000)).toBe(true);
     expect(trainRunning(train({ endedUnix: 1000 }), 1_030_001)).toBe(false);
+  });
+});
+
+describe("blockAt", () => {
+  // two tracks running east at Klostergården, 4.5 m apart: block "a" on the
+  // north one runs on through a crossover at 1 km onto the south one, where
+  // block "b" already runs
+  const [lat0, lon0] = [55.6954, 13.1727];
+  const m = 1 / 111_320;
+  const at = (east: number, north: number): [number, number] => [lon0 + (east * m) / Math.cos((lat0 * Math.PI) / 180), lat0 + north * m];
+  const blocks = [
+    { id: "a", lines: [[at(0, 4.5), at(1_000, 4.5), at(1_050, 0), at(2_000, 0)]] },
+    { id: "b", lines: [[at(0, 0), at(2_000, 0)]] },
+  ];
+  // drawn up to a metre either side of its track as it moves along
+  const jitter = (k: number) => (k % 2 ? 1 : -1) * ((k * 0.37) % 1);
+
+  test("a train stays in its own block where another runs on beside it, then onto its track", () => {
+    let was: string | undefined;
+    for (let k = 0; k < 100; k++) {
+      was = blockAt(at(20 * k, jitter(k)), blocks, was) ?? undefined;
+      expect(was).toBe("b");
+    }
+  });
+
+  test("a train going through the crossover stays in the block it came in", () => {
+    let was: string | undefined;
+    for (let k = 0; k < 100; k++) {
+      const east = 20 * k;
+      const north = east < 1_000 ? 4.5 : east < 1_050 ? 4.5 - (east - 1_000) * 0.09 : 0;
+      // (whichever block comes first in the list)
+      was = blockAt(at(east, north + jitter(k)), [...blocks].reverse(), was) ?? undefined;
+      expect(was).toBe("a");
+    }
+  });
+
+  test("a train goes on into the next block, and is in none off the track", () => {
+    const next = [...blocks, { id: "c", lines: [[at(2_000, 0), at(3_000, 0)]] }];
+    expect(blockAt(at(2_010, 0.5), next, "b")).toBe("c");
+    expect(blockAt(at(500, 4.5), next, "b")).toBe("a");
+    expect(blockAt(at(500, 20), next)).toBeNull();
   });
 });

@@ -19,6 +19,8 @@ const OUT = new URL("../../static/trains/", import.meta.url);
 /** As in src/lib/train-models.ts. */
 const CAR_WIDTH_M = 3.1;
 const CAR_HEIGHT_M = 4.1;
+/** The height of a car body's middle above the rails, metres: faces turned towards it are inside. */
+const BODY_MID_M = 2.2;
 /** Triangles per car. */
 const TRIANGLES = 1500;
 
@@ -55,6 +57,13 @@ function carOf({ positions, colors }, [y0, y1], xMid, zLow) {
     const o = t * 9;
     const y = (positions[o + 1] + positions[o + 4] + positions[o + 7]) / 3;
     if (y < y0 || y >= y1) continue;
+    // SketchUp exports each face twice, its inner side (often white) facing in: keep the side facing out
+    const p = (v, c) => positions[o + v * 3 + c];
+    const u = [0, 1, 2].map((c) => p(1, c) - p(0, c));
+    const w = [0, 1, 2].map((c) => p(2, c) - p(0, c));
+    const normal = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+    const outward = [(p(0, 0) + p(1, 0) + p(2, 0)) / 3 - xMid, y - mid, (p(0, 2) + p(1, 2) + p(2, 2)) / 3 - zLow - BODY_MID_M];
+    if (normal[0] * outward[0] + normal[1] * outward[1] + normal[2] * outward[2] < 0) continue;
     for (let v = 0; v < 3; v++) {
       // half a turn about z: the model's low-y end leads
       out.push(-(positions[o + v * 3] - xMid) / CAR_WIDTH_M, -(positions[o + v * 3 + 1] - mid) / length, (positions[o + v * 3 + 2] - zLow) / CAR_HEIGHT_M);

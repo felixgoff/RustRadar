@@ -178,4 +178,16 @@ describe("realistic map: the ground", () => {
     expect(surface(lineOf(f({ layerName: "transportation", class: "path", subclass: "cycleway" })).paint)).toBe(41);
     expect(surface(areaPaint(f({ layerName: "landuse", class: "pitch" })))).toBe(15);
   });
+
+  test("OpenRailwayMap's tracks on ballast, but not in tunnels, out of use, or trams'; its platforms paved", () => {
+    const orm = (p: Record<string, unknown>) => lineOf(f({ layerName: "railway_line_high", state: "present", ...p }));
+    expect(surface(orm({ feature: "rail" }).paint)).toBe(35);
+    expect(surface(orm({ feature: "rail", service: "siding" }).edgePaint)).toBe(38);
+    expect(orm({ feature: "light_rail" }).width).toBeGreaterThan(0);
+    expect(orm({ feature: "rail", tunnel: true }).width).toBe(0);
+    expect(orm({ feature: "rail", state: "disused" }).width).toBe(0);
+    expect(orm({ feature: "tram" }).width).toBe(0);
+    expect(surface(areaPaint(f({ layerName: "standard_railway_platforms" })))).toBe(9);
+    expect(lineOf(f({ layerName: "standard_railway_platforms" })).width).toBeGreaterThan(0);
+  });
 });

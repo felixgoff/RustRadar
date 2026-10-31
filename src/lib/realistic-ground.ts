@@ -5,15 +5,19 @@
 // their real widths between pavements, railways' tracks on their ballast,
 // paths and runways. Lit as the rest of the realistic map is (realistic.ts):
 // wet in rain, white under snow, water rippling and reflecting the sky.
+// In the app the railways are OpenRailwayMap's, the track the trains run on,
+// and stations' platforms stand up beside them (`railGroundLayers`).
 
 import { type Layer, LayerExtension } from "@deck.gl/core";
 import { MVTLayer } from "@deck.gl/geo-layers";
 import { GeoJsonLayer, PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import type { Device } from "@luma.gl/core";
-import { bridgeParts, omtDeck, type Lines, type TileIndex } from "./bridges";
+import { isTauri } from "./api";
+import { bridgeParts, type DeckHeight, omtDeck, ormDeck, type Lines, type TileIndex } from "./bridges";
 import { LC } from "./landcover";
 import { type Lod, LodMVTLayer, type TileSource } from "./lod-tileset";
 import { SGL_TILES, SGL_ZOOM, sglFetch, sglPath } from "./streets-gl";
+import { railTilesUrl, SPEED_TILE_ZOOMS, speedKind } from "./rail-layer";
 import { realisticLight } from "./realistic";
 import { withRoadWidths } from "./road-widths";
 import { type GROUND_TEXTURES, realisticTextures, textureLayer } from "./realistic-textures";
@@ -246,6 +250,8 @@ export function areaPaint({ properties: p }: Feature): RGBA {
       return p.type === "farmland" ? fieldPaint(p) : (SGL_AREAS[String(p.type)] ?? NONE);
     case "highways":
       return p.pathType === "pedestrian" || p.pathType === "footway" || p.pathType === "platform" ? AREAS.platform : AREAS.apron;
+    case PLATFORMS:
+      return AREAS.platform;
     default:
       return NONE;
   }
@@ -333,6 +339,18 @@ const AEROWAYS: Record<string, Line> = {
 const TRAM: Line = { width: 2.2, paint: paint(39), edge: 0, edgePaint: NONE };
 const NO_LINE: Line = { width: 0, paint: NONE, edge: 0, edgePaint: NONE };
 
+/** OpenRailwayMap's tracks (the app's `railtiles:`, rail-layer.ts): the very ones the trains run on. */
+const RAIL_LINES = "railway_line_high";
+/** OpenRailwayMap's stations' platforms, served (by the same protocol) at this zoom alone. */
+const PLATFORMS = "standard_railway_platforms";
+const PLATFORM_ZOOM = 15;
+/**
+ * In the app the ground's railways are OpenRailwayMap's, as current as the
+ * track the trains run on; the maps' own (out of date in places) are left
+ * out then, but for trams' rails in the street.
+ */
+const OWN_RAILS = isTauri();
+
 /** How a line is drawn on the ground: a road, railway, path, river or runway (tunnels and ferries not at all). */
 export function lineOf({ properties: p }: Feature): Line {
   const [cls, sub] = [String(p.class ?? ""), String(p.subclass ?? "")];
@@ -342,6 +360,7 @@ export function lineOf({ properties: p }: Feature): Line {
       if (cls === "path") return PATHS[sub] ?? PATHS[sub === "steps" || sub === "platform" ? "footway" : "path"];
       // a tram's rails are set in the street; light rail runs on its own ballast, as a railway
       if (cls === "transit" && sub === "tram") return TRAM;
+      if (OWN_RAILS && (cls === "rail" || cls === "transit")) return NO_LINE;
       return asSurveyed(ROADS[cls] ?? NO_LINE, p, false);
     case "waterway": {
       if (p.brunnel === "tunnel") return NO_LINE;
@@ -351,7 +370,7 @@ export function lineOf({ properties: p }: Feature): Line {
       return AEROWAYS[cls] ?? NO_LINE;
     // Streets GL's tiles: roads as wide as their lanes, of their own surface; railways; waterways
     case "highways": {
-      if (p.type === "railway") return p.railwayType === "tram" ? TRAM : ROADS.rail;
+      if (p.type === "railway") return p.railwayType === "tram" ? TRAM : OWN_RAILS ? NO_LINE : ROADS.rail;
       const path = sglPath(p);
       if (!path) return NO_LINE;
       const own = AEROWAYS[path.kind] ?? PATHS[path.kind] ?? ROADS[path.kind] ?? NO_LINE;
@@ -369,6 +388,15 @@ export function lineOf({ properties: p }: Feature): Line {
     case "water":
       if (p.type !== "waterway") return NO_LINE;
       return { width: Number(p.width) || WATERWAYS[String(p.waterwayType)] || 2, paint: AREAS.water, edge: 0, edgePaint: NONE };
+    // OpenRailwayMap's tracks on their ballast (not in tunnels, nor trams': the maps' own, in the street)
+    case RAIL_LINES: {
+      const kind = p.tunnel ? null : speedKind(p);
+      if (kind === "transit") return p.feature === "tram" ? NO_LINE : ROADS.transit;
+      return kind ? ROADS.rail : NO_LINE;
+    }
+    // a platform mapped as a line, flat (as an area it stands up: `railGroundLayers`)
+    case PLATFORMS:
+      return PATHS.pedestrian;
     default:
       return NO_LINE;
   }
@@ -413,7 +441,9 @@ const SGL_SURFACES: Record<string, RGBA | undefined> = {
 };
 
 const linePaint = (f: Feature) => lineOf(f).paint;
-const onRails = ({ properties: p }: Feature) => p.class === "rail" || p.class === "transit";
+const onRails = ({ properties: p }: Feature) => p.class === "rail" || p.class === "transit" || p.layerName === RAIL_LINES;
+/** How high a line's bridge is: OpenRailwayMap's tracks' as the rail map and the trains have them. */
+const deckOf: DeckHeight = (p, numeric) => (p.layerName === RAIL_LINES ? ormDeck(p, numeric) : omtDeck(p, numeric));
 const lineWidth = (f: Feature) => lineOf(f).width;
 const edgePaint = (f: Feature) => lineOf(f).edgePaint;
 const edgeWidth = (f: Feature) => {
@@ -437,6 +467,7 @@ uniform sampler2D rground_water;
 uniform sampler2D rground_earth;
 uniform sampler2D rground_night;
 in vec2 rg_e;
+in vec3 rg_wall;
 ${table("GS_LAYER", (s) => (s.texture === "water" ? -1 : textureLayer.ground(s.texture)))}
 ${table("GS_METRES", (s) => s.metres)}
 ${table("GS_ROUGH", (s) => s.rough)}
@@ -454,6 +485,13 @@ const groundInject = {
     vec2 rg_ll = project.projectionMode == PROJECTION_MODE_GLOBE ? geometry.worldPosition.xy : rlight.anchor;
     rg_e = vec2((rg_ll.x + 180.0) / 360.0, (90.0 - rg_ll.y) / 180.0);
   }
+  `,
+  // an extruded area's sides (a platform's edge) face their own way; all else up (the flat map's)
+  "vs:#main-end": /* glsl */ `
+    rg_wall = vec3(0.0);
+  #ifdef IS_SIDE_VERTEX
+    rg_wall = geometry.normal;
+  #endif
   `,
   "fs:DECKGL_FILTER_COLOR": /* glsl */ `
   {
@@ -539,7 +577,7 @@ const groundInject = {
           c.rgb = mix(c.rgb, c3, crops);
         }
         vec3 nm = texture(rground_normal, at).xyz * 2.0 - 1.0;
-        n = normalize(vec3(nm.xy, max(nm.z, 0.3)));
+        n = dot(rg_wall, rg_wall) > 0.0 ? normalize(rg_wall) : normalize(vec3(nm.xy, max(nm.z, 0.3)));
         // a little unevenness over tens of metres, so the repeats don't show (gone where it would only speckle)
         float grain = 1.0 - smoothstep(0.25, 1.0, rl_cells(rl_t * 32.0));
         albedo = c.rgb * tint * (1.0 + 0.28 * grain * (rl_noise(rl_t, 32.0) - 0.5));
@@ -587,7 +625,7 @@ const groundInject = {
 
 const groundModule = {
   name: "rground",
-  vs: "out vec2 rg_e;\n",
+  vs: "out vec2 rg_e;\nout vec3 rg_wall;\n",
   fs: groundFs,
 } as const;
 
@@ -696,7 +734,7 @@ class GroundTile extends GeoJsonLayer {
     const tile = (this.props as { tile?: { index: TileIndex } }).tile?.index;
     // the survey's roads at their widths (binary tiles, the flat map's)
     const lines = !Array.isArray(data) && tile ? withSurvey(tileLines as Binary, tile) : tileLines;
-    const bridges = !Array.isArray(data) && tile ? bridgeParts((lines as Binary).lines as unknown as Lines, tile, omtDeck) : null;
+    const bridges = !Array.isArray(data) && tile ? bridgeParts((lines as Binary).lines as unknown as Lines, tile, deckOf) : null;
     const onGround = bridges ? { ...(lines as Binary), lines: bridges.ground } : lines;
     const layers = [
       new GeoJsonLayer({ ...own, id: `${id}-areas`, data: areas, filled: true, stroked: false } as never),
@@ -742,11 +780,16 @@ const renderGround = (props: object) => new GroundTile(props as never);
 
 const GROUND_LAYERS = ["landuse", "landcover", "aeroway", "water", "waterway", "transportation"];
 const loadOptions = new Map<string, object>();
+/** The loader's options for these layers of a tile (the same object each time, for the layer's props to compare equal). */
+const mvtOptions = (layers: string[], workerUrl: string) => {
+  const key = `${layers.join(",")}|${workerUrl}`;
+  let options = loadOptions.get(key);
+  if (!options) loadOptions.set(key, (options = { mvt: { layers, workerUrl } }));
+  return options;
+};
 
 /** The ground's vector tiles; MVTLayer decodes per projection, so each gets its own layer (and cache). */
 export const groundLayer = (url: string, flat: boolean, workerUrl: string, extensions: unknown[], parameters: object, roadsVersion = 0) => {
-  let options = loadOptions.get(workerUrl);
-  if (!options) loadOptions.set(workerUrl, (options = { mvt: { layers: GROUND_LAYERS, workerUrl } }));
   return new MVTLayer({
     id: flat ? "ground-flat" : "ground-globe",
     data: url,
@@ -754,7 +797,7 @@ export const groundLayer = (url: string, flat: boolean, workerUrl: string, exten
     roadsVersion,
     minZoom: 0,
     maxZoom: 14,
-    loadOptions: options,
+    loadOptions: mvtOptions(GROUND_LAYERS, workerUrl),
     renderSubLayers: renderGround as never,
     getFillColor: areaPaint as never,
     getLineColor: linePaint as never,
@@ -797,8 +840,6 @@ const renderCityGround = (props: { tile: { index: { z: number } } }) =>
  * ones over it are in (the ground under them showing through otherwise).
  */
 export const cityGroundLayer = (url: string, lod: Lod, workerUrl: string, extensions: unknown[], parameters: object, roadsVersion = 0) => {
-  let options = loadOptions.get(workerUrl);
-  if (!options) loadOptions.set(workerUrl, (options = { mvt: { layers: GROUND_LAYERS, workerUrl } }));
   return new LodMVTLayer({
     id: "ground-city",
     data: url,
@@ -806,7 +847,7 @@ export const cityGroundLayer = (url: string, lod: Lod, workerUrl: string, extens
     lod,
     roadsVersion,
     maxZoom: SGL_ZOOM,
-    loadOptions: options,
+    loadOptions: mvtOptions(GROUND_LAYERS, workerUrl),
     renderSubLayers: renderCityGround as never,
     getFillColor: areaPaint as never,
     getLineColor: linePaint as never,
@@ -819,6 +860,67 @@ export const cityGroundLayer = (url: string, lod: Lod, workerUrl: string, extens
     parameters,
     pickable: false,
   });
+};
+
+/** Platforms this near the camera, metres: further off they are too low to tell from the ground. */
+const PLATFORM_LOD: Lod = { levels: [PLATFORM_ZOOM], maxDistance: 4000 };
+/** A platform's height above the rails, metres (Sweden's are 0.55 to 0.73 m). */
+const PLATFORM_M = 0.6;
+
+/**
+ * In the app, the ground's railways: OpenRailwayMap's tracks, the very ones
+ * the trains run on (rail-layer.ts's tiles, scaled up past their deepest
+ * zoom), their bridges at the rail map's decks; and close in on the flat map,
+ * stations' platforms standing up beside them. Drawn over the rest of the
+ * ground (in `parameters`, as it is), the platforms in `solid`'s (hiding
+ * what is behind them). Elsewhere none: the maps' own railways are drawn.
+ */
+export const railGroundLayers = (flat: boolean, workerUrl: string, extensions: unknown[], parameters: object, solid: object): Layer[] => {
+  if (!OWN_RAILS) return [];
+  const rails = new MVTLayer({
+    id: flat ? "ground-rails-flat" : "ground-rails-globe",
+    data: railTilesUrl(),
+    minZoom: SPEED_TILE_ZOOMS.min,
+    maxZoom: SPEED_TILE_ZOOMS.max,
+    loadOptions: mvtOptions([RAIL_LINES], workerUrl),
+    renderSubLayers: renderGround as never,
+    getLineColor: linePaint as never,
+    getLineWidth: lineWidth as never,
+    lineWidthUnits: "meters",
+    // far out, a hairline, as the maps' railways were
+    lineWidthMinPixels: 0.6,
+    lineJointRounded: true,
+    lineCapRounded: true,
+    getPointRadius: 0,
+    extensions: extensions as never,
+    parameters,
+    pickable: false,
+  });
+  if (!flat) return [rails];
+  const platforms = new LodMVTLayer({
+    id: "ground-platforms",
+    data: railTilesUrl(),
+    lod: PLATFORM_LOD,
+    minZoom: PLATFORM_ZOOM,
+    maxZoom: PLATFORM_ZOOM,
+    loadOptions: mvtOptions([PLATFORMS], workerUrl),
+    renderSubLayers: renderGround as never,
+    getFillColor: areaPaint as never,
+    getLineColor: linePaint as never,
+    getLineWidth: lineWidth as never,
+    lineWidthUnits: "meters",
+    // the areas stand up, their sides lit as they face (not by deck.gl: their paint is their surface)
+    extruded: true,
+    getElevation: PLATFORM_M,
+    material: false,
+    // (outlines counter-clockwise in the tiles' own numbers, as the buildings': sides facing out)
+    _subLayerProps: { "polygons-fill": { _windingOrder: "CCW" } },
+    getPointRadius: 0,
+    extensions: extensions as never,
+    parameters: solid,
+    pickable: false,
+  });
+  return [rails, platforms];
 };
 
 const LAND_DATA = [

@@ -1,6 +1,6 @@
 // @ts-ignore bun's types are not a dependency; the runner provides the module
 import { describe, expect, test } from "bun:test";
-import { CAR_M, carLines } from "./train-cars";
+import { CAR_M, carLines, GAP_M } from "./train-cars";
 
 // east along 60°N: a degree of longitude is about 55.66 km
 const DEG_PER_M = 1 / 55_660;
@@ -18,28 +18,33 @@ describe("carLines", () => {
   test("its cars back from where it is drawn now, front first", () => {
     const cars = carLines(frames, tail, 3, 5_000);
     expect(cars.length).toBe(3);
-    // the head is 100 m on; the first car from there back, the last ending 78 m back
+    // the head is 100 m on; the first car from there back, the last ending three cars (less a gap) back
     expect(lonM(cars[0][cars[0].length - 1][0])).toBeCloseTo(100, 0);
-    expect(lonM(cars[2][0][0])).toBeCloseTo(100 - 3 * CAR_M + 2.5, 0);
+    expect(lonM(cars[2][0][0])).toBeCloseTo(100 - 3 * CAR_M + GAP_M, 0);
   });
 
   test("standing where its frames start, its cars lie along the track behind", () => {
     const cars = carLines(frames, tail, 4, 0);
     expect(lonM(cars[0][cars[0].length - 1][0])).toBeCloseTo(0, 0);
-    expect(lonM(cars[3][0][0])).toBeCloseTo(-4 * CAR_M + 2.5, 0);
+    expect(lonM(cars[3][0][0])).toBeCloseTo(-4 * CAR_M + GAP_M, 0);
   });
 
   test("without the track behind, straight on back", () => {
     const cars = carLines(frames, [], 2, 0);
-    expect(lonM(cars[1][0][0])).toBeCloseTo(-2 * CAR_M + 2.5, 0);
+    expect(lonM(cars[1][0][0])).toBeCloseTo(-2 * CAR_M + GAP_M, 0);
   });
 
   test("cars of their own lengths, the gap between each", () => {
     // a 15 m locomotive and a 25 m coach, standing at 0 m
     const [loco, coach] = carLines(frames, tail, 2, 0, (k) => (k === 0 ? 15 : 25));
     expect(lonM(loco[0][0])).toBeCloseTo(-15, 0);
-    expect(lonM(coach[coach.length - 1][0])).toBeCloseTo(-17.5, 0);
-    expect(lonM(coach[0][0])).toBeCloseTo(-42.5, 0);
+    expect(lonM(coach[coach.length - 1][0])).toBeCloseTo(-15 - GAP_M, 0);
+    expect(lonM(coach[0][0])).toBeCloseTo(-40 - GAP_M, 0);
+  });
+
+  test("models' cars end to end: their lengths take in the gap", () => {
+    const [first, second] = carLines(frames, tail, 2, 0, () => 25, 0);
+    expect(lonM(second[second.length - 1][0])).toBeCloseTo(lonM(first[0][0]), 1);
   });
 
   test("no frames, no cars", () => {

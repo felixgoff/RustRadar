@@ -2,8 +2,8 @@
 
 /** How long a car is drawn, metres (a coach with its coupling); as `CAR_M` in the backend. */
 export const CAR_M = 26;
-/** The gap drawn between cars, metres. */
-const GAP_M = 2.5;
+/** The gap drawn between cars, metres: buffer to buffer, as coupled cars stand. */
+export const GAP_M = 0.6;
 /** A train's cars where its operator doesn't say how many. */
 export const DEFAULT_CARS = 4;
 
@@ -27,6 +27,8 @@ export function carLines(
   nowMs: number,
   /** Each car's length, metres, where it isn't a coach's (`CAR_M` less the gap between). */
   lengthOf: (car: number) => number = () => CAR_M - GAP_M,
+  /** The gap between cars, metres (none for models: their lengths run to halfway across it). */
+  gap = GAP_M,
 ): [number, number][][] {
   if (!frames.length) return [];
   // the way it has come and goes: the tail reversed, up to the frames' start, then the frames
@@ -69,7 +71,7 @@ export function carLines(
     for (let i = 0; i < path.length; i++) if (at[i] > back && at[i] < front) line.push(path[i]);
     line.push(point(front));
     out.push(line.map(([lat, lon]) => [lon, lat]));
-    front = back - GAP_M;
+    front = back - gap;
   }
   return out;
 }

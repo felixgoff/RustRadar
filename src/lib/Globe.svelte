@@ -264,7 +264,7 @@
 
   /** GlobeView switches to a flat Web Mercator projection above this zoom. */
   const FLAT_ABOVE_ZOOM = 12;
-  const LIMITS = { minZoom: 0.5, maxZoom: 18, maxPitch: 60 };
+  const LIMITS = { minZoom: 0.5, maxZoom: 20, maxPitch: 60 };
   /** The realistic map tilts further, to look along the streets to the horizon and the sky over it. */
   const REALISTIC_LIMITS = { ...LIMITS, maxPitch: 75 };
   /** Following an aircraft, the camera can come down nearly level with it and circle it. */
@@ -1979,11 +1979,12 @@
       // a train with a model of its own: its cars, each as long as the real one
       const model = (k: number) => modelCar(train.model, k, count);
       const lengthOf = model(0) ? (k: number) => model(k)!.length : undefined;
-      let places = carPlaces(carLines(train.frames ?? [], train.tail ?? [], count, nowMs, lengthOf));
+      const gap = lengthOf ? 0 : undefined;
+      let places = carPlaces(carLines(train.frames ?? [], train.tail ?? [], count, nowMs, lengthOf, gap));
       if (places.length !== count) {
         const h = (data.headings[i] ?? 0) * DEGREES;
         const behind: [number, number] = [lat - Math.cos(h) / 1000, lon - Math.sin(h) / 1000 / (Math.cos(lat * DEGREES) || 1e-6)];
-        places = carPlaces(carLines([[lat, lon, nowMs]], [[lat, lon], behind], count, nowMs, lengthOf));
+        places = carPlaces(carLines([[lat, lon, nowMs]], [[lat, lon], behind], count, nowMs, lengthOf, gap));
       }
       const structures: Structure[] = train.structures ?? [];
       places.forEach((place, k) =>

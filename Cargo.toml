@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["src-tauri", "crates/fr24"]
+members = ["src-tauri", "crates/fr24", "crates/app"]
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 # Image codecs are painfully slow unoptimised, and the weather radar decodes

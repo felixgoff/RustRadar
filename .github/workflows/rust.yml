@@ -2,7 +2,10 @@ name: Build
 
 on:
   push:
-    branches: ["main"]
+    # rust-port (the native port, docs/port) runs only the port's jobs, native and
+    # native-targets: `check` and `version` skip a push there, and every job after them
+    # follows through `needs`, so nothing is bundled or published from it.
+    branches: ["main", "rust-port"]
     tags: ["v*"]
   pull_request:
     branches: ["main"]
@@ -24,6 +27,8 @@ jobs:
   # Fast feedback: frontend type-check + Rust tests for the whole workspace.
   check:
     name: Check & test
+    # not on a push to rust-port (see `on.push`)
+    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/rust-port') }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +80,10 @@ jobs:
   native:
     name: Native port (test & clippy)
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      # line tables only: stack traces with lines, and a target folder that fits the runner's disk
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
 
@@ -100,29 +109,78 @@ jobs:
           workspaces: ". -> target"
           key: native
 
+      # A GPU test with no adapter prints `skipped: …` and passes, so a driver that wgpu
+      # cannot open would leave the rendering untested with every test green. One GPU test,
+      # its output shown: it names the adapter, or the step fails. (--lib: the same build as
+      # the next step's, so nothing is compiled twice.)
+      - name: The GPU tests have an adapter
+        run: |
+          out="$(cargo test --workspace --exclude rustradar --locked --lib -- --nocapture --exact gpu::tests::the_device_asks_for_the_texture_compression_the_adapter_has 2>&1)"
+          printf '%s\n' "$out" | grep -E "compression|skipped"
+          if printf '%s\n' "$out" | grep -q "skipped:"; then
+            echo "::error::wgpu found no adapter on lavapipe: the GPU tests would only print skipped"
+            exit 1
+          fi
+
       - name: Rust tests
         run: cargo test --workspace --exclude rustradar --locked
+
+      # The shots the GPU tests drew (target/shots), to look at beside docs/port/reference.
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: native-shots
+          path: target/shots
+          if-no-files-found: warn
 
       - name: Clippy
         if: ${{ !cancelled() }}
         run: cargo clippy --locked --all-targets -p rustradar-core -p rustradar-backend -p rustradar-scene -p rustradar-map -p rustradar-app -p xtask -- -D warnings
 
-  # The native app keeps compiling for the other platforms it will ship on.
-  # One target per leg: with all four --target flags in one cargo call, cargo
-  # builds wayland-backend for an Apple target and fails.
+  # The native app keeps compiling for the other platforms it will ship on, each
+  # on a runner with that platform's C and C++ compilers: the build scripts of
+  # aws-lc-sys, zstd-sys and basisu_c_sys (C++, and bindgen over libclang) run
+  # under `cargo check` too, so a Linux host without them cannot check these
+  # targets. Android goes through cargo-ndk and the NDK, as the phone shells do
+  # (platform/android/build-rust.sh); iOS as platform/ios/build-rust.sh does.
   native-targets:
     name: Native port (check ${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-pc-windows-msvc
-          - aarch64-apple-darwin
-          - aarch64-apple-ios
-          - aarch64-linux-android
-    runs-on: ubuntu-24.04
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-ios
+            os: macos-latest
+          - target: aarch64-linux-android
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        if: ${{ matrix.target == 'aarch64-linux-android' }}
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        if: ${{ matrix.target == 'aarch64-linux-android' }}
+        with:
+          packages: platform-tools
+
+      - name: Android NDK
+        if: ${{ matrix.target == 'aarch64-linux-android' }}
+        run: |
+          sdkmanager "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -133,14 +191,35 @@ jobs:
           workspaces: ". -> target"
           key: check-${{ matrix.target }}
 
+      - name: cargo-ndk
+        if: ${{ matrix.target == 'aarch64-linux-android' }}
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
       - name: cargo check
-        run: cargo check -p rustradar-app --locked --target ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+          # The Windows runner has no NASM: aws-lc-sys's prebuilt NASM objects
+          # instead (read only for x86_64 Windows).
+          AWS_LC_SYS_PREBUILT_NASM: "1"
+        run: |
+          case "$TARGET" in
+            # -P 24: the API level of minSdk, as build-rust.sh passes
+            aarch64-linux-android)
+              cargo ndk -t arm64-v8a -P 24 check -p rustradar-app --locked ;;
+            # the iOS SDK through xcrun, at the app's deployment target
+            aarch64-apple-ios)
+              env -u SDKROOT IPHONEOS_DEPLOYMENT_TARGET=15.0 cargo check -p rustradar-app --locked --target "$TARGET" ;;
+            *)
+              cargo check -p rustradar-app --locked --target "$TARGET" ;;
+          esac
 
   # The version a release publishes, worked out once for every platform: the
   # files' version, or the next patch after the latest release if that one is
   # already out (installed apps only update to a newer version).
   version:
     name: Release version
+    # not on a push to rust-port (see `on.push`)
+    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/rust-port') }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pick.outputs.version }}

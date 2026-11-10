@@ -24,8 +24,8 @@
 //! heights hide one another by depth rather than by draw order (doc 03 §6).
 //!
 //! While an atlas is still transcoding, or if it failed, the layers that need it are not drawn
-//! (doc 03 §4.4); the aircraft layer is pending meanwhile, and the pool's wake brings the frame
-//! that uploads it. A name with no cell in an atlas draws nothing (deck's `MISSING_ICON`); every
+//! (doc 03 §4.4); the aircraft layer is pending meanwhile if the scene has icons
+//! ([`Icons::waiting`]), and the pool's wake brings the frame that uploads it. A name with no cell in an atlas draws nothing (deck's `MISSING_ICON`); every
 //! published model has one in both.
 //!
 //! Instances are rebuilt in each `prepare` from the scene and this frame's view (common offsets
@@ -114,6 +114,8 @@ pub struct Icons {
     pipeline: IconPipeline,
     outlines: IconLayer,
     icons: IconLayer,
+    /// The last scene prepared had icons.
+    wanted: bool,
 }
 
 impl Icons {
@@ -122,12 +124,14 @@ impl Icons {
             pipeline: IconPipeline::new(init, "aircraft icons", STATE),
             outlines: IconLayer::new("aircraft-icon-outlines"),
             icons: IconLayer::new("aircraft-icons"),
+            wanted: false,
         }
     }
 
     /// Once a frame, after [`AircraftAssets::poll`]: this frame's outlines and icons of `scene`.
     pub fn prepare(&mut self, cx: &mut PrepareCx<'_>, assets: &AircraftAssets, scene: &AircraftScene) {
         let any = !scene.icons.is_empty();
+        self.wanted = any;
         let (icons, outline) = (assets.icons(), assets.outline());
         let view = cx.view;
         // the border needs both atlases, the silhouettes only their own
@@ -149,6 +153,12 @@ impl Icons {
         for batch in batches {
             self.pipeline.draw_batch(pass, batch);
         }
+    }
+
+    /// Whether the picture waits for an atlas: the scene has icons and an atlas is still
+    /// transcoding (the aircraft layer's `pending`; the headless path renders until it is not).
+    pub fn waiting(&self, assets: &AircraftAssets) -> bool {
+        self.wanted && assets.pending()
     }
 
     /// How many outlines and icons this frame draws.
@@ -458,6 +468,26 @@ mod tests {
                 assert!(close(p, border, 4), "{}: {d} px past the nose {p:?}, the border is {border:?}", icon.id);
             }
         }
+    }
+
+    /// The map waits for the atlases only while it has icons to draw: a renderer just made (its
+    /// atlases transcoding) and a scene without icons are not pending; a scene with icons is drawn
+    /// once they are in.
+    #[test]
+    fn only_a_scene_with_icons_waits_for_the_atlases() {
+        let Some(gpu) = gpu() else { return };
+        let mut renderer = MapRenderer::new(&gpu, FORMAT);
+        assert!(!renderer.pending(), "nothing to draw yet");
+        let mut input = SceneInput::new(VIEW, SIZE, SCALE, Basemap::Dark);
+        input.feed_now_ms = NOON_MS;
+        input.local_now_ms = NOON_MS;
+        let image = render_with(&gpu, &mut renderer, &input, SCALE).expect("rendered");
+        assert!(!renderer.pending());
+        assert_eq!(lit_groups(&image), 0);
+        input.aircraft.scene = scene();
+        let image = render_with(&gpu, &mut renderer, &input, SCALE).expect("rendered");
+        assert!(!renderer.pending());
+        assert_eq!(lit_groups(&image), ROW.len());
     }
 
     /// A test layer: [`Icons`] with assets of its own, drawing `scene` (the map's own aircraft

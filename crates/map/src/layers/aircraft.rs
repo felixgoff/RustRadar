@@ -3,8 +3,8 @@
 //!
 //! The scene builder hands over each refresh's [`AircraftScene`] (item A3) in [`Input::scene`]. The
 //! layer owns the one [`assets::AircraftAssets`] (item A2) every part draws with: made in `new`,
-//! polled in `prepare` (an atlas uploads once it is transcoded), and pending while an atlas still
-//! transcodes. Its parts draw in the order of doc 03 §3, rows 25–29: shadows ([`shadows`], A6), gear and
+//! polled in `prepare` (an atlas uploads once it is transcoded), and pending while an atlas the
+//! scene's icons need still transcodes (a scene without icons does not wait for them). Its parts draw in the order of doc 03 §3, rows 25–29: shadows ([`shadows`], A6), gear and
 //! models (A5), icon outlines and icons ([`icons`], A4), labels (A7).
 
 pub mod assets;
@@ -61,6 +61,6 @@ impl Layer for Aircraft {
     }
 
     fn pending(&self) -> bool {
-        self.assets.pending()
+        self.icons.waiting(&self.assets)
     }
 }

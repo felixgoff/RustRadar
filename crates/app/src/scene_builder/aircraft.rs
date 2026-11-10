@@ -21,9 +21,8 @@
 //! (`selected`, `follow`: item A8's `state::flight` and A10's lock), and the flight under the
 //! pointer (`hoveredId`: A9's `state::pick`). Those items add them to [`Aircraft::inputs`].
 //!
-//! The result is [`Aircraft::latest`]. `SceneInput`'s `aircraft` field
-//! (`rustradar_map::layers::aircraft::Input`) has nowhere to hold it yet: the aircraft layers'
-//! items (A4, A5) give it one and hand it over here.
+//! The result is [`Aircraft::latest`], handed to the aircraft layers as `SceneInput`'s
+//! `aircraft.scene` (`rustradar_map::layers::aircraft::Input`, item A4).
 
 use rustradar_core::settings::shown_kinds;
 use rustradar_map::SceneInput;
@@ -73,6 +72,8 @@ impl Aircraft {
         );
         // the taxiway networks of the airports aircraft are on the ground at, close in (A11)
         taxiways.taxiways_for(&self.latest.taxi_wanted, motion, local_now);
+        // what the aircraft layers draw until the next refresh
+        scene.aircraft.scene = self.latest.clone();
     }
 }
 

@@ -1,23 +1,39 @@
 //! Aircraft: shadows, landing gear and models (per group and part), icon outlines and icons, labels
 //! (doc 03 §4–7).
 //!
-//! Stage 2 stub (E4): draws nothing until A2, A4–A7 fill it; keep `new(&Init) -> Self` and
-//! the row in `layers::ordered`.
+//! The scene builder hands over each refresh's [`AircraftScene`] (item A3) in [`Input::scene`]. The
+//! layer owns the one [`assets::AircraftAssets`] (item A2) every part draws with: made in `new`,
+//! polled in `prepare` (an atlas uploads once it is transcoded), and pending while an atlas still
+//! transcodes. Its parts draw in the order of doc 03 §3, rows 25–29: shadows (A6), gear and
+//! models (A5), icon outlines and icons ([`icons`], A4), labels (A7).
 
 pub mod assets;
+
+use rustradar_scene::aircraft::AircraftScene;
 
 use super::{DrawCx, Init, Layer, PrepareCx};
 
 /// What the scene builder hands this layer (`SceneInput`'s field of the same name).
 #[derive(Debug, Clone, Default)]
-pub struct Input {}
+pub struct Input {
+    /// This scene refresh's aircraft (`AircraftBuilder::build`): mesh groups with their gear,
+    /// icons, label candidates. Empty when no aircraft are drawn.
+    pub scene: AircraftScene,
+}
 
 /// Rows 25–29: shadows, gear and models, icon outlines, icons, aircraft labels.
-pub struct Aircraft {}
+pub struct Aircraft {
+    assets: assets::AircraftAssets,
+}
 
 impl Aircraft {
-    pub fn new(_init: &Init<'_>) -> Self {
-        Aircraft {}
+    pub fn new(init: &Init<'_>) -> Self {
+        Aircraft { assets: assets::AircraftAssets::new(init) }
+    }
+
+    /// The meshes and atlases every part draws with.
+    pub fn assets(&self) -> &assets::AircraftAssets {
+        &self.assets
     }
 }
 
@@ -26,7 +42,13 @@ impl Layer for Aircraft {
         "aircraft"
     }
 
-    fn prepare(&mut self, _cx: &mut PrepareCx<'_>) {}
+    fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
+        self.assets.poll(cx.gpu);
+    }
 
     fn draw(&self, _pass: &mut wgpu::RenderPass<'_>, _cx: &DrawCx<'_>) {}
+
+    fn pending(&self) -> bool {
+        self.assets.pending()
+    }
 }

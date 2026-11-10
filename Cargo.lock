@@ -5001,8 +5001,6 @@ name = "rustradar"
 version = "0.3.0"
 dependencies = [
  "fr24",
- "futures-util",
- "reqwest",
  "rustradar-backend",
  "serde",
  "serde_json",

@@ -24,9 +24,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 fr24 = { path = "../crates/fr24" }
 rustradar-backend = { path = "../crates/backend" }
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["time", "macros", "sync", "rt"] }
-reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 
 # installs replace themselves on desktop; phones update through the APK or TestFlight (mobile_update.rs)
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

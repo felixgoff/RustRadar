@@ -568,6 +568,13 @@ mod tests {
         // and the first year alone: British Columbia keeps summer time from November 2026
         assert_eq!(zone_name(winter(), "America/Vancouver"), "PST");
         assert_eq!(zone_name(at("2027-01-15T12:00:00Z"), "America/Vancouver"), "PDT");
+        // so do Manitoba and Inuvik, which the bundled tz database knows from 2026d on
+        for zone in ["America/Winnipeg", "America/Rainy_River", "Canada/Central"] {
+            assert_eq!(zone_name(winter(), zone), "CST", "{zone}");
+            assert_eq!(zone_name(at("2027-01-15T12:00:00Z"), zone), "CDT", "{zone}");
+        }
+        assert_eq!(zone_name(winter(), "America/Inuvik"), "MST");
+        assert_eq!(zone_name(at("2027-01-15T12:00:00Z"), "America/Inuvik"), "MDT");
         // the table is case-sensitive, as `SAME_CLOCK` and `OWNED` were: London's BST needs its name
         assert_eq!(zone_name(summer(), "europe/london"), "UTC+1");
         // an offset in seconds (Madras time, +5:21:10) rounds to minutes

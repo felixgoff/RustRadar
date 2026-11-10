@@ -20,6 +20,7 @@ pub mod requests;
 pub mod scene_builder;
 pub mod state;
 pub mod theme;
+pub mod tile_fetcher;
 pub mod ui;
 
 use std::path::PathBuf;

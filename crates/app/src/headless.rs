@@ -4,22 +4,27 @@
 //! builders, the map, the egui pass) on a stand-in surface, with its clock standing still at
 //! `--now` (or the time it started). It touches no folder of the user's: the backend gets fresh
 //! cache and config folders, removed afterwards, so no saved keys and no cached tiles take part.
-//! It draws frames until no layer waits for work (at most [`MAX_WAIT`]), then two more with egui's
-//! clock a second apart (an egui area is invisible on its first frame, spike pitfall 9).
+//! Its map tiles never come from the network: from the `--fixture` folder, else the committed
+//! fixtures ([`tile_fetcher::shot_tiles`]); a tile the folder lacks is not drawn (and logged).
+//! It draws frames until no layer waits for work, its tiles above all (at most [`MAX_WAIT`]), then
+//! two more with egui's clock a second apart (an egui area is invisible on its first frame, spike
+//! pitfall 9).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use rustradar_backend::Dirs;
 use rustradar_map::Gpu;
 pub use rustradar_map::headless::{FORMAT, Image, MAX_WAIT, Offscreen};
+use rustradar_map::io::{self, TileFetcher};
 use rustradar_scene::camera::ViewState;
 
 use crate::app::{Engine, start_backend};
 use crate::requests::{self, Requests, no_wake};
 use crate::state::{AppState, Clock, system_now_ms};
+use crate::tile_fetcher;
 use crate::{Options, SHOT_SIZE};
 
 type Error = Box<dyn std::error::Error>;
@@ -32,6 +37,9 @@ pub struct Shot {
     pub adapter: String,
     /// Whether the backend started.
     pub backend: bool,
+    /// The tiles the map asked for that the shot's tile folder lacks (source, `z/x/y`), drawn as
+    /// nothing.
+    pub missing_tiles: Vec<(String, String)>,
 }
 
 /// Cache and config folders of the shot's own, removed when it ends.
@@ -88,6 +96,17 @@ pub fn render_on(gpu: &Gpu, options: &Options) -> Result<Shot, Error> {
     let state = AppState::new(options.startup(), backend, Some(requests), Some(events_rx), view, size.map(f64::from));
 
     let mut engine = Engine::new(gpu, FORMAT, state);
+    // the shot's tiles, never the network's; the frames are drawn in a loop: nothing to wake
+    let tiles = tile_fetcher::shot_tiles(options);
+    match &tiles {
+        Some(tiles) => log::info!("map tiles from {}", tiles.root().display()),
+        None => log::warn!("no tile folder for the shot: the map's tiles are not drawn"),
+    }
+    let fetcher: Arc<dyn TileFetcher> = match &tiles {
+        Some(tiles) => tiles.clone(),
+        None => io::offline(),
+    };
+    engine.map.set_tiles(fetcher, None);
     let surface = surface_size(size, scale);
     let target = Offscreen::new(gpu, surface);
     let clock = Clock::fixed(options.now_ms.unwrap_or_else(system_now_ms));
@@ -110,7 +129,11 @@ pub fn render_on(gpu: &Gpu, options: &Options) -> Result<Shot, Error> {
             break;
         }
         if started.elapsed() > MAX_WAIT {
-            log::warn!("a layer was still loading after {} s; the shot shows what had arrived", MAX_WAIT.as_secs());
+            log::warn!(
+                "still loading after {} s ({}); the shot shows what had arrived",
+                MAX_WAIT.as_secs(),
+                engine.map.pending_layers().join(", ")
+            );
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -121,7 +144,13 @@ pub fn render_on(gpu: &Gpu, options: &Options) -> Result<Shot, Error> {
     }
     let image = target.read(gpu)?;
     let adapter = format!("{}, map MSAA x{}", gpu.describe(), engine.map.samples());
-    Ok(Shot { image, adapter, backend: started_backend })
+    let missing_tiles: Vec<(String, String)> =
+        tiles.map(|t| t.misses().into_iter().map(|(source, tile)| (source, format!("{}/{}/{}", tile.z, tile.x, tile.y))).collect()).unwrap_or_default();
+    if !missing_tiles.is_empty() {
+        let shown: Vec<String> = missing_tiles.iter().take(8).map(|(source, tile)| format!("{source} {tile}")).collect();
+        log::warn!("the tile folder lacks {} tiles the map asked for, drawn as nothing: {}", missing_tiles.len(), shown.join(", "));
+    }
+    Ok(Shot { image, adapter, backend: started_backend, missing_tiles })
 }
 
 /// `--screenshot FILE`: draws the shot and writes it as a PNG.

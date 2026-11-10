@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::rail::{fields, packed};
+use rustradar_core::mvt;
 
 /// The zoom OpenFreeMap's footprints are read at, and the zooms made from them.
 const SOURCE_ZOOM: u32 = 13;
@@ -97,63 +97,11 @@ async fn source_tile(x: u32, y: u32) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// A tile's `building` layer as rings (its units, y down) and its extent.
+/// A tile's `building` layer as rings (its units, y down, open) and its extent.
 pub fn footprints(pbf: &[u8]) -> (Vec<Vec<(f64, f64)>>, f64) {
-    let mut rings = Vec::new();
-    let mut extent = 4096.0;
-    for (f, layer) in fields(pbf) {
-        let (3, Err(layer)) = (f, layer) else { continue };
-        let mut name = "";
-        let mut features: Vec<&[u8]> = Vec::new();
-        for (lf, v) in fields(layer) {
-            match (lf, v) {
-                (1, Err(b)) => name = std::str::from_utf8(b).unwrap_or_default(),
-                (2, Err(b)) => features.push(b),
-                (5, Ok(e)) => extent = e as f64,
-                _ => {}
-            }
-        }
-        if name != "building" {
-            continue;
-        }
-        for feature in features {
-            let (mut kind, mut geometry): (u64, &[u8]) = (0, &[]);
-            for (ff, v) in fields(feature) {
-                match (ff, v) {
-                    (3, Ok(k)) => kind = k,
-                    (4, Err(g)) => geometry = g,
-                    _ => {}
-                }
-            }
-            if kind != 3 {
-                continue;
-            }
-            // MoveTo starts a ring, LineTo goes on, ClosePath ends it; coordinates are zigzag deltas
-            let commands = packed(geometry);
-            let (mut cx, mut cy) = (0i64, 0i64);
-            let mut ring: Vec<(f64, f64)> = Vec::new();
-            let mut i = 0;
-            while i < commands.len() {
-                let (id, count) = (commands[i] & 7, (commands[i] >> 3) as usize);
-                i += 1;
-                if id == 7 {
-                    if ring.len() >= 3 {
-                        rings.push(std::mem::take(&mut ring));
-                    }
-                    ring.clear();
-                    continue;
-                }
-                for _ in 0..count {
-                    let (Some(&dx), Some(&dy)) = (commands.get(i), commands.get(i + 1)) else { break };
-                    i += 2;
-                    cx += ((dx >> 1) as i64) ^ -((dx & 1) as i64);
-                    cy += ((dy >> 1) as i64) ^ -((dy & 1) as i64);
-                    ring.push((cx as f64, cy as f64));
-                }
-            }
-        }
-    }
-    (rings, extent)
+    let Some(layer) = mvt::layer(pbf, "building") else { return (Vec::new(), mvt::EXTENT_DEFAULT) };
+    let rings = layer.features().filter(|f| f.kind == mvt::GeomType::Polygon).flat_map(|f| f.rings()).collect();
+    (rings, layer.extent)
 }
 
 /// Fills `rings` (even–odd, so courtyards stay open) into `cells` × `cells` of
@@ -705,6 +653,120 @@ mod tests {
         assert!((x0 - 80.0).abs() < 24.0 && (x1 - 240.0).abs() < 24.0, "{x0} {x1}");
         assert!((y0 - 160.0).abs() < 24.0 && (y1 - 320.0).abs() < 24.0, "{y0} {y1}");
         assert!(encode(&vec![0u8; CELLS * CELLS]).is_empty());
+    }
+
+    /// OpenFreeMap's zoom-13 tile 4396/2562 (central Lund; its build of 2026-11-01; © OpenMapTiles,
+    /// © OpenStreetMap contributors, ODbL), as fetched.
+    const LUND_Z13: &[u8] = include_bytes!("../tests/data/openfreemap-13-4396-2562.pbf");
+
+    /// What loaders.gl 4.5.2's `VectorTile` (the TypeScript app's decoder) read in [`LUND_Z13`],
+    /// layer by layer: its name, version, extent and features; its features by geometry type
+    /// (unknown, point, line, polygon) and the sum of their ids; the parts and points of their
+    /// geometry as its `loadGeometry` has them (each MoveTo a part, a ring's first point again at its
+    /// ClosePath) and the sums of the points' x and y; and their tags: how many, the strings'
+    /// length in UTF-16 units, how many numbers and their sum, how many true and false.
+    #[allow(clippy::type_complexity)]
+    const LUND_Z13_AS_LOADERS_GL_READ_IT: [(&str, u64, f64, usize, [usize; 4], u64, usize, usize, f64, f64, usize, usize, usize, f64, usize, usize); 13] = [
+        ("aeroway", 2, 4096.0, 1, [0, 0, 0, 1], 5261401532, 1, 11, 15582.0, 27924.0, 1, 7, 0, 0.0, 0, 0),
+        ("boundary", 2, 4096.0, 2, [0, 0, 2, 0], 2061018810, 12, 167, 321099.0, 415369.0, 6, 0, 6, 19.0, 0, 0),
+        ("building", 2, 4096.0, 1, [0, 0, 0, 1], 2356842430, 680, 10921, 21769780.0, 26204183.0, 0, 0, 0, 0.0, 0, 0),
+        ("landcover", 2, 4096.0, 51, [0, 0, 0, 51], 131281382359, 71, 1874, 4344601.0, 2839047.0, 102, 543, 0, 0.0, 0, 0),
+        ("landuse", 2, 4096.0, 107, [0, 0, 0, 107], 181884550085, 352, 3731, 7153691.0, 8993090.0, 107, 911, 0, 0.0, 0, 0),
+        ("mountain_peak", 2, 4096.0, 3, [0, 3, 0, 0], 114501495943, 3, 3, 11937.0, -243.0, 12, 12, 9, 1265.0, 0, 0),
+        ("park", 2, 4096.0, 1, [0, 1, 0, 0], 1029245572, 1, 1, 7980.0, 1402.0, 18, 266, 1, 1.0, 0, 0),
+        ("place", 2, 4096.0, 10, [0, 10, 0, 0], 283359567650, 10, 10, 8008.0, -1989.0, 139, 897, 10, 155.0, 0, 0),
+        ("poi", 2, 4096.0, 1, [0, 1, 0, 0], 52485407021, 1, 1, 260.0, 3373.0, 21, 331, 1, 1.0, 0, 0),
+        ("transportation", 2, 4096.0, 427, [0, 0, 389, 38], 1767609250397, 1032, 4631, 9400266.0, 10564498.0, 1431, 6028, 354, 331.0, 0, 0),
+        ("transportation_name", 2, 4096.0, 16, [0, 2, 14, 0], 11727108304, 21, 284, 632948.0, 565408.0, 113, 1165, 6, 21.0, 0, 0),
+        ("water", 2, 4096.0, 24, [0, 0, 0, 24], 71602291012, 25, 278, 366128.0, 507930.0, 72, 105, 48, 7160229096.0, 0, 0),
+        ("waterway", 2, 4096.0, 10, [0, 0, 10, 0], 35084875060, 10, 84, 93678.0, 80134.0, 20, 58, 10, 1.0, 0, 0),
+    ];
+
+    /// loaders.gl's `loadGeometry` from a feature's commands: each MoveTo starts a part, a
+    /// ClosePath repeats the part's first point.
+    fn load_geometry(f: &mvt::Feature) -> Vec<Vec<(f64, f64)>> {
+        let (mut parts, mut part): (Vec<Vec<(f64, f64)>>, Option<Vec<(f64, f64)>>) = (Vec::new(), None);
+        for c in f.commands() {
+            match c {
+                mvt::Command::MoveTo(p) => {
+                    parts.extend(part.take());
+                    part = Some(vec![p]);
+                }
+                mvt::Command::LineTo(p) => part.iter_mut().for_each(|l| l.push(p)),
+                mvt::Command::ClosePath => part.iter_mut().for_each(|l| l.push(l[0])),
+            }
+        }
+        parts.extend(part);
+        parts
+    }
+
+    #[test]
+    fn a_real_tile_reads_as_loaders_gl_read_it() {
+        let layers: Vec<mvt::Layer> = mvt::layers(LUND_Z13).collect();
+        assert_eq!(layers.len(), LUND_Z13_AS_LOADERS_GL_READ_IT.len());
+        for (layer, want) in layers.iter().zip(LUND_Z13_AS_LOADERS_GL_READ_IT) {
+            let (name, version, extent, features, types, ids, parts, points, sx, sy, tags, strings, nums, numsum, trues, falses) = want;
+            assert_eq!((layer.name, layer.version, layer.extent, layer.len()), (name, version, extent, features));
+            let mut got = ([0usize; 4], 0u64, 0usize, 0usize, 0.0f64, 0.0f64, 0usize, 0usize, 0usize, 0.0f64, 0usize, 0usize);
+            for f in layer.features() {
+                got.0[f.kind as usize] += 1;
+                got.1 += f.id.unwrap_or(0);
+                let geometry = load_geometry(&f);
+                got.2 += geometry.len();
+                for &(x, y) in geometry.iter().flatten() {
+                    got.3 += 1;
+                    got.4 += x;
+                    got.5 += y;
+                }
+                for (_, v) in &f.tags {
+                    got.6 += 1;
+                    match *v {
+                        mvt::Value::Str(s) => got.7 += s.encode_utf16().count(),
+                        mvt::Value::Num(n) => {
+                            got.8 += 1;
+                            got.9 += n;
+                        }
+                        mvt::Value::Bool(true) => got.10 += 1,
+                        mvt::Value::Bool(false) => got.11 += 1,
+                    }
+                }
+                // the readings the backend uses, from the same commands
+                let closed_by_ring = geometry.iter().filter(|p| p.len() >= 4).map(|p| p[..p.len() - 1].to_vec()).collect::<Vec<_>>();
+                match f.kind {
+                    mvt::GeomType::Polygon => assert_eq!(f.rings(), closed_by_ring, "{name}"),
+                    mvt::GeomType::LineString => {
+                        assert_eq!(f.lines(), geometry.iter().filter(|p| p.len() > 1).cloned().collect::<Vec<_>>(), "{name}")
+                    }
+                    _ => assert_eq!(f.points().collect::<Vec<_>>(), geometry.concat(), "{name}"),
+                }
+            }
+            assert_eq!((got.0, got.1, got.2, got.3, got.4, got.5), (types, ids, parts, points, sx, sy), "{name}: geometry");
+            assert_eq!((got.6, got.7, got.8, got.10, got.11), (tags, strings, nums, trues, falses), "{name}: tags");
+            assert!((got.9 - numsum).abs() <= 1e-9 * numsum.abs(), "{name}: {} against {numsum}", got.9);
+        }
+        // the layers picked by name come in the order asked
+        let names = ["water", "building", "nothing", "aeroway"];
+        assert_eq!(mvt::layers_named(LUND_Z13, &names).iter().map(|l| l.name).collect::<Vec<_>>(), ["water", "building", "aeroway"]);
+        // a tag as loaders.gl had it
+        let poi = mvt::layer(LUND_Z13, "poi").unwrap().feature(0).unwrap();
+        assert_eq!(poi.text("name"), Some("Lund centralstation"));
+        assert_eq!((poi.text("class"), poi.text("subclass"), poi.num("rank")), (Some("railway"), Some("station"), Some(1.0)));
+        assert_eq!(poi.points().collect::<Vec<_>>(), [(260.0, 3373.0)]);
+    }
+
+    #[test]
+    fn footprints_of_a_real_tile() {
+        let (rings, extent) = footprints(LUND_Z13);
+        assert_eq!(extent, 4096.0);
+        // every part of the one building feature, closed (each ring's first point not repeated)
+        assert_eq!(rings.len(), 680);
+        assert_eq!(rings.iter().map(Vec::len).sum::<usize>(), 10921 - 680);
+        let mut built = vec![false; CELLS * CELLS];
+        fill(&rings, extent, &mut built, 0, 0, CELLS);
+        let count = built.iter().filter(|&&b| b).count();
+        assert!(count > 3000, "{count}");
+        // no buildings in a tile without the layer
+        assert_eq!(footprints(&[]), (Vec::new(), 4096.0));
     }
 
     /// OpenFreeMap itself: Lund's zoom-12 tile.

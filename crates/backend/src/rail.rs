@@ -23,6 +23,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use rustradar_core::mvt;
+
 use crate::rail_motion::{ahead, course, distance};
 
 #[path = "blocks.rs"]
@@ -83,8 +85,6 @@ const WRONG_WAY_COST: f64 = 4.0;
 /// Known for this much of a stretch between switches (or a third of it), the
 /// way trains run there holds for all of it, metres.
 const SPREAD_FLOW_M: f64 = 100.0;
-/// The extent of a tile's own units when it doesn't say.
-const EXTENT_DEFAULT: f64 = 4096.0;
 
 type Line = Vec<(f64, f64)>;
 type Key = (u32, u32);
@@ -186,88 +186,6 @@ fn on_tile_edge(p: (f64, f64)) -> bool {
     (fx - fx.round()).abs() < 1e-4 || (fy - fy.round()).abs() < 1e-4
 }
 
-struct Pb<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-
-impl<'a> Pb<'a> {
-    fn varint(&mut self) -> Option<u64> {
-        let mut v = 0u64;
-        let mut shift = 0;
-        loop {
-            let byte = *self.b.get(self.i)?;
-            self.i += 1;
-            v |= u64::from(byte & 0x7f) << shift;
-            if byte < 0x80 {
-                return Some(v);
-            }
-            shift += 7;
-            if shift > 63 {
-                return None;
-            }
-        }
-    }
-
-    /// The next field: its number, and its value (a varint, or the bytes of
-    /// a length-delimited or fixed-width one).
-    fn field(&mut self) -> Option<(u64, Result<u64, &'a [u8]>)> {
-        let key = self.varint()?;
-        let value = match key & 7 {
-            0 => Ok(self.varint()?),
-            1 => {
-                let b = self.b.get(self.i..self.i + 8)?;
-                self.i += 8;
-                Err(b)
-            }
-            2 => {
-                let len = self.varint()? as usize;
-                let b = self.b.get(self.i..self.i.checked_add(len)?)?;
-                self.i += len;
-                Err(b)
-            }
-            5 => {
-                let b = self.b.get(self.i..self.i + 4)?;
-                self.i += 4;
-                Err(b)
-            }
-            _ => return None,
-        };
-        Some((key >> 3, value))
-    }
-}
-
-pub fn fields(b: &[u8]) -> impl Iterator<Item = (u64, Result<u64, &[u8]>)> {
-    let mut pb = Pb { b, i: 0 };
-    std::iter::from_fn(move || pb.field())
-}
-
-pub fn packed(b: &[u8]) -> Vec<u64> {
-    let mut pb = Pb { b, i: 0 };
-    std::iter::from_fn(|| if pb.i < pb.b.len() { pb.varint() } else { None }).collect()
-}
-
-/// A tag value: the vector tile spec's string, float, double, int, uint, sint or bool.
-#[derive(Clone, Debug, PartialEq)]
-enum Val<'a> {
-    Str(&'a str),
-    Num(f64),
-    Bool(bool),
-}
-
-fn value(b: &[u8]) -> Option<Val<'_>> {
-    fields(b).find_map(|(f, v)| match (f, v) {
-        (1, Err(s)) => std::str::from_utf8(s).ok().map(Val::Str),
-        (2, Err(b)) => Some(Val::Num(f64::from(f32::from_le_bytes(b.try_into().ok()?)))),
-        (3, Err(b)) => Some(Val::Num(f64::from_le_bytes(b.try_into().ok()?))),
-        (4, Ok(n)) => Some(Val::Num(n as i64 as f64)),
-        (5, Ok(n)) => Some(Val::Num(n as f64)),
-        (6, Ok(n)) => Some(Val::Num(((n >> 1) as i64 ^ -((n & 1) as i64)) as f64)),
-        (7, Ok(n)) => Some(Val::Bool(n != 0)),
-        _ => None,
-    })
-}
-
 /// A segment cut to the square `0..e` (Liang-Barsky); none if it lies outside.
 fn clip_segment(p: (f64, f64), q: (f64, f64), e: f64) -> Option<((f64, f64), (f64, f64))> {
     let (dx, dy) = (q.0 - p.0, q.1 - p.1);
@@ -334,100 +252,31 @@ fn clip(points: &[(f64, f64)], e: f64) -> Vec<Line> {
 /// The railway tracks in an OpenRailwayMap vector tile, in degrees.
 pub fn decode(pbf: &[u8], z: u32, x: u32, y: u32) -> Vec<Track> {
     let mut out = Vec::new();
-    for (f, layer) in fields(pbf) {
-        let (3, Err(layer)) = (f, layer) else { continue };
-        let mut name = "";
-        let mut keys: Vec<&str> = Vec::new();
-        let mut values: Vec<Option<Val>> = Vec::new();
-        let mut features: Vec<&[u8]> = Vec::new();
-        let mut extent = EXTENT_DEFAULT;
-        for (lf, v) in fields(layer) {
-            match (lf, v) {
-                (1, Err(b)) => name = std::str::from_utf8(b).unwrap_or_default(),
-                (2, Err(b)) => features.push(b),
-                (3, Err(b)) => keys.push(std::str::from_utf8(b).unwrap_or_default()),
-                (4, Err(b)) => values.push(value(b)),
-                (5, Ok(e)) => extent = e as f64,
-                _ => {}
-            }
-        }
-        if name != "railway_line_high" {
-            continue;
-        }
-        for feature in features {
-            let mut tags: HashMap<&str, &Val> = HashMap::new();
-            let mut geometry: &[u8] = &[];
-            let mut kind = 0;
-            for (ff, v) in fields(feature) {
-                match (ff, v) {
-                    (2, Err(t)) => {
-                        for kv in packed(t).chunks(2) {
-                            if let [k, v] = kv
-                                && let (Some(k), Some(Some(v))) = (keys.get(*k as usize), values.get(*v as usize))
-                            {
-                                tags.insert(k, v);
-                            }
-                        }
-                    }
-                    (3, Ok(k)) => kind = k,
-                    (4, Err(g)) => geometry = g,
-                    _ => {}
-                }
-            }
-            let text = |k: &str| match tags.get(k) {
-                Some(Val::Str(s)) => Some(*s),
-                _ => None,
-            };
+    for layer in mvt::layers_named(pbf, &["railway_line_high"]) {
+        for f in layer.features() {
             // only railways in use: no trams or metros, nor lines abandoned, razed or being built
-            if kind != 2 || text("feature") != Some("rail") || text("state").is_some_and(|s| s != "present") {
+            if f.kind != mvt::GeomType::LineString
+                || f.text("feature") != Some("rail")
+                || f.text("state").is_some_and(|s| s != "present")
+            {
                 continue;
             }
-            let maxspeed = match tags.get("maxspeed") {
-                Some(Val::Num(n)) if *n > 0.0 => Some(*n),
+            let maxspeed = match f.get("maxspeed") {
+                Some(mvt::Value::Num(n)) if *n > 0.0 => Some(*n),
                 _ => None,
             };
-            let track_ref = text("track_ref").map(str::to_owned);
-            let service = text("service").is_some();
-            let yard = matches!(text("service"), Some("yard" | "spur"));
-            let flag = |k: &str| matches!(tags.get(k), Some(Val::Bool(true)));
-
-            // MoveTo starts a line, LineTo goes on; coordinates are zigzag deltas
-            let commands = packed(geometry);
-            let (mut cx, mut cy) = (0i64, 0i64);
-            let mut lines: Vec<Line> = Vec::new();
-            let mut line: Line = Vec::new();
-            let mut i = 0;
-            while i < commands.len() {
-                let (id, count) = (commands[i] & 7, (commands[i] >> 3) as usize);
-                i += 1;
-                if id == 7 {
-                    continue;
-                }
-                for _ in 0..count {
-                    let (Some(&dx), Some(&dy)) = (commands.get(i), commands.get(i + 1)) else { break };
-                    i += 2;
-                    cx += ((dx >> 1) as i64) ^ -((dx & 1) as i64);
-                    cy += ((dy >> 1) as i64) ^ -((dy & 1) as i64);
-                    if id == 1 && line.len() > 1 {
-                        lines.push(std::mem::take(&mut line));
-                    } else if id == 1 {
-                        line.clear();
-                    }
-                    line.push((cx as f64, cy as f64));
-                }
-            }
-            if line.len() > 1 {
-                lines.push(line);
-            }
-            for piece in lines.iter().flat_map(|l| clip(l, extent)) {
+            let track_ref = f.text("track_ref").map(str::to_owned);
+            let service = f.text("service").is_some();
+            let yard = matches!(f.text("service"), Some("yard" | "spur"));
+            for piece in f.lines().iter().flat_map(|l| clip(l, layer.extent)) {
                 out.push(Track {
-                    points: piece.iter().map(|&(px, py)| to_lat_lon(z, x, y, extent, px, py)).collect(),
+                    points: piece.iter().map(|&(px, py)| to_lat_lon(z, x, y, layer.extent, px, py)).collect(),
                     maxspeed,
                     track_ref: track_ref.clone(),
                     service,
                     yard,
-                    bridge: flag("bridge"),
-                    tunnel: flag("tunnel"),
+                    bridge: f.flag("bridge"),
+                    tunnel: f.flag("tunnel"),
                 });
             }
         }

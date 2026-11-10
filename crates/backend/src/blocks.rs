@@ -35,68 +35,26 @@ pub use rustradar_core::model::TrainBlock as Block;
 /// The signals in a `railway_signals` tile.
 pub fn decode_signals(pbf: &[u8], z: u32, x: u32, y: u32) -> Vec<Signal> {
     let mut out = Vec::new();
-    for (f, layer) in fields(pbf) {
-        let (3, Err(layer)) = (f, layer) else { continue };
-        let mut name = "";
-        let mut keys: Vec<&str> = Vec::new();
-        let mut values: Vec<Option<Val>> = Vec::new();
-        let mut features: Vec<&[u8]> = Vec::new();
-        let mut extent = EXTENT_DEFAULT;
-        for (lf, v) in fields(layer) {
-            match (lf, v) {
-                (1, Err(b)) => name = std::str::from_utf8(b).unwrap_or_default(),
-                (2, Err(b)) => features.push(b),
-                (3, Err(b)) => keys.push(std::str::from_utf8(b).unwrap_or_default()),
-                (4, Err(b)) => values.push(value(b)),
-                (5, Ok(e)) => extent = e as f64,
-                _ => {}
-            }
-        }
-        if name != "railway_signals" {
-            continue;
-        }
-        for feature in features {
-            let mut tags: HashMap<&str, &Val> = HashMap::new();
-            let mut geometry: &[u8] = &[];
-            for (ff, v) in fields(feature) {
-                match (ff, v) {
-                    (2, Err(t)) => {
-                        for kv in packed(t).chunks(2) {
-                            if let [k, v] = kv
-                                && let (Some(k), Some(Some(v))) = (keys.get(*k as usize), values.get(*v as usize))
-                            {
-                                tags.insert(k, v);
-                            }
-                        }
-                    }
-                    (4, Err(g)) => geometry = g,
-                    _ => {}
-                }
-            }
-            let text = |k: &str| match tags.get(k) {
-                Some(Val::Str(s)) => Some(*s),
+    for layer in mvt::layers_named(pbf, &["railway_signals"]) {
+        let extent = layer.extent;
+        for f in layer.features() {
+            let num = |k: &str| match f.get(k) {
+                Some(mvt::Value::Num(n)) => Some(*n),
+                Some(mvt::Value::Bool(b)) => Some(f64::from(u8::from(*b))),
                 _ => None,
             };
-            let num = |k: &str| match tags.get(k) {
-                Some(Val::Num(n)) => Some(*n),
-                Some(Val::Bool(b)) => Some(f64::from(u8::from(*b))),
-                _ => None,
-            };
-            // a point: MoveTo with one zigzag pair
-            let commands = packed(geometry);
-            let (Some(&dx), Some(&dy)) = (commands.get(1), commands.get(2)) else { continue };
-            let px = (((dx >> 1) as i64) ^ -((dx & 1) as i64)) as f64;
-            let py = (((dy >> 1) as i64) ^ -((dy & 1) as i64)) as f64;
+            // a point: its first
+            let Some((px, py)) = f.points().next() else { continue };
             if !(0.0..=extent).contains(&px) || !(0.0..=extent).contains(&py) {
                 continue;
             }
             // main if any of its parts is a main signal still in use
             let main = (0..12).any(|i| {
-                text(&format!("category{i}")) == Some("main") && num(&format!("deactivated{i}")).is_none_or(|d| d == 0.0)
+                f.text(&format!("category{i}")) == Some("main") && num(&format!("deactivated{i}")).is_none_or(|d| d == 0.0)
             });
             let both = num("direction_both").is_some_and(|b| b != 0.0);
             let heading = num("azimuth").filter(|_| !both).map(|a| a.rem_euclid(360.0));
-            out.push(Signal { at: to_lat_lon(z, x, y, extent, px, py), heading, main, name: text("ref").map(str::to_owned) });
+            out.push(Signal { at: to_lat_lon(z, x, y, extent, px, py), heading, main, name: f.text("ref").map(str::to_owned) });
         }
     }
     out

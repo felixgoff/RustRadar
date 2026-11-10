@@ -1577,7 +1577,7 @@ Checked on 2026-11-10 at commit `faf583c` on `rust-port` by the stage 3-4 review
 | `bun run check` | 0 errors, 0 warnings |
 | `bun test src` | 394 pass |
 | `cargo doc --workspace --no-deps` | the 5 warnings of stage 2 (core `ships.rs`, `trains.rs:436`; backend `radar.rs`), none in stage 3-4 files |
-| CI "Build" on `rust-port` | run 42906844384 (`f7e0abc`, this review's fix 1) green: tests on SwiftShader, clippy, and the Windows, macOS, iOS and Android checks. The test job had been red since the lit earth (runs 98–105). Run 42908125571 (`faf583c`) was queued at the time of writing |
+| CI "Build" on `rust-port` | run 42906844384 (`f7e0abc`, this review's fix 1) green: tests on SwiftShader, clippy, and the Windows, macOS, iOS and Android checks. It is the first green run of the port's jobs on `rust-port`: runs 89–105 failed or were cancelled. Run 42908125571 (`faf583c`) was queued at the time of writing |
 
 Before this review's fixes the workspace run failed 5 tests, all in the app's E5 and E17 shot tests: four in
 `tests/shots.rs` and one in `tests/headless.rs` (the lit earth's polar cap, and the dark map's sea, which has the

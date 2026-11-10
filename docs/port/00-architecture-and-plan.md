@@ -1609,9 +1609,9 @@ reference pictures' summer morning), beside `docs/port/reference/`:
   - no buildings at V4 (B7);
   - no UI (stage 7);
   - today's pictures sit about 4.5 px higher (T1's finding).
-- **Dark V5** (no `dark-v5` reference exists): water and streets of Gamla stan at pitch 60 are right. Today's V5
-  is mostly extruded buildings, which are missing (B7).
-- **Satellite V3** (no `satellite-v3` reference; compared with `satellite-v2` and `satellite-v7`): only the lit
+- **Dark V5** (no `dark-v5` reference exists, so nothing to compare with): the water and streets round Gamla
+  stan at pitch 60, no seams. Today's app draws buildings there, which are missing (B7).
+- **Satellite V3** (no `satellite-v3` reference; looked at beside `satellite-v7`): only the lit
   earth sphere, a dark blue gradient with the camera light's highlight. No imagery: B6 was not delivered.
 - **V2, V3, V4 with the synthetic snapshot as `--fixture`** (236 flights, written from
   `tests/common/fixtures.rs`'s generator): pixel-identical to the plain dark shots. The feed reads the snapshot

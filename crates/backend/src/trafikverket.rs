@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::rail_motion as motion;
-use crate::trains::{Kind, Train, unix_ms};
+use crate::trains::{Kind, Train, TrainSource, unix_ms};
 use crate::{BackendEvent, FollowSender, Notifier};
 
 const URL: &str = "https://api.trafikinfo.trafikverket.se/v2/data.json";
@@ -742,7 +742,7 @@ pub fn train(
     Train {
         // the advertised number and its day are what the stops are looked up by
         id,
-        source: "trafikverket",
+        source: TrainSource::Trafikverket,
         name: match &product {
             Some(p) => format!("{p} {number}"),
             None => format!("Train {number}"),
@@ -781,6 +781,7 @@ pub fn train(
         model: service.and_then(|s| {
             let calls: Vec<&str> = s.calls.iter().filter_map(|c| stations.get(&c.station)).map(|st| st.name.as_str()).collect();
             crate::train_class::model_of(s.product_code.as_deref(), s.product.as_deref(), s.owner.as_deref(), &calls)
+                .map(str::to_owned)
         }),
     }
 }
@@ -978,29 +979,9 @@ fn calls_ahead<'a>(
 
 // ------------------------------------------------------------------- stops
 
-/// A time at a stop: as planned, as now expected, and as it happened.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StopTime {
-    pub planned: Option<i64>,
-    pub estimated: Option<i64>,
-    pub actual: Option<i64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Stop {
-    pub name: String,
-    pub lat: Option<f64>,
-    pub lon: Option<f64>,
-    /// Unix seconds; arrival is empty at the first stop, departure at the last.
-    pub arrival: Option<StopTime>,
-    pub departure: Option<StopTime>,
-    pub track: Option<String>,
-    pub canceled: bool,
-    /// Notices at this stop: delay causes, replacement buses and so on.
-    pub notes: Vec<String>,
-}
+// A stop of a train's run, and a time at it (as planned, as now expected, and as it happened;
+// Unix seconds): `rustradar_core::model`.
+pub use rustradar_core::model::{StopTime, TrainStop as Stop};
 
 fn stop_time(row: &Value) -> StopTime {
     let secs = |v: &Value| v.as_str().and_then(unix_ms).map(|ms| ms / 1000);
@@ -1074,16 +1055,9 @@ pub fn parse_stops(body: &str, stations: &HashMap<String, Station>) -> Result<Ve
 
 const REFUSED: &str = "Trafikverket didn't accept the API key (check it on the keys page)";
 
-/// What Trafikverket says of the saved key; on the wire `"none"`, `"invalid"` or `"ok"`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum KeyStatus {
-    /// No key saved.
-    None,
-    /// Refused.
-    Invalid,
-    Ok,
-}
+// What Trafikverket says of the saved key; on the wire `"none"`, `"invalid"` or `"ok"`:
+// `rustradar_core::model`.
+pub use rustradar_core::model::TrafikverketKeyStatus as KeyStatus;
 
 /// Whether the saved key works, asked of Trafikverket with the smallest
 /// query there is: ok, invalid (refused), or none (no key saved). An
@@ -1623,15 +1597,8 @@ pub async fn stops(http: &reqwest::Client, key: &str, id: &str) -> Result<Vec<St
 
 // --------------------------------------------------------------- following
 
-/// What the panel hears about the train it shows, as it happens.
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum TrainEvent {
-    /// A new position (and with it the way ahead).
-    Train { train: Box<Train> },
-    /// The stops with their times as they now stand.
-    Stops { stops: Vec<Stop> },
-}
+// What the panel hears about the train it shows, as it happens: `rustradar_core::model`.
+pub use rustradar_core::model::TrainEvent;
 
 /// The operational number of each train on the map, by its id.
 fn operational_numbers() -> &'static Mutex<HashMap<String, String>> {
@@ -1879,32 +1846,9 @@ fn last_places() -> &'static Places {
     P.get_or_init(Default::default)
 }
 
-/// A place on a train's way ahead: a station it stops at, or one it passes.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RouteStop {
-    pub name: String,
-    /// At its platform where the track is known, else the station's point.
-    pub lat: f64,
-    pub lon: f64,
-    pub track: Option<String>,
-    pub stops: bool,
-}
-
-/// The way a train will take along the track, from where it is to its last
-/// station, through the platforms it is announced at.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TrainRoute {
-    /// Stretches of track, each `[lon, lat]` points; the first starts at the
-    /// train. Where the track between two places isn't known (not loaded yet,
-    /// or not found) there is a gap, never a guess across country.
-    pub segments: Vec<Vec<[f64; 2]>>,
-    /// The places still ahead.
-    pub stops: Vec<RouteStop>,
-    /// False while some of the track is still loading: ask again shortly.
-    pub complete: bool,
-}
+// The way a train will take along the track, from where it is to its last station through the
+// platforms it is announced at, and the places on it: `rustradar_core::model`.
+pub use rustradar_core::model::{RouteStop, TrainRoute};
 
 /// A train's way ahead, by the id `trains` gave it.
 pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
@@ -2266,7 +2210,7 @@ mod tests {
     fn each_operator_is_streamed_apart_but_not_those_left_out() {
         let train = |id: &str, op: Option<&str>| Train {
             id: id.into(),
-            source: "trafikverket",
+            source: TrainSource::Trafikverket,
             name: id.into(),
             kind: Kind::Regional,
             lat: 59.0,

@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde_json::Value;
 
 use crate::CmdResult;
@@ -35,108 +34,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 /// Cache entries kept at most (old ones are dropped first).
 const CACHE_LIMIT: usize = 32;
 
-/// One aircraft as adsb.lol reports it. Absent values are left out.
-#[derive(Clone, Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Aircraft {
-    /// ICAO 24-bit address, lowercase hex (`~`-prefixed for non-ICAO addresses).
-    pub hex: String,
-    /// Callsign, trimmed.
-    pub callsign: String,
-    pub reg: String,
-    pub typecode: String,
-    /// How the data was received: `adsb_icao`, `mlat`, `tisb_icao`, ...
-    pub source: String,
-    /// The position came from multilateration (less precise than ADS-B).
-    pub mlat: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lat: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lon: Option<f64>,
-    /// Unix ms of the position: the response's `now` minus `seen_pos`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub position_ms: Option<u64>,
-    /// Unix ms of the latest message of any kind: `now` minus `seen`.
-    pub seen_ms: u64,
-    pub on_ground: bool,
-    /// Barometric altitude, feet (absent on the ground).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alt_baro: Option<i32>,
-    /// Geometric (GNSS) altitude, feet.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alt_geom: Option<i32>,
-    /// Ground speed, knots.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gs: Option<f32>,
-    /// Direction of motion over the ground, degrees true.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub track: Option<f32>,
-    /// Where the nose points, degrees true.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub true_heading: Option<f32>,
-    /// Where the nose points, degrees magnetic.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mag_heading: Option<f32>,
-    /// Bank angle, degrees, right wing down positive.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub roll: Option<f32>,
-    /// Rate of change of track, degrees per second, clockwise positive.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub track_rate: Option<f32>,
-    /// Feet per minute.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baro_rate: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub geom_rate: Option<i32>,
-    /// Indicated and true airspeed, knots.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ias: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tas: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mach: Option<f32>,
-    /// Wind the wind comes from, degrees true, and its speed, knots.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wind_dir: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wind_speed: Option<i32>,
-    /// Outside and total air temperature, °C.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub oat: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tat: Option<i32>,
-    /// Altitude selected on the autopilot's control panel (MCP/FCU), feet.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nav_altitude_mcp: Option<i32>,
-    /// Altitude selected by the flight management system, feet.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nav_altitude_fms: Option<i32>,
-    /// Heading selected on the autopilot, degrees.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nav_heading: Option<f32>,
-    /// Altimeter setting, hPa.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nav_qnh: Option<f32>,
-    /// Engaged autopilot modes, e.g. `autopilot`, `vnav`, `lnav`, `tcas`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub nav_modes: Vec<String>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub squawk: String,
-    /// `none` is left out.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub emergency: String,
-    /// ADS-B emitter category, e.g. `A3`.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub category: String,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Snapshot {
-    /// The server's clock when it answered, Unix ms.
-    pub now_ms: u64,
-    pub aircraft: Vec<Aircraft>,
-}
+// One aircraft as adsb.lol reports it, and an answer of them: `rustradar_core::model`.
+pub use rustradar_core::model::{AdsbAircraft as Aircraft, AdsbSnapshot as Snapshot};
 
 /// Responses kept for reuse, and when we may call again.
 #[derive(Default)]

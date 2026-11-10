@@ -1,66 +1,25 @@
 //! Airport arrival and departure boards, from the JSON airport API.
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Arrivals,
-    Departures,
-}
+// Arrivals or departures, one flight on the board, and a page of them: `rustradar_core::model`.
+// "Other airport" is the destination for departures and the origin for arrivals; times are Unix
+// seconds for the event at this airport.
+pub use rustradar_core::model::{Board, BoardMode as Mode, BoardRow};
 
-impl Mode {
-    pub fn api(self) -> fr24::json::AirportListMode {
-        match self {
-            Mode::Arrivals => fr24::json::AirportListMode::Arrivals,
-            Mode::Departures => fr24::json::AirportListMode::Departures,
-        }
-    }
-
-    fn key(self) -> &'static str {
-        match self {
-            Mode::Arrivals => "arrivals",
-            Mode::Departures => "departures",
-        }
+/// The airport list API's name for the mode.
+pub fn api(mode: Mode) -> fr24::json::AirportListMode {
+    match mode {
+        Mode::Arrivals => fr24::json::AirportListMode::Arrivals,
+        Mode::Departures => fr24::json::AirportListMode::Departures,
     }
 }
 
-/// One flight on the board. "Other airport" is the destination for
-/// departures and the origin for arrivals; times are Unix seconds for the
-/// event at this airport.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BoardRow {
-    pub flight_id: Option<u32>,
-    pub number: Option<String>,
-    pub callsign: Option<String>,
-    pub airline: Option<String>,
-    pub airline_icao: Option<String>,
-    pub logo: Option<String>,
-    pub airport_iata: Option<String>,
-    pub airport_name: Option<String>,
-    pub airport_city: Option<String>,
-    pub scheduled: Option<i64>,
-    pub estimated: Option<i64>,
-    pub actual: Option<i64>,
-    pub status: Option<String>,
-    /// e.g. `green`, `yellow`, `red`, `gray`.
-    pub status_color: Option<String>,
-    pub live: bool,
-    pub aircraft: Option<String>,
-    pub registration: Option<String>,
-    pub terminal: Option<String>,
-    pub gate: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Board {
-    pub rows: Vec<BoardRow>,
-    pub total: Option<u64>,
-    pub page: u64,
-    pub pages: Option<u64>,
+fn key(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Arrivals => "arrivals",
+        Mode::Departures => "departures",
+    }
 }
 
 fn text(v: &Value) -> Option<String> {
@@ -68,7 +27,7 @@ fn text(v: &Value) -> Option<String> {
 }
 
 pub fn parse(response: &Value, mode: Mode) -> Board {
-    let schedule = &response["result"]["response"]["airport"]["pluginData"]["schedule"][mode.key()];
+    let schedule = &response["result"]["response"]["airport"]["pluginData"]["schedule"][key(mode)];
     let (here, there, event) = match mode {
         Mode::Departures => ("origin", "destination", "departure"),
         Mode::Arrivals => ("destination", "origin", "arrival"),

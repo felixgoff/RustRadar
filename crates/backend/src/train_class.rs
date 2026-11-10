@@ -33,21 +33,8 @@ pub enum Category {
     S = 3,
 }
 
-/// How the map draws its cars (train-models.ts).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Shape {
-    /// A long, pointed nose.
-    HighSpeed,
-    /// Two rows of windows.
-    DoubleDeck,
-    /// A multiple unit with a short, rounded nose.
-    Regional,
-    /// A locomotive in front of its coaches.
-    Loco,
-    /// A single railcar with a blunt cab.
-    Railcar,
-}
+// How the map draws its cars (train-models.ts): `rustradar_core::model`.
+pub use rustradar_core::model::TrainShape as Shape;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

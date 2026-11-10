@@ -12,8 +12,6 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
-
 use crate::CmdResult;
 
 const URL: &str = "https://www.vesselfinder.com/api/pub/mp2";
@@ -52,32 +50,10 @@ const MAX_SPAN_TILES: f64 = 26.0;
 /// From this zoom up the feed carries ships' dimensions (for hulls and models).
 const DETAIL_ZOOM: u8 = 14;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Ship {
-    pub mmsi: u32,
-    pub lat: f64,
-    pub lon: f64,
-    /// The ship's name, or its MMSI when it hasn't broadcast one.
-    pub name: String,
-    /// VesselFinder's type colour: 2 tug/special, 3 passenger, 4 cargo,
-    /// 5 fishing, 6 tanker, 7 SAR/law enforcement, 8 pleasure/sailing,
-    /// 0 unknown; others are "other".
-    pub kind: u8,
-    /// 0 small, 1 medium, 2 large (always medium at zoom 6 and below).
-    pub size: u8,
-    /// Degrees clockwise from north; none when moored or not reported.
-    pub heading: Option<f32>,
-    /// The position is old.
-    pub old: bool,
-    /// Metres from the AIS reference point to bow, stern, port and starboard
-    /// (only close in, and only when plausible).
-    pub dims: Option<[u16; 4]>,
-    /// Where it is expected over the next couple of minutes, `(lat, lon,
-    /// unix_ms)`, for the map to move it along; empty when it isn't moving
-    /// (or hasn't been seen move yet). See `track`.
-    pub frames: Vec<(f64, f64, i64)>,
-}
+// A ship on the map, an AIS navigational status, and what VesselFinder knows about one ship
+// (values the feed leaves out, or gives as 0 where 0 means "not known", are `None`):
+// `rustradar_core::model`.
+pub use rustradar_core::model::{NavStatus, Ship, ShipDetails};
 
 /// Big-endian reads that stop at the end of the buffer instead of panicking.
 struct Reader<'a> {
@@ -522,13 +498,6 @@ const CLICK_URL: &str = "https://www.vesselfinder.com/api/pub/click";
 /// A ship's card is answered from memory for this long.
 const DETAILS_REUSE: Duration = Duration::from_secs(60);
 
-/// An AIS navigational status: the standard code and its wording.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct NavStatus {
-    pub code: u8,
-    pub label: String,
-}
-
 /// The AIS navigational status's wording; none for "not defined" (15), the
 /// reserved codes and anything out of range.
 fn nav_status(code: i64) -> Option<NavStatus> {
@@ -548,47 +517,6 @@ fn nav_status(code: i64) -> Option<NavStatus> {
         _ => return None,
     };
     Some(NavStatus { code: code as u8, label: label.to_owned() })
-}
-
-/// What VesselFinder knows about one ship. Values the feed leaves out, or
-/// gives as 0 where 0 means "not known", are `None`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShipDetails {
-    pub name: Option<String>,
-    pub imo: Option<u32>,
-    pub mmsi: u32,
-    /// VesselFinder's own type wording, e.g. "Container Ship".
-    pub type_label: Option<String>,
-    /// The flag state's name.
-    pub flag: Option<String>,
-    /// The flag's ISO 3166 code, upper case.
-    pub flag_code: Option<String>,
-    pub length_m: Option<f64>,
-    pub beam_m: Option<f64>,
-    /// As last reported by the crew.
-    pub draught_m: Option<f64>,
-    pub max_draught_m: Option<f64>,
-    pub gross_tonnage: Option<u32>,
-    pub deadweight: Option<u32>,
-    pub year_built: Option<u16>,
-    /// As entered by the crew: often a UN/LOCODE (`UKSOU`), sometimes free text.
-    pub destination: Option<String>,
-    /// As entered by the crew, Unix seconds.
-    pub eta_unix: Option<i64>,
-    /// Speed over ground, knots.
-    pub speed_kn: Option<f64>,
-    /// Course over ground, degrees.
-    pub course_deg: Option<f64>,
-    pub nav_status: Option<NavStatus>,
-    /// When the position was reported, Unix seconds.
-    pub position_unix: Option<i64>,
-    /// The position came by satellite AIS.
-    pub satellite: bool,
-    /// For `https://static.vesselfinder.net/ship-photo/{photoId}/1`.
-    pub photo_id: Option<String>,
-    /// A search-and-rescue aircraft.
-    pub sar: bool,
 }
 
 /// A number the feed may send as a number or a string; `None` for anything else.

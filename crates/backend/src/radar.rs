@@ -14,7 +14,6 @@
 use std::time::{Duration, Instant};
 
 use contour::ContourBuilder;
-use serde::Serialize;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -29,13 +28,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(480);
 pub const GROUND_MIN_DBZ: f32 = 5.0;
 pub const LIFTED_MIN_DBZ: f32 = 25.0;
 
-#[derive(Clone, Copy, Serialize)]
-pub struct Bounds {
-    pub west: f64,
-    pub south: f64,
-    pub east: f64,
-    pub north: f64,
-}
+// A source's region, degrees, and what the globe is told of its volume: `rustradar_core::model`.
+pub use rustradar_core::model::{RadarBounds as Bounds, RadarVolume as VolumeInfo};
 
 /// One source's current scan, reduced to what the globe draws.
 pub struct Volume {
@@ -56,22 +50,10 @@ pub struct Volume {
     pub coverage_size: (u32, u32),
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VolumeInfo {
-    pub source: &'static str,
-    pub time: i64,
-    pub bounds: Bounds,
-    /// Heights that have shapes, km.
-    pub levels: Vec<f32>,
-    pub coverage_width: u32,
-    pub coverage_height: u32,
-}
-
 impl Volume {
     pub fn info(&self) -> VolumeInfo {
         VolumeInfo {
-            source: self.source,
+            source: self.source.to_owned(),
             time: self.time,
             bounds: self.bounds,
             levels: self

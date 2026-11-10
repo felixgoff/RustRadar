@@ -38,25 +38,9 @@ const MAX_AGE_S: i64 = 30 * 86_400;
 /// After a failure, don't ask again for the same airport for this long.
 const RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    Taxiway,
-    Taxilane,
-    Runway,
-}
-
-/// One OSM way's centreline.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Line {
-    pub kind: Kind,
-    /// The taxiway's or runway's designator, e.g. `A3` or `04L/22R`, where tagged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#ref: Option<String>,
-    /// `[lon, lat]` pairs, rounded to 1e-7° (about a centimetre).
-    pub points: Vec<[f64; 2]>,
-}
+// One OSM way's centreline and what it is, as `taxiways/{ICAO}.json` holds them:
+// `rustradar_core::model`.
+pub use rustradar_core::model::{TaxiKind as Kind, TaxiLine as Line};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

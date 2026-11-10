@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde_json::Value;
 
 use crate::CmdResult;
@@ -20,23 +19,8 @@ const FRESH: Duration = Duration::from_secs(600);
 const GRID_DEG: f64 = 0.1;
 const MAX_CACHED: usize = 256;
 
-/// The weather now, as the realistic map needs it.
-#[derive(Serialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Weather {
-    /// How much of the sky is cloud, 0 to 1.
-    pub cloud: f64,
-    /// Of it, low cloud (the kind that hides the sun), 0 to 1.
-    pub cloud_low: f64,
-    /// Fog over the place, 0 to 1.
-    pub fog: f64,
-    /// Rain or snow expected in the next hour, mm.
-    pub precipitation: f64,
-    /// MET's symbol for the next hour: `clearsky_day`, `partlycloudy_night`, `rain`, `snow`, `fog`, …
-    pub symbol: String,
-    /// The air's temperature, °C.
-    pub temperature: f64,
-}
+// The weather now, as the realistic map needs it: `rustradar_core::model`.
+pub use rustradar_core::model::Weather;
 
 /// The weather in a Locationforecast answer: its first (current) time step.
 pub fn parse(body: &Value) -> Option<Weather> {

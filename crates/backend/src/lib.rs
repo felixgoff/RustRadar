@@ -10,6 +10,7 @@
 pub mod adsblol;
 pub mod board;
 pub mod building_lod;
+pub mod convert;
 pub mod devlog;
 pub mod dwd;
 pub mod export;
@@ -52,7 +53,6 @@ use fr24::grpc::{
 use fr24::json::{AirportListParams, FindEntry, FindParams, FlightListParams, FlightListQuery, FlightListRecord};
 use fr24::proto::common::Icon;
 use futures_util::StreamExt;
-use serde::Serialize;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::AbortHandle;
@@ -312,40 +312,9 @@ fn to_string(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-/// A compact view of a live flight, sent for every aircraft on the globe.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LiveFlight {
-    pub id: u32,
-    pub lat: f32,
-    pub lon: f32,
-    /// Degrees clockwise from north
-    pub track: i32,
-    /// Feet
-    pub alt: i32,
-    /// Knots
-    pub speed: i32,
-    pub on_ground: bool,
-    pub timestamp_ms: u64,
-    pub callsign: String,
-    pub flight: String,
-    pub reg: String,
-    pub typecode: String,
-    pub origin: String,
-    pub destination: String,
-    /// Flightradar24's icon class, e.g. `A320`, `B744`, `EC` (helicopter)
-    pub icon: String,
-    /// The aircraft's recent history: positions before `lat`/`lon`, as
-    /// `[Δlat, Δlon, Δms]` back from the report, each point at
-    /// `lat - Δlat·1e-5`, `lon - Δlon·1e-5` and `timestamp_ms - Δms`, newest
-    /// first (Δms increasing). Flightradar24 sends up to ~10 s of them; they
-    /// overlap the previous reports' positions, so motion can be played back
-    /// through them rather than guessed.
-    pub positions: Vec<[i32; 3]>,
-    /// Feet per minute; only requested, so only present, when signed in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vspeed: Option<i32>,
-}
+// A live flight, an answer of `live_flights`, and what a followed flight's stream brings
+// (`Backend::follow_flight`): `rustradar_core::model`.
+pub use rustradar_core::model::{FollowEvent, LiveFlight, LiveSnapshot};
 
 /// Furthest back a buffered position may be; anything else is corrupt
 /// (upstream occasionally sends an underflowed delta near 2^32).
@@ -365,56 +334,32 @@ fn buffered_positions(buffer: Option<&fr24::proto::common::PositionBuffer>) -> V
     out
 }
 
-impl From<fr24::proto::common::Flight> for LiveFlight {
-    fn from(f: fr24::proto::common::Flight) -> Self {
-        let positions = buffered_positions(f.position_buffer.as_ref());
-        let extra = f.extra_info.unwrap_or_default();
-        let route = extra.route.unwrap_or_default();
-        Self {
-            id: f.flightid as u32,
-            lat: f.lat,
-            lon: f.lon,
-            track: f.track,
-            alt: f.alt,
-            speed: f.speed,
-            on_ground: f.on_ground,
-            timestamp_ms: f.timestamp_ms,
-            callsign: f.callsign,
-            flight: extra.flight,
-            reg: extra.reg,
-            typecode: extra.r#type,
-            origin: route.from,
-            destination: route.to,
-            icon: Icon::try_from(f.icon)
-                .map(|i| i.as_str_name().to_owned())
-                .unwrap_or_default(),
-            positions,
-            vspeed: None,
-        }
+/// A live feed's flight as the globe gets it (without `vspeed`).
+fn live_flight(f: fr24::proto::common::Flight) -> LiveFlight {
+    let positions = buffered_positions(f.position_buffer.as_ref());
+    let extra = f.extra_info.unwrap_or_default();
+    let route = extra.route.unwrap_or_default();
+    LiveFlight {
+        id: f.flightid as u32,
+        lat: f.lat,
+        lon: f.lon,
+        track: f.track,
+        alt: f.alt,
+        speed: f.speed,
+        on_ground: f.on_ground,
+        timestamp_ms: f.timestamp_ms,
+        callsign: f.callsign,
+        flight: extra.flight,
+        reg: extra.reg,
+        typecode: extra.r#type,
+        origin: route.from,
+        destination: route.to,
+        icon: Icon::try_from(f.icon)
+            .map(|i| i.as_str_name().to_owned())
+            .unwrap_or_default(),
+        positions,
+        vspeed: None,
     }
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LiveSnapshot {
-    pub flights: Vec<LiveFlight>,
-    pub server_time_ms: u64,
-    pub requests: usize,
-    pub errors: Vec<String>,
-    pub elapsed_ms: u64,
-    pub authenticated: bool,
-}
-
-/// What a followed flight's stream brings ([`Backend::follow_flight`]).
-#[derive(Clone, Serialize)]
-#[serde(tag = "event", content = "data", rename_all = "camelCase")]
-pub enum FollowEvent {
-    /// The latest merged details, including the full trail.
-    Details(Box<FlightDetailsRecord>),
-    /// A subscription failed; it will be retried.
-    Error(String),
-    /// Following stopped, e.g. because the flight is no longer live.
-    Ended(String),
 }
 
 async fn follow_task(fr24: Arc<Fr24>, flight_id: u32, channel: FollowSender<FollowEvent>) {
@@ -440,7 +385,7 @@ async fn follow_task(fr24: Arc<Fr24>, flight_id: u32, channel: FollowSender<Foll
                                 details.apply_update(update);
                             }
                             if channel
-                                .send(FollowEvent::Details(Box::new(details.clone())))
+                                .send(FollowEvent::Details(Box::new(convert::flight_details(details.clone()))))
                                 .is_err()
                             {
                                 return;
@@ -644,7 +589,7 @@ impl Backend {
                     let vspeed = f.extra_info.as_ref().map(|e| e.vspeed);
                     LiveFlight {
                         vspeed: if signed_in { vspeed } else { None },
-                        ..LiveFlight::from(f)
+                        ..live_flight(f)
                     }
                 })
                 .collect(),
@@ -762,7 +707,7 @@ impl Backend {
         let params = AirportListParams {
             page: page.unwrap_or(1),
             limit: 25,
-            ..AirportListParams::new(code.trim().to_uppercase(), mode.api())
+            ..AirportListParams::new(code.trim().to_uppercase(), board::api(mode))
         };
         let response = self
             .client()

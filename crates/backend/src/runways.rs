@@ -12,33 +12,8 @@ const URL: &str = "https://davidmegginson.github.io/ourairports-data/runways.csv
 /// Refetch after a week; a stale copy is still used if the refetch fails.
 const MAX_AGE_S: i64 = 7 * 86_400;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunwayEnd {
-    /// e.g. `22L`
-    pub ident: String,
-    /// The physical end of the runway (not the displaced threshold).
-    pub lat: f64,
-    pub lon: f64,
-    /// Feet, where known.
-    #[serde(default)]
-    pub elevation_ft: Option<f64>,
-    /// Feet from the physical end to the landing threshold.
-    #[serde(default)]
-    pub displaced_ft: f64,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Runway {
-    #[serde(default)]
-    pub length_ft: Option<f64>,
-    #[serde(default)]
-    pub width_ft: Option<f64>,
-    pub surface: String,
-    /// The two ends, low-numbered first.
-    pub ends: [RunwayEnd; 2],
-}
+// A runway and its two ends, as `runways.json` holds them: `rustradar_core::model`.
+pub use rustradar_core::model::{Runway, RunwayEnd};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -5,7 +5,6 @@
 //! state isn't published.
 
 use super::*;
-use serde::Serialize;
 
 /// The zoom the signal tiles are fetched at (they are only served close in).
 pub const SIGNAL_ZOOM: u32 = 14;
@@ -29,15 +28,9 @@ pub struct Signal {
     pub name: Option<String>,
 }
 
-/// A block: the main signal it starts at, and its track (`[lon, lat]`
-/// stretches; it branches where the track does).
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Block {
-    pub id: String,
-    pub signal: Option<String>,
-    pub lines: Vec<Vec<[f64; 2]>>,
-}
+// A block: the main signal it starts at, and its track (`[lon, lat]`
+// stretches; it branches where the track does): `rustradar_core::model`.
+pub use rustradar_core::model::TrainBlock as Block;
 
 /// The signals in a `railway_signals` tile.
 pub fn decode_signals(pbf: &[u8], z: u32, x: u32, y: u32) -> Vec<Signal> {

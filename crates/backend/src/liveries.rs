@@ -4,14 +4,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LogoColors {
-    pub primary: [u8; 3],
-    pub secondary: Option<[u8; 3]>,
-}
+// An airline's livery colours, RGB: `rustradar_core::model`.
+pub use rustradar_core::model::LogoColors;
 
 /// Cached results per IATA code; `None` means the airline has no usable logo.
 pub type ColorCache = HashMap<String, Option<LogoColors>>;

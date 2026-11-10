@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde_json::Value;
 
 use crate::trafikverket::{includes, post, results, rows};
@@ -27,13 +26,9 @@ const TTL: Duration = Duration::from_secs(24 * 3600);
 const MAX_CELLS: usize = 48;
 const EARTH_RADIUS: f64 = 6_371_008.8;
 
-/// A stretch of road: its line (longitude, latitude), how wide it is, metres, and whether paved.
-#[derive(Clone, Debug, Serialize)]
-pub struct RoadPiece {
-    pub line: Vec<[f64; 2]>,
-    pub width: f32,
-    pub paved: bool,
-}
+// A stretch of road: its line (longitude, latitude), how wide it is, metres, and whether paved:
+// `rustradar_core::model`.
+pub use rustradar_core::model::RoadPiece;
 
 /// A road measured in one direction: county, main and sub number, direction's code.
 type RoadKey = (i64, i64, i64, i64);

@@ -3,17 +3,11 @@
 
 use fr24::Fr24;
 use fr24::auth::Credentials;
-use serde::Serialize;
 
 use crate::CmdResult;
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionInfo {
-    pub authenticated: bool,
-    /// Unix seconds when the token expires, if known.
-    pub expires: Option<i64>,
-}
+// Whether signed in, and until when: `rustradar_core::model`.
+pub use rustradar_core::model::SessionInfo;
 
 fn info(fr24: &Fr24) -> SessionInfo {
     let auth = fr24.auth();

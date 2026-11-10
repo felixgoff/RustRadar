@@ -1372,14 +1372,10 @@ pub fn track_from(start: (f64, f64), heading: f64, metres: f64) -> Option<Vec<(f
     Some(out)
 }
 
-/// A bridge or a tunnel on the track: its line (`[lon, lat]`), and whether
-/// it goes on as one past each end (cut by a tile's edge, or mapped in pieces).
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
-pub struct Structure {
-    pub tunnel: bool,
-    pub line: Vec<[f64; 2]>,
-    pub joined: [bool; 2],
-}
+// A bridge or a tunnel on the track: its line (`[lon, lat]`), and whether
+// it goes on as one past each end (cut by a tile's edge, or mapped in pieces):
+// `rustradar_core::model`.
+pub use rustradar_core::model::Structure;
 
 /// The bridges and tunnels of these tiles' tracks that `keep` keeps.
 fn structures_of(sets: &[Arc<Vec<Track>>], keep: impl Fn(&Track) -> bool) -> Vec<Structure> {

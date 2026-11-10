@@ -5,48 +5,12 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fr24::Fr24;
-use serde::{Deserialize, Serialize};
 
 /// Refetch after a week; a stale copy is still used if the refetch fails.
 const MAX_AGE_S: i64 = 7 * 86_400;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Airline {
-    pub name: String,
-    pub iata: String,
-    pub icao: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Airport {
-    /// Flightradar24's airport id, as in a flight's schedule.
-    pub id: u32,
-    pub name: String,
-    pub iata: String,
-    pub icao: String,
-    pub city: String,
-    pub country: String,
-    pub lat: f64,
-    pub lon: f64,
-    /// Field elevation, feet, where known. Older caches lack it.
-    #[serde(default)]
-    pub alt: Option<i64>,
-    /// A relative size/importance score.
-    pub size: i64,
-    /// IANA timezone name, e.g. `Europe/London`.
-    pub timezone: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReferenceData {
-    /// Unix seconds.
-    pub fetched_at: i64,
-    pub airlines: Vec<Airline>,
-    pub airports: Vec<Airport>,
-}
+// Airlines and airports, as `reference.json` holds them: `rustradar_core::model`.
+pub use rustradar_core::model::{Airline, Airport, ReferenceData};
 
 fn now_s() -> i64 {
     SystemTime::now()

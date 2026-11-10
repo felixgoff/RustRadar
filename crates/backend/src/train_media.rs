@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use serde::Serialize;
 use serde_json::Value;
 
 
@@ -22,22 +21,9 @@ const LOGO_WIDTH: u32 = 240;
 const RAIL_WORDS: &[&str] =
     &["rail", "train", "tåg", "järnväg", "jernbane", "tog", "rautatie", "juna", "bahn", "zug", "transport", "trafik"];
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Photo {
-    pub url: String,
-    /// The article it comes from, for the credit and a link.
-    pub title: String,
-    pub page_url: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TrainMedia {
-    pub photo: Option<Photo>,
-    /// The operator's logo, a PNG rendering of the file on Commons.
-    pub logo: Option<String>,
-}
+// A photo of the train (with the article it comes from, for the credit and a link) and its
+// operator's logo (a PNG rendering of the file on Commons): `rustradar_core::model`.
+pub use rustradar_core::model::{TrainMedia, TrainPhoto as Photo};
 
 /// What the summary endpoint says about an article.
 #[derive(Clone, Debug, Default, PartialEq)]

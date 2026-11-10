@@ -6,39 +6,22 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
-use serde::{Deserialize, Serialize};
-
 use crate::Dirs;
 
 const FILE: &str = "keys.json";
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct Keys {
-    pub fr24_email: String,
-    pub fr24_password: String,
-    /// Trafiklab "GTFS Sverige 3" realtime: vehicle positions and delays.
-    pub trafiklab_gtfs: String,
-    /// Trafiklab "GTFS Sverige 3" static: the timetable that names them
-    /// (operators, line colours, stops).
-    pub trafiklab_gtfs_static: String,
-    /// Trafiklab Oxyfi: live positions from on-train wifi.
-    pub trafiklab_oxyfi: String,
-    /// Trafikverket's open API: every train in Sweden.
-    pub trafikverket: String,
-}
+// The keys, as `keys.json` holds them (camelCase, every field optional): `rustradar_core::model`.
+pub use rustradar_core::model::Keys;
 
-impl Keys {
-    fn trimmed(self) -> Keys {
-        Keys {
-            fr24_email: self.fr24_email.trim().to_owned(),
-            // a password may well start or end with a space
-            fr24_password: self.fr24_password,
-            trafiklab_gtfs: self.trafiklab_gtfs.trim().to_owned(),
-            trafiklab_gtfs_static: self.trafiklab_gtfs_static.trim().to_owned(),
-            trafiklab_oxyfi: self.trafiklab_oxyfi.trim().to_owned(),
-            trafikverket: self.trafikverket.trim().to_owned(),
-        }
+fn trimmed(keys: Keys) -> Keys {
+    Keys {
+        fr24_email: keys.fr24_email.trim().to_owned(),
+        // a password may well start or end with a space
+        fr24_password: keys.fr24_password,
+        trafiklab_gtfs: keys.trafiklab_gtfs.trim().to_owned(),
+        trafiklab_gtfs_static: keys.trafiklab_gtfs_static.trim().to_owned(),
+        trafiklab_oxyfi: keys.trafiklab_oxyfi.trim().to_owned(),
+        trafikverket: keys.trafikverket.trim().to_owned(),
     }
 }
 
@@ -69,7 +52,7 @@ pub fn load(dirs: &Dirs) -> Keys {
 /// Saves the keys and puts them in use. Signing in to Flightradar24 with a
 /// changed login is the page's next call, so a wrong password is reported there.
 pub fn save(dirs: &Dirs, keys: Keys) -> Result<Keys, String> {
-    let keys = keys.trimmed();
+    let keys = trimmed(keys);
     let path = path(dirs);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't open {}: {e}", dir.display()))?;
@@ -110,13 +93,12 @@ mod tests {
 
     #[test]
     fn keys_are_trimmed_but_passwords_kept() {
-        let keys = Keys {
+        let keys = trimmed(Keys {
             fr24_email: " me@example.com ".into(),
             fr24_password: " secret ".into(),
             trafikverket: "key\n".into(),
             ..Default::default()
-        }
-        .trimmed();
+        });
         assert_eq!(keys.fr24_email, "me@example.com");
         assert_eq!(keys.fr24_password, " secret ");
         assert_eq!(keys.trafikverket, "key");

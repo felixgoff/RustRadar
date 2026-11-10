@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde_json::Value;
 
 use crate::CmdResult;
@@ -42,43 +41,8 @@ const MAX_QUERY: usize = 200;
 /// Languages Photon has names for; anything else gets the local names.
 const LANGUAGES: [&str; 4] = ["en", "de", "fr", "it"];
 
-/// A coarse category, for the icon and how close to fly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    /// A house number, or a building without a name.
-    Address,
-    Street,
-    /// A named building, landmark, shop, station, park, canal...
-    Poi,
-    Airport,
-    /// A suburb, neighbourhood or locality within a town.
-    District,
-    City,
-    /// A town, village or hamlet.
-    Town,
-    Postcode,
-    /// A state, province, county or region.
-    Region,
-    Country,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct Place {
-    /// What the place is called: its name, or the street and number.
-    pub name: String,
-    /// A readable address line, e.g. `Damrak 1, 1012 LG Amsterdam, Netherlands`.
-    pub label: String,
-    pub kind: Kind,
-    /// What a named place is, from OpenStreetMap's tag, e.g. `Hotel`, `Canal`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-    pub lat: f64,
-    pub lon: f64,
-    /// `[west, south, east, north]`, degrees, for places with an extent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bbox: Option<[f64; 4]>,
-}
+// A place found, and its coarse category (for the icon and how close to fly): `rustradar_core::model`.
+pub use rustradar_core::model::{Place, PlaceKind as Kind};
 
 fn text<'a>(p: &'a Value, key: &str) -> &'a str {
     p[key].as_str().map(str::trim).unwrap_or("")

@@ -11,7 +11,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use tokio::task::AbortHandle;
 
 use crate::trafikverket::TrainEvent;
@@ -33,81 +32,9 @@ const BACKOFF_MAX: Duration = Duration::from_secs(600);
 /// Answers kept (one: the whole network).
 const CACHE_LIMIT: usize = 2;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Kind {
-    HighSpeed,
-    Intercity,
-    Regional,
-    Suburban,
-    Other,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Train {
-    /// Source-prefixed and stable for the run, e.g. `trafikverket:2026-10-13:523`.
-    pub id: String,
-    pub source: &'static str,
-    /// e.g. "SJ Snabbtåg 523", "Pendeltåg 2245".
-    pub name: String,
-    pub kind: Kind,
-    pub lat: f64,
-    pub lon: f64,
-    /// Degrees clockwise from north.
-    pub heading: Option<f32>,
-    pub speed_kmh: Option<f32>,
-    pub destination: Option<String>,
-    pub operator: Option<String>,
-    /// Minutes late (negative: early).
-    pub delay_minutes: Option<i32>,
-    /// When the position was reported, Unix seconds.
-    pub position_unix: i64,
-    /// Where it is drawn, `(lat, lon, unix_ms)` in time order, from about
-    /// now on (from when it stopped, standing); empty when there is nothing
-    /// to move it by.
-    pub frames: Vec<(f64, f64, i64)>,
-    /// Dev builds: its latest report and the one before, for the map to
-    /// mark. Empty in release builds.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub reports: Vec<Sighting>,
-    /// Dev builds: where the real train most likely is, as `frames`, for the
-    /// map to mark. Empty in release builds.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub predicted: Vec<(f64, f64, i64)>,
-    /// How many cars (and locomotives) it runs with, where its operator says.
-    pub cars: Option<u32>,
-    /// The track it has come along, `(lat, lon)` back from the start of
-    /// `frames`, for its cars to be drawn on; empty when not known.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tail: Vec<(f64, f64)>,
-    /// The bridges and tunnels on the track along `tail` and `frames`, for
-    /// its cars to be drawn up on or down in.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub structures: Vec<crate::rail::Structure>,
-    /// When it came to a stand at its last stop, Unix seconds: the map drops
-    /// it a little after.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ended_unix: Option<i64>,
-    /// How its cars are drawn, from the vehicles its product runs with.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shape: Option<crate::train_class::Shape>,
-    /// The 3D model its cars are drawn with, where there is one for it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<&'static str>,
-}
-
-/// A position report as the dev map marks it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Sighting {
-    pub lat: f64,
-    pub lon: f64,
-    pub unix_ms: i64,
-    pub speed_kmh: Option<f32>,
-    /// The newest report; else the one before it, the train is drawn from.
-    pub latest: bool,
-}
+// A train on the map, its kind, where it comes from, and a position report as the dev map marks
+// it: `rustradar_core::model`.
+pub use rustradar_core::model::{Sighting, Train, TrainKind as Kind, TrainSource};
 
 /// Degrees; `west > east` crosses the antimeridian.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -534,12 +461,9 @@ pub async fn blocks(west: f64, south: f64, east: f64, north: f64) -> CmdResult<T
     .map_err(|e| e.to_string())
 }
 
-#[derive(serde::Serialize)]
-pub struct TrainBlocks {
-    pub blocks: Vec<crate::rail::blocks::Block>,
-    pub structures: Vec<crate::rail::Structure>,
-    pub complete: bool,
-}
+// The signal blocks starting in an area, the bridges and tunnels of their track, and whether all
+// of it is here: `rustradar_core::model`.
+pub use rustradar_core::model::TrainBlocks;
 
 /// The trains the map shows close up (by id): streamed live, every few
 /// seconds, like a followed one. Trafikverket's only; an empty list stops it.
@@ -639,7 +563,7 @@ mod tests {
     fn streamed_trains_are_patched_in_newest_first() {
         let t = |id: &str, at: i64| Train {
             id: id.into(),
-            source: "trafikverket",
+            source: TrainSource::Trafikverket,
             name: id.into(),
             kind: Kind::Regional,
             lat: 59.0,
@@ -706,7 +630,7 @@ mod tests {
     fn serializes_camel_case() {
         let t = Train {
             id: "trafikverket:1".into(),
-            source: "trafikverket",
+            source: TrainSource::Trafikverket,
             name: "SJ 1".into(),
             kind: Kind::HighSpeed,
             lat: 59.33,

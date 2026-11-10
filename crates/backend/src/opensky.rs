@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde_json::Value;
 
 const URL: &str = "https://opensky-network.org/api/tracks/all";
@@ -16,18 +15,8 @@ const URL: &str = "https://opensky-network.org/api/tracks/all";
 const TTL: Duration = Duration::from_secs(240);
 const FEET_PER_METRE: f64 = 3.280_84;
 
-#[derive(Clone, Serialize)]
-pub struct TrackPoint {
-    /// Unix seconds
-    pub timestamp: i64,
-    pub latitude: f32,
-    pub longitude: f32,
-    /// Barometric altitude, feet
-    pub altitude: i32,
-    /// Degrees clockwise from north
-    pub track: u32,
-    pub on_ground: bool,
-}
+// One point of a track: `rustradar_core::model`.
+pub use rustradar_core::model::OpenSkyPoint as TrackPoint;
 
 #[derive(Default)]
 pub struct Cache {

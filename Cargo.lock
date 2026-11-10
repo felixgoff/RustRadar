@@ -7978,8 +7978,10 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "epaint",
+ "indexmap 2.14.2",
  "resvg",
  "rustradar-core",
+ "serde",
  "serde_json",
  "skrifa",
  "wuff",

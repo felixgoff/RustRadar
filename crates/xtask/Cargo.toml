@@ -11,6 +11,9 @@ rustradar-core = { workspace = true }
 wuff = { workspace = true }
 resvg = { workspace = true }
 serde_json = { workspace = true }
+# Lucide's iconData attributes, read in their source order.
+serde = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 # The vendored fonts and icons are checked with the crates the app reads them with.

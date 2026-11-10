@@ -11,12 +11,15 @@
 pub mod frame;
 pub mod gpu;
 pub mod headless;
+pub mod io;
+pub mod jobs;
 pub mod layers;
 pub mod pipelines;
 pub mod renderer;
 pub mod shaders;
 pub mod state;
 pub mod target;
+pub mod tiles;
 
 pub use gpu::{Gpu, GpuError};
 pub use renderer::{MapRenderer, SceneInput};

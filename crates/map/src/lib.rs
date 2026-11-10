@@ -19,6 +19,7 @@ pub mod renderer;
 pub mod shaders;
 pub mod state;
 pub mod target;
+pub mod textures;
 pub mod tiles;
 
 pub use gpu::{Gpu, GpuError};

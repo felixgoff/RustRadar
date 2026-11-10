@@ -67,6 +67,75 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --locked
 
+  # The native port (docs/port): the workspace's tests on a software Vulkan
+  # driver, so the GPU tests run instead of printing "skipped", then clippy on
+  # the port's crates. The Tauri shim is left out: `check` tests it, with the
+  # WebKitGTK and frontend build it needs. No job needs this one, so it never
+  # holds back a release.
+  native:
+    name: Native port (test & clippy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # lavapipe, Mesa's CPU Vulkan driver. Its ICD file is lvp_icd.json or
+      # lvp_icd.x86_64.json, depending on the Mesa version.
+      - name: Install software Vulkan (lavapipe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          test -f "${icds[0]}"
+          echo "VK_ICD_FILENAMES=${icds[0]}" >> "$GITHUB_ENV"
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          # fails unless the driver loads and lists a device
+          VK_ICD_FILENAMES="${icds[0]}" vulkaninfo --summary | grep -E "deviceName|driverInfo"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: native
+
+      - name: Rust tests
+        run: cargo test --workspace --exclude rustradar --locked
+
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --all-targets -p rustradar-core -p rustradar-backend -p rustradar-scene -p rustradar-map -p rustradar-app -p xtask -- -D warnings
+
+  # The native app keeps compiling for the other platforms it will ship on.
+  # One target per leg: with all four --target flags in one cargo call, cargo
+  # builds wayland-backend for an Apple target and fails.
+  native-targets:
+    name: Native port (check ${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-apple-darwin
+          - aarch64-apple-ios
+          - aarch64-linux-android
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: check-${{ matrix.target }}
+
+      - name: cargo check
+        run: cargo check -p rustradar-app --locked --target ${{ matrix.target }}
+
   # The version a release publishes, worked out once for every platform: the
   # files' version, or the next patch after the latest release if that one is
   # already out (installed apps only update to a newer version).

@@ -95,8 +95,8 @@ impl Gpu {
         format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type)
     }
 
-    /// The format the KTX2 textures go to the GPU in on this device ([`textures::LoadOptions::
-    /// for_device`]): BC7, ASTC 4×4, ETC2 or RGBA8.
+    /// The format the KTX2 textures go to the GPU in on this device
+    /// ([`textures::LoadOptions::for_device`]): BC7, ASTC 4×4, ETC2 or RGBA8.
     pub fn texture_target(&self) -> textures::Target {
         textures::LoadOptions::for_device(&self.device).target
     }

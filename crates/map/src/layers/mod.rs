@@ -40,7 +40,7 @@
 //!
 //! Tiles (plan 1.4.8; the renderer owns the runtime, item T1). A layer with tiles keeps a
 //! [`TileSet`] made in `new` with [`Init::tile_set`]: its sources (names of [`crate::io`]), its
-//! selection ([`DeckSelect`] for deck's rule, [`crate::tiles::LodSelect`] for the distance LOD),
+//! selection ([`DeckSelect`] for deck's rule, [`LodSelect`] for the distance LOD),
 //! its limits and refinement, and its decode function, which runs on the shared worker pool
 //! (bytes → `core::mvt` → `scene::tess` → CPU buffers in tile-local units). Each `prepare` it calls
 //! [`PrepareCx::update_tiles`] once: the set selects for this frame's camera, collects answers,
@@ -80,7 +80,7 @@ use crate::gpu::Gpu;
 use crate::jobs::Cancel;
 use crate::pipelines::mesh::{LightRig, MeshPipeline};
 use crate::renderer::SceneInput;
-pub use crate::tiles::{ByteSize, DeckSelect, Select, Source, TileIndex, TileRuntime, TileSet, TileSetOptions, UploadBudget};
+pub use crate::tiles::{ByteSize, DeckSelect, LodSelect, Refinement, Select, Source, TileIndex, TileRuntime, TileSet, TileSetOptions, UploadBudget};
 
 /// How a layer stands on 3D terrain (plan 1.4.12, stage 9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

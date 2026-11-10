@@ -1460,3 +1460,94 @@ tilted, the wheel zoomed in and out. Not run: Wayland, Windows, macOS, a real GP
 
 **Disk.** `target/` was 18 GB at the start of the check with 8.9 GB free; a full `cargo test --workspace` rebuilt
 every workspace test binary. Stale test binaries in `target/debug/deps` were deleted to keep room.
+
+---
+
+## Tile plumbing (T1)
+
+Item T1 closes gaps 1–3 of the stage 2 status (commits `634a23c`, `6a1885f`). What a tile layer of stage 3 on
+(B2, B4, B6, B7, T4, W1, R-items, Z-items) builds on:
+
+**The renderer owns the runtime.** `MapRenderer` holds a `tiles::TileRuntime`: a `jobs::Pool` of
+`default_threads()` workers and a fetcher, `io::offline()` until the app calls
+`MapRenderer::set_tiles(fetcher, wake)` (the wake is the event loop's; the pool calls it after each job). Every
+clone of the runtime shares the fetcher: setting a new one makes every `TileSet` drop its cache at its next
+update (`TileRuntime::generation`), so an early "empty" answer is never kept. The layers share one
+`UploadBudget` per frame, in draw order (`set_upload_budget`; `UploadBudget::per_frame()` by default, 4 tiles
+or 8 MB, in the window and in shots alike).
+
+**A tile layer**, in its file under `layers/` (`TileSet`, `Source`, `DeckSelect`, `LodSelect`,
+`TileSetOptions`, `Refinement`, `ByteSize`, `TileIndex`, `UploadBudget` are re-exported from `layers`):
+
+```rust
+// new(init): one TileSet per source, deck's rule or the distance LOD, decode on the pool
+let tiles: TileSet<Decoded, Gpu> = init.tile_set(
+    vec![Source::new(io::OPENFREEMAP)],                // or Source::at(name, zooms) per zoom
+    DeckSelect(VECTOR_TILES),                           // or LodSelect::new(lod, tile_size)
+    TileSetOptions { max_requests: 8, refinement: Refinement::BestAvailable, ..Default::default() },
+    |tile, bytes, cancel| decode(tile, &bytes, cancel), // bytes → core::mvt → scene::tess, Ok(None) = nothing
+);
+// prepare(cx): once a frame
+cx.update_tiles(&mut self.tiles, |gpu, tile, decoded| upload(gpu, decoded)); // within the frame's budget
+for (tile, _) in self.tiles.visible() { self.slots.push((cx.tile_frame(tile, 0.0), tile)); }
+cx.set_lights(&self.mesh_pipeline);                                          // lit layers only
+// draw(pass, cx): self.tiles.get(tile) for each pushed slot, coarse to fine
+// pending(): self.tiles.loading() while the layer draws (the headless path waits on it)
+```
+
+`Decoded` implements `ByteSize` (`Vec<T>` already does). Work that is not tiles (KTX2 textures, radar meshes)
+goes to `init.tiles.pool` / `cx.tiles.pool`. A layer that stops drawing (another basemap) reports
+`pending() == false`; it may `clear()` its set or keep the cache.
+
+**Sources.** Layers name sources with `io::{OPENFREEMAP, ESRI, TERRARIUM, MAPTERHORN, RAINVIEWER, STREETS_GL}`:
+the fixture folders' names and `backend::tiles`' cache folders. The app maps them in
+`app::tile_fetcher::TileSources::app()`: OpenFreeMap from its TileJSON (read once, never written), Esri
+`…/World_Imagery/MapServer/tile/{z}/{y}/{x}`, terrarium, Mapterhorn and Streets GL as in today's code. A
+source whose URL changes (a RainViewer frame) is set with `TileSources::set_template` (W1 needs a handle to
+the table: `BackendTiles::sources()`).
+
+**The app.** `tile_fetcher::BackendTiles` implements `io::TileFetcher` on `backend::tiles::Tiles` (cache in
+`<cache>/tiles`), spawned on the backend's runtime; it wakes the loop after each answer and stops (answering
+nothing) within 100 ms of a cancel. `tile_fetcher::for_state(&state)` picks the fetcher: the `--fixture`
+folder's tiles (`DIR/tiles` when it has one, else `DIR`), else `BackendTiles` in the backend's cache folder,
+else offline. **Not wired in the window yet:** `app.rs` is not T1's, so its owner adds one line after the
+engine is made (in `View::new`): `tile_fetcher::connect(&mut engine.map, &engine.state);` (the fetcher of
+`for_state` and the requests' wake). Until then the window draws no tile.
+
+**Shots** (`app::headless`) never touch the network: tiles come from `--fixture DIR` as above, else the
+committed set (`io::fixture_tiles_dir()`, `crates/map/tests/data/tiles`, found where the build ran), through
+`io::DirTiles`; the shot logs the tiles the folder lacks (`Shot::missing_tiles`) and the layers still pending
+at the 60 s timeout. Map tests use `tests/common/fixture_tiles.rs` (`FixtureTiles`, now a wrapper of
+`io::DirTiles`) and `shots::map_shot_with_tiles`.
+
+**Light rig.** `SceneInput::lights: LightRig` is the scene's one rig; `SceneInput::new` makes it unaimed,
+`scene.aim_lights(buildings)` aims it as G:2723-2724 does each render
+(`aimKeyLight(localSun(sunDirection(feed now), centre), buildings && flat ? sunlight(up)·clamp01(zoom − 12) : 0)`;
+`renderer::scene_lights`). **The scene builder must call `scene.aim_lights(buildings)` once the clocks are
+set** (B7 or whoever owns `scene_builder/`: until then the key light keeps its usual direction, right for every
+view without buildings). Lit layers write it into their mesh pipelines with `cx.set_lights(&pipeline)` each
+frame (the earth layer's owner is moving it from its own `LightRig::new()` to this).
+
+**Texture compression.** `Gpu::open` asks for `textures::compression_features(adapter.features())`, so
+`LoadOptions::for_device` picks BC7 > ASTC > ETC2 > RGBA8 for real; `Gpu::texture_target()` says which.
+SwiftShader offers BC, ETC2 and ASTC: BC7.
+
+**Tests.** Map: `tile_plumbing.rs` (a reference water layer over the V3 fixtures at 1440 × 900: no tile
+missing, decoded off the drawing thread, at most 4 uploads a frame, 95.9 % of today's water and 97.4 % of its
+land matched against `dark-v3-1440x900.png`; tile frames within 0.14 px of `scene::camera` at zoom 5, 9, 11.9,
+13.5 and 15.5, pitched), unit tests for the pool's wake, `DirTiles`, the fetcher swap, `TileSet::loading`, the
+light rig and the device's features. App: `tile_fetcher` (a tile through `backend::tiles` from a local server
+with a wake, the TileJSON read once, a cancel that stops the download and wakes nobody, today's templates, the
+fixture rules, the choice by state).
+
+**Found on the way.**
+- Today's reference pictures stand **about 4.5 px higher and 0.5 px left** of where deck's own viewport (and
+  E1, and this port) puts the map, the same at 1440 × 900 and 390 × 844 (dark V3's water). The tiles and the
+  projection agree with deck's code; the offset is in how the pages were captured or laid out. Shot tests
+  that compare with `docs/port/reference/` should search a few pixels of offset (as `tile_plumbing.rs` does)
+  rather than assume none, and someone should find its cause before pixel parity is claimed.
+- While several engineers build in one tree, cargo can run a test binary built from another snapshot (a run
+  listed 163 map tests where the source had 171). `touch` the files you changed before a test run whose test
+  list you rely on.
+- `crates/app/tests/shots.rs` (E18) fails three earth tests since the lit earth (`86ecf5b`): the polar cap
+  reads `(48,47,47)` where they expect `(50,50,50)`; the earth's owner updates them.

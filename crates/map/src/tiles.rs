@@ -610,10 +610,10 @@ impl<D: ByteSize + Send + 'static, T> TileSet<D, T> {
         self.tiles.iter().any(|t| !matches!(t.load, Load::Idle))
     }
 
-    /// Whether a layer drawing this set should count as still loading ([`crate::layers::Layer::
-    /// pending`]): a tile on its way ([`Self::pending`]), or a selection not yet all settled
-    /// ([`Self::is_loaded`]; a selected tile whose request was cancelled is asked again at the next
-    /// update). A set that was never updated is not loading.
+    /// Whether a layer drawing this set should count as still loading (its
+    /// [`crate::layers::Layer::pending`]): a tile on its way ([`Self::pending`]), or a selection not
+    /// yet all settled ([`Self::is_loaded`]; a selected tile whose request was cancelled is asked
+    /// again at the next update). A set that was never updated is not loading.
     pub fn loading(&self) -> bool {
         self.pending() || (self.viewport.is_some() && !self.is_loaded())
     }

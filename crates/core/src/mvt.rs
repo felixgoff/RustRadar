@@ -454,6 +454,12 @@ pub fn layer<'a>(pbf: &'a [u8], name: &str) -> Option<Layer<'a>> {
     layers_named(pbf, &[name]).pop()
 }
 
+/// Every layer of this name, in the tile's order (empty ones too), as the backend's decoders
+/// have always read their tiles. Only those layers are read.
+pub fn layers_called<'a>(pbf: &'a [u8], name: &'a str) -> impl Iterator<Item = Layer<'a>> {
+    layer_messages(pbf).filter(move |b| name_of(b) == name).map(Layer::parse)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,6 +740,10 @@ mod tests {
         assert_eq!(layer(&t, "roads").unwrap().len(), 2);
         assert!(layer(&t, "empty").is_none());
         assert!(layers(&[]).next().is_none());
+        // every layer of a name, in the tile's order
+        assert_eq!(layers_called(&t, "roads").map(|l| (l.extent, l.len())).collect::<Vec<_>>(), [(1.0, 1), (2.0, 2), (3.0, 0)]);
+        assert_eq!(layers_called(&t, "empty").count(), 1);
+        assert_eq!(layers_called(&t, "nothing").count(), 0);
     }
 
     // ---------------------------------------------------------- geometry

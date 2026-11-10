@@ -35,7 +35,7 @@ pub use rustradar_core::model::TrainBlock as Block;
 /// The signals in a `railway_signals` tile.
 pub fn decode_signals(pbf: &[u8], z: u32, x: u32, y: u32) -> Vec<Signal> {
     let mut out = Vec::new();
-    for layer in mvt::layers_named(pbf, &["railway_signals"]) {
+    for layer in mvt::layers_called(pbf, "railway_signals") {
         let extent = layer.extent;
         for f in layer.features() {
             let num = |k: &str| match f.get(k) {

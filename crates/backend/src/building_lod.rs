@@ -97,11 +97,15 @@ async fn source_tile(x: u32, y: u32) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// A tile's `building` layer as rings (its units, y down, open) and its extent.
+/// A tile's `building` layers as rings (their units, y down, open) and their extent (the last
+/// one's; the default without one).
 pub fn footprints(pbf: &[u8]) -> (Vec<Vec<(f64, f64)>>, f64) {
-    let Some(layer) = mvt::layer(pbf, "building") else { return (Vec::new(), mvt::EXTENT_DEFAULT) };
-    let rings = layer.features().filter(|f| f.kind == mvt::GeomType::Polygon).flat_map(|f| f.rings()).collect();
-    (rings, layer.extent)
+    let (mut rings, mut extent) = (Vec::new(), mvt::EXTENT_DEFAULT);
+    for layer in mvt::layers_called(pbf, "building") {
+        rings.extend(layer.features().filter(|f| f.kind == mvt::GeomType::Polygon).flat_map(|f| f.rings()));
+        extent = layer.extent;
+    }
+    (rings, extent)
 }
 
 /// Fills `rings` (even–odd, so courtyards stay open) into `cells` × `cells` of
@@ -685,7 +689,8 @@ mod tests {
     /// loaders.gl's `loadGeometry` from a feature's commands: each MoveTo starts a part, a
     /// ClosePath repeats the part's first point.
     fn load_geometry(f: &mvt::Feature) -> Vec<Vec<(f64, f64)>> {
-        let (mut parts, mut part): (Vec<Vec<(f64, f64)>>, Option<Vec<(f64, f64)>>) = (Vec::new(), None);
+        let mut parts: Vec<mvt::Line> = Vec::new();
+        let mut part: Option<mvt::Line> = None;
         for c in f.commands() {
             match c {
                 mvt::Command::MoveTo(p) => {

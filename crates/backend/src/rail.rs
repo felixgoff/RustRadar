@@ -252,7 +252,7 @@ fn clip(points: &[(f64, f64)], e: f64) -> Vec<Line> {
 /// The railway tracks in an OpenRailwayMap vector tile, in degrees.
 pub fn decode(pbf: &[u8], z: u32, x: u32, y: u32) -> Vec<Track> {
     let mut out = Vec::new();
-    for layer in mvt::layers_named(pbf, &["railway_line_high"]) {
+    for layer in mvt::layers_called(pbf, "railway_line_high") {
         for f in layer.features() {
             // only railways in use: no trams or metros, nor lines abandoned, razed or being built
             if f.kind != mvt::GeomType::LineString

@@ -20,10 +20,10 @@ Plan references: section 5, risks K3 (surface lifecycle) and K4 (text input, saf
 
 ## 2. Before the checks: wiring the app loop
 
-**Done by the stage-2 review** (the commit after `0e02cf2`): the six calls below are now in `app.rs`, `lib.rs` and
+**Done by the stage-2 review** (commit `c17c341`): the six calls below are now in `app.rs`, `lib.rs` and
 `platform/mod.rs` (`dirs()` has one definition per platform instead of the `return`s shown), checked with clippy
-for both phone targets through stand-in C compilers; the "Phone shells" CI run of that commit is the first real
-build with them. What remains for the text fields is the `report` call at the end of this section (U8, U9, U17).
+for both phone targets through stand-in C compilers, and built for real by "Phone shells" run 42870433769
+(debug APK and simulator app). What remains for the text fields is the `report` call at the end of this section (U8, U9, U17).
 
 Before that commit (E19 did not own the app loop), an APK or simulator app did the following:
 

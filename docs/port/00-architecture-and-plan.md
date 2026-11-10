@@ -849,13 +849,13 @@ are.
 
 | ☐ | Feature | Spec | Item |
 |---|---|---|---|
-| ☐ | Globe at zoom ≤ 12, flat Web Mercator above, hard swap, same scale at the centre | 01 §2 | E1 |
-| ☐ | Zoom/latitude coupling (globe grows toward the poles, pan changes zoom, shifted limits) | 01 §2.2, §2.4 | E1, E2 |
+| ☑ | Globe at zoom ≤ 12, flat Web Mercator above, hard swap, same scale at the centre | 01 §2 | E1 |
+| ☑ | Zoom/latitude coupling (globe grows toward the poles, pan changes zoom, shifted limits) | 01 §2.2, §2.4 | E1, E2 |
 | ☐ | Limits: zoom 0.5–20, pitch 60 (75 realistic, 85 locked), latitude ±85 | 01 §2.4 | E2, A10 |
 | ☐ | Pan (north-up), rotate and tilt, wheel zoom about the pointer, shift-wheel, double-click | 01 §3.2–3.5 | E2, B8 |
 | ☐ | Trackpad scroll pans; pinch and twist on macOS; touch pan and pinch | 01 §3.7–3.8 | B8 |
 | ☐ | `fly_to` 1500 ms, `zoom_by` 250 ms, reset orientation 400 ms, tilt to 55°; linear, no inertia | 01 §1.3, §3.6 | E2 |
-| ☐ | Scene refresh pacing 0 / 50 / 150 / 500 ms | 01 §2.6 | E17 |
+| ☑ | Scene refresh pacing 0 / 50 / 150 / 500 ms | 01 §2.6 | E17 |
 | ☐ | Cursor: grab, grabbing, pointer | 01 §1.4 | B8 |
 | ☐ | Lock on an aircraft; follow a train or ship | 01 §3.9–3.10 | A10, T1, H1 |
 
@@ -959,7 +959,7 @@ are.
 
 | ☐ | Feature | Spec | Item |
 |---|---|---|---|
-| ☐ | Same config and cache folders on desktop; `keys.json` carried over | 07 §6, §11.1 | S1.3, E17 |
+| ☑ | Same config and cache folders on desktop; `keys.json` carried over | 07 §6, §11.1 | S1.3, E17 |
 | ☐ | Open links, reveal exported files | 07 §11.2 | U20 |
 | ☐ | Desktop self-update with splash, hourly check, toast | 07 §7.1, §12 | P2, P3 |
 | ☐ | Android update notice | 07 §7.3 | P4 |
@@ -1018,6 +1018,12 @@ Known differences from today's app that this plan accepts:
 13. Label characters Overpass has no glyph for are skipped (the browser fell back to system fonts).
 14. Rain and tilt-shift are GPU passes instead of DOM overlays.
 15. On Android the soft keyboard works through the app's own text bridge; composition underlines are not shown.
+16. Map label glyphs sit where TinySDF 2.3 draws them. Today deck 9.4 assumes tiny-sdf 2.0's pen position, so
+    every glyph is drawn up to about 1 px too far left (the reference shows "Södertäl je"); the port does not
+    reproduce that (E10).
+17. Label collision tests each label's whole claimed box against the boxes kept so far; deck tests only the
+    anchor patch and lets hidden labels' boxes still hide others. Labels come out somewhat sparser, aircraft
+    labels most (E11; B4 and A7 decide whether to keep it).
 
 Not in this plan; candidates after parity: twist-to-rotate and two-finger tilt on touch; fling inertia and eased
 `fly_to`; long-press hover card on touch; far building tiles drawn roof-coloured and hazed (doc 04 §17.1);
@@ -1316,7 +1322,140 @@ and 8; 4, 6, 9 and 10 remain.
     20 GB. A full `cargo test --workspace` needed old test binaries, the cross-target folders and
     `target/debug/incremental` deleted first.
 
+---
 
+## Stage 2 status
 
+Checked on 2026-11-10 at commit `c17c341` on `rust-port` by the stage-2 review (the item that owns no files).
 
+**Done.** E1–E18 are committed and their acceptance holds, with the restated lines and gaps below. E19 is
+partial: everything that can be done without a phone is done; the device checklists are pending (person
+check). Five lines of section 4 are now ticked: the motion model (stage 1), the globe/flat swap, the
+zoom/latitude coupling, the scene refresh pacing, and the desktop folders with `keys.json`.
 
+**Checks**
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | clean |
+| `cargo test --workspace` (SwiftShader) | 1522 passed, 0 failed, 22 ignored; no GPU test skipped |
+| `cargo clippy --workspace --all-targets` | no warnings |
+| `cargo clippy -p rustradar-app --all-targets --target {aarch64-linux-android, aarch64-apple-ios}` | no warnings, through stand-in C compilers (E17's recipe); target folders deleted |
+| "Phone shells" CI (`.github/workflows/phone-shells.yml`) | runs 42865363833 and 42866917494 passed (E19); run 42870433769 (commit `c17c341`, with the wiring) passed: the debug APK with the real NDK 27 and the simulator app |
+| `cargo check -p rustradar` (shim) | passes |
+| `bun run check` | 0 errors, 0 warnings |
+| `bun test src` | 394 pass |
+| app shot tests with no adapter (`VK_ICD_FILENAMES=/nonexistent.json WGPU_BACKEND=vulkan`) | 22 pass, each GPU test prints `skipped: …` |
+
+The 1522 passing tests, by crate:
+
+| Crate | Passed | Ignored |
+|---|---|---|
+| core | 602 unit + 2 in `tests/motion.rs` | 0 |
+| scene | 424 | 0 |
+| map | 161 unit + 9 in `tests/fixture_tiles.rs` | 0 |
+| backend | 211 | 22 (the 21 of stage 1, and `tiles::live_openfreemap`, which needs the network) |
+| app | 45 unit + 3 in `tests/headless.rs` + 19 in `tests/shots.rs` | 0 |
+| xtask | 26 | 0 |
+| fr24 | 17 + 1 doc-test | 0 |
+| shim | 2 | 0 |
+
+**TypeScript twins.** The 7 tests left for stage 2 are ported under their own names and pass:
+`trackpad.test.ts` (3, in `scene::controller`) and `ktx2-transcode.test.ts` (4, in `map::textures`). All 394
+TypeScript tests now have a Rust twin.
+
+**What was looked at.** The headless binary (`cargo run -p rustradar-app -- --screenshot …`) at V1 dark (1100 × 720
+and 640 × 400 × 2), V1 realistic, V2 satellite at 390 × 844, V7 satellite, V8, latitude 0 against 60 at zoom 2,
+zoom 11.9 against 12.1 pitched, zoom 12 pitch 60 satellite: a land disc on ink where the globe shows, land or the
+satellite earth colour edge to edge on the flat map, no seam at the antimeridian, the disc 1.7× wider at latitude
+60. Also the 37 `e18-*` shots of the harness (cube, shadows, lines, dashes, icons, ring, "Stockholm"). For the
+first time **the interactive window ran**: under Xvfb (X11, llvmpipe GL) it opened, drew the globe of V1, and a
+left drag panned (the view moved north and the disc grew 1.18×, as deck's pan does at zoom 1.9), a right drag
+tilted, the wheel zoomed in and out. Not run: Wayland, Windows, macOS, a real GPU, HiDPI, the maximised start.
+
+**Per item**
+
+| Item | Verdict | Evidence, and what differs from the row |
+|---|---|---|
+| E1 | done | `camera::tests::matches_every_golden_view`: all 24 views, every field; worst 3.3e-10 px, matrices 1.9e-16 relative. Off-limb unproject returns deck's closest approach, not the exact limb point. |
+| E2 | done; one line restated | 3 trackpad twins; 23 scenarios run through deck 9.4's own `GlobeController` and the app's `NorthUpGlobeController`, matched to 1e-9. **"A pan keeps the grabbed point under the pointer" is not what today's app does**: deck moves the map 1.117× the pointer's travel and ignores pitch; the test of that name checks deck's rate. Keeping parity is the plan's priority; an exact grab would be a new deviation (owner's call). |
+| E3 | done | `matches_every_golden_tile_list`: 144 lists (24 views × 6 configs), 4943 tiles, same tiles in the same order. |
+| E4 | done | ink frame exact in 3 configurations; `all_shaders_validate`; `projection_precision` 0.0115 px on the globe, 0.0016 px flat, and the same on the GPU. |
+| E5 | done; one line restated; one parity gap | V1's edge within 1.5 px of E1's limb in 72 sectors. **"Twice as wide at latitude 60" cannot hold on screen**: deck's camera stands 1.5 viewport heights away, so the disc grows 1.71×; the globe's radius at the centre's distance doubles (1.999), and that is what the test checks. **Gap**: see 4 below (the earth is unlit). |
+| E6 | done | widths within 6 % at zoom 3, 11, 15, pitch 0 and 60, for lines running into the view; a line across the view at pitch 60 lies flat and is half as wide, as in deck; dashes 59, 42, 60, 42. |
+| E7 | done | three face brightnesses; depth 0 gives exactly the instance colour; `SHADOW` darkens an overlap once (control with `SURFACE_NO_CULL` twice); roofs of `dark-v4` within 1 level. |
+| E8 | done | billboard 48 px (area within 0.4 %) upright at pitch 0 and 60, bearing 30; ground icon foreshortened to 0.50–0.52 of the area. Sizes are deck's (exact at the focal depth), not constant at every depth. |
+| E9 | done | ring `[55,142,240,235]` over halo `[55,142,240,56]` within deck's expected range on globe and flat map, × 1 and × 2; ring 2.000–2.001 px. |
+| E10 | done; one deviation | ink box within 0.85 px (× 1) and 0.26 px (× 2) of epaint's; SDF square symmetric and 0.75 at the edge. Glyphs placed where TinySDF draws them, not where deck 9.4 does (section 6, item 16). |
+| E11 | done | 12 unit tests, including the three of the row. Whole-box test (section 6, item 17). |
+| E12 | done; plan 1.4.11 superseded | 17 unit tests for each hit kind, draw order, depth modes and pixel ratios. The nearest pixel wins, then the topmost item at that pixel (deck's `getClosestObject`); 1.4.11's "topmost wins, ties to the nearest" is reversed. A point's radius is its drawn footprint; the 6 px come on top. |
+| E13 | done; **not plumbed in** | the 4 acceptance tests with a fake fetcher and 35 more (E13 ran them 25 times without a flake). Nothing outside the crate uses it yet (gap 1). |
+| E14 | done | tests against a local tokio listener (second request from disk, stale file on failure); no test touches the network. No ETag revalidation. |
+| E15 | done; runtime target always RGBA8 | 4 twins; the icon atlas as RGBA8 896 × 768 with 10 levels, not blank; BC7, ASTC and ETC2 uploads read back on SwiftShader. Gap 3. |
+| E16 | done for its rows; too few views for stage 3 | 33.2 MB, 670 tiles, NOTICE; `FixtureTiles` and 9 tests. Gap 5. |
+| E17 | done | `--screenshot` draws E5's globe through `map::headless`; the binary writes a shot with every proxy dead (test; E17 also ran it inside `unshare -rn`). The four cross targets were checked only with stand-in C compilers (gap 6). |
+| E18 | done | 19 shot tests on SwiftShader; without an adapter all pass with `skipped:`; `SHOT_GOLDEN` records and compares. |
+| E19 | partial | CI built the debug APK (real NDK 27) and the simulator app. The app-loop wiring that E19 could not do (its files were E17's) is done by this review (fix 1). Device checklists K3, K4, folders, safe area and back not run. |
+
+**Fixes made by this review**
+1. `c17c341`: the phone glue is wired into the app loop, as `docs/port/device-notes.md` §2 asked:
+   `platform::android::init` before the folders are read; `platform::dirs()` defined per platform (Android
+   from the activity, iOS inside the container); `before_frame`/`after_frame` around the frame, back →
+   `Action::CloseTop`, else `leave()`; `platform::ios::init()` in `rustradar_ios_main`. Two broken intra-doc
+   links in `platform/android.rs` fixed. device-notes §2 updated.
+
+**Gaps** (each with the item that has it, and who should take it)
+1. **Tile plumbing has no owner (E4, E13, E14, E16, E17).** `layers::Init` and `PrepareCx` carry no
+   `TileRuntime` or `UploadBudget`; `MapRenderer::new` takes no runtime; the app has no `TileFetcher` on
+   `backend::tiles` (spawned on `rt()`, waking the loop); the headless path has no fixture fetcher (`--fixture`
+   is the feeds' folder) and does not wait on `TileSet::pending`. B2 owns only `layers/vector_map.rs` and
+   `scene_builder/base.rs`, so stage 3 cannot draw a tile until an item owns `crates/map/src/{layers/mod.rs,
+   renderer.rs, headless.rs}` and the app's fetcher. Suggest one item before B2 that also takes gaps 2 and 3.
+2. **Light rig (E7).** `SceneInput` has no `lights: LightRig`; every lit layer (B7 buildings, A5 aircraft,
+   ships, cars) needs the one rig aimed from `buildings && flat` (G:2723). `renderer.rs` is E4's.
+3. **Texture compression unused (E15, E4).** `Gpu::open` requests no feature, so `LoadOptions::for_device`
+   always picks RGBA8 (about 110 MB for the realistic set). Request
+   `textures::compression_features(adapter.features())`: optional, so the baseline holds.
+4. **The earth sphere is unlit (E5; found by E7).** deck 9.4 reads `material: false` as luma's default Phong
+   material, lit. The dark map's polar caps beyond ±85° read (41,40,39)–(44,43,41) in `dark-v1`, (50,50,50) in
+   the port; the satellite and realistic spheres are lit today as well. No later item owns `layers/earth.rs`;
+   the owner of gap 1 or B6 should light it with `Material::DECK_DEFAULT` and the rig of gap 2.
+5. **Fixtures for stage 3 (E16).** The set covers V3–V6 and OpenFreeMap's world at z0–2. B2 and B4 accept on
+   shots at V2 (zoom 4.5, tiles z4–z5), which the set lacks; V7, V8, satellite at V1 and the realistic sources
+   are not covered either. Extend `cargo xtask fixtures` (plan of `fixtures.rs`) before B2's shots.
+6. **CI and cross targets (E17, P10).** `rust.yml` runs only on `main`, so none of the port has run there. Its
+   `native-targets` job (`cargo check -p rustradar-app --target …` on ubuntu) fails for all four targets now
+   that aws-lc-sys, zstd-sys and basisu_c_sys need target C toolchains; Windows and macOS were checked only
+   with stand-in compilers and nothing was linked. P10 must fix this before the branch merges; it should also
+   fold `phone-shells.yml` into `rust.yml`.
+7. **Linux runtime library.** winit on X11 loads `libxkbcommon-x11.so.0` at start and panics without it (this
+   container lacks it; the Xvfb check used a copy from the Ubuntu package in the scratch folder). The deb, rpm
+   and AppImage of P7 must depend on or bundle it.
+8. **Spike leftovers (E17).** `crates/app/src/ui.rs` (the placeholder panel, no longer drawn) and `theme.rs`
+   are still compiled. U1/U6 replace them with the `ui/` folder; `ui.rs` and `ui/mod.rs` cannot both exist.
+9. **Phones (E19).** Device checklists pending (below). Every single-line text field must call
+   `platform::android::text::report` (U8, U9, U17). Back is always taken on Android, so Android 14+ shows no
+   back-to-home preview until the state can say ahead of time whether anything is open.
+10. **Rustdoc.** `cargo doc --workspace` warns in `core/src/ships.rs` (link to private `KINDS`),
+    `core/src/trains.rs:436` (unclosed `<number>`) and `backend/src/radar.rs` (`contour` ambiguous); none in
+    stage-2 files.
+
+**Plan text superseded by stage 2** (rows left as written; the code follows deck and today's app):
+- 1.4.2: the flat map's metres use math.gl's 40.03e6 m circumference at the point's latitude, the globe a
+  radius of 6 370 972 m; `core::geo::meters_per_pixel` (40 075 016.686 m) is 0.1 % off both viewports' own
+  `meters_per_pixel()`.
+- 1.4.11 picking priority: see E12 above.
+- 1.5 phones: the Android safe area comes from the window insets (`MainActivity.onApplyWindowInsets`), not
+  `content_rect`; back reaches Rust through `nativeBack`, not as a key.
+- E2 and E5 acceptance lines: see the table.
+
+**Pending for the owner (person checks)**
+- One Android phone and one iPhone: `docs/port/device-notes.md` §4–§6 (K3 surface lifecycle, K4 text input,
+  safe area and back, folders). Get the builds from the "Phone shells" CI artifacts.
+- On a downloaded APK: `unzip -l` shows only `lib/arm64-v8a/librustradar_app.so`; for Play, 16 KB page
+  alignment (device-notes §7).
+- The desktop window on Windows, macOS and a Wayland session, on a real GPU: opens maximised and hidden until
+  the first frame, pans, tilts and zooms.
+
+**Disk.** `target/` was 18 GB at the start of the check with 8.9 GB free; a full `cargo test --workspace` rebuilt
+every workspace test binary. Stale test binaries in `target/debug/deps` were deleted to keep room.

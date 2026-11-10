@@ -14,8 +14,25 @@
 //! layer gets in [`Init::tiles`] and [`PrepareCx::tiles`]; the app hands over its fetcher and the
 //! event loop's wake with [`MapRenderer::set_tiles`]. Each frame the layers share one
 //! [`UploadBudget`] ([`MapRenderer::set_upload_budget`]).
+//!
+//! Errors and the rebuild path (item B9; doc 01 §9.5, plan 2.2). Once the app has called
+//! [`MapRenderer::catch_errors`], the first thing that goes wrong on the device (a wgpu
+//! validation, internal or out-of-memory error, or the device lost) is kept as a [`MapError`]
+//! for the map error card (`app::ui::map_error`), as `reportMapError` keeps the first error
+//! today (G:1252-1259), and the map stops drawing: no layer is prepared or drawn and the last
+//! picture stays on the surface under the card, until Retry ([`MapRenderer::retry`]). A lost
+//! device (today's `webglcontextlost`, G:3489-3492) cannot draw again: the app opens a new device
+//! and calls [`MapRenderer::rebuild`], which makes everything the renderer holds on the GPU again
+//! from what it keeps on the CPU (the scene, the camera, the clock, the tile runtime with its
+//! fetcher, whose disk cache serves the tiles again, and the worker pool); today's Retry reloads
+//! the page instead. Errors after the first are logged at debug level, as today's are dropped.
+//!
+//! Deviations: today's context-loss message names WebGL ("The graphics context was lost (WebGL
+//! context lost)"); here it names the GPU device ([`DEVICE_LOST_MESSAGE`]). Without
+//! [`MapRenderer::catch_errors`] (shots, tests) a wgpu error panics, as wgpu's default handler
+//! does, so no test passes over a broken frame.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rustradar_core::geo::Basemap;
 use rustradar_core::num::clamp01;
@@ -149,6 +166,175 @@ pub fn map_scale(basemap: Basemap, scale_factor: f64) -> f64 {
     }
 }
 
+/// The card's message when the device is lost (today's "The graphics context was lost (WebGL
+/// context lost)", G:3491, with the GPU device in WebGL's place).
+pub const DEVICE_LOST_MESSAGE: &str = "The graphics context was lost (GPU device lost)";
+
+/// The first thing that stopped the map drawing (`mapError`, G:1252-1259), for the map error card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapError {
+    /// What went wrong, on one line: the card's message (today's `err.message`).
+    pub message: String,
+    /// Everything that was said about it (today's `err.stack`), for "Copy details".
+    pub details: String,
+    /// The device is gone: nothing more can be drawn with it, and Retry means a new device and
+    /// [`MapRenderer::rebuild`] (today's `contextLost`, after which Retry reloads the page).
+    pub lost: bool,
+}
+
+impl MapError {
+    /// An error of the app's own (a surface that cannot be drawn on, say).
+    pub fn new(message: impl Into<String>, details: impl Into<String>) -> Self {
+        MapError { message: one_line(&message.into()), details: details.into(), lost: false }
+    }
+
+    /// The device was lost (`webglcontextlost`, G:3489-3492), for `reason` and the driver's
+    /// `message`.
+    pub fn device_lost(reason: wgpu::DeviceLostReason, message: &str) -> Self {
+        let message = message.trim();
+        let details = if message.is_empty() { format!("Device lost ({reason:?})") } else { format!("Device lost ({reason:?}): {message}") };
+        MapError { message: DEVICE_LOST_MESSAGE.into(), details, lost: true }
+    }
+
+    /// A wgpu error: the message is its chain of causes on one line ("In Device::create_buffer:
+    /// Buffer usages … are invalid"), the details wgpu's whole report.
+    pub fn from_wgpu(error: &wgpu::Error) -> Self {
+        let mut causes = Vec::new();
+        let mut source = std::error::Error::source(error);
+        while let Some(cause) = source {
+            let line = one_line(&cause.to_string());
+            if !line.is_empty() {
+                causes.push(line);
+            }
+            source = cause.source();
+        }
+        let text = error.to_string();
+        let first_line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+        let chain = causes.join(": ");
+        let (message, details) = match error {
+            wgpu::Error::OutOfMemory { .. } => {
+                let tree: String = causes.iter().enumerate().map(|(i, c)| format!("{}{c}\n", "  ".repeat(i + 1))).collect();
+                (if chain.is_empty() { first_line } else { format!("Out of memory: {chain}") }, format!("{text}\n\nCaused by:\n{tree}"))
+            }
+            wgpu::Error::Validation { .. } | wgpu::Error::Internal { .. } => (if chain.is_empty() { first_line } else { chain }, text),
+        };
+        MapError { message, details, lost: false }
+    }
+}
+
+/// `text` with every run of white space (new lines too) made one space, trimmed.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What Retry takes (`retryMap`, G:1272-1277).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retry {
+    /// The error is cleared: the next frame draws again (`mapError = null; render()`).
+    Redraw,
+    /// The device is lost: open a new one and [`MapRenderer::rebuild`] on it (today the page
+    /// reloads). The error stays until then.
+    Rebuild,
+}
+
+/// The renderer's catch of the device's errors (shared with the callbacks wgpu holds).
+#[derive(Clone, Default)]
+struct ErrorWatch(Arc<Mutex<Watched>>);
+
+#[derive(Default)]
+struct Watched {
+    /// The first error since the last retry or rebuild.
+    first: Option<MapError>,
+    /// Which installation counts: callbacks of an older device (the one before a rebuild) are
+    /// ignored.
+    device: u64,
+    /// Errors are caught (`catch_errors`), so a rebuild catches them on its new device too.
+    catching: bool,
+    /// Called when an error is caught, so the loop draws the card.
+    wake: Option<Wake>,
+}
+
+impl ErrorWatch {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Watched> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Catches `device`'s errors from now on; an earlier device's no longer count.
+    fn install(&self, device: &wgpu::Device) {
+        let id = {
+            let mut watched = self.lock();
+            watched.device += 1;
+            watched.catching = true;
+            watched.device
+        };
+        let watch = self.clone();
+        device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| watch.report_from(id, MapError::from_wgpu(&error))));
+        let watch = self.clone();
+        device.set_device_lost_callback(move |reason, message| watch.report_from(id, MapError::device_lost(reason, &message)));
+    }
+
+    fn report_from(&self, device: u64, error: MapError) {
+        if self.lock().device != device {
+            log::debug!("map error on a device since replaced: {}", error.message);
+            return;
+        }
+        self.report(error);
+    }
+
+    /// Keeps `error` unless one is kept already (`if (mapError) return`); wakes the loop.
+    fn report(&self, error: MapError) {
+        let wake = {
+            let mut watched = self.lock();
+            if watched.first.is_some() {
+                log::debug!("map error after the first: {}", error.message);
+                return;
+            }
+            log::error!("map error: {}\n{}", error.message, error.details);
+            watched.first = Some(error);
+            watched.wake.clone()
+        };
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
+    fn error(&self) -> Option<MapError> {
+        self.lock().first.clone()
+    }
+
+    fn stopped(&self) -> bool {
+        self.lock().first.is_some()
+    }
+}
+
+/// What the renderer holds on the GPU: made by [`MapRenderer::new`], made again by
+/// [`MapRenderer::rebuild`].
+struct GpuParts {
+    bindings: Bindings,
+    frames: FrameArena,
+    target: MapTarget,
+    composite: Composite,
+    layers: Vec<Box<dyn Layer>>,
+}
+
+impl GpuParts {
+    fn new(gpu: &Gpu, surface_format: wgpu::TextureFormat, tiles: &TileRuntime) -> Self {
+        let device = &gpu.device;
+        let samples = gpu.msaa_samples(MAP_FORMAT);
+        let bindings = Bindings::new(device);
+        let frames = FrameArena::new(device, &bindings.frame_layout);
+        let layers = layers::ordered(&Init { gpu, bindings: &bindings, color_format: MAP_FORMAT, samples, tiles });
+        GpuParts {
+            frames,
+            // sized by the first `prepare`
+            target: MapTarget::new(device, [1, 1], samples),
+            composite: Composite::new(device, surface_format),
+            layers,
+            bindings,
+        }
+    }
+}
+
 /// The map: its layers, its target and its passes.
 pub struct MapRenderer {
     bindings: Bindings,
@@ -170,25 +356,22 @@ pub struct MapRenderer {
     tiles: TileRuntime,
     /// What a frame may upload, over all layers.
     upload_budget: UploadBudget,
+    /// What stopped the map drawing ([`Self::catch_errors`]).
+    errors: ErrorWatch,
 }
 
 impl MapRenderer {
     /// A renderer that composites onto surfaces of `surface_format` (prefer a non-sRGB one: the
     /// map's colours are gamma-space values).
     pub fn new(gpu: &Gpu, surface_format: wgpu::TextureFormat) -> Self {
-        let device = &gpu.device;
-        let samples = gpu.msaa_samples(MAP_FORMAT);
-        let bindings = Bindings::new(device);
-        let frames = FrameArena::new(device, &bindings.frame_layout);
         let scene = SceneInput::default();
         let tiles = TileRuntime::new(io::offline(), Arc::new(Pool::new(jobs::default_threads())));
-        let layers = layers::ordered(&Init { gpu, bindings: &bindings, color_format: MAP_FORMAT, samples, tiles: &tiles });
+        let GpuParts { bindings, frames, target, composite, layers } = GpuParts::new(gpu, surface_format, &tiles);
         let scene_view = ViewFrame::new(&scene.view, scene.size, scene.map_scale, 0.0);
         MapRenderer {
             frames,
-            // sized by the first `prepare`
-            target: MapTarget::new(device, [1, 1], samples),
-            composite: Composite::new(device, surface_format),
+            target,
+            composite,
             layers,
             camera: scene.view,
             camera_size: scene.size,
@@ -199,7 +382,71 @@ impl MapRenderer {
             epoch_ms: None,
             tiles,
             upload_budget: UploadBudget::per_frame(),
+            errors: ErrorWatch::default(),
         }
+    }
+
+    /// From now on the first error on `gpu`'s device (validation, internal, out of memory, the
+    /// device lost) is kept for the map error card instead of panicking, and the map stops
+    /// drawing until [`Self::retry`] or [`Self::rebuild`]; `wake` (the event loop's) is called
+    /// when it is caught. The window calls it once; shots and tests do not, so an error fails them.
+    pub fn catch_errors(&mut self, gpu: &Gpu, wake: Option<Wake>) {
+        self.errors.lock().wake = wake;
+        self.errors.install(&gpu.device);
+    }
+
+    /// Stops the map with an error found outside the device's own reports (the window's surface,
+    /// say), unless one is kept already.
+    pub fn report_error(&self, error: MapError) {
+        self.errors.report(error);
+    }
+
+    /// The first error since the last retry or rebuild: while there is one the map is stopped
+    /// and the card shows it.
+    pub fn error(&self) -> Option<MapError> {
+        self.errors.error()
+    }
+
+    /// The card's Retry (`retryMap`, G:1272-1277): an error is cleared and the next frame draws
+    /// again ([`Retry::Redraw`]), unless the device is lost: then nothing changes until the app has
+    /// a new device for [`Self::rebuild`] ([`Retry::Rebuild`]).
+    pub fn retry(&mut self) -> Retry {
+        let mut watched = self.errors.lock();
+        if watched.first.as_ref().is_some_and(|e| e.lost) {
+            return Retry::Rebuild;
+        }
+        watched.first = None;
+        Retry::Redraw
+    }
+
+    /// Makes everything this renderer holds on the GPU again on `gpu` (plan 2.2: after the device
+    /// was lost, a new one; or the same), compositing onto surfaces of `surface_format`.
+    ///
+    /// Kept, from the CPU: the scene and the camera, the clock's epoch, the upload budget, and the
+    /// tile runtime (the app's fetcher, whose disk cache serves the tiles again without the
+    /// network, the worker pool and its wake). Made again: the bindings, the frame arena, the map
+    /// target, the composite pass and every layer of [`layers::ordered`], which load their tiles
+    /// and embedded textures as on a first start. Layers added with [`Self::add_layer`] are
+    /// dropped (they belong to the old device). The error is cleared, and if errors were caught
+    /// they are caught on `gpu` from now on (the old device's no longer count).
+    pub fn rebuild(&mut self, gpu: &Gpu, surface_format: wgpu::TextureFormat) {
+        // the old device's resources go before the new ones are made
+        self.layers.clear();
+        let GpuParts { bindings, frames, target, composite, layers } = GpuParts::new(gpu, surface_format, &self.tiles);
+        self.bindings = bindings;
+        self.frames = frames;
+        self.target = target;
+        self.composite = composite;
+        self.layers = layers;
+        let catching = {
+            let mut watched = self.errors.lock();
+            watched.first = None;
+            watched.catching
+        };
+        if catching {
+            self.errors.install(&gpu.device);
+        }
+        log::info!("map rebuilt on {}", gpu.describe());
     }
 
     /// Where tiles come from from now on: the app's `fetcher` (on `backend::tiles`, or a folder of
@@ -280,19 +527,26 @@ impl MapRenderer {
         self.layers.iter().map(|l| l.name()).collect()
     }
 
-    /// Whether a layer still waits for work that will change the picture.
+    /// Whether a layer still waits for work that will change the picture (never while the map is
+    /// stopped by an error).
     pub fn pending(&self) -> bool {
-        self.layers.iter().any(|l| l.pending())
+        !self.errors.stopped() && self.layers.iter().any(|l| l.pending())
     }
 
     /// The layers that still wait, in draw order (for a log).
     pub fn pending_layers(&self) -> Vec<&'static str> {
+        if self.errors.stopped() {
+            return Vec::new();
+        }
         self.layers.iter().filter(|l| l.pending()).map(|l| l.name()).collect()
     }
 
     /// Main thread, before encoding: the frame's view and globals, the layers' uploads and
-    /// frames. `local_now_ms` is the local clock.
+    /// frames. `local_now_ms` is the local clock. Nothing while the map is stopped by an error.
     pub fn prepare(&mut self, gpu: &Gpu, local_now_ms: f64) {
+        if self.errors.stopped() {
+            return;
+        }
         let epoch = *self.epoch_ms.get_or_insert(local_now_ms);
         let time_s = ((local_now_ms - epoch) / 1000.0) as f32;
         let scale = self.scene.map_scale;
@@ -319,8 +573,18 @@ impl MapRenderer {
         self.bindings.write_globals(&gpu.queue, &self.view.globals);
     }
 
-    /// Records the map pass and the composite pass onto `surface` (`surface_size` pixels).
+    /// Records the map pass and the composite pass onto `surface` (`surface_size` pixels). While
+    /// the map is stopped by an error only the composite of the last picture is recorded (the card
+    /// goes over it), and nothing once the device is lost.
     pub fn draw(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, surface: &wgpu::TextureView, surface_size: [u32; 2]) {
+        match self.errors.error() {
+            Some(error) if error.lost => return,
+            Some(_) => {
+                self.composite.draw(&gpu.device, &gpu.queue, encoder, &self.target, surface, surface_size);
+                return;
+            }
+            None => {}
+        }
         {
             let mut pass = self.target.begin_pass(encoder, CLEAR);
             pass.set_stencil_reference(SHADOW_STENCIL_REFERENCE);
@@ -352,6 +616,7 @@ impl MapRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu::testing::gpu;
     use crate::pipelines::mesh::key_light_unit;
 
     /// 2026-06-21 10:00 UTC: noon in Stockholm at midsummer (the reference pictures' clock).
@@ -398,6 +663,204 @@ mod tests {
         assert_eq!(scene.lights, full);
         scene.aim_lights(false);
         assert!(close(scene.lights.key_direction, key_light_unit()));
+    }
+
+    /// A device of the test's own, which it may break or destroy, opened while the shared one is
+    /// held so that no other test uses SwiftShader meanwhile.
+    fn own_device(_shared: &Gpu) -> Gpu {
+        Gpu::headless().expect("a second device on the adapter the shared one is on")
+    }
+
+    /// A validation error on `gpu`'s device (a buffer that would be mapped for reading and used as
+    /// vertices), reported to its uncaptured-error handler.
+    fn provoke_validation_error(gpu: &Gpu, label: &str) {
+        let _ = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        });
+    }
+
+    fn shots_dir() -> std::path::PathBuf {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+        std::fs::create_dir_all(&dir).expect("the shot folder");
+        dir
+    }
+
+    fn differing_pixels(a: &crate::headless::Image, b: &crate::headless::Image) -> usize {
+        assert_eq!((a.width, a.height), (b.width, b.height));
+        a.rgba.chunks_exact(4).zip(b.rgba.chunks_exact(4)).filter(|(a, b)| a != b).count()
+    }
+
+    /// B9's acceptance (plan 2.2): the device is lost under a map drawn from tiles (the dark map at
+    /// V3 with its labels and the night, from the fixtures), the renderer is rebuilt on a new
+    /// device from what it keeps on the CPU (the scene, the camera, the tile runtime and its
+    /// fetcher), and draws the same picture as before, pixel for pixel.
+    #[test]
+    fn a_renderer_rebuilt_after_its_device_is_lost_draws_the_same_shot() {
+        use crate::headless::{FORMAT, render_with};
+        use crate::io::DirTiles;
+        use crate::layers::{earth, labels, night, vector_map};
+
+        let Some(shared) = gpu() else { return };
+        let v3 = ViewState { longitude: 18.07, latitude: 59.33, zoom: 9.0, bearing: 0.0, pitch: 0.0, position: None };
+        let mut scene = SceneInput::new(v3, [1100.0, 720.0], 1.0, Basemap::Dark);
+        scene.local_now_ms = MIDWINTER_NIGHT;
+        scene.feed_now_ms = MIDWINTER_NIGHT;
+        scene.earth = earth::Input::SHOWN;
+        scene.vector_map = vector_map::Input::SHOWN;
+        scene.labels = labels::Input::shown();
+        scene.night = night::Input::SHOWN;
+        scene.aim_lights(false);
+
+        let first = own_device(&shared);
+        let tiles = Arc::new(DirTiles::fixtures());
+        let mut renderer = MapRenderer::new(&first, FORMAT);
+        renderer.set_tiles(tiles.clone(), None);
+        renderer.catch_errors(&first, None);
+        let before = render_with(&first, &mut renderer, &scene, 1.0).expect("rendered");
+        assert!(!renderer.pending(), "still loading: {:?}", renderer.pending_layers());
+        assert!(tiles.misses().is_empty(), "the fixtures lack {:?}", tiles.misses());
+        assert_eq!(renderer.error(), None);
+        before.save_png(&shots_dir().join("b9-before-the-loss.png")).expect("png");
+        // tiles, labels and the night are on it: the sea, the land, the night over both, text
+        let colours: std::collections::HashSet<[u8; 4]> = before.rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect();
+        assert!(colours.len() > 50, "a picture of the map, not a flat one: {} colours", colours.len());
+
+        // the device goes (a driver reset, the GPU removed: here destroyed), and wgpu says so at
+        // its next poll
+        first.device.destroy();
+        let _ = first.device.poll(wgpu::PollType::wait_indefinitely());
+        let lost = renderer.error().expect("the loss is caught");
+        assert!(lost.lost);
+        assert_eq!(lost.message, DEVICE_LOST_MESSAGE);
+        assert_eq!(lost.details, "Device lost (Destroyed)");
+        assert!(!renderer.pending(), "a stopped map waits for nothing");
+        assert_eq!(renderer.retry(), Retry::Rebuild, "Retry cannot draw on a lost device");
+        assert_eq!(renderer.error(), Some(lost));
+
+        // a new device, and everything made again on it
+        let second = own_device(&shared);
+        renderer.rebuild(&second, FORMAT);
+        assert_eq!(renderer.error(), None);
+        assert_eq!(renderer.scene().view, v3, "the scene is kept");
+        assert!(Arc::ptr_eq(&renderer.tiles().fetcher(), &(tiles.clone() as Arc<dyn TileFetcher>)), "the fetcher is kept");
+        let after = render_with(&second, &mut renderer, &scene, 1.0).expect("rendered after the rebuild");
+        after.save_png(&shots_dir().join("b9-after-the-rebuild.png")).expect("png");
+        assert!(!renderer.pending());
+        assert_eq!(renderer.error(), None, "nothing went wrong on the new device");
+        assert_eq!(differing_pixels(&before, &after), 0, "the rebuilt map draws the same shot");
+    }
+
+    /// `reportMapError` and `retryMap` (G:1252-1277): the first error is kept, a later one does not
+    /// replace it, the map stops (the last picture stays and nothing new is drawn) until Retry;
+    /// errors are caught on the new device after a rebuild, and the old device's no longer count.
+    #[test]
+    fn the_first_error_stops_the_map_until_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::headless::{FORMAT, Offscreen, render_with};
+        use crate::layers::earth;
+
+        let Some(shared) = gpu() else { return };
+        let gpu = own_device(&shared);
+        let mut renderer = MapRenderer::new(&gpu, FORMAT);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counted = wakes.clone();
+        renderer.catch_errors(
+            &gpu,
+            Some(Arc::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            })),
+        );
+        let scene = |basemap: Basemap| {
+            let mut scene = SceneInput::new(ViewState::INITIAL, [320.0, 200.0], 1.0, basemap);
+            scene.earth = earth::Input::SHOWN;
+            scene
+        };
+        let v1 = scene(Basemap::Dark);
+        // the satellite earth's blue where the dark map's land is grey
+        let v1_satellite = scene(Basemap::Satellite);
+        let first = render_with(&gpu, &mut renderer, &v1, 1.0).expect("rendered");
+        assert_eq!(renderer.error(), None);
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+
+        provoke_validation_error(&gpu, "first");
+        let error = renderer.error().expect("caught");
+        assert!(!error.lost);
+        assert!(error.message.starts_with("In Device::create_buffer, label = 'first': "), "{}", error.message);
+        assert!(!error.message.contains('\n'));
+        assert!(error.details.starts_with("Validation Error"), "{}", error.details);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1, "the loop is woken to show the card");
+        provoke_validation_error(&gpu, "second");
+        assert_eq!(renderer.error(), Some(error.clone()), "the first error is kept");
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+
+        // stopped: another scene draws nothing new; the last picture is composited under the card
+        assert!(!renderer.pending());
+        let stopped = render_with(&gpu, &mut renderer, &v1_satellite, 1.0).expect("rendered");
+        assert_eq!(differing_pixels(&first, &stopped), 0, "the map is stopped at its last picture");
+
+        // Retry: drawing again
+        assert_eq!(renderer.retry(), Retry::Redraw);
+        assert_eq!(renderer.error(), None);
+        let satellite = render_with(&gpu, &mut renderer, &v1_satellite, 1.0).expect("rendered");
+        assert!(differing_pixels(&first, &satellite) > 10_000, "the satellite earth drawn after Retry");
+
+        // the app's own report stops it too
+        renderer.report_error(MapError::new("The window's surface\ncannot be drawn on", "Surface lost"));
+        assert_eq!(renderer.error().map(|e| e.message), Some("The window's surface cannot be drawn on".to_string()));
+        assert_eq!(renderer.retry(), Retry::Redraw);
+
+        // rebuilt on another device: its errors are caught, the old device's are not
+        let other = own_device(&shared);
+        renderer.rebuild(&other, FORMAT);
+        provoke_validation_error(&gpu, "old device");
+        assert_eq!(renderer.error(), None, "the old device's errors no longer count");
+        gpu.device.destroy();
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        assert_eq!(renderer.error(), None, "nor its loss");
+        let rebuilt = render_with(&other, &mut renderer, &v1, 1.0).expect("rendered");
+        assert_eq!(differing_pixels(&first, &rebuilt), 0);
+        provoke_validation_error(&other, "new device");
+        assert!(renderer.error().expect("caught on the new device").message.contains("'new device'"));
+        let off = Offscreen::new(&other, [320, 200]);
+        renderer.render(&other, off.view(), off.size(), 0.0);
+        assert_eq!(differing_pixels(&first, &off.read(&other).expect("read")), 0, "stopped again");
+    }
+
+    /// The card's text for each kind of error (doc 01 §9.5): one line for the message, wgpu's whole
+    /// report for the details.
+    #[test]
+    fn map_errors_read_as_the_card_shows_them() {
+        #[derive(Debug)]
+        struct Cause(&'static str, Option<Box<Cause>>);
+        impl std::fmt::Display for Cause {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for Cause {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|c| c as &(dyn std::error::Error + 'static))
+            }
+        }
+        let chain = || Box::new(Cause("In Device::create_render_pipeline, label = 'path'", Some(Box::new(Cause("Error matching\n  the vertex shader", None)))));
+        let description = "Validation Error\n\nCaused by:\n  In Device::create_render_pipeline, label = 'path'\n    Error matching\n  the vertex shader\n";
+        let validation = MapError::from_wgpu(&wgpu::Error::Validation { source: chain(), description: description.into() });
+        assert_eq!(validation.message, "In Device::create_render_pipeline, label = 'path': Error matching the vertex shader");
+        assert_eq!(validation.details, description);
+        assert!(!validation.lost);
+        let memory = MapError::from_wgpu(&wgpu::Error::OutOfMemory { source: Box::new(Cause("In Device::create_buffer", Some(Box::new(Cause("Not enough memory left.", None))))) });
+        assert_eq!(memory.message, "Out of memory: In Device::create_buffer: Not enough memory left.");
+        assert_eq!(memory.details, "Out of Memory\n\nCaused by:\n  In Device::create_buffer\n    Not enough memory left.\n");
+        let internal = MapError::from_wgpu(&wgpu::Error::Internal { source: Box::new(Cause("", None)), description: "\n  Internal error\nmore".into() });
+        assert_eq!(internal.message, "Internal error", "no cause: the report's first line");
+        let lost = MapError::device_lost(wgpu::DeviceLostReason::Unknown, " VK_ERROR_DEVICE_LOST \n");
+        assert_eq!(lost, MapError { message: DEVICE_LOST_MESSAGE.into(), details: "Device lost (Unknown): VK_ERROR_DEVICE_LOST".into(), lost: true });
+        assert_eq!(DEVICE_LOST_MESSAGE, "The graphics context was lost (GPU device lost)");
+        assert_eq!(MapError::new(" a\n b ", "d"), MapError { message: "a b".into(), details: "d".into(), lost: false });
     }
 
     #[test]

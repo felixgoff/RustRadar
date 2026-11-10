@@ -11,7 +11,7 @@ use super::consts::*;
 use super::fit::hermite;
 use super::track::Track;
 use super::{clamp, distance_km, wrap_lon, wrap180};
-use crate::trains::js_min;
+use crate::trains::{js_max, js_min};
 
 /// Scratch for merging: a report's own samples, oldest first, and the merged result (reports are
 /// merged for every aircraft in every snapshot).
@@ -88,7 +88,7 @@ pub fn off_path(tr: &Track, sc: &Scratch) -> bool {
             (tr.fx[last] + tr.mx[last] * dt, tr.fy[last] + tr.my[last] * dt)
         };
         let lat = tr.ref_lat + y / M_PER_DEG;
-        let lon = tr.ref_lon + x / (M_PER_DEG * (((tr.ref_lat + lat) / 2.0) * DEG).cos().max(1e-3));
+        let lon = tr.ref_lon + x / (M_PER_DEG * js_max((((tr.ref_lat + lat) / 2.0) * DEG).cos(), 1e-3));
         if distance_km(lat, lon, sc.new_lat[j], sc.new_lon[j]) * 1000.0 > JUMP_M {
             return true;
         }
@@ -189,7 +189,7 @@ pub fn merge_report(
 
 /// Distance (km) a sample may plausibly be from another `gap_s` seconds away, at the track's speed.
 pub fn plausible_km(tr: &Track, gap_s: f64) -> f64 {
-    (tr.speed_kt.max(250.0) * 2.0 * KNOTS_TO_MS * gap_s.abs()) / 1000.0 + 0.5
+    (js_max(tr.speed_kt, 250.0) * 2.0 * KNOTS_TO_MS * gap_s.abs()) / 1000.0 + 0.5
 }
 
 /// Starts the per-sample sources when measured samples first join a track: all so far are
@@ -282,7 +282,7 @@ pub fn finish_samples(tr: &mut Track) {
     // (the TypeScript reads `undefined`, a NaN in arithmetic, without samples)
     tr.ref_lat = tr.lats.last().copied().unwrap_or(f64::NAN);
     tr.ref_lon = tr.lons.last().copied().unwrap_or(f64::NAN);
-    let cos_ref = (tr.ref_lat * DEG).cos().max(1e-3);
+    let cos_ref = js_max((tr.ref_lat * DEG).cos(), 1e-3);
     tr.xs.clear();
     tr.ys.clear();
     for i in 0..n {
@@ -385,4 +385,217 @@ pub fn buffer_acceleration(tr: &Track, from: f64) -> f64 {
     }
     let span = (last_mid - first_mid) / 1000.0;
     if span >= MIN_ACCEL_DT_S { (last_speed - first_speed) / span } else { f64::NAN }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assert_close;
+    use crate::motion::aircraft::Phase;
+    use crate::motion::aircraft::fit::{self, fit_track};
+
+    const T0: f64 = 1_760_000_000_000.0;
+
+    fn close_all(actual: &[f64], expected: &[f64], digits: i32) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?} against {expected:?}");
+        for (a, e) in actual.iter().zip(expected) {
+            assert_close!(*a, *e, digits);
+        }
+    }
+
+    /// Due north at 200 kt from 45N 10E, a report at T0 with its buffer 2-8 s back, merged and
+    /// fitted (bun: the same through `mergeReport` and `fitTrack`).
+    fn straight(sc: &mut Scratch, fs: &mut fit::Scratch) -> Track {
+        let mut tr = Track::new(1);
+        tr.phase = Phase::Cruise;
+        tr.speed_kt = 200.0;
+        tr.report_ms = T0;
+        let own = merge_report(&mut tr, sc, &[[185, 0, 2_000], [370, 0, 4_000], [555, 0, 6_000], [740, 0, 8_000]], T0, 45.0, 10.0, false);
+        assert_eq!(own, Some(true));
+        fit_track(&mut tr, fs, true);
+        tr
+    }
+
+    #[test]
+    fn report_points_are_the_buffer_in_time_order_then_the_report() {
+        // bun: reportPoints({ positions }, 1e6, 50, 179.9999)
+        let mut sc = Scratch::default();
+        let positions = [
+            [0, 0, 100],
+            [10, 10, 2_000],
+            [11, -11, 2_100],
+            [20, -20, 4_000],
+            [5, 5, 31_000],
+            [0, 0, -5],
+            [30, -30, 1_700],
+            [9_000_001, 0, 3_000],
+        ];
+        report_points(&mut sc, &positions, 1e6, 50.0, 179.9999);
+        // outside 200 ms..30 s: left out; within 200 ms of a point already in: the later one in the
+        // buffer is left out; the buffer's longitudes wrap, the report's is taken as given
+        assert_eq!(sc.new_t, [996_000.0, 997_000.0, 998_000.0, 998_300.0, 1e6]);
+        close_all(&sc.new_lat, &[49.9998, -40.00001, 49.9999, 49.9997, 50.0], 12);
+        close_all(&sc.new_lon, &[-179.99990000000003, 179.99990000000003, 179.99980000000005, -179.9998, 179.9999], 12);
+        assert_eq!(sc.report_from_ms, 996_000.0);
+        // no buffer: the report alone
+        report_points(&mut sc, &[], 5.0, 1.0, 2.0);
+        assert_eq!((sc.new_t.clone(), sc.new_lat.clone(), sc.new_lon.clone()), (vec![5.0], vec![1.0], vec![2.0]));
+        assert_eq!(sc.report_from_ms, 5.0);
+    }
+
+    #[test]
+    fn a_report_and_its_buffer_become_samples_in_a_frame_around_the_newest() {
+        let mut sc = Scratch::default();
+        let mut fs = fit::Scratch::default();
+        let tr = straight(&mut sc, &mut fs);
+        assert_eq!(sc.report_from_ms, T0 - 8_000.0);
+        assert_eq!(tr.n, 5);
+        assert_eq!(tr.ts, [T0 - 8_000.0, T0 - 6_000.0, T0 - 4_000.0, T0 - 2_000.0, T0]);
+        assert_eq!((tr.ref_lat, tr.ref_lon), (45.0, 10.0));
+        assert!(!tr.mixed && tr.src.is_empty());
+        close_all(&tr.xs, &[0.0; 5], 12);
+        close_all(&tr.ys, &[-822.8424571693971, -617.1318428772454, -411.4212285850936, -205.71061429215177, 0.0], 9);
+        // bun: the fit of the same
+        close_all(&tr.fx, &[0.0; 5], 12);
+        close_all(&tr.fy, &[-822.8482069221811, -617.140924986869, -411.4307376764659, -205.71168378055066, 0.025410442198761984], 9);
+        close_all(&tr.mx, &[0.0; 5], 12);
+        close_all(&tr.my, &[102.8534493092302, 102.85402428450823, 102.85665742130911, 102.86320783973284, 102.87473339775653], 9);
+        assert_eq!(tr.r_ts, tr.ts);
+        close_all(&tr.r_om, &[0.0; 5], 15);
+        close_all(&tr.r_ac, &[0.0008020280197271745, 0.0016264217504395144, 0.002660511065791127, 0.0034515188747169154, 0.004518994111855079], 12);
+    }
+
+    #[test]
+    fn a_report_off_the_smoothed_path_starts_the_samples_over_unless_it_is_older() {
+        let mut sc = Scratch::default();
+        let mut fs = fit::Scratch::default();
+        let mut tr = straight(&mut sc, &mut fs);
+        // 2 s later and 300 m east of the line: well inside the plausible distance, but off the path
+        let lat = 45.0 + (2.0 * 102.888) / M_PER_DEG;
+        let lon = 10.0 + 300.0 / (M_PER_DEG * (45.0 * DEG).cos());
+        report_points(&mut sc, &[], T0 + 2_000.0, lat, lon);
+        assert!(off_path(&tr, &sc));
+        // older than the measured state: dropped, the samples kept
+        assert_eq!(merge_report(&mut tr, &mut sc, &[], T0 + 2_000.0, lat, lon, true), None);
+        assert_eq!(tr.n, 5);
+        // newer: the samples (and the fit's rates) start over from it
+        assert_eq!(merge_report(&mut tr, &mut sc, &[], T0 + 2_000.0, lat, lon, false), Some(true));
+        assert_eq!(tr.ts, [T0 + 2_000.0]);
+        close_all(&tr.lats, &[45.00185058802779], 12);
+        close_all(&tr.lons, &[10.003815498436076], 12);
+        assert!(tr.r_ts.is_empty() && tr.r_om.is_empty() && tr.r_ac.is_empty());
+        // on the line it would have been fine
+        let mut tr = straight(&mut sc, &mut fs);
+        report_points(&mut sc, &[], T0 + 2_000.0, lat, 10.0);
+        assert!(!off_path(&tr, &sc));
+        // a single sample, or one not yet fitted, is never off a path
+        tr.fx.clear();
+        assert!(!off_path(&tr, &sc));
+    }
+
+    #[test]
+    fn a_report_implausibly_far_from_the_nearest_sample_starts_them_over() {
+        let mut sc = Scratch::default();
+        let mut fs = fit::Scratch::default();
+        let mut tr = straight(&mut sc, &mut fs);
+        // 3 s at 250 kt (the floor) twice over, plus half a kilometre
+        assert_close!(plausible_km(&tr, -3.0), 1.271666, 12);
+        tr.speed_kt = 60.0;
+        assert_close!(plausible_km(&tr, -3.0), 1.271666, 12);
+        tr.speed_kt = f64::NAN;
+        assert!(plausible_km(&tr, 1.0).is_nan());
+        tr.speed_kt = 200.0;
+        // 10 km north 4 s later: far, wherever the path goes
+        assert_eq!(merge_report(&mut tr, &mut sc, &[], T0 + 4_000.0, 45.09, 10.0, false), Some(true));
+        assert_eq!(tr.ts, [T0 + 4_000.0]);
+        assert_eq!(nearest_sample(&tr, 0.0), Some(0));
+        clear_samples(&mut tr);
+        finish_samples(&mut tr);
+        assert_eq!(nearest_sample(&tr, 0.0), None);
+        assert_eq!(tr.n, 0);
+        assert!(tr.ref_lat.is_nan() && tr.xs.is_empty());
+    }
+
+    #[test]
+    fn measured_samples_join_by_time_and_source_rank() {
+        let mut sc = Scratch::default();
+        let mut fs = fit::Scratch::default();
+        let mut tr = straight(&mut sc, &mut fs);
+        start_mixing(&mut tr);
+        assert_eq!(tr.src, [SRC_FR24; 5]);
+        // ADS-B 400 ms after the report replaces it; MLAT 300 ms after a Flightradar24 sample is
+        // outranked; MLAT between two samples goes in
+        assert!(insert_sample(&mut tr, T0 + 400.0, 45.0004, 10.00001, SRC_ADSB));
+        assert!(!insert_sample(&mut tr, T0 - 1_700.0, 44.998, 10.0, SRC_MLAT));
+        assert!(insert_sample(&mut tr, T0 - 5_000.0, 44.9955, 10.00002, SRC_MLAT));
+        finish_samples(&mut tr);
+        // bun: the same through insertSample and finishSamples
+        assert_eq!(tr.ts, [T0 - 8_000.0, T0 - 6_000.0, T0 - 5_000.0, T0 - 4_000.0, T0 - 2_000.0, T0 + 400.0]);
+        close_all(&tr.lats, &[44.9926, 44.99445, 44.9955, 44.9963, 44.99815, 45.0004], 12);
+        close_all(&tr.lons, &[10.0, 10.0, 10.00002, 10.0, 10.0, 10.00001], 12);
+        assert_eq!(tr.src, [1, 1, 0, 1, 1, 2]);
+        assert!(tr.mixed);
+        close_all(&tr.xs, &[-0.7862613754565532, -0.7862613754565532, 0.7862613754565532, -0.7862613754565532, -0.7862613754565532, 0.0], 9);
+        close_all(&tr.ys, &[-867.320427827117, -661.6098135349653, -544.8551405582531, -455.89919924281344, -250.1885849498716, 0.0], 9);
+        // the weighted fit (MLAT counts for little), with the measured sample newest
+        fit_track(&mut tr, &mut fs, false);
+        close_all(&tr.fx, &[-0.794828189324932, -0.8220527256605591, -0.8034524833309878, -0.7586129227248226, -0.5684485090905784, -0.13751460067385204], 9);
+        close_all(&tr.fy, &[-867.316593919666, -661.6658437239576, -558.7216739992173, -455.681630676544, -249.20347748377787, -0.5958184131833533], 9);
+        close_all(&tr.mx, &[-0.03243596700264692, 0.00668781719014926, 0.030891690737854513, 0.059697137282811064, 0.13392439830561748, 0.21946999128210537], 9);
+        close_all(&tr.my, &[102.75556787557511, 102.90044768135954, 102.98832553708202, 103.09681696893638, 103.39765710944003, 103.75148576921985], 9);
+        close_all(&tr.r_om, &[0.00016313348278043166, 0.00020861896952645235, 0.0002224691798357844, 0.00022322948449482515, 0.0002519856469062246, 0.0002741879492979981], 12);
+        // a Flightradar24 report whose buffer point coincides with the ADS-B sample: outranked
+        let lat = 45.0 + (2.0 * 102.888) / M_PER_DEG;
+        tr.report_ms = T0 + 2_000.0;
+        assert_eq!(merge_report(&mut tr, &mut sc, &[[0, 0, 1_700], [180, 0, 2_000]], T0 + 2_000.0, lat, 10.0, false), Some(true));
+        assert_eq!(tr.ts, [T0 - 8_000.0, T0 - 6_000.0, T0 - 5_000.0, T0 - 4_000.0, T0 - 2_000.0, T0 + 400.0, T0 + 2_000.0]);
+        assert_eq!(tr.src, [1, 1, 0, 1, 1, 2, 1]);
+        close_all(&tr.lats, &[44.9926, 44.99445, 44.9955, 44.9963, 44.99815, 45.0004, 45.00185058802779], 12);
+        // a far measured position: older than the report, dropped; newer, the samples start over
+        assert!(!merge_measured(&mut tr, T0 + 1_000.0, 46.0, 10.0, SRC_ADSB));
+        assert_eq!(tr.n, 7);
+        assert!(merge_measured(&mut tr, T0 + 3_000.0, 46.0, 10.0, SRC_ADSB));
+        assert_eq!((tr.ts.clone(), tr.src.clone(), tr.mixed), (vec![T0 + 3_000.0], vec![SRC_ADSB], true));
+        assert!(tr.r_ts.is_empty());
+        // once only Flightradar24's samples are left, the track is no longer mixed
+        tr.report_ms = T0 + 4_000.0;
+        merge_report(&mut tr, &mut sc, &[], T0 + 4_000.0, 46.5, 10.0, false);
+        assert!(!tr.mixed && tr.src.is_empty());
+    }
+
+    #[test]
+    fn the_window_keeps_thirty_seconds_and_the_buffer_tells_the_acceleration() {
+        // a braking roll: 80 kt slowing at 2 kt/s, a report every 2 s for 40 s (bun: the same)
+        let mut sc = Scratch::default();
+        let mut tr = Track::new(1);
+        tr.phase = Phase::LandingRoll;
+        tr.speed_kt = 60.0;
+        tr.on_ground = true;
+        for k in 0..=20 {
+            let t = T0 + k as f64 * 2_000.0;
+            let s = k as f64 * 2.0;
+            let dist = 80.0 * KNOTS_TO_MS * s - 0.5 * 2.0 * KNOTS_TO_MS * s * s;
+            tr.report_ms = t;
+            merge_report(&mut tr, &mut sc, &[], t, 45.0 + dist / M_PER_DEG, 10.0, false);
+        }
+        assert_eq!((tr.n, tr.ts[0], tr.ts[tr.n - 1]), (16, T0 + 10_000.0, T0 + 40_000.0));
+        assert_close!(buffer_acceleration(&tr, T0 + 24_000.0), -2.00000000004163, 9);
+        // straight on: no chord turns, and too short a run of usable chords to tell anyway
+        assert!(buffer_turn_rate(&tr, T0 + 24_000.0).is_nan());
+        // too little left to tell an acceleration
+        assert!(buffer_acceleration(&tr, T0 + 37_000.0).is_nan());
+    }
+
+    #[test]
+    fn the_buffer_tells_the_turn_rate() {
+        // the first report of a 2 deg/s right turn at 220 kt (bun: bufferTurnRate, bufferAcceleration)
+        let mut sc = Scratch::default();
+        let mut tr = Track::new(1);
+        tr.speed_kt = 220.0;
+        merge_report(&mut tr, &mut sc, &[[203, -10, 2_000], [406, -40, 4_000], [606, -90, 6_000], [804, -160, 8_000]], T0, 45.0, 10.0, false);
+        assert_close!(buffer_turn_rate(&tr, sc.report_from_ms), 2.00676453322518, 9);
+        assert_close!(buffer_acceleration(&tr, sc.report_from_ms), -0.17471799456329032, 9);
+        // only the report's own samples count
+        assert!(buffer_turn_rate(&tr, T0 - 1_000.0).is_nan());
+    }
 }

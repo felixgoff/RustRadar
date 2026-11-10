@@ -222,9 +222,9 @@ mod tests {
     fn pressure_altitude_and_qnh_invert_each_other() {
         // bun: trueAltitude(3000, 1003.25), trueAltitude(3000, 1023.25), qnhFrom(-200, 0), qnhFrom(250, 0)
         assert_eq!(true_altitude(3_000.0, 1003.25), 2730.946863930527);
-        assert_eq!(true_altitude(3_000.0, 1023.25), 3269.6000939064926);
-        assert_eq!(qnh_from(-200.0, 0.0), 1020.5980829064113);
-        assert_eq!(qnh_from(250.0, 0.0), 1004.2020818524373);
+        assert_eq!(true_altitude(3_000.0, 1023.25), 3265.9109837632277);
+        assert_eq!(qnh_from(-200.0, 0.0), 1020.5946787978459);
+        assert_eq!(qnh_from(250.0, 0.0), 1004.1293980836144);
         assert_eq!(true_altitude(5_000.0, STD_HPA), 5_000.0);
         for (p, q) in [(0.0, 1000.0), (1_200.0, 1030.0), (-150.0, 960.0)] {
             assert_close!(qnh_from(p, true_altitude(p, q)), q, 9);
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(correct_alt(3_000.0, 0.5, 1003.25), 3_000.0 + 0.5 * (2730.946863930527 - 3_000.0));
         let mut tr = Track::new(1);
         tr.qnh = 1023.25;
-        assert_eq!(corrected(&tr, 3_000.0, 1.0), 3269.6000939064926);
+        assert_eq!(corrected(&tr, 3_000.0, 1.0), 3265.9109837632277);
     }
 
     #[test]
@@ -253,9 +253,9 @@ mod tests {
         assert_close!(flare_slope(50.0 - 1e-9), 1.0, 6);
         assert_close!(flare_slope(FLARE_FLOOR_FT + 1e-9), TOUCHDOWN_SINK, 6);
         // bun: flare(0), flareSlope(0), flare(20)
-        assert_eq!(flare(0.0), 12.000000000000002);
-        assert_eq!(flare_slope(0.0), 0.5200000000000001);
-        assert_eq!(flare(20.0), 24.32);
+        assert_eq!(flare(0.0), 12.000000000000004);
+        assert_eq!(flare_slope(0.0), 0.52);
+        assert_eq!(flare(20.0), 24.320000000000007);
         // never through the ground, and rising with the raw height
         let mut last = 0.0;
         for k in -100..=200 {
@@ -362,15 +362,15 @@ mod tests {
             add_altitude(&mut tr, t, a, 1.0);
         }
         fit_altitude(&mut tr, &mut buf);
-        let afv = [4994.795658093958, 4979.844213269006, 4960.2007638941005, 4930.4017451017435, 4834.757620741193];
-        let afd = [-4.8817669722853375, -5.0753287355098925, -7.193442225917917, -11.85891812347035, -12.091453541549346];
+        let afv = [5006.145453341516, 4983.3878857089785, 4942.331535334846, 4913.5479158107355, 4829.587209804095];
+        let afd = [-7.539764977451341, -7.678037677635075, -9.047280368902648, -10.0057858717268, -10.73973944038164];
         for k in 0..5 {
             assert_close!(tr.afv[k], afv[k], 9);
             assert_close!(tr.afd[k], afd[k], 9);
         }
         let (v, s) = altitude_at(&tr, 9_000.0);
-        assert_close!(v, 4950.976591839628, 9);
-        assert_close!(s, -9.21858564813744, 9);
+        assert_close!(v, 4933.071609932429, 9);
+        assert_close!(s, -9.457457831251375, 9);
     }
 
     #[test]

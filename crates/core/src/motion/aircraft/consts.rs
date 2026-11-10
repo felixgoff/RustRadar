@@ -480,7 +480,7 @@ mod tests {
         assert_eq!(cos_snap_aligned(), 0.9396926207859084);
         assert_eq!(cos_snap_wide(), 0.8191520442889918);
         // sources rank MLAT < Flightradar24 < ADS-B
-        assert!(SRC_MLAT < SRC_FR24 && SRC_FR24 < SRC_ADSB);
+        const { assert!(SRC_MLAT < SRC_FR24 && SRC_FR24 < SRC_ADSB) };
     }
 
     #[test]

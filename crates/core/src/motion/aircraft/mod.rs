@@ -14,7 +14,7 @@
 //! |---|---|---|
 //! | `mod.rs` | [`Measured`], [`Phase`], [`Pose`], [`Motion`] and its [`World`]; clock, airports, taxiway networks, `prune`, `draw_altitude`, field selection; the small functions of doc 05 §10.3 | S1.18 |
 //! | [`consts`] | every constant, the aircraft class, the per-phase and per-class tables | S1.18 |
-//! | [`track`] | [`Track`](track::Track), [`State`](track::State), [`Raw`](track::Raw), [`Blend`](track::Blend), the speed profile | S1.18 |
+//! | [`track`] | [`Track`], [`State`](track::State), [`Raw`](track::Raw), [`Blend`](track::Blend), the speed profile | S1.18 |
 //! | [`samples`] | report points, merging (with jump detection), measured samples, the local frame, buffer estimators | S1.18 |
 //! | [`spline`] | the cubic smoothing spline | S1.18 |
 //! | [`fit`] | the horizontal fit around a reference path, Hermite evaluation, turn nodes | S1.18 |
@@ -45,6 +45,9 @@
 //! - Airports are `Arc<Airport>` compared by identity ([`same_airport`], [`AirportKey`]), as the
 //!   TypeScript compared `Airport` objects; taxiway networks are `Arc<TaxiNetwork>` compared with
 //!   `Arc::ptr_eq`, and kept in insertion order (the first that covers a point wins).
+
+// The TypeScript's negated comparisons (`!(x > 0)`, true for NaN) are kept as written (doc 05 §14).
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 pub mod altitude;
 pub mod blend;
@@ -749,6 +752,35 @@ mod tests {
         assert_eq!(m.now(0.0), 10_000.0);
     }
 
+    /// `motion.test.ts` "syncClock offsets now()", with the local clock passed in where the
+    /// TypeScript read `Date.now()` (here it moves on a few ms between calls, as there).
+    #[test]
+    fn sync_clock_offsets_now() {
+        let mut local = 1_760_000_000_000.0;
+        let mut date_now = || {
+            local += 3.0;
+            local
+        };
+        let mut m = Motion::new();
+        let t = date_now();
+        assert!((m.now(t) - t).abs() < 50.0);
+        let t = date_now();
+        m.sync_clock(t + 60_000.0, t);
+        let t = date_now();
+        assert!((m.now(t) - t - 60_000.0).abs() < 50.0);
+        m.sync_clock(f64::NAN, date_now());
+        m.sync_clock(5.0, date_now());
+        let t = date_now();
+        assert!((m.now(t) - t - 60_000.0).abs() < 50.0);
+        // small differences are smoothed, not taken outright
+        let t = date_now();
+        m.sync_clock(t + 61_000.0, t);
+        let t = date_now();
+        let offset = m.now(t) - t;
+        assert!(offset > 60_000.0 + 50.0);
+        assert!(offset < 61_000.0 - 50.0);
+    }
+
     #[test]
     fn airport_cells_wrap_and_skip_bad_positions() {
         assert_eq!(World::cell(0.0, 0.0), 90 * 360);
@@ -757,16 +789,16 @@ mod tests {
         let mut m = Motion::new();
         let good = airport("AAA", 45.0, 10.0, 100);
         let bad = airport("BBB", f64::NAN, 10.0, 0);
-        let anonymous = airport("", 45.5, 10.5, 0);
+        let anonymous = airport("", 45.95, 10.95, 0);
         m.set_airports(&[good.clone(), bad, anonymous.clone()]);
         assert_eq!(m.world.by_iata.len(), 1);
         assert_eq!(m.world.grid.values().map(Vec::len).sum::<usize>(), 2);
         // the nearest reaches into the neighbouring cells, across the antimeridian too
-        assert!(Arc::ptr_eq(&m.world.nearest_airport(45.9, 10.9, 15.0).unwrap(), &anonymous));
+        assert!(Arc::ptr_eq(&m.world.nearest_airport(46.02, 11.02, 15.0).unwrap(), &anonymous));
         assert!(Arc::ptr_eq(&m.world.nearest_airport(44.99, 9.99, 15.0).unwrap(), &good));
         assert!(m.world.nearest_airport(46.5, 10.0, 15.0).is_none());
         let east = airport("EEE", 0.0, 179.95, 0);
-        m.set_airports(&[east.clone()]);
+        m.set_airports(std::slice::from_ref(&east));
         assert!(Arc::ptr_eq(&m.world.nearest_airport(0.0, -179.95, 15.0).unwrap(), &east));
         // a new list replaces the old
         assert!(!m.world.by_iata.contains_key("AAA"));

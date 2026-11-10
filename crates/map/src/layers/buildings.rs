@@ -45,9 +45,14 @@
 //!   the rest keeping their old shadows meanwhile (`renderLayers`' recasting budget). The layer is
 //!   [`Layer::pending`] while any is left to recast, so a shot waits for them.
 //!
-//! Deviations: the clip is per pixel, as deck's (aliased; the vector map's stencil clip is
-//! antialiased); the walls are vertices of their own, not deck's instanced quads (the same
-//! triangles and lighting).
+//! How it is checked: V4 against today's picture (97.7 % of today's building pixels are buildings
+//! here and 98.9 % the other way, 0.7 levels apart on average); V5 for the lit faces and the
+//! shadows (each darkens the land or the water exactly once); the far tiles at zoom 12.1; the cut
+//! at a tile's square; the recast as the sun moves.
+//!
+//! Deviation, invisible: the walls are vertices of their own, not deck's instanced quads (the
+//! same triangles, lit at the same corners). The clip is per pixel, as deck's discard is (aliased,
+//! where the vector map's stencil clip is antialiased).
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;

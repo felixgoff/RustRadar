@@ -93,7 +93,8 @@ pub struct SceneBuilder {
 impl SceneBuilder {
     /// The scene of `state` now: the camera's view on its canvas, the basemap, the map scale for a
     /// display of `scale_factor`, the frame's clocks, the earth; then every builder's layers.
-    pub fn build(&mut self, state: &AppState, clocks: Clocks, scale_factor: f64) -> SceneInput {
+    /// `state` is mutable for the aircraft: posing a flight feeds the motion model.
+    pub fn build(&mut self, state: &mut AppState, clocks: Clocks, scale_factor: f64) -> SceneInput {
         let basemap = state.basemap();
         let mut scene = SceneInput::new(state.controller.view(), state.controller.size(), map_scale(basemap, scale_factor), basemap);
         scene.local_now_ms = clocks.local_ms;
@@ -156,9 +157,9 @@ mod tests {
     fn the_scene_has_the_view_the_clocks_and_the_earth() {
         let view = ViewState { longitude: 18.07, latitude: 59.33, zoom: 9.0, bearing: 10.0, pitch: 30.0, position: None };
         for (basemap, scale, map_scale) in [(Basemap::Dark, 2.0, 2.0), (Basemap::Satellite, 1.0, 1.0), (Basemap::Realistic, 2.0, 1.5)] {
-            let state = AppState::new(Startup { basemap: Some(basemap), ..Default::default() }, None, None, None, view, [1100.0, 720.0]);
+            let mut state = AppState::new(Startup { basemap: Some(basemap), ..Default::default() }, None, None, None, view, [1100.0, 720.0]);
             let clocks = Clocks { local_ms: 1.7e12, feed_ms: 1.7e12 + 300.0 };
-            let scene = SceneBuilder::default().build(&state, clocks, scale);
+            let scene = SceneBuilder::default().build(&mut state, clocks, scale);
             assert_eq!(scene.view, view);
             assert_eq!(scene.size, [1100.0, 720.0]);
             assert_eq!(scene.basemap, basemap);

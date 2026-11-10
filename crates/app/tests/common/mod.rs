@@ -3,6 +3,7 @@
 //! it compares golden shots with, and shots through the app's `--screenshot` path.
 #![allow(dead_code)]
 
+pub mod fixtures;
 #[path = "../../../map/tests/common/shots.rs"]
 pub mod shots;
 

@@ -157,7 +157,8 @@ impl Engine {
         }
         self.map.set_camera(view, size);
         if self.pacer.due(local_ms, view.zoom, locked) || self.map.needs_refresh() {
-            let scene = self.scene.build(&self.state, self.state.clocks(local_ms), scale_factor);
+            let clocks = self.state.clocks(local_ms);
+            let scene = self.scene.build(&mut self.state, clocks, scale_factor);
             self.map.update(scene);
             self.built_for = Some(built_for);
         }

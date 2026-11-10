@@ -43,6 +43,13 @@
 //! When the layer stops drawing (another basemap) it drops its tiles, as deck finalizes a layer
 //! that leaves the list; it is [`Layer::pending`] only while it draws ([`TileSet::loading`]).
 //!
+//! Checked against today's pictures (`docs/port/reference/satellite-*.png`, tests below): V2 and
+//! V7 on the globe and V6 on the flat map match colour for colour where no label, building or UI
+//! covers them (means within 1 level), V6 to the pixel and the globe's views within 1–2 px. (So
+//! the imagery does not show the 4.5 px offset T1 measured on the dark map's vector tiles.) Far
+//! north, as at V7, deck's selection on the globe leaves the top row of tiles out and the earth
+//! sphere shows there, in today's picture as here.
+//!
 //! Deviations, invisible or nearly:
 //! - The picture's colours come from the `image` crate's JPEG decoder, not the browser's: the two
 //!   may round a level or two apart here and there.

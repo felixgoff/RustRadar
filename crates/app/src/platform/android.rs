@@ -8,7 +8,8 @@
 //!   gets (system bars and display cutout; and the soft keyboard's height), device pixels, each
 //!   time they change;
 //! - `nativeBack()`: the back gesture or key. The activity takes the key before GameActivity's
-//!   native key path would swallow it, and AndroidX hands the gesture over on Android 13+;
+//!   native key path would swallow it, and AndroidX hands the gesture over on Android 13+. It
+//!   answers whether the app takes it: not before `init`, and then the activity leaves at once;
 //! - `nativeEditorAction(action)`: the keyboard's action key (Done). android-activity delivers it
 //!   only to winit's input loop, which drops it;
 //! - `nativeTextChanged()`: the keyboard changed the text, so a frame reads it soon;
@@ -81,11 +82,13 @@ pub fn set_wake(wake: Wake) {
     }
 }
 
-fn wake() {
+/// Wakes the event loop; false when nobody has asked to be woken.
+fn wake() -> bool {
     let wake = WAKE.lock().ok().and_then(|w| w.clone());
-    if let Some(wake) = wake {
+    if let Some(wake) = &wake {
         wake();
     }
+    wake.is_some()
 }
 
 /// The activity's new insets (`nativeInsets`).
@@ -118,10 +121,14 @@ pub fn keyboard_height(insets: Insets, pixels_per_point: f32) -> f32 {
     insets.keyboard.max(0) as f32 / pixels_per_point
 }
 
-/// The back gesture or key (`nativeBack`).
-pub fn back_pressed() {
+/// The back gesture or key (`nativeBack`). Returns whether the app takes it: only once the frame
+/// loop listens (a wake is set), else back must do what it does without the app.
+pub fn back_pressed() -> bool {
+    if WAKE.lock().map(|w| w.is_none()).unwrap_or(true) {
+        return false;
+    }
     BACK.store(true, Ordering::Release);
-    wake();
+    wake()
 }
 
 /// Whether back was pressed since the last call.
@@ -642,7 +649,9 @@ mod glue {
             }
             Sync::Update(keyboard) => app.set_text_input_state(state(keyboard)),
             // the frame drawn showed egui's cursor: one more with the keyboard's
-            Sync::Moved => super::wake(),
+            Sync::Moved => {
+                let _ = super::wake();
+            }
             Sync::Stop | Sync::Nothing => {}
         }
     }
@@ -683,9 +692,10 @@ mod glue {
         super::report_insets(super::Insets { left, top, right, bottom, keyboard });
     }
 
+    /// A JNI `boolean`: whether the app takes back.
     #[unsafe(no_mangle)]
-    extern "system" fn Java_com_felix_rustradar_MainActivity_nativeBack(_env: *mut c_void, _this: *mut c_void) {
-        super::back_pressed();
+    extern "system" fn Java_com_felix_rustradar_MainActivity_nativeBack(_env: *mut c_void, _this: *mut c_void) -> u8 {
+        u8::from(super::back_pressed())
     }
 
     #[unsafe(no_mangle)]
@@ -695,7 +705,7 @@ mod glue {
 
     #[unsafe(no_mangle)]
     extern "system" fn Java_com_felix_rustradar_MainActivity_nativeTextChanged(_env: *mut c_void, _this: *mut c_void) {
-        super::wake();
+        let _ = super::wake();
     }
 }
 
@@ -734,6 +744,8 @@ mod tests {
 
     #[test]
     fn the_activity_reports_wake_the_loop() {
+        assert!(!back_pressed(), "before the loop listens back is not the app's");
+        assert!(!take_back());
         let woken = Arc::new(AtomicUsize::new(0));
         let w = woken.clone();
         set_wake(Arc::new(move || {
@@ -743,7 +755,7 @@ mod tests {
         report_insets(i);
         assert_eq!(insets(), i);
         assert!(!take_back());
-        back_pressed();
+        assert!(back_pressed(), "the app takes back");
         assert!(take_back());
         assert!(!take_back(), "taken once");
         editor_action();

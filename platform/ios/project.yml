@@ -1,0 +1,60 @@
+# The iOS app for xcodegen (doc 07 §13.5): `xcodegen generate` here writes RustRadar.xcodeproj
+# (not committed). One app target: main.m calls rustradar_ios_main in librustradar_app.a, which
+# build-rust.sh builds with cargo before each build. No CocoaPods, no Swift.
+#
+#   cd platform/ios && xcodegen generate
+#   xcodebuild -project RustRadar.xcodeproj -scheme RustRadar -sdk iphonesimulator \
+#     -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+name: RustRadar
+options:
+  bundleIdPrefix: com.felix
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    # CI passes the release's MARKETING_VERSION and CURRENT_PROJECT_VERSION (P9)
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  RustRadar:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Sources
+      - path: Assets.xcassets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.felix.rustradar
+        PRODUCT_NAME: RustRadar
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # build-rust.sh leaves librustradar_app.a beside the app
+        LIBRARY_SEARCH_PATHS: ["$(inherited)", "$(BUILT_PRODUCTS_DIR)"]
+        # the Basis transcoder is C++; Rust's own #[link] frameworks do not travel with a
+        # static library, hence the list under dependencies
+        OTHER_LDFLAGS: ["$(inherited)", "-lrustradar_app", "-lc++"]
+        # only Apple silicon simulators (aarch64-apple-ios-sim)
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+        # the build phase writes into the workspace's target/ folder
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        CODE_SIGN_STYLE: Automatic
+    preBuildScripts:
+      - name: Build the Rust library
+        script: '"$SRCROOT/build-rust.sh"'
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(BUILT_PRODUCTS_DIR)/librustradar_app.a
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: Foundation.framework
+      - sdk: CoreFoundation.framework
+      - sdk: CoreGraphics.framework
+      - sdk: QuartzCore.framework
+      - sdk: Metal.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: libresolv.tbd
+    scheme: {}

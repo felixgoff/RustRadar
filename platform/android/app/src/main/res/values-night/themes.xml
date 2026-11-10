@@ -1,0 +1,7 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme (GameActivity needs an AppCompat one). -->
+    <style name="Theme.rustradar" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- the map's ink until the first frame, not a white flash (doc 07 §11.7) -->
+        <item name="android:windowBackground">@color/ink</item>
+    </style>
+</resources>

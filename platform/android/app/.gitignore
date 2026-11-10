@@ -1,0 +1,2 @@
+# librustradar_app.so, built by ../build-rust.sh (cargo-ndk)
+/src/main/jniLibs/**/*.so

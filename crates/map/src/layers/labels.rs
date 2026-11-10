@@ -696,13 +696,19 @@ mod tests {
 
     /// V1 (the whole globe, zoom 1.9): only labels facing the camera (`cosAngle > 0.42` from the
     /// view's centre), so nothing on the far side shows through the globe; country names and big
-    /// cities.
+    /// cities, today's (97 % of today's text pixels matched and of ours).
     #[test]
     fn far_out_only_labels_facing_the_camera_are_drawn() {
-        let Some((_, drawn)) = shot(v1(), Input::shown(), "b4-dark-v1-1440x900.png") else { return };
+        let Some((image, drawn)) = shot(v1(), Input::shown(), "b4-dark-v1-1440x900.png") else { return };
         let v = v1();
-        eprintln!("V1: {} labels: {:?}", drawn.len(), drawn.iter().map(|s| s.text.as_str()).collect::<Vec<_>>());
+        let (recall, precision, theirs, mine, shift) = text_agreement(&image, &reference("dark-v1-1440x900.png"));
+        eprintln!(
+            "V1: {} labels; today's text {theirs} px, ours {mine}: {recall:.3} of today's and {precision:.3} of ours matched at {shift:?}: {:?}",
+            drawn.len(),
+            drawn.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
+        );
         assert!(drawn.len() > 10 && drawn.iter().any(|s| s.color == labels_map::COUNTRY_COLOR), "{drawn:?}");
+        assert!(recall > 0.95 && precision > 0.95, "{recall} of today's, {precision} of ours");
         for s in &drawn {
             assert!(cos_angle(s.lon, s.lat, v.longitude, v.latitude) > labels_map::HORIZON_MIN_COS, "{s:?}");
         }

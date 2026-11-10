@@ -1408,7 +1408,8 @@ tilted, the wheel zoomed in and out. Not run: Wayland, Windows, macOS, a real GP
 1. **Tile plumbing has no owner (E4, E13, E14, E16, E17).** `layers::Init` and `PrepareCx` carry no
    `TileRuntime` or `UploadBudget`; `MapRenderer::new` takes no runtime; the app has no `TileFetcher` on
    `backend::tiles` (spawned on `rt()`, waking the loop); the headless path has no fixture fetcher (`--fixture`
-   is the feeds' folder) and does not wait on `TileSet::pending`. B2 owns only `layers/vector_map.rs` and
+   is the feeds' folder; it already draws until `MapRenderer::pending` is false, which layers fill through
+   `Layer::pending`). B2 owns only `layers/vector_map.rs` and
    `scene_builder/base.rs`, so stage 3 cannot draw a tile until an item owns `crates/map/src/{layers/mod.rs,
    renderer.rs, headless.rs}` and the app's fetcher. Suggest one item before B2 that also takes gaps 2 and 3.
 2. **Light rig (E7).** `SceneInput` has no `lights: LightRig`; every lit layer (B7 buildings, A5 aircraft,

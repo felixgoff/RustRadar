@@ -23,3 +23,7 @@ regex = { workspace = true }
 indexmap = { workspace = true }
 dirs = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+# The tile cache's tests serve HTTP on 127.0.0.1.
+tokio = { workspace = true, features = ["net", "io-util"] }

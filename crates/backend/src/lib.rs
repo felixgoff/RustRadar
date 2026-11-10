@@ -33,6 +33,7 @@ pub mod session;
 pub mod ships;
 pub mod sth;
 pub mod taxiways;
+pub mod tiles;
 pub mod trafikverket;
 pub mod train_class;
 pub mod train_media;

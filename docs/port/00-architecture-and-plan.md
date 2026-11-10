@@ -863,9 +863,9 @@ are.
 
 | ☐ | Feature | Spec | Item |
 |---|---|---|---|
-| ☐ | Earth sphere colour per basemap; land rectangle | 01 §5.4–5.5 | E5 |
-| ☐ | Dark vector map: water, borders, roads, aeroways with the palette and widths | 01 §5.6 | B1, B2 |
-| ☐ | True-width runways | 01 §5.7 | B3 |
+| ☑ | Earth sphere colour per basemap; land rectangle | 01 §5.4–5.5 | E5 |
+| ☑ | Dark vector map: water, borders, roads, aeroways with the palette and widths | 01 §5.6 | B1, B2 |
+| ☑ | True-width runways | 01 §5.7 | B3 |
 | ☐ | Satellite imagery with tint; no borders or roads on it | 01 §5.8 | B6 |
 | ☐ | Place names and airport codes, sizes, colours, priorities, declutter, label size setting | 01 §5.9 | B4 |
 | ☐ | Night shading in four twilight steps | 01 §5.10 | B5 |
@@ -876,7 +876,7 @@ are.
 
 | ☐ | Feature | Spec | Item |
 |---|---|---|---|
-| ☐ | Live feed with intervals, back-off, regional or world view | 06 §3.4 | A1 |
+| ☑ | Live feed with intervals, back-off, regional or world view | 06 §3.4 | A1 |
 | ☑ | Motion model: smoothing, delay, prediction, flare, taxi snap, gear | 05 §10 | S1.18–S1.20 |
 | ☐ | Icons with outlines below zoom 11 at flat pitch; size floor 8–24 px | 03 §2, §6 | A3, A4 |
 | ☐ | 3D models, two LODs, depth and material by zoom, landing gear | 03 §5 | A5 |
@@ -887,7 +887,7 @@ are.
 | ☐ | Selected flight: trail with shadow, filed and estimated route, waypoints, airport markers, ring | 03 §8, §15 | A8 |
 | ☐ | Follow stream states and auto-resume; OpenSky merge; adsb.lol measured data | 06 §3.5 | A8 |
 | ☐ | Click to select, click empty map to deselect, hover highlight | 03 §10 | A9 |
-| ☐ | Taxiway networks near the view | 03 §16 | A11 |
+| ☑ | Taxiway networks near the view | 03 §16 | A11 |
 
 **Trains**
 
@@ -1510,9 +1510,8 @@ the table: `BackendTiles::sources()`).
 `<cache>/tiles`), spawned on the backend's runtime; it wakes the loop after each answer and stops (answering
 nothing) within 100 ms of a cancel. `tile_fetcher::for_state(&state)` picks the fetcher: the `--fixture`
 folder's tiles (`DIR/tiles` when it has one, else `DIR`), else `BackendTiles` in the backend's cache folder,
-else offline. **Not wired in the window yet:** `app.rs` is not T1's, so its owner adds one line after the
-engine is made (in `View::new`): `tile_fetcher::connect(&mut engine.map, &engine.state);` (the fetcher of
-`for_state` and the requests' wake). Until then the window draws no tile.
+else offline. The window connects it in `View::new` (`tile_fetcher::connect(&mut engine.map, &engine.state)`:
+the fetcher of `for_state` and the requests' wake; wired by the stage 3-4 review, `faf583c`).
 
 **Shots** (`app::headless`) never touch the network: tiles come from `--fixture DIR` as above, else the
 committed set (`io::fixture_tiles_dir()`, `crates/map/tests/data/tiles`, found where the build ran), through
@@ -1549,5 +1548,191 @@ fixture rules, the choice by state).
 - While several engineers build in one tree, cargo can run a test binary built from another snapshot (a run
   listed 163 map tests where the source had 171). `touch` the files you changed before a test run whose test
   list you rely on.
-- `crates/app/tests/shots.rs` (E18) fails three earth tests since the lit earth (`86ecf5b`): the polar cap
-  reads `(48,47,47)` where they expect `(50,50,50)`; the earth's owner updates them.
+- `crates/app/tests/shots.rs` (E18) failed three earth tests after the lit earth (`86ecf5b`): the polar cap
+  reads `(48,47,47)` where they expected `(50,50,50)`. Fixed by the stage 3-4 review (`f7e0abc`).
+
+---
+
+## Stages 3-4 status
+
+Checked on 2026-11-10 at commit `faf583c` on `rust-port` by the stage 3-4 review (the item that owns no files).
+
+**In short.**
+- Stage 3: B1, B2, B3 and B8 are done. B4, B5, B6, B7 and B9 were not delivered.
+- Stage 4: A1, A2, A3, A10 and A11 are done. A4–A9 were not delivered, so **no aircraft is drawn yet**. The feed,
+  the GPU assets and the per-flight scene all exist, but the map's aircraft layer (`layers/aircraft.rs`) is still
+  the empty stub and nothing hands them to it.
+- The four items added before stage 3 (T1 tile plumbing, T2 lit earth, T3 fixtures, T4 CI) are done.
+- Five more lines of section 4 are ticked: the earth's colour per basemap, the dark vector map, true-width
+  runways, the live aircraft feed, the taxiway networks. Ten lines are ticked in all.
+
+**Checks**
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | clean |
+| `cargo test --workspace` (SwiftShader) | 1680 passed, 0 failed, 23 ignored; no GPU test skipped |
+| `cargo clippy --workspace --all-targets` | no warnings |
+| `cargo check -p rustradar` (shim) | passes |
+| `bun run check` | 0 errors, 0 warnings |
+| `bun test src` | 394 pass |
+| `cargo doc --workspace --no-deps` | the 5 warnings of stage 2 (core `ships.rs`, `trains.rs:436`; backend `radar.rs`), none in stage 3-4 files |
+| CI "Build" on `rust-port` | run 42906844384 (`f7e0abc`, this review's fix 1) green: tests on SwiftShader, clippy, and the Windows, macOS, iOS and Android checks. The test job had been red since the lit earth (runs 98–105). Run 42908125571 (`faf583c`) was queued at the time of writing |
+
+Before this review's fixes the workspace run failed 5 tests, all in the app's E5 and E17 shot tests: four in
+`tests/shots.rs` and one in `tests/headless.rs` (the lit earth's polar cap, and the dark map's sea, which has the
+ink's colour). Fix 1 below.
+
+The passing tests, by crate:
+
+| Crate | Passed | Ignored | Since stage 2 |
+|---|---|---|---|
+| core | 602 unit + 2 in `tests/motion.rs` | 0 | – |
+| scene | 470 | 0 | +46 (B1, B3, A3, A10) |
+| map | 187 unit + 9 in `tests/fixture_tiles.rs` + 2 in `tests/tile_plumbing.rs` | 1 doc block (`aircraft/assets.rs`, an example, not a test) | +28 (T1, T2, B2, B3, A2) |
+| backend | 211 | 22 (as in stage 2) | – |
+| app | 123 unit + 3 in `tests/headless.rs` + 1 in `tests/lock.rs` + 19 in `tests/shots.rs` | 0 | +79 (T1, B2, B8, A1, A2, A3, A10, A11) |
+| xtask | 31 | 0 | +5 (T3) |
+| fr24 | 17 + 1 doc-test | 0 | – |
+| shim | 2 | 0 | – |
+
+No test was marked `#[ignore]` in stages 3-4. One test was removed with the file it checked
+(`earth::layouts_match_the_wgsl`, with `earth.wgsl`, T2).
+
+**What was looked at.** Headless shots through the app binary at 1440 × 900, `--now 1782036000000` (the
+reference pictures' summer morning), beside `docs/port/reference/`:
+- **Dark V1–V4** against `dark-v1` to `dark-v4`. The vector map is today's: coastlines, lakes, the road net,
+  borders, runways, taxiways and aprons in the same places and colours. Histograms of the greys agree: V3's
+  east and south-west hold the same shares of `(30,30,30)` and `(50,50,50)`; V2's roads and V1's borders fall in
+  the same grey bands, today's only fewer where labels cover them. What differs:
+  - no labels (place names, country names, airport codes: B4);
+  - no buildings at V4 (B7);
+  - no UI (stage 7);
+  - today's pictures sit about 4.5 px higher (T1's finding).
+- **Dark V5** (no `dark-v5` reference exists): water and streets of Gamla stan at pitch 60 are right. Today's V5
+  is mostly extruded buildings, which are missing (B7).
+- **Satellite V3** (no `satellite-v3` reference; compared with `satellite-v2` and `satellite-v7`): only the lit
+  earth sphere, a dark blue gradient with the camera light's highlight. No imagery: B6 was not delivered.
+- **V2, V3, V4 with the synthetic snapshot as `--fixture`** (236 flights, written from
+  `tests/common/fixtures.rs`'s generator): pixel-identical to the plain dark shots. The feed reads the snapshot
+  (logged), and no aircraft is drawn (A4, A5).
+- Every one of these shots logged no missing tile: T3's fixtures cover V1–V5 at this size.
+- **The window**, under Xvfb on llvmpipe (GL), with `--fixture`: it now draws the vector map's tiles (fix 2), and
+  a double click zooms in about the pointer 300 ms after the release with no further event (fix 2). Not run:
+  a real GPU, Wayland, Windows, macOS.
+
+**Per item**
+
+| Item | Verdict | Evidence, and what differs from the row |
+|---|---|---|
+| T1 | done | `tile_plumbing.rs` (a reference water layer at V3: 95.9 % of today's water, 97.4 % of its land; tile frames within 0.14 px of `scene::camera`), 8 map and 6 app unit tests. The window's one line was missing: added by this review (fix 2). |
+| T2 | done; one plan line restated | The earth drawn with the instanced mesh pipeline and luma's default Phong. V1 against `dark-v1`: the centre equal, 872 cap pixels 0 levels off. Doc 01 §4 and §5.4 say "unlit"; deck lights it, and the port follows deck. Its follow-up in the app's shot tests is fix 1. |
+| T3 | done | 1040 files, 55 MB (budget 60 MB); of the 670 tiles already committed none changed (only `NOTICE`). 5.4 MB of the budget is left. |
+| T4 | done | The port's jobs run on `rust-port`; `native-targets` checks Windows, macOS, iOS and Android on their own runners, all green. The required test job was red from the lit earth until `f7e0abc`. |
+| B1 | done; two row lines restated | 17 tests; tessellation checked against deck's own tesselators over 7 fixture tiles (segment counts exact, globe triangle lists index for index). The row's three acceptance lines are in `water_motorways_and_maritime_borders_at_stockholm`. Restated: every tile drawn on the globe (z ≤ 12) is cut on the 5° grid, as deck cuts it, not only z ≤ 6; lines follow loaders.gl's `layers` order (water, boundary, transportation, aeroway), not the tile's. Gap 4. |
+| B2 | done | V2: 99.6 % of today's sea and 98.2 % of its land matched, borders and roads present; V3: 95.9 % and 96.0 % at the reference's offset; V4: runways, taxiways, aprons, 99.8 % land. Crossing zoom 12 at V3 asks for no new tile at 1440 × 900, 1100 × 720 and 390 × 844. The flat map clips each tile to its square (a stencil mask). Deviations: `maxRequests` 6 (deck's default), not 8; the clip's edge is antialiased. |
+| B3 | done | V4: runway width per pixel row against the 45 m band, mean error +0.039 px, worst 0.50 px over 781 rows; straight down 13.246 px against 45 / mpp = 13.183 px; no jump at the switch; clipped on the flat map. |
+| B4 | not delivered | `layers/labels.rs` is the stub. An interrupted attempt left `crates/scene/src/labels_map.rs` (1027 lines) **untracked and not declared** in `scene/src/lib.rs`; not reviewed, not committed. Its next owner reviews it or starts over. |
+| B5 | not delivered | `layers/night.rs` is the stub. |
+| B6 | not delivered | `layers/imagery.rs` is the stub: satellite shows only the lit earth sphere. |
+| B7 | not delivered | `layers/buildings.rs` and `tess/buildings.rs` are stubs. The scene builder never calls `scene.aim_lights(buildings)` (right while there are no buildings). |
+| B8 | done; person check pending | 27 unit tests, each gesture event, time, rounded centre and pinch scale checked against mjolnir's recognizers run under bun. Its four calls in `app.rs` (timers, the timers' wake-up, key gate, cursor) were missing: added by this review (fix 2). `hovering` is `false` and `shortcuts_off` is `false` until A9 and U6/U17 exist. |
+| B9 | not delivered | `ui/map_error.rs` does not exist; no rebuild path in `renderer.rs`. |
+| A1 | done | 16 unit tests with a fake clock and canned answers, each acceptance line. Shots without `--fixture` asked the real backend: fixed by this review (fix 2). |
+| A2 | done | 11 tests: every model and level uploads and draws as its CPU rasterisation; the atlas cells of all 24 icon classes are non-empty, nose up. No layer uses the assets yet (gap 1). |
+| A3 | done | 22 tests. Golden counts through the whole `SceneBuilder`: V1 134 icons, V3 25 icons and 33 labels, V4 seven model groups with gear; six views match today's loop run under bun on the same snapshot, to 1e-9. Its output reaches no layer (gap 1). |
+| A4 | not delivered | – |
+| A5 | not delivered | – |
+| A6 | not delivered | – |
+| A7 | not delivered | – |
+| A8 | not delivered | – |
+| A9 | not delivered | – |
+| A10 | done; not reachable in the app | 9 scene and 12 app unit tests; the lock shot keeps the aircraft 0.000 px from the centre at 0, 10 and 20 s on the globe and the flat map (a marker disc stands in for the aircraft, since no aircraft layer exists). The lock engages only when A8 calls `state.camera.set_selected` and `set_follow`: never in the app yet. |
+| A11 | done | 11 unit tests with a fake backend, each acceptance line. The scene builder did not ask for the networks it wants: added by this review (fix 2). |
+
+**Fixes made by this review**
+1. `f7e0abc`: the app's E5 and E17 globe shots (`tests/shots.rs`, `tests/headless.rs`):
+   - They draw from an empty `--fixture` folder, so no tile is drawn and they check E5's earth and land alone.
+     The vector map has its own shots, and the dark sea's ink colour would hide the disc's edge.
+   - They expect the lit earth past ±85.06° and on satellite: `earth::lit_color` within 2.5 levels.
+   - The disc's edge is fitted per sector against the rim's own colour.
+   - The disc's middle is checked pixel by pixel: the land exactly; the caps within the lit tolerance; 1.5 px
+     either side of the land's edge and 3 px either side of the earth sphere's limb skipped (T2's trap).
+   - At V1 the cap above the centre is checked to be lit, not land.
+   - This replaces T2's patch, which was lost with the scratch folder.
+2. `faf583c`: wiring that finished items left to files they did not own:
+   - `app.rs`: `tile_fetcher::connect` in `View::new` (T1), so the window draws tiles.
+   - `app.rs`: `input.update` before the camera step and `input.next_due_ms()` in the schedule (B8), so a click
+     and a double click fire on time.
+   - `app.rs`: `set_key_gate` and `set_cursor` after the egui pass (B8). Hovering and the dialogs' shortcut gate
+     are `false` until A9 and U6/U17.
+   - `headless.rs`: without `--fixture`, the aircraft, livery and taxiway feeds have no source (A1, A2, A11), so
+     a shot never touches the network (section 8).
+   - `scene_builder/aircraft.rs`: `taxiways.taxiways_for(…)` after each build (A11).
+
+**Stage 2 gaps, now**
+1. Tile plumbing, 2. light rig, 3. texture compression: closed by T1.
+4. The unlit earth: closed by T2.
+5. Fixtures for stage 3: closed by T3, for the views of stages 3 and 4.
+6. CI and cross targets: closed by T4, except that P10 must still fold `phone-shells.yml` into `rust.yml`.
+7. Linux runtime library: still open. winit also needs `libxcb-xkb.so.1` (`libxcb-xkb1`), which
+   `libxkbcommon-x11` loads. P7's packages must depend on both.
+8. Spike leftovers: still open (`crates/app/src/ui.rs`, `theme.rs`).
+9. Phones: still open.
+10. Rustdoc: unchanged.
+
+**Gaps** (each with the item that has it, and who should take it)
+1. **No aircraft on the map (A4–A9).** Whoever takes A4 and A5:
+   - gives `layers::aircraft::Input` a field for `rustradar_scene::aircraft::AircraftScene`;
+   - sets it in `scene_builder/aircraft.rs` from `self.latest`;
+   - makes the aircraft layer own one `AircraftAssets` (`aircraft/assets.rs`'s module doc shows the three calls).
+
+   A8 calls `state.camera.set_selected` and `set_follow`, and passes the selected row to `aircraft.shown(…)` and
+   to A3's `Inputs`. A9 supplies `hovering` to `MapInput::set_cursor` (`app.rs` passes `false`) and reads
+   `MapInput::take_clicks`.
+2. **Labels (B4)**: see the table. `labels_map.rs` is in the working tree only.
+3. **B5, B6, B7, B9** not started. B7's row is out of date: since `146cdad` today's app uses no backend
+   building LOD. Dark and satellite buildings use `CITY_LOD` (levels 13, 14, 16, bias 0.5, 25 km), with flat roofs
+   from z13 tiles below `CITY_CLOSE_ZOOM` 14 (T3's report).
+4. **Earcut (B1).** `scene::geom::earcut` wraps `earcutr` 0.5, which covers too much where a hole touches its
+   polygon's outline: 34 of 11 814 globe-cut parts and 2 of 2 924 whole polygons of the fixtures, painting water
+   over land. B1 ported earcut 2.2.4 (deck's) privately inside `tess/vector.rs`. Radar meshing and roofs still
+   use `earcutr`. Move the port to `geom/earcut.rs` and drop `earcutr` (S1.24's file; needs an owner).
+5. **The reference pictures' 4.5 px offset** (T1) is still unexplained. Comparisons search a few pixels of
+   offset; find the cause before claiming pixel parity.
+6. **Lavapipe** (CI, not required): `pipelines::fill::tests::fills_blend_as_deck_draws_them` gets `[25,26,28]`
+   for `[25,26,27]`. Allow ±1, as section 8 asks of exact colours (E5's file).
+7. **Stage 4 fixtures.** The synthetic snapshot exists (`tests/common/fixtures.rs`, 236 flights, written to a
+   folder only by tests). `landings.json` is not reused yet, and none of A4–A8's acceptance shots exist. A1, A2
+   and A11 defined the `--fixture` folder's files: `live_flights.json`, `top_flights.json`,
+   `reference_data.json`, `airline_colors.json` and `taxiways/{ICAO}.json`.
+8. **Fixture budget**: 5.4 MB of 60 MB left (T3). Stages 5–10 need a larger budget or a trimmed set.
+9. **The satellite sphere** shows two highlights, the camera light's and the key light's (T4 noticed). No
+   reference shows the bare satellite earth; look again once B6 draws imagery over it.
+
+**Plan text superseded by stages 3-4** (rows left as written; the code follows deck and today's app):
+- B1 row: the globe cut applies to every tile drawn on the globe (z ≤ 12); lines are in loaders.gl's `layers`
+  order. Doc 01 §5.6: the same, and `aerodrome` polygons in the aeroway layer are filled `APRON`.
+- 1.3: the vector map triangulates with a port of earcut 2.2.4, not `earcutr`.
+- 1.4.8: the vector map asks for at most 6 tiles at once (deck's `maxRequests` default), not 8.
+- Doc 01 §4 and §5.4 (E5): the earth sphere is lit (luma's default Phong, the scene's rig).
+- B7 row: no "backend far-LOD tiles" (gap 3).
+- Each finished item records its other deviations in its module docs. The visible ones:
+  - B2: the flat map's tile clip is antialiased.
+  - B3: the true-width runways share the map's tiles, so they never load later than the map.
+  - B8: a mouse wheel notch is WebView2's 100 px, so a Mac mouse zooms faster than today. Pinch scale is
+    additive. A cancelled touch ends the drag.
+  - A1, A2, A11: the UI's asks and the answers take effect at the next poll (one frame).
+  - A10: the free limits are handed back at once when a lock ends.
+
+**Pending for the owner (person checks)**
+- B8 on Windows and on macOS with a mouse and a trackpad:
+  - left-drag pan; right- or modifier-drag rotate; wheel and shift-wheel zoom; double click;
+  - trackpad scroll pans and ctrl-scroll zooms; macOS pinch and twist;
+  - the camera keys `+ = - n t` and the arrows;
+  - the cursor (open hand, closed hand);
+  - how fast a Mac mouse wheel zooms (deviation above).
+- On a touchscreen: one-finger pan, two-finger pinch.
+- Everything listed under "Pending for the owner" in the stage 2 status.
+
+**Disk.** 13 GB free after this review's runs, 26 GB used on the volume.

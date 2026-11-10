@@ -31,6 +31,9 @@ pub enum TrainKind {
     Intercity,
     Regional,
     Suburban,
+    /// Also any kind this build does not know: the TypeScript drew those as "other"
+    /// (`KINDS[kind] ?? KINDS.other`, `trains.ts:23`).
+    #[serde(other)]
     Other,
 }
 
@@ -338,6 +341,18 @@ mod tests {
             assert_eq!(serde_json::to_value(status).unwrap(), json!(status.as_str()));
             assert_eq!(serde_json::from_value::<TrafikverketKeyStatus>(json!(status.as_str())).unwrap(), status);
         }
+    }
+
+    #[test]
+    fn an_unknown_train_kind_reads_as_other() {
+        assert_eq!(serde_json::from_value::<TrainKind>(json!("nightTrain")).unwrap(), TrainKind::Other);
+        assert_eq!(serde_json::from_value::<TrainKind>(json!("HighSpeed")).unwrap(), TrainKind::Other);
+        let mut wire = train_wire();
+        wire["kind"] = json!("museum");
+        let train: Train = serde_json::from_value(wire).unwrap();
+        assert_eq!(train.kind, TrainKind::Other);
+        // and is sent on as "other"
+        assert_eq!(serde_json::to_value(train).unwrap()["kind"], json!("other"));
     }
 
     fn stops_wire() -> Value {

@@ -16,6 +16,7 @@ use indexmap::IndexSet;
 
 pub use crate::geo::Rgb;
 use crate::model::{LiveFlight, LogoColors};
+use crate::reference::airline_icao;
 
 /// A part of an aircraft model that takes a livery colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -258,13 +259,6 @@ fn curated(icao: &str) -> Option<&'static Livery> {
 
 fn from_logo(colors: &LogoColors) -> Livery {
     Livery { tail: colors.primary, engines: colors.secondary.unwrap_or(ENGINE_GREY), ..DEFAULT_LIVERY }
-}
-
-/// The airline's ICAO designator from an airline-style callsign (`DLH4XK` → `DLH`):
-/// `reference.svelte.ts` `airlineIcao`, `/^([A-Z]{3})\d/`.
-fn airline_icao(callsign: &str) -> Option<&str> {
-    let b = callsign.as_bytes();
-    (b.len() >= 4 && b[..3].iter().all(u8::is_ascii_uppercase) && b[3].is_ascii_digit()).then(|| &callsign[..3])
 }
 
 /// The airline IATA code from a flight number such as `LH26` or `U25634`: `/^([A-Z0-9]{2})\d/`.

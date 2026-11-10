@@ -561,17 +561,7 @@ mod tests {
 
     #[test]
     fn clear_of_the_ship_palette_and_of_the_selection_amber() {
-        // ships.ts `shipColor` for SHIP_COLOR_KEYS [0, 2, 3, 4, 5, 6, 7, 8]
-        let ships: [Rgb; 8] = [
-            [140, 152, 168],
-            [72, 198, 194],
-            [98, 152, 240],
-            [116, 188, 112],
-            [236, 128, 156],
-            [218, 92, 92],
-            [228, 234, 242],
-            [192, 136, 236],
-        ];
+        let ships = [0, 2, 3, 4, 5, 6, 7, 8].map(crate::ships::ship_color);
         let amber: Rgb = [240, 180, 60];
         let dist = |a: Rgb, b: Rgb| {
             let d = |i: usize| f64::from(a[i]) - f64::from(b[i]);

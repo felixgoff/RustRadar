@@ -5,8 +5,9 @@
 //! [`bounds`], [`coverage_box`]), connected components ([`components`]) and "no pixel darker
 //! than" ([`darker_than`]). They hold across rasterisers (SwiftShader, lavapipe, real GPUs).
 //!
-//! [`map_shot`] draws a scene with test layers through the map's headless path; the app's
-//! `tests/common` adds shots through `--screenshot`'s path.
+//! [`map_shot`] draws a scene with test layers through the map's headless path ([`map_shot_with_tiles`]
+//! with a tile fetcher, e.g. the fixtures of `fixture_tiles.rs`); the app's `tests/common` adds
+//! shots through `--screenshot`'s path.
 //!
 //! Shots are written to `target/shots/` for review ([`save`]). With `SHOT_GOLDEN=1` each one is
 //! also compared with `target/shots/golden/<name>`, which the first such run records (and
@@ -24,10 +25,11 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use rustradar_map::frame::ViewFrame;
 use rustradar_map::headless::{FORMAT, Image, render_with};
+use rustradar_map::io::TileFetcher;
 use rustradar_map::layers::{Init, Layer};
 use rustradar_map::{Gpu, GpuError, MapRenderer, SceneInput};
 use rustradar_scene::camera::ViewState;
@@ -132,7 +134,20 @@ pub fn gpu() -> Option<MutexGuard<'static, Gpu>> {
 /// then the test layers `build` makes (drawn last, in order), through `map::headless`. The image
 /// and the view of the frame it was drawn with.
 pub fn map_shot(gpu: &Gpu, scene: &SceneInput, scale_factor: f64, build: impl FnOnce(&Init<'_>) -> Vec<Box<dyn Layer>>) -> (Image, ViewFrame) {
+    map_shot_with_tiles(gpu, scene, scale_factor, rustradar_map::io::offline(), build)
+}
+
+/// [`map_shot`] with tiles from `fetcher` (the renderer's [`MapRenderer::set_tiles`], before the
+/// layers are made): the shot is taken once no layer waits for its tiles.
+pub fn map_shot_with_tiles(
+    gpu: &Gpu,
+    scene: &SceneInput,
+    scale_factor: f64,
+    fetcher: Arc<dyn TileFetcher>,
+    build: impl FnOnce(&Init<'_>) -> Vec<Box<dyn Layer>>,
+) -> (Image, ViewFrame) {
     let mut renderer = MapRenderer::new(gpu, FORMAT);
+    renderer.set_tiles(fetcher, None);
     let layers = build(&renderer.init(gpu));
     for layer in layers {
         renderer.add_layer(layer);

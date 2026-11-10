@@ -37,6 +37,22 @@
 //! | [`markers::SelectionRing`] | 30 `selection-ring` | A8 |
 //!
 //! The terrain-draping hooks ([`Layer::drape`]) are for stage 9.
+//!
+//! Tiles (plan 1.4.8; the renderer owns the runtime, item T1). A layer with tiles keeps a
+//! [`TileSet`] made in `new` with [`Init::tile_set`]: its sources (names of [`crate::io`]), its
+//! selection ([`DeckSelect`] for deck's rule, [`crate::tiles::LodSelect`] for the distance LOD),
+//! its limits and refinement, and its decode function, which runs on the shared worker pool
+//! (bytes → `core::mvt` → `scene::tess` → CPU buffers in tile-local units). Each `prepare` it calls
+//! [`PrepareCx::update_tiles`] once: the set selects for this frame's camera, collects answers,
+//! decodes, and uploads decoded tiles within the frame's [`UploadBudget`], which all layers share,
+//! through the layer's upload function (CPU buffers → GPU buffers, on the main thread). Then for
+//! each tile of [`TileSet::visible`] it pushes the tile's frame ([`PrepareCx::tile_frame`]) and
+//! draws it in `draw`. Its [`Layer::pending`] is [`TileSet::loading`] while it draws (the headless
+//! path renders until no layer is pending). A layer that stops drawing (another basemap) calls
+//! [`TileSet::clear`] or keeps its cache, but reports pending only while it draws.
+//!
+//! Lights: every lit layer reads the scene's one [`LightRig`] (`SceneInput::lights`, aimed at each
+//! scene refresh, G:2723) and hands it to its mesh pipelines with [`PrepareCx::set_lights`].
 
 pub mod aircraft;
 pub mod blocks;
@@ -61,7 +77,10 @@ pub mod vector_map;
 
 use crate::frame::{Bindings, FrameArena, FrameSlot, GLOBALS_GROUP, ViewFrame};
 use crate::gpu::Gpu;
+use crate::jobs::Cancel;
+use crate::pipelines::mesh::{LightRig, MeshPipeline};
 use crate::renderer::SceneInput;
+pub use crate::tiles::{ByteSize, DeckSelect, Select, Source, TileIndex, TileRuntime, TileSet, TileSetOptions, UploadBudget};
 
 /// How a layer stands on 3D terrain (plan 1.4.12, stage 9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,12 +113,28 @@ pub struct Init<'a> {
     pub color_format: wgpu::TextureFormat,
     /// The map pass's sample count (4, or 1 where the adapter cannot).
     pub samples: u32,
+    /// The renderer's tile runtime: the app's fetcher and the worker pool (also for work that is
+    /// not tiles: `cx.tiles.pool`).
+    pub tiles: &'a TileRuntime,
 }
 
 impl Init<'_> {
     /// The map pass's multisample state.
     pub fn multisample(&self) -> wgpu::MultisampleState {
         wgpu::MultisampleState { count: self.samples, ..Default::default() }
+    }
+
+    /// A tile set on the renderer's runtime: tiles from `sources` (a tile's zoom picks the first
+    /// that serves it), chosen by `select`, within `options`, decoded by `decode` on the worker
+    /// pool (`D`: CPU content; `T`: what the layer's upload makes of it). See [`TileSet::new`].
+    pub fn tile_set<D: ByteSize + Send + 'static, T>(
+        &self,
+        sources: Vec<Source>,
+        select: impl Select + 'static,
+        options: TileSetOptions,
+        decode: impl Fn(TileIndex, Vec<u8>, &Cancel) -> Result<Option<D>, String> + Send + Sync + 'static,
+    ) -> TileSet<D, T> {
+        TileSet::new(self.tiles, sources, select, options, decode)
     }
 }
 
@@ -114,6 +149,38 @@ pub struct PrepareCx<'a> {
     pub frames: &'a mut FrameArena,
     /// The local clock, Unix ms.
     pub local_now_ms: f64,
+    /// The renderer's tile runtime (as [`Init::tiles`]).
+    pub tiles: &'a TileRuntime,
+    /// What may still be uploaded this frame, shared by every layer in draw order (plan 1.4.4: 4
+    /// tiles or 8 MB a frame in the window; no limit headless).
+    pub budget: &'a mut UploadBudget,
+}
+
+impl PrepareCx<'_> {
+    /// One frame of `set`'s work ([`TileSet::update`]) for this frame's camera, within the frame's
+    /// upload budget; `upload` turns a decoded tile into what the layer draws, on the main thread.
+    /// Whether the tiles drawn changed.
+    pub fn update_tiles<D: ByteSize + Send + 'static, T>(&mut self, set: &mut TileSet<D, T>, mut upload: impl FnMut(&Gpu, TileIndex, D) -> T) -> bool {
+        let gpu = self.gpu;
+        set.update(&self.view.viewport, self.budget, |tile, decoded| upload(gpu, tile, decoded))
+    }
+
+    /// Pushes the local Mercator frame of `tile` (tile units, `v` south; `z_offset_m` metres up,
+    /// [`ViewFrame::tile`]) for this frame's draws.
+    pub fn tile_frame(&mut self, tile: TileIndex, z_offset_m: f64) -> FrameSlot {
+        self.frames.push(&self.view.tile(tile, z_offset_m))
+    }
+
+    /// The scene's light rig (`SceneInput::lights`).
+    pub fn lights(&self) -> &LightRig {
+        &self.scene.lights
+    }
+
+    /// Writes this frame's lights (the scene's rig, turned for this frame's camera) into
+    /// `pipeline`: every frame, for each mesh pipeline a layer draws with.
+    pub fn set_lights(&self, pipeline: &MeshPipeline) {
+        pipeline.set_lights(&self.gpu.queue, &self.scene.lights, self.view);
+    }
 }
 
 /// What `draw` gets.

@@ -10,7 +10,8 @@
 //!   nobody holds is not worth computing.
 //! - The result comes back over an `std::sync::mpsc` channel ([`Job::poll`] each frame, or
 //!   [`Job::wait`]); after each job the pool calls its [`Wake`], so the app's event loop wakes up
-//!   to collect it.
+//!   to collect it. The wake can be set after the pool is made ([`Pool::set_wake`]: the map's
+//!   renderer makes its pool before the app hands it the event loop's wake).
 //! - The pool has [`default_threads`] workers on the app: `clamp(cores − 2, 2, 6)`, which leaves a
 //!   core to the main thread and one to the tokio runtime.
 //!
@@ -86,7 +87,7 @@ struct Shared {
     work: Condvar,
     /// [`Pool::wait_idle`] waits here.
     idle: Condvar,
-    wake: Option<Wake>,
+    wake: Mutex<Option<Wake>>,
 }
 
 impl Shared {
@@ -117,7 +118,7 @@ impl Pool {
 
     /// A pool of `threads` workers (at least one) that calls `wake` after every job.
     pub fn with_wake(threads: usize, wake: Option<Wake>) -> Self {
-        let shared = Arc::new(Shared { state: Mutex::default(), work: Condvar::new(), idle: Condvar::new(), wake });
+        let shared = Arc::new(Shared { state: Mutex::default(), work: Condvar::new(), idle: Condvar::new(), wake: Mutex::new(wake) });
         let threads = (0..threads.max(1))
             .map(|i| {
                 let shared = Arc::clone(&shared);
@@ -151,6 +152,11 @@ impl Pool {
         drop(state);
         self.shared.work.notify_one();
         Job { result: rx, cancel }
+    }
+
+    /// Calls `wake` (none: nobody) after every job from now on.
+    pub fn set_wake(&self, wake: Option<Wake>) {
+        *self.shared.wake.lock().unwrap_or_else(PoisonError::into_inner) = wake;
     }
 
     /// The number of workers.
@@ -231,7 +237,9 @@ fn worker(shared: &Shared) {
         if !busy {
             shared.idle.notify_all();
         }
-        if let Some(wake) = &shared.wake {
+        // (called outside the lock: a wake may take its time)
+        let wake = shared.wake.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(wake) = wake {
             wake();
         }
     }
@@ -423,6 +431,34 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(woken.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn a_wake_set_later_is_called_after_the_next_jobs() {
+        let pool = Pool::new(1);
+        let mut first = pool.spawn(0.0, |_| 1);
+        assert_eq!(first.wait(), JobPoll::Done(1));
+        pool.wait_idle();
+        let woken = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&woken);
+        pool.set_wake(Some(Arc::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        })));
+        let mut second = pool.spawn(0.0, |_| 2);
+        assert_eq!(second.wait(), JobPoll::Done(2));
+        for _ in 0..500 {
+            if woken.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(woken.load(Ordering::SeqCst), 1, "the job before the wake was set woke nobody");
+        pool.set_wake(None);
+        let mut third = pool.spawn(0.0, |_| 3);
+        assert_eq!(third.wait(), JobPoll::Done(3));
+        pool.wait_idle();
+        std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(woken.load(Ordering::SeqCst), 1);
     }
 
     #[test]

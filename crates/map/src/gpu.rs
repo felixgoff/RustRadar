@@ -1,10 +1,16 @@
 //! Adapter, device and queue, shared by the window and the headless path (moved from the spike's
 //! `crates/app/src/gpu.rs`; plan 1.4.13 for the limits).
 //!
-//! Baseline: WebGL2-class limits raised to the adapter's texture sizes, and no optional feature, so
-//! GLES 3.0 Android devices stay in scope. No compute, no storage buffers.
+//! Baseline: WebGL2-class limits raised to the adapter's texture sizes, and no feature the map
+//! needs, so GLES 3.0 Android devices stay in scope. No compute, no storage buffers. The one
+//! optional extra: the texture compression features the adapter offers (BC, ASTC, ETC2,
+//! [`textures::compression_features`]), so the KTX2 textures go to the GPU as BC7, ASTC 4×4 or
+//! ETC2 where they can ([`textures::Target::for_features`]) instead of four times the memory in
+//! RGBA8. A device without any of them still draws everything.
 
 use std::fmt;
+
+use crate::textures;
 
 /// Depth/stencil format of the map pass. WebGPU guarantees it everywhere, including 4× MSAA, so no
 /// fallback is needed; the stencil is for shadows (plan 1.4.5).
@@ -65,6 +71,8 @@ impl Gpu {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("rustradar"),
+                // only what the adapter has: optional, the baseline needs none
+                required_features: textures::compression_features(adapter.features()),
                 // Stay inside what GLES 3 / WebGL2-class mobile GPUs offer, but keep the adapter's
                 // real texture size for big rasters.
                 required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
@@ -85,6 +93,12 @@ impl Gpu {
     pub fn describe(&self) -> String {
         let info = self.adapter.get_info();
         format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type)
+    }
+
+    /// The format the KTX2 textures go to the GPU in on this device ([`textures::LoadOptions::
+    /// for_device`]): BC7, ASTC 4×4, ETC2 or RGBA8.
+    pub fn texture_target(&self) -> textures::Target {
+        textures::LoadOptions::for_device(&self.device).target
     }
 }
 
@@ -113,6 +127,28 @@ pub(crate) mod testing {
                 eprintln!("skipped: no graphics adapter");
                 None
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::gpu;
+    use crate::textures::{self, Target};
+
+    /// Gap 3 of stage 2: the device has every compression feature its adapter offers, so the
+    /// textures' target is the best one the adapter can sample, not always RGBA8.
+    #[test]
+    fn the_device_asks_for_the_texture_compression_the_adapter_has() {
+        let Some(gpu) = gpu() else { return };
+        let offered = textures::compression_features(gpu.adapter.features());
+        assert_eq!(textures::compression_features(gpu.device.features()), offered);
+        let target = gpu.texture_target();
+        assert_eq!(target, Target::for_features(offered));
+        eprintln!("{}: compression {offered:?}, KTX2 textures as {target:?}", gpu.describe());
+        // (SwiftShader offers BC and ETC2, and ASTC: BC7 goes first)
+        if gpu.adapter.get_info().name.contains("SwiftShader") {
+            assert_eq!(target, Target::Bc7);
         }
     }
 }

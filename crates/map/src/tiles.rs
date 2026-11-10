@@ -50,7 +50,8 @@
 //!   `LodTileset` (it overrides only `_getRequestPriority`): they use spare request slots only.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use rustradar_scene::camera::Viewport;
 use rustradar_scene::lod::{self, AHEAD_PRIORITY, Lod, LodTileset, Selection, keep_coarser_until_in};
@@ -71,21 +72,43 @@ pub const UPLOAD_TILES_PER_FRAME: usize = 4;
 pub const UPLOAD_BYTES_PER_FRAME: usize = 8 << 20;
 
 /// What every tile set fetches and decodes with: the app's [`TileFetcher`] and the worker pool.
+/// Cheap to clone; every clone shares the fetcher and the pool, so [`TileRuntime::set_fetcher`]
+/// reaches every tile set made with any clone.
 #[derive(Clone)]
 pub struct TileRuntime {
-    pub fetcher: Arc<dyn TileFetcher>,
+    fetcher: Arc<RwLock<Arc<dyn TileFetcher>>>,
+    /// Moves on with each [`TileRuntime::set_fetcher`].
+    generation: Arc<AtomicU64>,
     pub pool: Arc<Pool>,
 }
 
 impl TileRuntime {
     pub fn new(fetcher: Arc<dyn TileFetcher>, pool: Arc<Pool>) -> Self {
-        TileRuntime { fetcher, pool }
+        TileRuntime { fetcher: Arc::new(RwLock::new(fetcher)), generation: Arc::new(AtomicU64::new(0)), pool }
     }
 
     /// A runtime whose sources have nothing anywhere (every tile settles empty), with a pool of
     /// `threads` workers: for renderers without tiles.
     pub fn offline(threads: usize) -> Self {
-        Self::new(Arc::new(crate::io::FnFetcher(|_: &str, _: TileIndex| Ok(None))), Arc::new(Pool::new(threads)))
+        Self::new(crate::io::offline(), Arc::new(Pool::new(threads)))
+    }
+
+    /// The fetcher now.
+    pub fn fetcher(&self) -> Arc<dyn TileFetcher> {
+        Arc::clone(&self.fetcher.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Fetches through `fetcher` from now on. Every tile set made with this runtime (or a clone)
+    /// drops what it holds at its next update and starts over: what the old fetcher answered (an
+    /// empty tile, above all) is not kept as the new one's.
+    pub fn set_fetcher(&self, fetcher: Arc<dyn TileFetcher>) {
+        *self.fetcher.write().unwrap_or_else(PoisonError::into_inner) = fetcher;
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// How many times the fetcher was set.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 }
 
@@ -405,6 +428,8 @@ enum Outcome<D> {
 /// makes of it on the main thread (GPU buffers; `D` itself for a layer that draws from the CPU).
 pub struct TileSet<D, T = D> {
     runtime: TileRuntime,
+    /// The runtime's [`TileRuntime::generation`] the cache was filled with.
+    generation: u64,
     sources: Vec<Source>,
     select: Box<dyn Select>,
     decode: Arc<DecodeFn<D>>,
@@ -451,6 +476,7 @@ impl<D: ByteSize + Send + 'static, T> TileSet<D, T> {
     ) -> Self {
         TileSet {
             runtime: runtime.clone(),
+            generation: runtime.generation(),
             sources,
             select: Box::new(select),
             decode: Arc::new(decode),
@@ -473,6 +499,12 @@ impl<D: ByteSize + Send + 'static, T> TileSet<D, T> {
     /// upload within `budget` with `upload`, refine, prune, trim, request. Whether any tile's
     /// visibility changed (deck's `frameNumber` moves on then).
     pub fn update(&mut self, viewport: &Viewport, budget: &mut UploadBudget, mut upload: impl FnMut(TileIndex, D) -> T) -> bool {
+        let generation = self.runtime.generation();
+        if generation != self.generation {
+            // another fetcher: start over
+            self.clear();
+            self.generation = generation;
+        }
         self.clock += 1;
         self.collect();
         if self.viewport.as_ref() != Some(viewport) {
@@ -576,6 +608,14 @@ impl<D: ByteSize + Send + 'static, T> TileSet<D, T> {
     /// the headless path renders until no layer has one.
     pub fn pending(&self) -> bool {
         self.tiles.iter().any(|t| !matches!(t.load, Load::Idle))
+    }
+
+    /// Whether a layer drawing this set should count as still loading ([`crate::layers::Layer::
+    /// pending`]): a tile on its way ([`Self::pending`]), or a selection not yet all settled
+    /// ([`Self::is_loaded`]; a selected tile whose request was cancelled is asked again at the next
+    /// update). A set that was never updated is not loading.
+    pub fn loading(&self) -> bool {
+        self.pending() || (self.viewport.is_some() && !self.is_loaded())
     }
 
     /// Requests holding a slot (fetching or decoding).
@@ -950,7 +990,7 @@ impl<D: ByteSize + Send + 'static, T> TileSet<D, T> {
                 self.settle(i, None, 0, None);
                 continue;
             };
-            let fetch = Fetch::start(&*self.runtime.fetcher, Arc::clone(&source.name), index);
+            let fetch = Fetch::start(&*self.runtime.fetcher(), Arc::clone(&source.name), index);
             self.tiles[i].load = Load::Fetching(fetch);
         }
     }
@@ -1089,7 +1129,7 @@ mod tests {
     fn harness_with(select: impl Select + 'static, options: TileSetOptions) -> Harness {
         let fake = Arc::new(Fake::default());
         let pool = Arc::new(Pool::new(2));
-        let runtime = TileRuntime { fetcher: fake.clone(), pool: Arc::clone(&pool) };
+        let runtime = TileRuntime::new(fake.clone(), Arc::clone(&pool));
         let set = TileSet::new(&runtime, vec![Source::new("test")], select, options, decode);
         // Europe at zoom 4.5: the tiles the tests pick lie around the centre
         let viewport = viewport_for(&view(10.0, 52.0, 4.5), [800.0, 600.0]);
@@ -1380,7 +1420,7 @@ mod tests {
     fn a_tile_no_source_serves_settles_empty_without_a_request() {
         let fake = Arc::new(Fake::default());
         let pool = Arc::new(Pool::new(1));
-        let runtime = TileRuntime { fetcher: fake.clone(), pool: Arc::clone(&pool) };
+        let runtime = TileRuntime::new(fake.clone(), Arc::clone(&pool));
         let chosen = Fixed::default();
         let sources = [Source::at("coarse", [3, 4]), Source::at("fine", [5]), Source::new("never reached")];
         let mut set: TileSet<Payload> = TileSet::new(&runtime, sources[..2].to_vec(), chosen.clone(), TileSetOptions::default(), decode);
@@ -1584,7 +1624,7 @@ mod tests {
     fn decoding_runs_on_the_worker_pool() {
         let fake = Arc::new(Fake::default());
         let pool = Arc::new(Pool::new(2));
-        let runtime = TileRuntime { fetcher: fake.clone(), pool: Arc::clone(&pool) };
+        let runtime = TileRuntime::new(fake.clone(), Arc::clone(&pool));
         let chosen = Fixed::default();
         let threads = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&threads);
@@ -1615,7 +1655,7 @@ mod tests {
     fn a_fetcher_that_answers_at_once_loads_in_two_updates() {
         let pool = Arc::new(Pool::new(1));
         let fetcher = FnFetcher(|source: &str, tile: TileIndex| Ok(Some(format!("{source}/{}", tile.id()).into_bytes())));
-        let runtime = TileRuntime { fetcher: Arc::new(fetcher), pool: Arc::clone(&pool) };
+        let runtime = TileRuntime::new(Arc::new(fetcher), Arc::clone(&pool));
         let mut set: TileSet<Vec<u8>, String> =
             TileSet::new(&runtime, vec![Source::new("files")], DeckSelect(rustradar_scene::tiles::VECTOR_TILES), TileSetOptions::default(), |_, b, _| Ok(Some(b)));
         let viewport = viewport_for(&ViewState::INITIAL, [1100.0, 720.0]);
@@ -1634,6 +1674,56 @@ mod tests {
         let drawn: Vec<&str> = set.visible().map(|(_, s)| s.as_str()).collect();
         assert_eq!(drawn.len(), set.selected().len());
         assert!(drawn.iter().all(|s| s.starts_with("files/")));
+    }
+
+    #[test]
+    fn a_new_fetcher_makes_every_tile_set_start_over() {
+        let pool = Arc::new(Pool::new(1));
+        let runtime = TileRuntime::new(crate::io::offline(), Arc::clone(&pool));
+        // (made with a clone: the swap reaches it all the same)
+        let mut set: TileSet<Vec<u8>, String> =
+            TileSet::new(&runtime.clone(), vec![Source::new("files")], DeckSelect(rustradar_scene::tiles::VECTOR_TILES), TileSetOptions::default(), |_, b, _| Ok(Some(b)));
+        let viewport = viewport_for(&ViewState::INITIAL, [1100.0, 720.0]);
+        let upload = |_, bytes: Vec<u8>| String::from_utf8(bytes).unwrap();
+        let run = |set: &mut TileSet<Vec<u8>, String>| {
+            for _ in 0..20 {
+                set.update(&viewport, &mut UploadBudget::unlimited(), upload);
+                if !set.loading() {
+                    return;
+                }
+                pool.wait_idle();
+            }
+            panic!("still loading");
+        };
+        run(&mut set);
+        assert!(set.selected().iter().all(|&t| set.state(t) == Some(TileState::Empty)), "offline: nothing anywhere");
+        let generation = runtime.generation();
+        runtime.set_fetcher(Arc::new(FnFetcher(|source: &str, tile: TileIndex| Ok(Some(format!("{source}/{}", tile.id()).into_bytes())))));
+        assert_eq!(runtime.generation(), generation + 1);
+        run(&mut set);
+        assert!(set.selected().iter().all(|&t| set.state(t) == Some(TileState::Loaded)), "the empty tiles were asked again");
+        assert_eq!(set.visible().count(), set.selected().len());
+        assert!(set.visible().all(|(t, s)| *s == format!("files/{}", t.id())));
+    }
+
+    #[test]
+    fn a_set_is_loading_until_its_selection_has_settled() {
+        let mut h = harness(TileSetOptions::default());
+        h.choose(&row(3));
+        assert!(!h.set.loading(), "never updated: not loading");
+        h.update();
+        assert!(h.set.loading());
+        h.load_all();
+        assert!(!h.set.loading() && h.set.is_loaded());
+        // a tile that fails has settled too
+        h.choose(&row(5));
+        h.update();
+        assert!(h.set.loading());
+        for tile in h.fake.outstanding() {
+            h.fake.answer(tile, Err(FetchError::Failed("down".into())));
+        }
+        h.settle();
+        assert!(!h.set.loading());
     }
 
     // --- loading ahead -------------------------------------------------------------------------------

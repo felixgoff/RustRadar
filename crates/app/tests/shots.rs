@@ -243,63 +243,164 @@ fn limb(globe: &GlobeViewport, angle: f64, ratio: f64) -> f64 {
     (inside + outside) / 2.0
 }
 
-/// Checks a disc of `inside` on `outside` round the image's centre against the limb of the
-/// sphere of `ratio` × deck's globe: its edge within 1.5 px in every sector on the image (E5's
-/// acceptance), along four rays too, the inside and the corners all one colour. Returns the
-/// mean measured edge, device pixels.
+/// The earth sphere's radius over deck's surface sphere.
+const EARTH_RATIO: f64 = earth::EARTH_RADIUS_M / GLOBE_EARTH_RADIUS_M;
+/// How far (levels, each channel) the GPU's lit earth may be from [`earth::lit_color`] (the
+/// earth layer's own `LIT_TOLERANCE`, measured by T2 on SwiftShader).
+const LIT_TOLERANCE: f64 = 2.5;
+
+/// The E5 shots' options: [`options`] with an empty `--fixture` folder, so no tile is drawn and
+/// the globe is E5's earth and land alone (the dark map's sea, B2's, has the ink's colour; the
+/// vector map is checked by its own shots in `map::layers::vector_map`).
+fn globe_options(view: ViewState, basemap: Basemap, size: [u32; 2], scale: f64) -> Options {
+    let empty = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e18-no-tiles");
+    std::fs::create_dir_all(&empty).expect("an empty fixture folder");
+    Options { fixture: Some(empty), ..options(view, basemap, size, scale) }
+}
+
+/// What a tile-less shot of `frame` (CSS pixels; `scale` device pixels each) shows on `basemap` at
+/// the device pixel centre `xy`, with how many levels it may be off: on the dark map the land
+/// rectangle, exactly `(50,50,50)`, where the pixel's ray meets the surface within ±85.06°; past
+/// that (the polar caps), and on satellite everywhere, the earth sphere lit as deck lights it
+/// ([`earth::lit_color`] with the unaimed rig, which is the scene's on the globe; T2). `None` off
+/// the earth, within 1.5 px of the land's edge, and within 3 px of the earth sphere's own limb,
+/// where on SwiftShader single MSAA samples of its edge-on facets win the depth test against the
+/// land (T2's trap; the unlit earth did the same, unseen).
+fn globe_colour(frame: &ViewFrame, basemap: Basemap, scale: f64, xy: [f64; 2]) -> Option<([f64; 3], f64)> {
+    let globe = frame.viewport.globe()?;
+    let css = [xy[0] / scale, xy[1] / scale];
+    let on_earth = |p: [f64; 2]| globe.ray_distance_to_globe_center_ratio(p) < EARTH_RATIO;
+    let (dx, dy) = (css[0] - globe.width / 2.0, css[1] - globe.height / 2.0);
+    let out = dx.hypot(dy).max(1e-9);
+    let (ox, oy) = (3.0 * dx / out, 3.0 * dy / out);
+    if on_earth([css[0] - ox, css[1] - oy]) != on_earth([css[0] + ox, css[1] + oy]) {
+        return None;
+    }
+    let lit = || earth::lit_color(frame, &mesh::LightRig::new(), basemap, css).map(|c| (c.map(|v| v * 255.0), LIT_TOLERANCE));
+    if basemap != Basemap::Dark {
+        return lit();
+    }
+    if globe.ray_distance_to_globe_center_ratio(css) >= 1.0 {
+        return None;
+    }
+    let edge = earth::LAND_POLYGON[2][1];
+    let past = |p: [f64; 2]| globe.unproject(p, 0.0)[1].abs() > edge;
+    let here = past(css);
+    let around = [[-1.5, 0.0], [1.5, 0.0], [0.0, -1.5], [0.0, 1.5]];
+    if !around.iter().all(|[ax, ay]| past([css[0] + ax, css[1] + ay]) == here) {
+        return None;
+    }
+    if here { lit() } else { Some(([f64::from(LAND[0]), f64::from(LAND[1]), f64::from(LAND[2])], 0.0)) }
+}
+
+/// The largest channel difference between `p` and `colour`.
+fn off_by(p: Rgba, colour: [f64; 3]) -> f64 {
+    (0..3).map(|c| (f64::from(p[c]) - colour[c]).abs()).fold(0.0, f64::max)
+}
+
+/// Checks the disc on ink round the image's centre against the limb of the sphere of `ratio` ×
+/// deck's globe in a tile-less shot of `frame` on `basemap` (at `scale`): its edge within 1.5 px
+/// in every sector on the image (E5's acceptance), the colour of a covered pixel at the limb
+/// taken as [`globe_colour`] gives it just inside (the land on the dark map; the lit sphere on
+/// satellite); along four rays too where the disc's rim is one colour (dark); every pixel of the
+/// disc's middle what [`globe_colour`] says (the land exactly, the lit caps within their
+/// tolerance); the corners ink. Returns the mean measured edge, device pixels.
 #[track_caller]
-fn assert_disc_at_the_limb(image: &Image, globe: &GlobeViewport, scale: f64, ratio: f64, inside: Rgba, outside: Rgba, what: &str) -> f64 {
+fn assert_disc_at_the_limb(image: &Image, frame: &ViewFrame, scale: f64, ratio: f64, basemap: Basemap, what: &str) -> f64 {
+    let globe = frame.viewport.globe().expect("the globe");
     let centre = Rect::whole(image).centre();
     let near = limb(globe, 0.0, ratio) * scale;
     let sectors = 72;
+    // a covered pixel's colour at the limb, per sector: the expected colour 4 CSS px inside it
+    let rim = |angle: f64| -> Rgba {
+        if basemap == Basemap::Dark {
+            return LAND;
+        }
+        let r = (limb(globe, angle, ratio) - 4.0) * scale;
+        let (colour, _) = globe_colour(frame, basemap, scale, [centre[0] + r * angle.cos(), centre[1] + r * angle.sin()]).expect("the lit earth inside its limb");
+        byte(colour)
+    };
+    let mut radii: std::collections::HashMap<Rgba, Vec<Option<f64>>> = std::collections::HashMap::new();
     let mut edges = Vec::new();
-    for (s, edge) in disc_radii(image, centre, near, sectors, inside, outside).into_iter().enumerate() {
-        let Some(edge) = edge else { continue };
+    for s in 0..sectors {
         let angle = (s as f64 + 0.5) * TAU / sectors as f64;
+        let inside = rim(angle);
+        let Some(edge) = radii.entry(inside).or_insert_with(|| disc_radii(image, centre, near, sectors, inside, INK))[s] else { continue };
         let expected = limb(globe, angle, ratio) * scale;
         assert!((edge - expected).abs() <= 1.5, "{what}: the edge at {:.1}° is at {edge:.2} px, E1's limb at {expected:.2} px", angle.to_degrees());
         edges.push(edge);
     }
     assert!(edges.len() >= sectors / 3, "{what}: only {} sectors on the picture", edges.len());
-    for angle in [0.3, 1.9, 3.5, 5.1] {
-        let expected = limb(globe, angle, ratio) * scale;
-        if let Some(edge) = disc_radius(image, centre, angle, inside, outside) {
-            assert!((edge - expected).abs() <= 1.5, "{what}: along {angle} the edge is at {edge:.2} px, the limb at {expected:.2} px");
+    if basemap == Basemap::Dark {
+        for angle in [0.3, 1.9, 3.5, 5.1] {
+            let expected = limb(globe, angle, ratio) * scale;
+            if let Some(edge) = disc_radius(image, centre, angle, LAND, INK) {
+                assert!((edge - expected).abs() <= 1.5, "{what}: along {angle} the edge is at {edge:.2} px, the limb at {expected:.2} px");
+            }
         }
     }
-    assert_eq!(coverage(image, Rect::around(image, centre, 0.6 * near), inside, 0), 1.0, "{what}: the disc's middle");
+    let middle = Rect::around(image, centre, 0.6 * near);
+    let (mut checked, mut wrong, mut worst) = (0usize, 0usize, 0.0f64);
+    for (x, y) in middle.pixels() {
+        let Some((colour, tolerance)) = globe_colour(frame, basemap, scale, [f64::from(x) + 0.5, f64::from(y) + 0.5]) else { continue };
+        let off = off_by(pixel(image, x, y), colour);
+        worst = worst.max(off);
+        checked += 1;
+        if off > tolerance {
+            if wrong < 5 {
+                eprintln!("{what}: ({x}, {y}) is {:?}, expected {colour:.1?} ± {tolerance}", pixel(image, x, y));
+            }
+            wrong += 1;
+        }
+    }
+    eprintln!("{what}: {checked} pixels of the disc's middle checked, worst {worst:.2} levels off");
+    assert!(checked * 10 >= middle.pixels().count() * 9, "{what}: only {checked} pixels of the disc's middle checked");
+    assert_eq!(wrong, 0, "{what}: {wrong} pixels of the disc's middle are not what they should be");
     for corner in [Rect::new(0, 0, 8, 8), Rect::new(image.width - 8, image.height - 8, 8, 8)] {
-        assert_eq!(coverage(image, corner, outside, 0), 1.0, "{what}: the corner {corner:?}");
+        assert_eq!(coverage(image, corner, INK, 0), 1.0, "{what}: the corner {corner:?}");
     }
     edges.iter().sum::<f64>() / edges.len() as f64
 }
 
-/// Item E5's acceptance, shot V1 through `--screenshot`'s path (the backend started): on the dark
-/// map a disc of `(50,50,50)` on `(30,30,30)` whose edge is E1's projection of the globe's limb
-/// within 1.5 px all round, at the shot size and scale 1 and on a smaller canvas at scale 2.
+/// Item E5's acceptance, shot V1 through `--screenshot`'s path (the backend started, no tiles):
+/// on the dark map a disc of `(50,50,50)` on `(30,30,30)` whose edge is E1's projection of the
+/// globe's limb within 1.5 px all round, at the shot size and scale 1 and on a smaller canvas at
+/// scale 2; past ±85.06° (the cap above the centre) the lit earth sphere (T2).
 #[test]
 fn v1_is_a_disc_of_land_on_ink_at_the_limb() {
     let Some(gpu) = gpu() else { return };
     for (size, scale) in [(SHOT_SIZE, 1.0), ([640, 400], 2.0)] {
-        let image = app_shot(&gpu, &options(V1.view(), Basemap::Dark, size, scale));
+        let image = app_shot(&gpu, &globe_options(V1.view(), Basemap::Dark, size, scale));
         save(&image, &format!("e18-v1-dark-{}x{}@{scale}.png", size[0], size[1]));
-        let globe = GlobeViewport::new(&V1.view(), f64::from(size[0]), f64::from(size[1]));
-        let edge = assert_disc_at_the_limb(&image, &globe, scale, 1.0, LAND, INK, &format!("V1 {size:?} at {scale}"));
-        eprintln!("V1 {size:?} at {scale}: mean edge {edge:.2} px, limb {:.2} px", limb(&globe, 0.0, 1.0) * scale);
+        let frame = ViewFrame::new(&V1.view(), [f64::from(size[0]), f64::from(size[1])], scale, 0.0);
+        let edge = assert_disc_at_the_limb(&image, &frame, scale, 1.0, Basemap::Dark, &format!("V1 {size:?} at {scale}"));
+        let globe = frame.viewport.globe().expect("the globe");
+        eprintln!("V1 {size:?} at {scale}: mean edge {edge:.2} px, limb {:.2} px", limb(globe, 0.0, 1.0) * scale);
+        // the cap past 85.06° N is above the centre, the lit earth sphere, not land (on the shot
+        // size's canvas; the smaller one cuts it off)
+        let [x, y, _] = frame.viewport.project([10.0, 88.0, 0.0]);
+        if size == SHOT_SIZE {
+            assert!(y > 0.0, "88° N is on the picture at {x:.1}, {y:.1}");
+            let (x, y) = ((x * scale) as u32, (y * scale) as u32);
+            let (lit, tolerance) = globe_colour(&frame, Basemap::Dark, scale, [f64::from(x) + 0.5, f64::from(y) + 0.5]).expect("the cap");
+            let p = pixel(&image, x, y);
+            assert!(tolerance > 0.0 && off_by(p, lit) <= tolerance && p != LAND, "the cap is {p:?}, lit {lit:.1?}");
+        }
     }
 }
 
-/// On satellite (no imagery yet) the disc is the earth sphere's own colour, at the limb of the
-/// 6.3e6 m sphere, 1.1 % inside deck's surface; between the two limbs, space.
+/// On satellite (no imagery yet) the disc is the earth sphere, lit as deck lights it (T2), at the
+/// limb of the 6.3e6 m sphere, 1.1 % inside deck's surface; between the two limbs, space.
 #[test]
 fn v1_on_satellite_is_the_earth_sphere_below_the_surface() {
     let Some(gpu) = gpu() else { return };
-    let image = app_shot(&gpu, &options(V1.view(), Basemap::Satellite, SHOT_SIZE, 1.0));
+    let image = app_shot(&gpu, &globe_options(V1.view(), Basemap::Satellite, SHOT_SIZE, 1.0));
     save(&image, "e18-v1-satellite.png");
-    let globe = GlobeViewport::new(&V1.view(), 1100.0, 720.0);
-    let ratio = earth::EARTH_RADIUS_M / GLOBE_EARTH_RADIUS_M;
-    assert_disc_at_the_limb(&image, &globe, 1.0, ratio, SATELLITE_EARTH, INK, "V1 satellite");
-    let (sphere, surface) = (limb(&globe, 0.0, ratio), limb(&globe, 0.0, 1.0));
+    let frame = ViewFrame::new(&V1.view(), [1100.0, 720.0], 1.0, 0.0);
+    let globe = frame.viewport.globe().expect("the globe");
+    let ratio = EARTH_RATIO;
+    assert_disc_at_the_limb(&image, &frame, 1.0, ratio, Basemap::Satellite, "V1 satellite");
+    let (sphere, surface) = (limb(globe, 0.0, ratio), limb(globe, 0.0, 1.0));
     assert!(surface - sphere > 3.0, "{sphere} {surface}");
     assert_color(&image, (550.0 + (sphere + surface) / 2.0) as u32, 360, INK, 0);
 }
@@ -317,10 +418,11 @@ fn latitude_60_shows_the_globe_twice_as_large_as_the_equator() {
     let mut disc_px = Vec::new();
     for latitude in [0.0, 60.0] {
         let v = ViewState { latitude, ..V1.view() };
-        let image = app_shot(&gpu, &options(v, Basemap::Dark, SHOT_SIZE, 1.0));
+        let image = app_shot(&gpu, &globe_options(v, Basemap::Dark, SHOT_SIZE, 1.0));
         save(&image, &format!("e18-latitude-{latitude}.png"));
-        let globe = GlobeViewport::new(&v, 1100.0, 720.0);
-        let edge = assert_disc_at_the_limb(&image, &globe, 1.0, 1.0, LAND, INK, &format!("latitude {latitude}"));
+        let frame = ViewFrame::new(&v, [1100.0, 720.0], 1.0, 0.0);
+        let globe = frame.viewport.globe().expect("the globe");
+        let edge = assert_disc_at_the_limb(&image, &frame, 1.0, 1.0, Basemap::Dark, &format!("latitude {latitude}"));
         let height = 720.0;
         let t = edge / (1.5 * height);
         let radius = 1.5 * t * (t + (t * t + 1.0).sqrt()) * height;
@@ -334,34 +436,38 @@ fn latitude_60_shows_the_globe_twice_as_large_as_the_equator() {
     assert!(disc_px[1] / disc_px[0] > 1.6, "the disc grew {} times", disc_px[1] / disc_px[0]);
 }
 
-/// Every named view through `--screenshot`'s path on the dark map (today's map has nothing else on
-/// it yet): the flat views are land from edge to edge; on the globe views every pixel whose ray
-/// hits the globe well inside its limb is land and every one well outside is space, as E1's
-/// camera says (sampled every 10 px); V8 shows no seam where the land meets itself at the
-/// antimeridian.
+/// Every named view through `--screenshot`'s path on the dark map with no tiles (E5's earth and
+/// land alone): the flat views are land from edge to edge; on the globe views every pixel whose
+/// ray hits the globe well inside its limb is land (past ±85.06° the lit earth sphere, T2) and
+/// every one well outside is space, as E1's camera says (sampled every 10 px); V8 shows no seam
+/// where the land meets itself at the antimeridian.
 #[test]
 fn every_named_view_shows_land_where_e1_puts_the_globe() {
     let Some(gpu) = gpu() else { return };
     for named in VIEWS {
-        let image = app_shot(&gpu, &options(named.view(), Basemap::Dark, SHOT_SIZE, 1.0));
+        let image = app_shot(&gpu, &globe_options(named.view(), Basemap::Dark, SHOT_SIZE, 1.0));
         save(&image, &format!("e18-{}-dark.png", named.name.to_lowercase()));
         if named.is_flat() {
             assert_eq!(coverage(&image, Rect::whole(&image), LAND, 0), 1.0, "{} is land everywhere", named.name);
             continue;
         }
-        let globe = GlobeViewport::new(&named.view(), 1100.0, 720.0);
-        let (mut land, mut space) = (0, 0);
+        let frame = ViewFrame::new(&named.view(), [1100.0, 720.0], 1.0, 0.0);
+        let globe = frame.viewport.globe().expect("the globe");
+        let (mut land, mut cap, mut space) = (0, 0, 0);
         for (x, y) in Rect::whole(&image).pixels().filter(|(x, y)| x % 10 == 5 && y % 10 == 5) {
-            let ratio = globe.ray_distance_to_globe_center_ratio([f64::from(x) + 0.5, f64::from(y) + 0.5]);
+            let xy = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+            let ratio = globe.ray_distance_to_globe_center_ratio(xy);
             if ratio < 0.985 {
-                assert_eq!(pixel(&image, x, y), LAND, "{}: ({x}, {y}) is on the globe", named.name);
-                land += 1;
+                let Some((colour, tolerance)) = globe_colour(&frame, Basemap::Dark, 1.0, xy) else { continue };
+                let p = pixel(&image, x, y);
+                assert!(off_by(p, colour) <= tolerance, "{}: ({x}, {y}) on the globe is {p:?}, expected {colour:.1?} ± {tolerance}", named.name);
+                if tolerance == 0.0 { land += 1 } else { cap += 1 }
             } else if ratio > 1.01 {
                 assert_eq!(pixel(&image, x, y), INK, "{}: ({x}, {y}) is in space", named.name);
                 space += 1;
             }
         }
-        eprintln!("{}: {land} samples of land, {space} of space", named.name);
+        eprintln!("{}: {land} samples of land, {cap} of the lit polar caps, {space} of space", named.name);
         assert!(land > 100, "{}", named.name);
         if named.name == "V8" {
             let mut checked = 0;

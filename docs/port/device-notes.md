@@ -20,8 +20,12 @@ Plan references: section 5, risks K3 (surface lifecycle) and K4 (text input, saf
 
 ## 2. Before the checks: wiring the app loop
 
-E19 does not own the app loop (`app.rs`, `lib.rs` and `platform/mod.rs` belong to E17). The glue is written and
-tested, but **nothing calls it yet**. Until the six calls below are in, an APK or simulator app does the following:
+**Done by the stage-2 review** (the commit after `0e02cf2`): the six calls below are now in `app.rs`, `lib.rs` and
+`platform/mod.rs` (`dirs()` has one definition per platform instead of the `return`s shown), checked with clippy
+for both phone targets through stand-in C compilers; the "Phone shells" CI run of that commit is the first real
+build with them. What remains for the text fields is the `report` call at the end of this section (U8, U9, U17).
+
+Before that commit (E19 did not own the app loop), an APK or simulator app did the following:
 
 - **Android:** it opens the globe without the backend, because it has no folders. Nothing is logged to logcat. There is no safe area and no typing. Back leaves the app at once, because `nativeBack` answers that the app does not take it.
 - **iOS:** it opens the globe with the backend (`Dirs::desktop()` already resolves inside the container). There is no log.
@@ -91,12 +95,12 @@ or by hand with "Run workflow". It has two artifacts:
 rustup target add aarch64-linux-android
 platform/android/build-rust.sh            # debug, arm64-v8a
 cd platform/android && ./gradlew assembleDebug && adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb logcat -s rustradar                   # the app's log (after the wiring of section 2)
+adb logcat -s rustradar                   # the app's log
 ```
 
 ## 4. Checklist K3: surface lifecycle
 
-Run this on one Android phone and one iPhone after the wiring of section 2. Leave `adb logcat -s rustradar` running on Android, or the Xcode console on iOS.
+Run this on one Android phone and one iPhone. Leave `adb logcat -s rustradar` running on Android, or the Xcode console on iOS.
 
 Expected throughout:
 - no crash;

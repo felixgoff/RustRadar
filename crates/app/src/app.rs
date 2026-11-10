@@ -257,6 +257,10 @@ pub fn run_with(mut builder: EventLoopBuilder<UserEvent>, options: Options) -> R
     let latch = WakeLatch::default();
     let proxy = event_loop.create_proxy();
     let wake = latch.wake_with(move || proxy.send_event(UserEvent::Wake).is_ok());
+    // the activity for the phone glue (logcat, folders, insets, keyboard, back), before the
+    // folders are read
+    #[cfg(target_os = "android")]
+    platform::android::init(winit::platform::android::EventLoopExtAndroid::android_app(&event_loop), wake.clone());
     let (events, events_rx) = mpsc::channel();
     let backend = start_backend(platform::dirs(), rt.handle(), events, wake.clone());
     let requests = Requests::new(rt.handle().clone(), wake);
@@ -353,9 +357,21 @@ impl View {
             }
         };
         let target = frame.texture.create_view(&Default::default());
-        let input = self.egui_input.take_egui_input(&self.window);
+        #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
+        let mut input = self.egui_input.take_egui_input(&self.window);
+        // Android: the safe area and the soft keyboard's edits; whether back was pressed
+        #[cfg(target_os = "android")]
+        let back = crate::platform::android::before_frame(&self.engine.egui, &mut input, self.window.scale_factor() as f32);
         let size = [self.config.width, self.config.height];
         let (platform, next) = self.engine.frame(&self.gpu, &target, size, self.window.scale_factor(), input, local_ms);
+        #[cfg(target_os = "android")]
+        {
+            // the focused text field mirrored to the keyboard; back closes the top card, else leaves
+            crate::platform::android::after_frame(&self.engine.egui, &platform);
+            if back && !self.engine.state.apply(Action::CloseTop, local_ms) {
+                crate::platform::android::leave();
+            }
+        }
         self.egui_input.handle_platform_output(&self.window, platform);
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);

@@ -14,11 +14,23 @@ pub const PHONE: bool = cfg!(any(target_os = "android", target_os = "ios"));
 ///
 /// On the desktop: Tauri's own folders (`<cache>/com.felix.rustradar`, `<config>/com.felix.rustradar`,
 /// downloads or home), so `keys.json` and every cache carry over from the Tauri build. On the phones
-/// the same rule is used until E19 takes the folders from the platform: on iOS it resolves inside the
-/// app's sandbox; on Android the system names no such folders and this is `None`, so the app runs the
-/// map without the backend.
+/// the Tauri build's folders there (`android::dirs` from the activity, after `android::init`;
+/// [`ios::dirs`] inside the app's sandbox), without downloads.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn dirs() -> Option<Dirs> {
     Dirs::desktop()
+}
+
+/// The folders the backend reads and writes: the Tauri build's on Android (`None` before `init`).
+#[cfg(target_os = "android")]
+pub fn dirs() -> Option<Dirs> {
+    android::dirs()
+}
+
+/// The folders the backend reads and writes: the Tauri build's inside the app's container.
+#[cfg(target_os = "ios")]
+pub fn dirs() -> Option<Dirs> {
+    ios::dirs()
 }
 
 #[cfg(test)]

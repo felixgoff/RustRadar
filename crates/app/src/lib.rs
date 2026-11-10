@@ -197,6 +197,7 @@ fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
 #[cfg(target_os = "ios")]
 #[unsafe(no_mangle)]
 pub extern "C" fn rustradar_ios_main() {
+    platform::ios::init();
     if let Err(e) = app::run(Options::default()) {
         log::error!("rustradar: {e}");
     }

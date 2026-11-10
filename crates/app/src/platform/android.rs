@@ -18,10 +18,10 @@
 //! go to the background).
 //!
 //! The frame loop's part (on Android only):
-//! - `init(event_loop.android_app(), wake)` before the backend starts, then [`dirs`] for it;
+//! - `init(event_loop.android_app(), wake)` before the backend starts, then `dirs` for it;
 //! - each frame, after egui-winit's `take_egui_input`: `before_frame(ctx, &mut raw_input,
 //!   pixels_per_point)`. It sets the safe area, turns the keyboard's edits into egui events and
-//!   returns whether back was pressed: then `Action::CloseTop`, and [`leave`] when that closed
+//!   returns whether back was pressed: then `Action::CloseTop`, and `leave` when that closed
 //!   nothing (doc 06 §3.11; the web build's history entry did the same);
 //! - after the egui pass, before egui-winit's `handle_platform_output`: `after_frame(ctx,
 //!   &platform_output)`, which mirrors the focused text field to the keyboard;

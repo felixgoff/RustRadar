@@ -1,8 +1,237 @@
 //! `cargo xtask vendor-fonts`: decode the `.woff2` subsets with `wuff` and write TTFs plus the
 //! OFL licence to `assets/fonts` (S1.30).
 //!
-//! Scaffold stub (S1.1): the command exists and fails until S1.30 fills it.
+//! The sources are the files the web build loads (`import "@fontsource-variable/overpass"` and
+//! `"…/overpass-mono"` in `src/routes/+layout.svelte`): the upright `wght` variable fonts of
+//! `node_modules/@fontsource-variable/{overpass,overpass-mono}/files`, one per subset. The
+//! italic files are not vendored, the UI never sets italic. Run `bun install --frozen-lockfile`
+//! first if `node_modules` is missing. woff2 is a lossless container, so the TTFs keep the
+//! `fvar`/`gvar` tables and stay variable: the app sets the `wght` coordinate per egui family
+//! (doc 00 §1.5).
+//!
+//! Output, all generated (re-running gives identical bytes):
+//! - `<family>-<subset>.ttf` for the families of [`FAMILIES`] and the subsets of [`SUBSETS`];
+//! - `OFL.txt`, the SIL Open Font License 1.1 of both packages;
+//! - `README.md`, where the files come from.
 
-pub fn run(_args: &[String]) -> Result<(), String> {
-    Err("vendor-fonts is not written yet (plan item S1.30)".into())
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// The font packages under `node_modules/@fontsource-variable`; each file stem starts with the
+/// package name.
+pub const FAMILIES: [&str; 2] = ["overpass", "overpass-mono"];
+
+/// The subsets, in the fallback order the app registers them in (doc 00 §1.5).
+pub const SUBSETS: [&str; 5] = ["latin", "latin-ext", "cyrillic", "cyrillic-ext", "vietnamese"];
+
+/// The repository root: `crates/xtask` is two levels below it.
+fn repo_root() -> PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest.ancestors().nth(2).unwrap_or(manifest).to_path_buf()
+}
+
+fn source_dir() -> PathBuf {
+    repo_root().join("node_modules/@fontsource-variable")
+}
+
+fn out_dir() -> PathBuf {
+    repo_root().join("assets/fonts")
+}
+
+/// The vendored file name of one subset of one family, e.g. `overpass-mono-latin-ext.ttf`.
+pub fn ttf_name(family: &str, subset: &str) -> String {
+    format!("{family}-{subset}.ttf")
+}
+
+pub fn run(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err(format!("vendor-fonts takes no arguments, got {args:?}"));
+    }
+    let out = out_dir();
+    let files = vendored_files(&source_dir())?;
+    fs::create_dir_all(&out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
+    for (name, bytes) in &files {
+        let path = out.join(name);
+        fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        println!("wrote {} ({} bytes)", path.display(), bytes.len());
+    }
+    Ok(())
+}
+
+fn read(path: &Path) -> Result<Vec<u8>, String> {
+    fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+fn read_text(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+/// The package's `version` from its `package.json`.
+fn package_version(package: &Path) -> Result<String, String> {
+    let path = package.join("package.json");
+    let json: serde_json::Value = serde_json::from_str(&read_text(&path)?)
+        .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    json["version"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{} has no version", path.display()))
+}
+
+/// Decodes one subset's `.woff2` file to TTF bytes.
+fn decode(source: &Path, family: &str, subset: &str) -> Result<Vec<u8>, String> {
+    let file = format!("{family}-{subset}-wght-normal.woff2");
+    let path = source.join(family).join("files").join(file);
+    let woff2 = read(&path)?;
+    wuff::decompress_woff2(&woff2).map_err(|e| format!("cannot decode {}: {e}", path.display()))
+}
+
+/// The licence both packages ship. They differ only in the copyright line: Overpass's also names
+/// its italic file, which is not vendored, so Overpass Mono's text (the same copyright holders,
+/// without the italic file) covers all ten TTFs. Fails if anything else differs.
+fn licence(source: &Path) -> Result<String, String> {
+    let overpass = read_text(&source.join("overpass/LICENSE"))?;
+    let mono = read_text(&source.join("overpass-mono/LICENSE"))?;
+    let body = |text: &str| text.split_once('\n').map(|(_, rest)| rest.to_owned());
+    if body(&overpass).is_none() || body(&overpass) != body(&mono) {
+        return Err("the font packages' LICENSE files differ beyond the copyright line".into());
+    }
+    if !mono.contains("SIL Open Font License, Version 1.1") {
+        return Err("the font licence is no longer the SIL Open Font License 1.1".into());
+    }
+    Ok(mono)
+}
+
+fn readme(source: &Path) -> Result<String, String> {
+    let mut packages = Vec::new();
+    for family in FAMILIES {
+        let version = package_version(&source.join(family))?;
+        packages.push(format!("`@fontsource-variable/{family}` {version}"));
+    }
+    Ok(format!(
+        "# Fonts\n\
+         \n\
+         Generated by `cargo xtask vendor-fonts` (`crates/xtask/src/fonts.rs`): do not edit.\n\
+         \n\
+         The TTFs are the `files/*-wght-normal.woff2` files of {}, decoded with `wuff`.\n\
+         They are variable fonts with a `wght` axis: Overpass 100 to 900 (default 400),\n\
+         Overpass Mono 300 to 700 (default 300).\n\
+         Subsets, in fallback order: {}.\n\
+         \n\
+         Licensed under the SIL Open Font License 1.1, see `OFL.txt`.\n",
+        packages.join(" and "),
+        SUBSETS.join(", "),
+    ))
+}
+
+/// Every file of `assets/fonts` as (name, bytes), built from the packages under `source`.
+fn vendored_files(source: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    if !source.is_dir() {
+        return Err(format!(
+            "{} is missing: run `bun install --frozen-lockfile` first",
+            source.display()
+        ));
+    }
+    let mut files = Vec::new();
+    for family in FAMILIES {
+        for subset in SUBSETS {
+            files.push((ttf_name(family, subset), decode(source, family, subset)?));
+        }
+    }
+    files.push(("OFL.txt".to_owned(), licence(source)?.into_bytes()));
+    files.push(("README.md".to_owned(), readme(source)?.into_bytes()));
+    Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use epaint::text::{FontData, Tag};
+    use skrifa::MetadataProvider as _;
+
+    fn vendored(name: &str) -> Vec<u8> {
+        let path = out_dir().join(name);
+        fs::read(&path)
+            .unwrap_or_else(|e| panic!("{}: {e} (run `cargo xtask vendor-fonts`)", path.display()))
+    }
+
+    #[test]
+    fn each_ttf_has_the_wght_axis() {
+        for family in FAMILIES {
+            // (min, default, max). Mono's default is its minimum, 300, not the 400 the UI uses,
+            // so the app always sets the coordinate (doc 00 §1.5).
+            let expected =
+                if family == "overpass" { (100.0, 400.0, 900.0) } else { (300.0, 300.0, 700.0) };
+            for subset in SUBSETS {
+                let name = ttf_name(family, subset);
+                let axes = FontData::from_owned(vendored(&name)).variation_axes();
+                let wght = axes
+                    .iter()
+                    .find(|axis| axis.tag == Tag::new(b"wght"))
+                    .unwrap_or_else(|| panic!("{name} has no wght axis: {axes:?}"));
+                assert_eq!((wght.range.min, wght.default, wght.range.max), expected, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn each_subset_maps_its_script() {
+        // One character per subset, from the subset's CSS `unicode-range`.
+        let samples = [
+            ("latin", ['A', '0', '\u{b7}']),
+            ("latin-ext", ['\u{141}', '\u{17e}', '\u{1e9e}']),
+            ("cyrillic", ['\u{416}', '\u{44f}', '\u{2116}']),
+            ("cyrillic-ext", ['\u{462}', '\u{4e8}', '\u{20b4}']),
+            ("vietnamese", ['\u{1ea1}', '\u{1ef9}', '\u{20ab}']),
+        ];
+        assert_eq!(samples.map(|(subset, _)| subset), SUBSETS);
+        for family in FAMILIES {
+            for (subset, chars) in samples {
+                let name = ttf_name(family, subset);
+                let bytes = vendored(&name);
+                let font = skrifa::FontRef::new(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let charmap = font.charmap();
+                for c in chars {
+                    assert!(charmap.map(c).is_some(), "{name} does not map U+{:04X}", u32::from(c));
+                }
+            }
+        }
+    }
+
+    /// Why `ui::text::job()` sets every `·` in `mono-400` (doc 00 §1.5): Overpass classes its
+    /// middle dot as a mark glyph in `GDEF`, so a shaper zeroes its advance (its `hmtx` advance
+    /// is 450 of 2000 units); Overpass Mono's is a plain glyph.
+    #[test]
+    fn overpass_middle_dot_is_a_mark_and_mono_is_not() {
+        use skrifa::raw::TableProvider as _;
+        for (family, class) in [("overpass", 3), ("overpass-mono", 0)] {
+            let name = ttf_name(family, "latin");
+            let bytes = vendored(&name);
+            let font = skrifa::FontRef::new(&bytes).unwrap();
+            let glyph = font.charmap().map('\u{b7}').unwrap();
+            let classes = font.gdef().unwrap().glyph_class_def().unwrap().unwrap();
+            assert_eq!(classes.get(glyph), class, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_licence_is_the_ofl() {
+        let text = String::from_utf8(vendored("OFL.txt")).unwrap();
+        assert!(text.starts_with("Copyright 2021 The Overpass Project Authors"));
+        assert!(text.contains("SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007"));
+    }
+
+    #[test]
+    fn vendored_files_match_a_fresh_decode() {
+        let source = source_dir();
+        if !source.is_dir() {
+            eprintln!("skipped: {} is missing (bun install --frozen-lockfile)", source.display());
+            return;
+        }
+        let files = vendored_files(&source).unwrap();
+        assert_eq!(files.len(), FAMILIES.len() * SUBSETS.len() + 2);
+        for (name, bytes) in files {
+            let stale = "is stale: run `cargo xtask vendor-fonts`";
+            assert!(vendored(&name) == bytes, "assets/fonts/{name} {stale}");
+        }
+    }
 }

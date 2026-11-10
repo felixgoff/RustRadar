@@ -483,6 +483,11 @@ mod tests {
         let [x, y, _] = renderer.view().viewport.project([10.0, 88.0, 0.0]);
         assert_eq!(image.pixel(x as u32, y as u32), [50, 50, 50, 255]);
         assert_eq!(image.pixel(2, 2), [30, 30, 30, 255]);
+        // the reference shots' canvas (docs/port/reference/dark-v1-1440x900.png: limb at 297–299 px)
+        let (image, renderer) = render(&gpu, V1, [1440.0, 900.0], Basemap::Dark, true);
+        save(&image, "e5-v1-dark-1440x900.png");
+        let (limb, edge) = assert_disc(&image, &renderer, 1.0, GROUND_DARK, INK, "V1 dark 1440 × 900");
+        eprintln!("V1 dark 1440 × 900: limb {limb:.2} px, measured edge {edge:.2} px");
     }
 
     /// The earth alone, on satellite (no imagery yet) and realistic (no sky or ground yet): a disc in
@@ -563,6 +568,30 @@ mod tests {
             let (image, _) = render(&gpu, view, [400.0, 300.0], Basemap::Satellite, true);
             let wrong = image.rgba.chunks_exact(4).filter(|p| *p != colour).count();
             assert_eq!(wrong, 0, "zoom {zoom}: {wrong} pixels are not {colour:?}");
+        }
+    }
+
+    /// The earth writes depth: a fill on the globe's far side, drawn after it without culling,
+    /// stays hidden behind it (and shows through where the earth is not drawn).
+    #[test]
+    fn the_earth_hides_the_far_side() {
+        let Some(gpu) = gpu() else { return };
+        // on the far side of V1, 60 px or so across, still inside the far plane
+        let far = DVec2::from_array(lng_lat_to_world([-150.0, -20.0]));
+        let scale = crate::frame::power_of_two_scale(60.0 / 2f64.powf(V1.zoom));
+        let anchor = far + DVec2::new(-scale / 2.0, scale / 2.0);
+        for shown in [false, true] {
+            let mut scene = SceneInput::new(V1, [400.0, 300.0], 1.0, Basemap::Satellite);
+            scene.earth = Input { shown };
+            let mut renderer = MapRenderer::new(&gpu, FORMAT);
+            let init = renderer.init(&gpu);
+            let mut squares = crate::pipelines::fill::tests::Squares::new(&init, DrawState::SURFACE_NO_CULL);
+            squares.add(&init, anchor, scale, [200, 100, 50, 255], fill::OPAQUE, false);
+            renderer.add_layer(Box::new(squares));
+            let image = render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered");
+            let [x, y, _] = renderer.view().viewport.project([-150.0, -20.0, 0.0]);
+            let expected = if shown { [6, 16, 34, 255] } else { [200, 100, 50, 255] };
+            assert_eq!(image.pixel(x as u32, y as u32), expected, "earth shown: {shown}");
         }
     }
 

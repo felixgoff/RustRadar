@@ -28,11 +28,11 @@ egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = { version = "0.37", default-features = false }
 # Windowing backends and clipboard are chosen per platform below.
 egui-winit = { version = "0.37", default-features = false }
-bytemuck = { version = "1", features = ["derive"] }
-pollster = "1"
-png = "0.18"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+
+[dev-dependencies]
+png = "0.18"
 
 # Desktop: X11 + Wayland, system clipboard (arboard), opening links.
 # arboard does not build for iOS (it falls into its Linux/Wayland branch) and
@@ -47,5 +47,10 @@ egui-winit = { version = "0.37", default-features = false, features = ["links"] 
 
 [target.'cfg(target_os = "android")'.dependencies]
 egui-winit = { version = "0.37", default-features = false, features = ["links"] }
-# winit refuses to build for Android without choosing an activity backend.
-winit = { version = "0.30.13", features = ["android-native-activity"] }
+# winit refuses to build for Android without choosing an activity backend: GameActivity, whose
+# GameTextInput the text bridge reads (platform/android.rs; plan 1.5). Its Java half is
+# androidx.games:games-activity 4.4.0 in platform/android, the version android-activity 0.6 glues.
+winit = { version = "0.30.13", features = ["android-game-activity"] }
+# MainActivity.leave() (the version android-activity uses), and the log in logcat.
+jni = "0.22"
+android_logger = { version = "0.15", default-features = false }

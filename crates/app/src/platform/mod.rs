@@ -4,6 +4,9 @@
 
 use rustradar_backend::Dirs;
 
+pub mod android;
+pub mod ios;
+
 /// Whether this build runs on a phone (`cfg(mobile)` in the Tauri build; doc 07 §11.7).
 pub const PHONE: bool = cfg!(any(target_os = "android", target_os = "ios"));
 

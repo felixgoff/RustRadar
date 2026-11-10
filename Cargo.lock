@@ -5000,13 +5000,10 @@ dependencies = [
 name = "rustradar"
 version = "0.3.0"
 dependencies = [
- "bzip2-rs",
- "contour",
- "flate2",
  "fr24",
  "futures-util",
- "image",
  "reqwest",
+ "rustradar-backend",
  "serde",
  "serde_json",
  "tauri",

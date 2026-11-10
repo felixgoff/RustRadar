@@ -183,7 +183,7 @@ fn turn(a: f64, b: f64) -> f64 {
 }
 
 /// The point on the segment `a`-`b` nearest `p`, and how far along it is (0..1).
-pub(crate) fn project(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> ((f64, f64), f64) {
+pub fn project(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> ((f64, f64), f64) {
     let k = p.0.to_radians().cos();
     let (dx, dy) = ((b.1 - a.1) * k, b.0 - a.0);
     let len2 = dx * dx + dy * dy;

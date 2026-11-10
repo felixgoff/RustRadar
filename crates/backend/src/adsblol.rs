@@ -376,8 +376,7 @@ async fn request(url: &str) -> Result<Snapshot, (String, Option<Duration>)> {
 }
 
 /// One aircraft by its ICAO 24-bit address.
-#[tauri::command]
-pub async fn adsb_hex(hex: String) -> CmdResult<Snapshot> {
+pub async fn hex(hex: &str) -> CmdResult<Snapshot> {
     let hex = hex.trim().to_ascii_lowercase();
     if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("not an ICAO 24-bit address".into());
@@ -386,8 +385,7 @@ pub async fn adsb_hex(hex: String) -> CmdResult<Snapshot> {
 }
 
 /// Aircraft using a callsign, for when the Mode S address isn't known yet.
-#[tauri::command]
-pub async fn adsb_callsign(callsign: String) -> CmdResult<Snapshot> {
+pub async fn callsign(callsign: &str) -> CmdResult<Snapshot> {
     let callsign = callsign.trim().to_ascii_uppercase();
     if callsign.is_empty()
         || callsign.len() > 8

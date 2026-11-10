@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::motion::{ahead, course, distance};
+use crate::rail_motion::{ahead, course, distance};
 
 #[path = "blocks.rs"]
 pub mod blocks;
@@ -139,7 +139,7 @@ pub fn set_cache_dir(dir: PathBuf) {
 }
 
 /// The HTTP client the track's data is fetched with.
-pub(crate) fn http() -> Option<&'static reqwest::Client> {
+pub fn http() -> Option<&'static reqwest::Client> {
     client()
 }
 
@@ -237,12 +237,12 @@ impl<'a> Pb<'a> {
     }
 }
 
-pub(crate) fn fields(b: &[u8]) -> impl Iterator<Item = (u64, Result<u64, &[u8]>)> {
+pub fn fields(b: &[u8]) -> impl Iterator<Item = (u64, Result<u64, &[u8]>)> {
     let mut pb = Pb { b, i: 0 };
     std::iter::from_fn(move || pb.field())
 }
 
-pub(crate) fn packed(b: &[u8]) -> Vec<u64> {
+pub fn packed(b: &[u8]) -> Vec<u64> {
     let mut pb = Pb { b, i: 0 };
     std::iter::from_fn(|| if pb.i < pb.b.len() { pb.varint() } else { None }).collect()
 }
@@ -508,28 +508,19 @@ fn remember(z: u32, x: u32, y: u32, bytes: Vec<u8>) -> Arc<Vec<u8>> {
     bytes
 }
 
-/// The `railtiles:` protocol the map draws the network from: `/{z}/{x}/{y}`
-/// (and at `PLATFORM_ZOOM`, stations' platforms).
-pub async fn serve(path: &str) -> tauri::http::Response<Vec<u8>> {
-    let respond = |status: u16, body: Vec<u8>| {
-        tauri::http::Response::builder()
-            .status(status)
-            .header("Content-Type", "application/x-protobuf")
-            .header("Access-Control-Allow-Origin", "*")
-            .body(body)
-            .unwrap_or_default()
-    };
-    let parts: Vec<u32> = path.trim_matches('/').split('/').filter_map(|p| p.parse().ok()).collect();
-    let [z, x, y] = parts[..] else { return respond(400, Vec::new()) };
+/// One tile of the network for the map to draw, as a vector tile (and at
+/// `PLATFORM_ZOOM`, stations' platforms). None where there is nothing: a zoom
+/// the network isn't served at, a tile off the map, or an empty one.
+pub async fn tile(z: u32, x: u32, y: u32) -> Result<Option<Arc<Vec<u8>>>, String> {
     if !((MIN_ZOOM..=ZOOM).contains(&z) || z == PLATFORM_ZOOM) || x >= 1 << z || y >= 1 << z {
-        return respond(204, Vec::new());
+        return Ok(None);
     }
     match tile_bytes(z, x, y).await {
-        Ok(b) if b.is_empty() => respond(204, Vec::new()),
-        Ok(b) => respond(200, b.to_vec()),
+        Ok(b) if b.is_empty() => Ok(None),
+        Ok(b) => Ok(Some(b)),
         Err(e) => {
             eprintln!("rail tile {z}/{x}/{y}: {e}");
-            respond(502, Vec::new())
+            Err(e)
         }
     }
 }
@@ -569,13 +560,13 @@ fn tracks_of(keys: &[Key]) -> Option<Vec<Arc<Vec<Track>>>> {
         }
     }
     // tests never go to the network
-    if cfg!(test) {
+    if crate::OFFLINE {
         return missing.is_empty().then_some(out);
     }
     for key in &missing {
         let recently_failed = s.failed.get(key).is_some_and(|at| at.elapsed() < RETRY);
         if s.loading.len() < MAX_LOADING && !recently_failed && s.loading.insert(*key) {
-            tauri::async_runtime::spawn(fetch(*key));
+            crate::rt().spawn(fetch(*key));
         }
     }
     missing.is_empty().then_some(out)
@@ -1332,7 +1323,7 @@ pub fn route_for(
 }
 
 /// Tests: every `{x}_{y}.pbf` tile in `dir` (zoom `ZOOM`) as if fetched.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn load_tiles_for_tests(dir: &str) {
     let mut st = store().lock().unwrap();
     for e in std::fs::read_dir(dir).unwrap() {
@@ -1806,7 +1797,7 @@ pub struct Rail {
     pub class: Option<crate::train_class::TrainClass>,
 }
 
-impl crate::motion::Track for Rail {
+impl crate::rail_motion::Track for Rail {
     fn route(
         &self,
         start: (f64, f64),
@@ -1814,7 +1805,7 @@ impl crate::motion::Track for Rail {
         targets: &[(f64, f64)],
         onwards_m: f64,
         onwards_only: bool,
-    ) -> Option<crate::motion::Routed> {
+    ) -> Option<crate::rail_motion::Routed> {
         route_for(start, heading, targets, onwards_m, self.class.as_ref(), onwards_only)
             .map(|r| (r.points, r.reached, r.speeds))
     }
@@ -1879,7 +1870,7 @@ fn point_along(line: &[(f64, f64)], s: f64) -> (f64, f64) {
     *line.last().unwrap_or(&(0.0, 0.0))
 }
 
-impl crate::motion::Track for Guided<'_> {
+impl crate::rail_motion::Track for Guided<'_> {
     fn route(
         &self,
         start: (f64, f64),
@@ -1887,7 +1878,7 @@ impl crate::motion::Track for Guided<'_> {
         targets: &[(f64, f64)],
         onwards_m: f64,
         onwards_only: bool,
-    ) -> Option<crate::motion::Routed> {
+    ) -> Option<crate::rail_motion::Routed> {
         let plain = || self.rail.route(start, heading, targets, onwards_m, onwards_only);
         // where it is along the way: on it, or short of where it starts (the report behind the drawn train)
         let short = self.way.first().is_some_and(|w| distance(start, *w) <= SHORT_OF_WAY_M);
@@ -2145,7 +2136,7 @@ mod tests {
 
     #[test]
     fn the_motion_follows_the_way_its_route_takes() {
-        use crate::motion::Track as _;
+        use crate::rail_motion::Track as _;
         // two tracks east 3 km, 10 m apart, joined by crossovers at each end (in one tile)
         let n = f64::from(1u32 << ZOOM);
         let a = (61.5, ((15.5_f64 + 180.0) / 360.0 * n).floor() / n * 360.0 - 180.0 + 0.0005);
@@ -2498,7 +2489,7 @@ mod tests {
         class: Option<crate::train_class::TrainClass>,
     }
 
-    impl crate::motion::Track for OnGraph<'_> {
+    impl crate::rail_motion::Track for OnGraph<'_> {
         fn route(
             &self,
             start: (f64, f64),
@@ -2506,7 +2497,7 @@ mod tests {
             targets: &[(f64, f64)],
             onwards_m: f64,
             onwards_only: bool,
-        ) -> Option<crate::motion::Routed> {
+        ) -> Option<crate::rail_motion::Routed> {
             route_in_dir(self.g, start, heading, targets, onwards_m, SNAP_SPREAD_M, self.class.as_ref(), onwards_only)
                 .map(|r| (r.points, r.reached, r.speeds))
         }
@@ -2522,7 +2513,7 @@ mod tests {
 
     #[test]
     fn a_train_whose_next_station_is_on_track_not_loaded_yet_still_moves() {
-        use crate::motion::{self, Fix, Stop};
+        use crate::rail_motion::{self as motion, Fix, Stop};
         // only the track round it is here: its station, 25 km on, is beyond it
         let a = (64.0, 18.0);
         let (station, start) = (ahead(a, 90.0, 25_000.0), ahead(a, 90.0, 1_000.0));
@@ -2546,7 +2537,7 @@ mod tests {
 
     #[test]
     fn a_train_takes_the_branch_its_next_station_is_on_however_far_it_is() {
-        use crate::motion::{self, Fix, Stop};
+        use crate::rail_motion::{self as motion, Fix, Stop};
         // north 3 km to a junction: straight on north, or off north-east to its station 16 km on
         let a = (63.0, 17.0);
         let j = ahead(a, 0.0, 3_000.0);
@@ -2582,7 +2573,7 @@ mod tests {
     #[test]
     #[ignore]
     fn a_train_from_lund_to_malmo_is_drawn_on_the_track() {
-        use crate::motion::{self, Fix, Frame, Stop};
+        use crate::rail_motion::{self as motion, Fix, Frame, Stop};
         let dir = std::env::var("RAIL_TILES").unwrap();
         let sets: Vec<Arc<Vec<Track>>> = std::fs::read_dir(&dir)
             .unwrap()

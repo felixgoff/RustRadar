@@ -433,14 +433,13 @@ async fn request(
 
 /// Places and addresses matching `query`, ranked toward `lat`/`lon` (the
 /// view's centre) when given, named in `lang` where Photon knows it.
-#[tauri::command]
 pub async fn geocode(
-    query: String,
+    query: &str,
     lat: Option<f64>,
     lon: Option<f64>,
-    lang: Option<String>,
+    lang: Option<&str>,
 ) -> CmdResult<Vec<Place>> {
-    let query = normalise(&query);
+    let query = normalise(query);
     if query.chars().count() < MIN_QUERY {
         return Ok(Vec::new());
     }
@@ -710,16 +709,16 @@ mod tests {
         assert!(cache.fresh("k0").is_none(), "least recently used goes");
         assert!(cache.fresh("missing").is_none());
     }
-    /// Talks to the real service: `cargo test -p rustradar live_photon -- --ignored`.
+    /// Talks to the real service: `cargo test -p rustradar-backend live_photon -- --ignored`.
     #[tokio::test]
     #[ignore]
     async fn live_photon() {
         let first_sent = Instant::now();
         let places = geocode(
-            "Damrak 1 Amsterdam".into(),
+            "Damrak 1 Amsterdam",
             Some(52.37),
             Some(4.9),
-            Some("en".into()),
+            Some("en"),
         )
         .await
         .unwrap();
@@ -732,17 +731,17 @@ mod tests {
         // the same query again comes from the cache, even while the next slot is a second away
         let started = Instant::now();
         let again = geocode(
-            "damrak  1 amsterdam".into(),
+            "damrak  1 amsterdam",
             Some(52.371),
             Some(4.901),
-            Some("en".into()),
+            Some("en"),
         )
         .await
         .unwrap();
         assert_eq!(again.len(), places.len());
         assert!(started.elapsed() < Duration::from_millis(50));
         // a new query goes out no sooner than a second after the last one
-        let city = geocode("Rotterdam".into(), None, None, None).await.unwrap();
+        let city = geocode("Rotterdam", None, None, None).await.unwrap();
         assert_eq!(city[0].kind, Kind::City);
         assert!(first_sent.elapsed() >= GAP);
     }

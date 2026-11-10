@@ -67,7 +67,7 @@ pub fn near(station: (f64, f64)) -> Option<Arc<Vec<Platform>>> {
         return Some(found.clone());
     }
     // tests never go to the network
-    if cfg!(test) {
+    if crate::OFFLINE {
         return None;
     }
     if s.failed.get(&k).is_some_and(|at| at.elapsed() < RETRY) || s.loading.len() >= MAX_LOADING || !s.loading.insert(k)
@@ -75,7 +75,7 @@ pub fn near(station: (f64, f64)) -> Option<Arc<Vec<Platform>>> {
         return None;
     }
     drop(s);
-    tauri::async_runtime::spawn(load(k, station));
+    crate::rt().spawn(load(k, station));
     None
 }
 
@@ -164,10 +164,19 @@ async fn fetch(station: (f64, f64)) -> Result<Vec<Platform>, String> {
     Err(last)
 }
 
+/// Overpass reports a timeout or lack of memory as a 200 with no elements and
+/// an error remark: that is a failure, not an empty area.
+pub fn overpass_failed(json: &Value) -> Result<(), String> {
+    match json["remark"].as_str() {
+        Some(remark) if remark.contains("error") => Err(format!("Overpass: {remark}")),
+        _ => Ok(()),
+    }
+}
+
 /// The platforms in an Overpass answer (`out tags geom`) that say which tracks they serve.
 pub fn parse(body: &str) -> Result<Vec<Platform>, String> {
     let v: Value = serde_json::from_str(body).map_err(|e| format!("not Overpass JSON: {e}"))?;
-    crate::taxiways::overpass_failed(&v)?;
+    overpass_failed(&v)?;
     let points = |geometry: &Value| -> Vec<(f64, f64)> {
         geometry
             .as_array()

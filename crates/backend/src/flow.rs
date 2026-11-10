@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 
 use crate::lines::Lines;
-use crate::motion::{course, distance};
+use crate::rail_motion::{course, distance};
 
 /// A track piece this close to a one-way line is that line, metres: under
 /// half the 4.5 m between tracks, so never the track beside it.
@@ -54,7 +54,7 @@ pub fn with_flow(a: (f64, f64), b: (f64, f64)) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::motion::ahead;
+    use crate::rail_motion::ahead;
 
     #[test]
     fn double_track_runs_each_way_on_its_own_track() {

@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(files[0].1, b"data");
     }
 
-    /// Fetches the live run: `cargo test -p rustradar dwd -- --ignored --nocapture`
+    /// Fetches the live run: `cargo test -p rustradar-backend dwd -- --ignored --nocapture`
     #[tokio::test]
     #[ignore]
     async fn live_run() {

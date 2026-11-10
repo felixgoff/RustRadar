@@ -187,8 +187,8 @@ fn signals_of(keys: &[SignalKey]) -> Option<Vec<Signal>> {
             None => {
                 missing = true;
                 let recent = s.failed.get(key).is_some_and(|at| at.elapsed() < RETRY);
-                if !cfg!(test) && !recent && s.loading.len() < MAX_SIGNAL_LOADING && s.loading.insert(*key) {
-                    tauri::async_runtime::spawn(fetch_signals(*key));
+                if !crate::OFFLINE && !recent && s.loading.len() < MAX_SIGNAL_LOADING && s.loading.insert(*key) {
+                    crate::rt().spawn(fetch_signals(*key));
                 }
             }
         }

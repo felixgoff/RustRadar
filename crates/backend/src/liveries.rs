@@ -139,7 +139,7 @@ mod tests {
         assert!(!is_iata("DLH"));
     }
 
-    /// Network: `cargo test -p rustradar -- --ignored --nocapture`
+    /// Network: `cargo test -p rustradar-backend -- --ignored --nocapture`
     #[tokio::test]
     #[ignore]
     async fn real_logos() {

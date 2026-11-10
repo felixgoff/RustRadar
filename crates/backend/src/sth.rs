@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 
 use crate::lines::Lines;
-use crate::motion::{course, distance};
+use crate::rail_motion::{course, distance};
 
 /// A track piece this far from the data's line is that line, metres.
 const SNAP_M: f64 = 6.0;
@@ -67,7 +67,7 @@ pub fn along(a: (f64, f64), b: (f64, f64)) -> Option<Limits> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::motion::ahead;
+    use crate::rail_motion::ahead;
 
     #[test]
     fn limits_follow_the_direction_of_travel() {

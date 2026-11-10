@@ -1,38 +1,23 @@
-mod adsblol;
-mod board;
-mod building_lod;
-mod devlog;
-mod dwd;
+mod commands;
 mod export;
-mod flow;
-mod geocode;
 mod keys;
-mod lines;
-mod liveries;
 // the checks run in the desktop tests too; only phones use it
 #[cfg(any(mobile, test))]
 #[cfg_attr(not(mobile), allow(dead_code))]
 mod mobile_update;
-mod motion;
-mod mrms;
-mod opensky;
-mod radar;
-mod osm_platforms;
-mod rail;
-mod reference;
 mod roads;
-mod runways;
-mod session;
-mod ships;
-mod sth;
 mod taxiways;
 mod trafikverket;
-mod train_class;
-mod train_media;
 mod trains;
 #[cfg(desktop)]
 mod updater;
-mod weather;
+
+// the modules that have moved to the backend crate, under the names the ones still here know them by
+use rustradar_backend::rail_motion as motion;
+use rustradar_backend::{
+    board, building_lod, devlog, dwd, liveries, mrms, opensky, osm_platforms, radar, rail, reference, runways,
+    train_class,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -500,7 +485,7 @@ async fn airline_colors(
 /// volume costs tens of megabytes to fetch, so a source is only asked for
 /// when its region is actually in view. DWD's figures are the extent of its
 /// WN composite grid, written out here to keep the table self-contained.
-const RADAR_SOURCES: [(&'static str, radar::Bounds); 2] = [
+const RADAR_SOURCES: [(&str, radar::Bounds); 2] = [
     ("mrms", mrms::BOUNDS),
     (
         "dwd",
@@ -647,6 +632,8 @@ fn open_devtools(window: tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // the backend spawns its background work (tiles, platforms, signals) on Tauri's runtime
+    rustradar_backend::set_rt(tauri::async_runtime::handle().inner().clone());
     let fr24 = Fr24::new().expect("failed to build http client");
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
@@ -665,12 +652,12 @@ pub fn run() {
         // the rail network's tiles, for the map: fetched and kept by the backend
         .register_asynchronous_uri_scheme_protocol("railtiles", |_ctx, request, responder| {
             let path = request.uri().path().to_owned();
-            tauri::async_runtime::spawn(async move { responder.respond(rail::serve(&path).await) });
+            tauri::async_runtime::spawn(async move { responder.respond(commands::rail_tiles(&path).await) });
         })
         // buildings far out, quantized (building_lod.rs)
         .register_asynchronous_uri_scheme_protocol("buildingtiles", |_ctx, request, responder| {
             let path = request.uri().path().to_owned();
-            tauri::async_runtime::spawn(async move { responder.respond(building_lod::serve(&path).await) });
+            tauri::async_runtime::spawn(async move { responder.respond(commands::building_tiles(&path).await) });
         })
         .setup(|app| {
             if let Ok(dir) = app.path().app_cache_dir() {
@@ -731,12 +718,12 @@ pub fn run() {
             radar_frame,
             radar_image,
             opensky_track,
-            adsblol::adsb_hex,
-            adsblol::adsb_callsign,
-            geocode::geocode,
-            session::session_info,
-            session::sign_in,
-            session::sign_out,
+            commands::adsb_hex,
+            commands::adsb_callsign,
+            commands::geocode,
+            commands::session_info,
+            commands::sign_in,
+            commands::sign_out,
             keys::get_keys,
             keys::save_keys,
             taxiways::airport_taxiways,
@@ -750,23 +737,23 @@ pub fn run() {
             mobile_update::pending_update,
             #[cfg(mobile)]
             mobile_update::restart_to_update,
-            ships::ships_in_view,
-            ships::ship_details,
+            commands::ships_in_view,
+            commands::ship_details,
             trains::trains_in_view,
             trains::train_stops,
             trains::train_route,
             trains::watch_trains,
             trains::train_blocks,
-            weather::weather_at,
+            commands::weather_at,
             trains::hide_train_operators,
-            devlog::dev_log,
-            devlog::dev_log_clear,
+            commands::dev_log,
+            commands::dev_log_clear,
             trafikverket::product_codes,
             trafikverket::trafikverket_key_status,
             roads::road_widths,
             trains::follow_train,
             trains::unfollow_train,
-            train_media::train_media,
+            commands::train_media,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -451,12 +451,12 @@ fn track(ships: &mut [Ship], now: i64) {
         let here = (ship.lat, ship.lon);
         let t = tracks.entry(ship.mmsi).or_insert(Track { lat: ship.lat, lon: ship.lon, since: now, seen: now, velocity: None });
         t.seen = now;
-        let moved = crate::motion::distance((t.lat, t.lon), here);
+        let moved = crate::rail_motion::distance((t.lat, t.lon), here);
         if moved > 3.0 {
             let dt = now - t.since;
             let speed = moved / (dt.max(1) as f64 / 1000.0);
             t.velocity = ((5_000..=MAX_TRACK_GAP_MS).contains(&dt) && speed <= MAX_SHIP_SPEED)
-                .then(|| (speed, crate::motion::course((t.lat, t.lon), here)));
+                .then(|| (speed, crate::rail_motion::course((t.lat, t.lon), here)));
             (t.lat, t.lon, t.since) = (ship.lat, ship.lon, now);
         } else if now - t.since > MAX_TRACK_GAP_MS {
             // still for a long while: moored or anchored
@@ -464,7 +464,7 @@ fn track(ships: &mut [Ship], now: i64) {
         }
         ship.frames = match t.velocity {
             Some((speed, course)) if !ship.old && speed > 0.2 => {
-                crate::motion::frames(ship.lat, ship.lon, t.since, Some(speed), Some(course), now)
+                crate::rail_motion::frames(ship.lat, ship.lon, t.since, Some(speed), Some(course), now)
             }
             _ => Vec::new(),
         };
@@ -474,8 +474,7 @@ fn track(ships: &mut [Ship], now: i64) {
 
 /// Ships in an area (degrees; `west > east` crosses the antimeridian) at a
 /// deck.gl zoom, as many as VesselFinder shows at that zoom.
-#[tauri::command]
-pub async fn ships_in_view(west: f64, south: f64, east: f64, north: f64, zoom: f64) -> CmdResult<Vec<Ship>> {
+pub async fn in_view(west: f64, south: f64, east: f64, north: f64, zoom: f64) -> CmdResult<Vec<Ship>> {
     let (zoom, [west, south, east, north]) = fit_view(west, south, east, north, feed_zoom(zoom));
     let areas = areas(west, south, east, north, zoom)?;
     let _gate = in_flight().lock().await;
@@ -660,8 +659,7 @@ fn details_cache() -> &'static tokio::sync::Mutex<std::collections::HashMap<u32,
 /// One ship's particulars, voyage and last report. Shares the map feed's
 /// spacing and backoff (it is the same host); a ship asked for within a minute
 /// is answered from memory.
-#[tauri::command]
-pub async fn ship_details(mmsi: u32) -> CmdResult<ShipDetails> {
+pub async fn details(mmsi: u32) -> CmdResult<ShipDetails> {
     if mmsi == 0 {
         return Err("not a ship".into());
     }
@@ -915,7 +913,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_ship_details() {
-        let ship = ship_details(477_135_600).await.unwrap();
+        let ship = details(477_135_600).await.unwrap();
         eprintln!("{ship:#?}");
         assert_eq!(ship.mmsi, 477_135_600);
         assert!(ship.flag.is_some());
@@ -925,7 +923,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_vesselfinder() {
-        let ships = ships_in_view(3.9, 51.8, 4.6, 52.1, 10.0).await.unwrap();
+        let ships = in_view(3.9, 51.8, 4.6, 52.1, 10.0).await.unwrap();
         assert!(!ships.is_empty());
     }
 
@@ -974,18 +972,18 @@ mod tests {
         assert!(first[0].frames.is_empty(), "not yet seen to move");
 
         // 100 m east in 10 s: 10 m/s
-        let east = crate::motion::ahead((57.0, 11.0), 90.0, 100.0);
+        let east = crate::rail_motion::ahead((57.0, 11.0), 90.0, 100.0);
         let mut second = [ship(east.0, east.1)];
         track(&mut second, t0 + 10_000);
         let f = &second[0].frames;
         assert!(f.len() >= 2);
         let (a, b) = (f[0], f[f.len() - 1]);
-        let speed = crate::motion::distance((a.0, a.1), (b.0, b.1)) / ((b.2 - a.2) as f64 / 1000.0);
+        let speed = crate::rail_motion::distance((a.0, a.1), (b.0, b.1)) / ((b.2 - a.2) as f64 / 1000.0);
         assert!((speed - 10.0).abs() < 0.2, "{speed} m/s");
         assert!(b.1 > a.1, "on east");
 
         // a jump of 50 km in 10 s is no voyage
-        let far = crate::motion::ahead(east, 90.0, 50_000.0);
+        let far = crate::rail_motion::ahead(east, 90.0, 50_000.0);
         let mut third = [ship(far.0, far.1)];
         track(&mut third, t0 + 20_000);
         assert!(third[0].frames.is_empty());

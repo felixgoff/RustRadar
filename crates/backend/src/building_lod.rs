@@ -557,29 +557,21 @@ pub fn encode(grid: &Grid) -> Vec<u8> {
     tile
 }
 
-/// The `buildingtiles:` protocol the map draws far-off buildings from: `/{z}/{x}/{y}`.
-pub async fn serve(path: &str) -> tauri::http::Response<Vec<u8>> {
-    let respond = |status: u16, body: Vec<u8>| {
-        tauri::http::Response::builder()
-            .status(status)
-            .header("Content-Type", "application/x-protobuf")
-            .header("Access-Control-Allow-Origin", "*")
-            .body(body)
-            .unwrap_or_default()
-    };
-    let parts: Vec<u32> = path.trim_matches('/').split('/').filter_map(|p| p.parse().ok()).collect();
-    let [z, x, y] = parts[..] else { return respond(400, Vec::new()) };
+/// One tile of far-off buildings for the map to draw, as a vector tile. None
+/// where there is nothing: a zoom they aren't made at, a tile off the map, or
+/// an empty one.
+pub async fn tile(z: u32, x: u32, y: u32) -> Result<Option<Vec<u8>>, String> {
     if !(MIN_ZOOM..=MAX_ZOOM).contains(&z) || x >= 1 << z || y >= 1 << z {
-        return respond(204, Vec::new());
+        return Ok(None);
     }
     match grid((z, x, y)).await {
         Ok(g) => match encode(&g) {
-            b if b.is_empty() => respond(204, Vec::new()),
-            b => respond(200, b),
+            b if b.is_empty() => Ok(None),
+            b => Ok(Some(b)),
         },
         Err(e) => {
             eprintln!("building tile {z}/{x}/{y}: {e}");
-            respond(502, Vec::new())
+            Err(e)
         }
     }
 }

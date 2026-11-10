@@ -5,6 +5,11 @@ edition = "2024"
 description = "RustRadar's backend without Tauri: HTTP, caches, feeds, streams"
 publish = false
 
+[features]
+# Keeps the track, signal and platform stores off the network and exposes their test helpers, for the
+# tests of a crate that uses this one (in this crate's own tests that is already so).
+test-support = []
+
 [dependencies]
 fr24 = { workspace = true }
 rustradar-core = { workspace = true }

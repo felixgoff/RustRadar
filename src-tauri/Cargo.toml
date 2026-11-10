@@ -23,13 +23,14 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 fr24 = { path = "../crates/fr24" }
+rustradar-backend = { path = "../crates/backend" }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["time", "macros", "sync", "rt"] }
-flate2 = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
 reqwest = { version = "0.13", default-features = false, features = ["stream"] }
-bzip2-rs = "0.1.2"
-contour = { version = "0.13.1", features = ["f32"] }
+
+[dev-dependencies]
+# the tests of the modules still here lean on the backend's stores staying off the network
+rustradar-backend = { path = "../crates/backend", features = ["test-support"] }
 
 # installs replace themselves on desktop; phones update through the APK or TestFlight (mobile_update.rs)
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

@@ -109,7 +109,7 @@ fn key_time(key: &str) -> Option<i64> {
     Some(days_from_civil(y, m, d) * 86_400 + hh * 3600 + mm * 60 + ss)
 }
 
-pub(crate) fn time_now() -> i64 {
+pub fn time_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -117,7 +117,7 @@ pub(crate) fn time_now() -> i64 {
 }
 
 // civil date <-> days since 1970-01-01 (Howard Hinnant's algorithms)
-pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(grib_i16([0x80, 0x03]), -3);
     }
 
-    /// Fetches the live volume: `cargo test -p rustradar mrms -- --ignored --nocapture`
+    /// Fetches the live volume: `cargo test -p rustradar-backend mrms -- --ignored --nocapture`
     #[tokio::test]
     #[ignore]
     async fn live_volume() {

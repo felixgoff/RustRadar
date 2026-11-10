@@ -66,8 +66,7 @@ fn cache() -> &'static Mutex<Cache> {
 }
 
 /// The weather at `lat`, `lon` now.
-#[tauri::command]
-pub async fn weather_at(lat: f64, lon: f64) -> CmdResult<Weather> {
+pub async fn at(lat: f64, lon: f64) -> CmdResult<Weather> {
     if !lat.is_finite() || !lon.is_finite() || lat.abs() > 90.0 {
         return Err("no such place".into());
     }

@@ -13,7 +13,6 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::CmdResult;
 
 const USER_AGENT: &str =
     concat!("RustRadar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/felixgoff/RustRadar; train pictures)");
@@ -159,7 +158,7 @@ fn is_photo(url: &str) -> bool {
     !lower.contains(".svg") && !lower.contains("logo") && !lower.contains("karta") && !lower.contains("map")
 }
 
-async fn lookup(source: &str, product: Option<&str>, operator: Option<&str>) -> TrainMedia {
+async fn search(source: &str, product: Option<&str>, operator: Option<&str>) -> TrainMedia {
     let langs = languages(source);
     let (product, operator) = futures_util::future::join(
         async {
@@ -195,20 +194,19 @@ fn cache() -> &'static Cache {
 }
 
 /// A photo of the train and its operator's logo, as far as Wikimedia has them.
-#[tauri::command]
-pub async fn train_media(source: String, product: Option<String>, operator: Option<String>) -> CmdResult<TrainMedia> {
+pub async fn lookup(source: &str, product: Option<String>, operator: Option<String>) -> TrainMedia {
     let clean = |s: Option<String>| s.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
     let (product, operator) = (clean(product), clean(operator));
-    let key = (source.clone(), product.clone().unwrap_or_default(), operator.clone().unwrap_or_default());
+    let key = (source.to_owned(), product.clone().unwrap_or_default(), operator.clone().unwrap_or_default());
     if let Some(hit) = cache().lock().unwrap().get(&key) {
-        return Ok(hit.clone());
+        return hit.clone();
     }
-    let media = lookup(&source, product.as_deref(), operator.as_deref()).await;
+    let media = search(source, product.as_deref(), operator.as_deref()).await;
     // an empty answer may be a network blip: asked again next time
     if media != TrainMedia::default() {
         cache().lock().unwrap().insert(key, media.clone());
     }
-    Ok(media)
+    media
 }
 
 #[cfg(test)]

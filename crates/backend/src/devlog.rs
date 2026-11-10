@@ -1,4 +1,4 @@
-//! In dev builds (`tauri dev`), every call the app makes to the outside
+//! In dev builds, every call the app makes to the outside
 //! APIs (Trafikverket, the train and ship sources, the track tiles): what was
 //! asked and what came back. Each is summed up in one line in the terminal
 //! and kept (the last few hundred) for the dev panel (Ctrl/Cmd+Shift+D).
@@ -143,7 +143,7 @@ impl Call {
         }
         log.entries.push_back(Entry {
             id,
-            at_ms: crate::trains::now_ms(),
+            at_ms: crate::now_ms(),
             source: self.source,
             method: self.method,
             url: self.url,
@@ -165,15 +165,14 @@ pub fn received(source: &str, url: &str, body: &str) {
 }
 
 /// The calls recorded after `since` (an entry id), oldest first; none in release builds.
-#[tauri::command]
-pub fn dev_log(since: Option<u64>) -> Vec<Entry> {
+pub fn entries(since: Option<u64>) -> Vec<Entry> {
     let since = since.unwrap_or(0);
     let log = log().lock().unwrap_or_else(|e| e.into_inner());
     log.entries.iter().filter(|e| e.id > since).cloned().collect()
 }
 
-#[tauri::command]
-pub fn dev_log_clear() {
+/// Forgets every recorded call.
+pub fn clear() {
     log().lock().unwrap_or_else(|e| e.into_inner()).entries.clear();
 }
 

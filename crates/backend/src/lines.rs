@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::motion::{course, distance};
+use crate::rail_motion::{course, distance};
 
 /// Grid cells of the index, degrees.
 const CELL: f64 = 0.002;
@@ -80,6 +80,7 @@ impl<T> Lines<T> {
     }
 
     #[cfg(test)]
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.pieces.len()
     }

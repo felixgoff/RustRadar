@@ -1,0 +1,25 @@
+[package]
+name = "rustradar-backend"
+version = "0.1.0"
+edition = "2024"
+description = "RustRadar's backend without Tauri: HTTP, caches, feeds, streams"
+publish = false
+
+[dependencies]
+fr24 = { workspace = true }
+rustradar-core = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+flate2 = { workspace = true }
+image = { workspace = true }
+bzip2-rs = { workspace = true }
+contour = { workspace = true }
+pmtiles = { workspace = true }
+jiff = { workspace = true }
+regex = { workspace = true }
+indexmap = { workspace = true }
+dirs = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "rustradar-scene"
+version = "0.1.0"
+edition = "2024"
+description = "The CPU side of RustRadar's map: camera, tiles, tessellation, meshing, label layout, picking. No GPU, no I/O"
+publish = false
+
+[dependencies]
+rustradar-core = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+earcutr = { workspace = true }
+tiny-skia = { workspace = true }
+skrifa = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }

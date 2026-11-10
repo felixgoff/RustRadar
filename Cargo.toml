@@ -1,6 +1,79 @@
 [workspace]
 resolver = "3"
-members = ["src-tauri", "crates/fr24", "crates/app"]
+members = [
+    "src-tauri",
+    "crates/fr24",
+    "crates/core",
+    "crates/backend",
+    "crates/scene",
+    "crates/map",
+    "crates/app",
+    "crates/xtask",
+]
+
+# The pins of docs/port/00-architecture-and-plan.md, section 1.3. Members write `dep.workspace = true`
+# and add the features they need.
+[workspace.dependencies]
+# Workspace crates
+fr24 = { path = "crates/fr24" }
+rustradar-core = { path = "crates/core" }
+rustradar-backend = { path = "crates/backend" }
+rustradar-scene = { path = "crates/scene" }
+rustradar-map = { path = "crates/map" }
+
+# Window, GPU, UI. These move together: egui-wgpu 0.37 pins wgpu 30 and egui-winit 0.37 pins
+# winit 0.30 (winit 0.31 is still beta). Windowing backends are chosen per target by the app.
+winit = { version = "0.30.13", default-features = false }
+wgpu = "30"
+egui = "0.37"
+egui-wgpu = { version = "0.37", default-features = false }
+egui-winit = { version = "0.37", default-features = false }
+epaint = { version = "0.37", default-features = false }
+pollster = "1"
+
+# Maths, GPU structs, geometry
+glam = "0.34"
+bytemuck = { version = "1", features = ["derive"] }
+earcutr = "0.5"
+contour = { version = "0.13.1", features = ["f32"] }
+
+# Textures, images, 2D raster, font outlines
+basisu_c_sys = { version = "0.9.1", features = ["extra"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+png = "0.18"
+tiny-skia = "0.12"
+resvg = { version = "0.49", default-features = false }
+# The version epaint 0.37 already pulls in.
+skrifa = "0.44"
+
+# Async, HTTP. Every client is built through `fr24::client_builder()` (doc 07 §2.3).
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+pmtiles = { version = "0.28", default-features = false, features = ["http-async"] }
+
+# Data, text, time
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The bundled tz database only: Android and iOS expose no portable one.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-fat", "tzdb-bundle-always", "perf-inline"] }
+unicode-normalization = "0.1"
+regex = "1"
+indexmap = "2"
+flate2 = "1"
+bzip2-rs = "0.1.2"
+log = "0.4"
+
+# Platform glue and updater (app)
+dirs = "6"
+webbrowser = "1.2"
+rfd = "0.18"
+minisign-verify = "0.3"
+semver = "1"
+tar = "0.4"
+
+# Tooling (xtask only)
+wuff = "0.2"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 # Image codecs are painfully slow unoptimised, and the weather radar decodes

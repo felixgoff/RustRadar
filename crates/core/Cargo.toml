@@ -1,0 +1,14 @@
+[package]
+name = "rustradar-core"
+version = "0.1.0"
+edition = "2024"
+description = "RustRadar's pure logic and data types: no I/O, no clock, no async, no GPU, no UI"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+jiff = { workspace = true }
+unicode-normalization = { workspace = true }
+regex = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }

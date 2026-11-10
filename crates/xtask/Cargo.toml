@@ -1,0 +1,18 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+description = "Developer and release tooling for RustRadar (never shipped, never cross-compiled)"
+publish = false
+
+[dependencies]
+# Only for shared constants.
+rustradar-core = { workspace = true }
+wuff = { workspace = true }
+resvg = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The vendored fonts and icons are checked with the crates the app reads them with.
+epaint = { workspace = true }
+skrifa = { workspace = true }

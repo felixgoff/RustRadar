@@ -1,0 +1,17 @@
+[package]
+name = "rustradar-map"
+version = "0.1.0"
+edition = "2024"
+description = "RustRadar's map renderer on wgpu: pipelines, passes, tile runtime, textures, headless render"
+publish = false
+
+[dependencies]
+rustradar-core = { workspace = true }
+rustradar-scene = { workspace = true }
+wgpu = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+basisu_c_sys = { workspace = true }
+image = { workspace = true }
+pollster = { workspace = true }
+log = { workspace = true }

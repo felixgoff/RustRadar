@@ -8,6 +8,7 @@
 //! models (A5), icon outlines and icons ([`icons`], A4), labels (A7).
 
 pub mod assets;
+pub mod icons;
 
 use rustradar_scene::aircraft::AircraftScene;
 
@@ -24,11 +25,13 @@ pub struct Input {
 /// Rows 25–29: shadows, gear and models, icon outlines, icons, aircraft labels.
 pub struct Aircraft {
     assets: assets::AircraftAssets,
+    /// Rows 27 and 28: icon outlines, icons.
+    icons: icons::Icons,
 }
 
 impl Aircraft {
     pub fn new(init: &Init<'_>) -> Self {
-        Aircraft { assets: assets::AircraftAssets::new(init) }
+        Aircraft { assets: assets::AircraftAssets::new(init), icons: icons::Icons::new(init) }
     }
 
     /// The meshes and atlases every part draws with.
@@ -44,9 +47,13 @@ impl Layer for Aircraft {
 
     fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
         self.assets.poll(cx.gpu);
+        let scene = &cx.scene.aircraft.scene;
+        self.icons.prepare(cx, &self.assets, scene);
     }
 
-    fn draw(&self, _pass: &mut wgpu::RenderPass<'_>, _cx: &DrawCx<'_>) {}
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
+        self.icons.draw(pass, cx);
+    }
 
     fn pending(&self) -> bool {
         self.assets.pending()

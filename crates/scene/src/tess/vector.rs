@@ -59,15 +59,22 @@
 //!   1]` in tile units); on the globe it does not clip.
 //!
 //! Runways: today the centre line of a runway is 4 px ([`RUNWAY_PX`]) until a runway 45 m wide
-//! is wider (doc 01 §5.7, item B3), when the map draws it 0 px wide and another layer draws it at
-//! 45 m. [`VectorTile::runway_lines`] names the runway segments of [`VectorTile::lines`], so the
-//! layer can leave them out of a draw without tessellating again.
+//! is wider (doc 01 §5.7, item B3: [`true_aeroways`]), when the map draws it 0 px wide and another
+//! layer (`aeroway-true-globe` / `aeroway-true-flat`, G:543-565) draws it 45 m wide
+//! ([`RUNWAY_WIDTH_M`]). [`VectorTile::runway_lines`] names the runway segments of
+//! [`VectorTile::lines`], so neither needs the tile tessellated again: the map draws
+//! [`VectorTile::non_runway_lines`] and the true-width layer [`VectorTile::true_width_runways`].
+//! deck decodes the tile once more for that layer (only its `aeroway` layer, lines only: a
+//! runway in `RUNWAY` 45 m wide, every other line `NONE` 0 wide, polygons not filled); its runway
+//! lines are the same features cut the same way as the map's, so the segments are the map's with
+//! another width.
 
 use std::f64::consts::PI;
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
 use glam::DVec2;
+use rustradar_core::geo::meters_per_pixel;
 use rustradar_core::mvt::{self, Feature, GeomType, Line, Value};
 
 use crate::camera::lng_lat_to_world;
@@ -109,6 +116,10 @@ pub const MINOR_ROADS: [&str; 4] = ["secondary", "tertiary", "minor", "service"]
 
 /// A runway's centre line in screen pixels while the true-width runways are off (G:547).
 pub const RUNWAY_PX: f64 = 4.0;
+
+/// A runway's width in metres once the true-width runways are on (`RUNWAY_WIDTH_M`, G:546: the
+/// tiles do not carry it, so a typical one).
+pub const RUNWAY_WIDTH_M: f64 = 45.0;
 
 /// One vertex of a fill: the layout of `rustradar_map::pipelines::fill::Vertex` (16 bytes,
 /// `#[repr(C)]`), so a mesh goes to the GPU with `bytemuck::cast_slice`.
@@ -174,6 +185,24 @@ impl VectorTile {
             ranges.push(start..end);
         }
         ranges
+    }
+
+    /// [`Self::lines`] without the runway centre lines, in order: what the vector map draws while
+    /// the true-width runways are on (their width is 0 then, G:600-603). Each runway range holds
+    /// whole lines, so every other line keeps its neighbours and joints.
+    pub fn non_runway_lines(&self) -> Vec<PathSegment> {
+        self.lines_without_runways().into_iter().flat_map(|r| self.lines[r.start as usize..r.end as usize].iter().copied()).collect()
+    }
+
+    /// The runway centre lines as the true-width layer draws them (`aeroway-true-*`, G:549-565):
+    /// each segment of [`Self::runway_lines`] in `RUNWAY`, [`RUNWAY_WIDTH_M`] wide, for a style
+    /// whose widths are in metres (`lineWidthUnits: "meters"`), in feature order.
+    pub fn true_width_runways(&self) -> Vec<PathSegment> {
+        self.runway_lines
+            .iter()
+            .flat_map(|r| self.lines[r.start as usize..r.end as usize].iter())
+            .map(|s| PathSegment { width: RUNWAY_WIDTH_M as f32, ..*s })
+            .collect()
     }
 }
 
@@ -355,6 +384,15 @@ pub fn vector_line_width(layer: &str, f: &Feature<'_>) -> f64 {
 /// Whether a line is a runway centre line (the vector map's runway width switch, G:601-603).
 pub fn is_runway_line(layer: &str, f: &Feature<'_>) -> bool {
     layer == "aeroway" && class_is(f, "runway")
+}
+
+/// `trueAeroways` (G:2672): whether runways are drawn at their true width, once a runway
+/// [`RUNWAY_WIDTH_M`] wide is at least as wide as its [`RUNWAY_PX`] centre line at the view's
+/// centre (`RUNWAY_WIDTH_M / metersPerPixel(zoom, latitude) >= RUNWAY_PX`, `geo.ts`'s
+/// `metersPerPixel`): from about zoom 12.76 at the equator, 12.13 at 50°, 11.76 at 60°, in either
+/// projection. At the switch the two lines are equally wide, so nothing jumps.
+pub fn true_aeroways(zoom: f64, latitude: f64) -> bool {
+    RUNWAY_WIDTH_M / meters_per_pixel(zoom, latitude) >= RUNWAY_PX
 }
 
 /// loaders.gl's `signedArea` (`mvt/lib/utils/geometry-utils.js`), on an open ring: twice the
@@ -1818,6 +1856,73 @@ mod tests {
         assert_eq!(none.lines_without_runways(), std::iter::once(0..10).collect::<Vec<_>>());
         let all = VectorTile { lines: t.lines[2..6].to_vec(), runway_lines: std::iter::once(0..4).collect(), ..VectorTile::default() };
         assert!(all.lines_without_runways().is_empty());
+    }
+
+    /// B3: the true-width layer's runways are the map's runway segments 45 m wide (same points,
+    /// neighbours, colour and caps); the map keeps every other line, in order.
+    #[test]
+    fn the_true_width_runways_are_the_runway_lines_45_m_wide_and_the_map_keeps_the_rest() {
+        let path: &[(i64, i64)] = &[(0, 0), (100, 0), (200, 50)];
+        let runway = || line(&[("class", V::S("runway"))], &[path]);
+        let taxiway = || line(&[("class", V::S("taxiway"))], &[path]);
+        let bytes = encode(&[
+            ("transportation", vec![line(&[("class", V::S("primary"))], &[path])]),
+            ("aeroway", vec![runway(), runway(), taxiway(), runway()]),
+        ]);
+        for tile in [TileIndex::new(9007, 4789, 14), TileIndex::new(2251, 1197, 12)] {
+            let t = run(tile, &bytes);
+            assert_eq!(t.lines.len(), 10);
+            assert_eq!(t.non_runway_lines(), [&t.lines[0..2], &t.lines[6..8]].concat());
+            let runways = t.true_width_runways();
+            let drawn: Vec<&PathSegment> = t.lines[2..6].iter().chain(&t.lines[8..10]).collect();
+            assert_eq!(runways.len(), drawn.len());
+            for (wide, &thin) in runways.iter().zip(&drawn) {
+                assert_eq!((thin.width, thin.color), (RUNWAY_PX as f32, RUNWAY));
+                assert_eq!(*wide, PathSegment { width: 45.0, ..*thin });
+            }
+        }
+        // no runway: nothing at true width, every line kept
+        let t = run(TileIndex::new(9007, 4789, 14), &encode(&[("aeroway", vec![taxiway()])]));
+        assert!(t.true_width_runways().is_empty());
+        assert_eq!(t.non_runway_lines(), t.lines);
+        // only runways: the map keeps nothing
+        let t = run(TileIndex::new(9007, 4789, 14), &encode(&[("aeroway", vec![runway()])]));
+        assert!(t.non_runway_lines().is_empty());
+        assert_eq!(t.true_width_runways().len(), t.lines.len());
+    }
+
+    /// B3: `trueAeroways` turns on where a runway 45 m wide is 4 px wide at the view's centre
+    /// (doc 01 §5.7: about zoom 12.8 at the equator, 12.2 at 50°, 11.8 at 60°).
+    #[test]
+    fn runways_turn_true_width_where_45_m_are_4_px() {
+        for (latitude, about) in [(0.0, 12.7643), (50.0, 12.1268), (60.0, 11.7643), (59.6519, 11.7794), (-60.0, 11.7643)] {
+            // 45 / mpp = 4 with mpp = C·cos φ / (512·2^z)
+            let switch = (rustradar_core::geo::EARTH_CIRCUMFERENCE_M * f64::cos(latitude * PI / 180.0) * RUNWAY_PX / (512.0 * RUNWAY_WIDTH_M)).log2();
+            assert!((switch - about).abs() < 1e-4, "{latitude}: {switch}");
+            assert!(!true_aeroways(switch - 1e-9, latitude), "{latitude}: on below {switch}");
+            assert!(true_aeroways(switch + 1e-9, latitude), "{latitude}: off above {switch}");
+        }
+        // the plan's views: on at V4 (Arlanda, zoom 13.5), off at V3 (Stockholm, zoom 9)
+        assert!(true_aeroways(13.5, 59.6519));
+        assert!(!true_aeroways(9.0, 59.33));
+        // off at every zoom of the globe at the equator, on far north before the flat map
+        assert!(!true_aeroways(12.0, 0.0));
+        assert!(true_aeroways(11.5, 70.0));
+    }
+
+    /// B3 on Arlanda's fixture tiles (the globe's z12 and the flat map's z14): every runway centre
+    /// line goes to the true-width layer 45 m wide, every other line stays with the map.
+    #[test]
+    fn arlanda_s_runway_lines_go_to_the_true_width_layer() {
+        for (z, x, y) in [(12, 2251, 1197), (14, 9007, 4789)] {
+            let tile = TileIndex::new(x, y, z);
+            let t = run(tile, &fixture(z, x, y));
+            let (runways, others) = (t.true_width_runways(), t.non_runway_lines());
+            assert!(!runways.is_empty(), "{tile:?}: no runway line");
+            assert_eq!(runways.len() + others.len(), t.lines.len(), "{tile:?}");
+            assert!(runways.iter().all(|s| s.color == RUNWAY && s.width == RUNWAY_WIDTH_M as f32), "{tile:?}");
+            assert!(others.iter().all(|s| s.color != RUNWAY), "{tile:?}");
+        }
     }
 
     #[test]

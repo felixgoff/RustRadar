@@ -48,6 +48,25 @@
 //!   (aliased), the stencil per MSAA sample, so the cut at a tile's edge is antialiased; two tiles
 //!   still meet without a gap or an overlap.
 //!
+//! **True-width runways** (item B3; doc 01 §5.7; G:543-565, 2672-2676). Close in, a runway's 4 px
+//! centre line would be thinner than the runway, so once a runway 45 m wide is at least 4 px wide
+//! at the view's centre (`scene::tess::vector::true_aeroways`, `45 / metersPerPixel(zoom, lat) >=
+//! 4`), today's app draws the vector map's runway lines 0 px wide and adds `aeroway-true-globe` /
+//! `aeroway-true-flat` right after it: the same tiles' `aeroway` lines, runways in `RUNWAY` 45 m
+//! wide (`lineWidthUnits: "meters"`, PathLayer's defaults otherwise), every other line invisible,
+//! no fills, `SURFACE_NO_CULL`, and on the flat map clipped to each tile's square like the map.
+//! Here each tile with runway lines uploads two more meshes ([`RunwayMeshes`]): its lines without
+//! the runways, which the map draws in place of all of them while the switch is on, and the
+//! runways 45 m wide, drawn after every tile of the map (so over the taxiways that cross them, as
+//! today), tile after tile in the map's order, through the same stencil clip on the flat map. A
+//! runway mapped as an area is still filled by the map at every zoom (`vectorFill`).
+//! Deviations, invisible once the tiles are in: deck's aeroway layer is an MVTLayer of its own,
+//! with its own tile cache that starts loading when the switch turns on (the runways missing
+//! meanwhile, since the map has already dropped them); here it shares the map's tiles and draws
+//! at once. Today the switch is worked out when the layers are built (each scene refresh, at most
+//! 50 ms apart at these zooms); here it is worked out every frame from the frame's camera, the
+//! camera the metre widths are measured with.
+//!
 //! When the layer stops drawing (another basemap) it drops its tiles, as deck finalizes a layer
 //! that leaves the list; it is [`Layer::pending`] only while it draws ([`TileSet::loading`]).
 //!
@@ -128,7 +147,29 @@ impl ByteSize for VectorTile {
 /// A tile on the GPU: its fills and its lines, in tile units.
 pub struct TileMeshes {
     pub fills: fill::Mesh<fill::Vertex>,
+    /// Every line, the runway centre lines 4 px wide (drawn while the true-width runways are off).
     pub lines: path::Mesh,
+    /// What a tile with runway centre lines draws while the true-width runways are on (B3).
+    pub runways: Option<RunwayMeshes>,
+}
+
+impl TileMeshes {
+    /// The lines the map draws: all of them, or without the runways while they are drawn at true
+    /// width (`getLineWidth` 0 for a runway, G:600-603).
+    pub fn map_lines(&self, true_width: bool) -> &path::Mesh {
+        match &self.runways {
+            Some(runways) if true_width => &runways.others,
+            _ => &self.lines,
+        }
+    }
+}
+
+/// A tile's lines while the true-width runways are on (item B3).
+pub struct RunwayMeshes {
+    /// The map's lines without the runway centre lines (`VectorTile::non_runway_lines`).
+    pub others: path::Mesh,
+    /// The runway centre lines 45 m wide (`VectorTile::true_width_runways`), widths in metres.
+    pub true_width: path::Mesh,
 }
 
 /// The decode step, on the worker pool: the tile's bytes tessellated by B1 (`None` for a tile
@@ -145,9 +186,15 @@ pub fn decode(tile: TileIndex, bytes: &[u8], cancel: &Cancel) -> Result<Option<V
 pub fn upload(device: &wgpu::Device, decoded: &VectorTile) -> TileMeshes {
     // `FillVertex` is `fill::Vertex`'s layout (16 bytes, `#[repr(C)]`)
     let vertices: &[fill::Vertex] = bytemuck::cast_slice::<FillVertex, fill::Vertex>(&decoded.fill_vertices);
+    // the true-width switch's two meshes, only for a tile with runway centre lines
+    let runways = (!decoded.runway_lines.is_empty()).then(|| RunwayMeshes {
+        others: path::Mesh::new(device, "vector map lines without runways", &decoded.non_runway_lines()),
+        true_width: path::Mesh::new(device, "runways at true width", &decoded.true_width_runways()),
+    });
     TileMeshes {
         fills: fill::Mesh::new(device, "vector map fills", vertices, &decoded.fill_indices),
         lines: path::Mesh::new(device, "vector map lines", &decoded.lines),
+        runways,
     }
 }
 
@@ -157,6 +204,8 @@ struct Draws {
     fill_style: fill::Style,
     path: Path,
     path_style: path::Style,
+    /// The true-width runways' style (B3).
+    runway_style: path::Style,
 }
 
 impl Draws {
@@ -167,17 +216,25 @@ impl Draws {
         let path = Path::new(init, label, state);
         // `lineWidthUnits: "pixels"`, PathLayer's defaults otherwise
         let path_style = path.style(device, &PathStyle::PIXELS);
-        Draws { fill, fill_style, path, path_style }
+        // the aeroway layer's `lineWidthUnits: "meters"`, PathLayer's defaults otherwise
+        let runway_style = path.style(device, &PathStyle::DEFAULT);
+        Draws { fill, fill_style, path, path_style, runway_style }
     }
 
-    /// A tile's fills, then its lines.
-    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>, slot: FrameSlot, meshes: &TileMeshes) {
+    /// A tile's fills, then its lines (without the runways while they are drawn at true width).
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>, slot: FrameSlot, meshes: &TileMeshes, true_width: bool) {
         if meshes.fills.index_count() > 0 {
             self.fill.draw(pass, cx, slot, &self.fill_style, &meshes.fills);
         }
-        if !meshes.lines.is_empty() {
-            self.path.draw(pass, cx, slot, &self.path_style, &meshes.lines);
+        let lines = meshes.map_lines(true_width);
+        if !lines.is_empty() {
+            self.path.draw(pass, cx, slot, &self.path_style, lines);
         }
+    }
+
+    /// A tile's runways at true width.
+    fn draw_runways(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>, slot: FrameSlot, runways: &path::Mesh) {
+        self.path.draw(pass, cx, slot, &self.runway_style, runways);
     }
 }
 
@@ -198,6 +255,8 @@ pub struct VectorMap {
     shown: bool,
     /// Whether this frame is the flat map (tiles clipped to their squares).
     flat: bool,
+    /// Whether this frame draws the runways at true width (`trueAeroways`, B3).
+    true_width: bool,
     /// This frame's tiles in draw order, each with its frame.
     drawn: Vec<(FrameSlot, TileIndex)>,
 }
@@ -228,6 +287,7 @@ impl VectorMap {
             reset_style,
             shown: false,
             flat: false,
+            true_width: false,
             drawn: Vec::new(),
         }
     }
@@ -254,6 +314,7 @@ impl Layer for VectorMap {
             return;
         }
         self.flat = !cx.view.is_globe();
+        self.true_width = vector::true_aeroways(cx.view.view.zoom, cx.view.view.latitude);
         cx.update_tiles(&mut self.tiles, |gpu, _tile, decoded| upload(&gpu.device, &decoded));
         for (tile, _) in self.tiles.visible() {
             self.drawn.push((cx.tile_frame(tile, 0.0), tile));
@@ -268,10 +329,27 @@ impl Layer for VectorMap {
             let Some(meshes) = self.tiles.get(tile) else { continue };
             if self.flat {
                 self.mark.draw(pass, cx, slot, &self.mark_style, &self.square);
-                self.clipped.draw(pass, cx, slot, meshes);
+                self.clipped.draw(pass, cx, slot, meshes, self.true_width);
                 self.reset.draw(pass, cx, slot, &self.reset_style, &self.square);
             } else {
-                self.globe.draw(pass, cx, slot, meshes);
+                self.globe.draw(pass, cx, slot, meshes, self.true_width);
+            }
+        }
+        if !self.true_width {
+            return;
+        }
+        // `aeroway-true-*`, after the whole map: each tile's runways 45 m wide, clipped alike
+        for &(slot, tile) in &self.drawn {
+            let Some(runways) = self.tiles.get(tile).and_then(|m| m.runways.as_ref()) else { continue };
+            if runways.true_width.is_empty() {
+                continue;
+            }
+            if self.flat {
+                self.mark.draw(pass, cx, slot, &self.mark_style, &self.square);
+                self.clipped.draw_runways(pass, cx, slot, &runways.true_width);
+                self.reset.draw(pass, cx, slot, &self.reset_style, &self.square);
+            } else {
+                self.globe.draw_runways(pass, cx, slot, &runways.true_width);
             }
         }
     }
@@ -287,7 +365,8 @@ mod tests {
     use std::sync::mpsc::Receiver;
     use std::sync::{Arc, Mutex};
 
-    use rustradar_scene::camera::ViewState;
+    use rustradar_scene::camera::{ViewState, world_to_lng_lat};
+    use rustradar_scene::geom::path::LocalMercator;
     use rustradar_scene::tess::vector::{BORDER, BORDER_STATE, LAND, ROAD_MAJOR, ROAD_MINOR, RUNWAY, TAXIWAY, WATER};
     use rustradar_scene::tiles::osm_tile_to_lng_lat;
 
@@ -600,5 +679,321 @@ mod tests {
             assert!(fixtures.asked().is_empty(), "{basemap:?}, shown {shown}: asked {:?}", fixtures.asked());
             assert!(!renderer.pending());
         }
+    }
+
+    // ------------------------------------------------------------- true-width runways (B3)
+
+    /// deck's metres in degrees of latitude (math.gl's `EARTH_CIRCUMFERENCE`, 40.03e6 m, which
+    /// the globe's radius of 6 370 972 m also gives within 5 parts in a million).
+    const DEG_PER_M: f64 = 360.0 / 40.03e6;
+
+    /// The runway centre lines of fixture tile `tile` as `[lon, lat]` ends, each cut to the tile's
+    /// square (the flat map clips there; past it the next tile draws the runway on).
+    fn runways_of(tile: TileIndex) -> Vec<[[f64; 2]; 2]> {
+        let bytes = DirTiles::fixtures().read(io::OPENFREEMAP, tile).expect("read");
+        let Some(decoded) = bytes.and_then(|b| decode(tile, &b, &Cancel::new()).expect("decoded")) else { return Vec::new() };
+        let local = LocalMercator::tile(tile);
+        let lng_lat = |[u, v]: [f64; 2]| {
+            let w = local.to_world([u, v]);
+            world_to_lng_lat([w.x, w.y])
+        };
+        let mut out = Vec::new();
+        for s in decoded.true_width_runways() {
+            let (a, b) = ([f64::from(s.start[0]), f64::from(s.start[1])], [f64::from(s.end[0]), f64::from(s.end[1])]);
+            // Liang–Barsky against [0, 1]²
+            let (mut t0, mut t1) = (0.0f64, 1.0f64);
+            for axis in 0..2 {
+                let d = b[axis] - a[axis];
+                for (p, q) in [(-d, a[axis]), (d, 1.0 - a[axis])] {
+                    if p == 0.0 {
+                        if q < 0.0 {
+                            t1 = -1.0;
+                        }
+                    } else if p < 0.0 {
+                        t0 = t0.max(q / p);
+                    } else {
+                        t1 = t1.min(q / p);
+                    }
+                }
+            }
+            if t1 > t0 {
+                let at = |t: f64| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+                out.push([lng_lat(at(t0)), lng_lat(at(t1))]);
+            }
+        }
+        out
+    }
+
+    /// A runway on the screen: its centre line and its two edges `half_m` metres to either side,
+    /// each as two screen points.
+    struct Band {
+        centre: [[f64; 2]; 2],
+        edges: [[[f64; 2]; 2]; 2],
+    }
+
+    impl Band {
+        fn new(frame: &ViewFrame, [a, b]: [[f64; 2]; 2], half_m: f64) -> Self {
+            let screen = |p: [f64; 2]| {
+                let s = frame.viewport.project([p[0], p[1], 0.0]);
+                [s[0], s[1]]
+            };
+            // the ground's normal, in metres east and north, then in degrees at each end
+            let cos = ((a[1] + b[1]) / 2.0).to_radians().cos();
+            let (east, north) = ((b[0] - a[0]) * cos, b[1] - a[1]);
+            let len = east.hypot(north);
+            let normal = [-north / len * half_m, east / len * half_m];
+            let shift = |p: [f64; 2], k: f64| [p[0] + k * normal[0] * DEG_PER_M / p[1].to_radians().cos(), p[1] + k * normal[1] * DEG_PER_M];
+            Band {
+                centre: [screen(a), screen(b)],
+                edges: [[screen(shift(a, 1.0)), screen(shift(b, 1.0))], [screen(shift(a, -1.0)), screen(shift(b, -1.0))]],
+            }
+        }
+    }
+
+    /// Where the screen line through `p` and `q` crosses the height `y`: x, and how far from `p`
+    /// to `q` (0 at `p`, 1 at `q`).
+    fn crossing([p, q]: [[f64; 2]; 2], y: f64) -> (f64, f64) {
+        let t = (y - p[1]) / (q[1] - p[1]);
+        (p[0] + (q[0] - p[0]) * t, t)
+    }
+
+    /// How much of a pixel of colour `c` the runway covers over the background `b`: `None` when
+    /// `c` is no blend of the two (something else is drawn there).
+    fn runway_share(c: [u8; 3], b: [u8; 3]) -> Option<f64> {
+        let r = rgb(RUNWAY).map(f64::from);
+        let (c, b) = (c.map(f64::from), b.map(f64::from));
+        let d: [f64; 3] = std::array::from_fn(|i| r[i] - b[i]);
+        let t = ((0..3).map(|i| (c[i] - b[i]) * d[i]).sum::<f64>() / (0..3).map(|i| d[i] * d[i]).sum::<f64>()).clamp(0.0, 1.0);
+        let off = (0..3).map(|i| (c[i] - b[i] - t * d[i]).abs()).fold(0.0, f64::max);
+        (off <= 6.0).then_some(t)
+    }
+
+    /// One pixel row across a runway: its width along the row in the shot (the runway colour's
+    /// cover of each pixel summed) and between the band's edges; and the sine of the angle
+    /// between the band and the row (a width along the row times it is the width across the
+    /// runway).
+    #[derive(Debug, Clone, Copy)]
+    struct Row {
+        measured: f64,
+        expected: f64,
+        sin: f64,
+    }
+
+    /// What the rows of `bands` measure in `image`, between 10 % and 90 % of each band's length
+    /// (its ends left out), on rows whose background on both sides is plain grey and nothing else
+    /// drawn there; and how many pixels inside the bands (1.5 px in from either edge) are not
+    /// exactly the runway's colour.
+    fn measure(image: &Image, bands: &[Band]) -> (Vec<Row>, usize, usize) {
+        let (mut rows, mut inside, mut foreign) = (Vec::new(), 0, 0);
+        for band in bands {
+            let [p, q] = band.centre;
+            let dir = [q[0] - p[0], q[1] - p[1]];
+            let sin = dir[1].abs() / dir[0].hypot(dir[1]);
+            if sin < 0.3 {
+                continue;
+            }
+            let (y0, y1) = (p[1].min(q[1]).ceil() as i64, p[1].max(q[1]).floor() as i64);
+            for y in y0.max(10)..y1.min(i64::from(image.height) - 10) {
+                let yc = y as f64 + 0.5;
+                let (xc, t) = crossing(band.centre, yc);
+                let (xa, _) = crossing(band.edges[0], yc);
+                let (xb, _) = crossing(band.edges[1], yc);
+                let (left, right) = (xa.min(xb), xa.max(xb));
+                if !(0.1..=0.9).contains(&t) || left < 10.0 || right > f64::from(image.width) - 10.0 {
+                    continue;
+                }
+                let px = |x: i64| rgb(image.pixel(x as u32, y as u32));
+                for x in (left + 1.5).ceil() as i64..(right - 1.5).floor() as i64 {
+                    inside += 1;
+                    foreign += usize::from(px(x) != rgb(RUNWAY));
+                }
+                let (from, to) = (left.floor() as i64, right.floor() as i64);
+                let (bl, br) = (px(from - 3), px(to + 3));
+                if bl[0] != bl[1] || bl[1] != bl[2] || br[0] != br[1] || br[1] != br[2] {
+                    continue;
+                }
+                let shares: Option<Vec<f64>> =
+                    (from - 1..=to + 1).map(|x| runway_share(px(x), if (x as f64 + 0.5) < xc { bl } else { br })).collect();
+                let Some(shares) = shares else { continue };
+                let measured: f64 = shares.iter().sum();
+                rows.push(Row { measured, expected: right - left, sin });
+            }
+        }
+        (rows, inside, foreign)
+    }
+
+    fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    }
+
+    /// The mean of `v` without its lowest and highest tenth. (A pixel holds four samples, so
+    /// each row's width is a multiple of a quarter pixel: a median would round, a mean does not.)
+    fn trimmed_mean(mut v: Vec<f64>) -> f64 {
+        v.sort_by(f64::total_cmp);
+        let cut = v.len() / 10;
+        let kept = &v[cut..v.len() - cut];
+        kept.iter().sum::<f64>() / kept.len() as f64
+    }
+
+    /// The share of `v` at or below `limit`.
+    fn share_within(v: &[f64], limit: f64) -> f64 {
+        v.iter().filter(|&&x| x <= limit).count() as f64 / v.len() as f64
+    }
+
+    /// A shot of the dark map from the fixtures at `view` on a `size` canvas, saved as `name`,
+    /// with no tile missing; and the tiles it asked for.
+    fn runway_shot(view: ViewState, size: [f64; 2], name: &str) -> Option<(Image, Vec<TileIndex>)> {
+        let gpu = gpu()?;
+        let fixtures = Noted::new();
+        let mut renderer = renderer(&gpu, fixtures.clone());
+        let image = render_with(&gpu, &mut renderer, &dark(view, size), 1.0).expect("rendered");
+        save(&image, name);
+        assert!(!renderer.pending(), "still loading: {:?}", renderer.pending_layers());
+        assert!(fixtures.tiles.misses().is_empty(), "the fixtures lack {:?}", fixtures.tiles.misses());
+        Some((image, fixtures.asked().into_iter().map(|(_, tile)| tile).collect()))
+    }
+
+    /// The runway bands `half_m` metres to either side of the runway lines of `tiles`.
+    fn bands(frame: &ViewFrame, tiles: &[TileIndex], half_m: f64) -> Vec<Band> {
+        tiles.iter().flat_map(|&tile| runways_of(tile)).map(|line| Band::new(frame, line, half_m)).collect()
+    }
+
+    /// The plan's acceptance of B3 (shot V4, Arlanda at zoom 13.5 pitched 45° and turned 30°,
+    /// where `trueAeroways` is on): the runways are 45 m wide. Across each pixel row the runway's
+    /// colour is as wide as the 45 m band projected through the camera within 1 px (within 0.1 px
+    /// on average), drawn over the taxiways that cross it, as in today's picture.
+    #[test]
+    fn v4_draws_the_runways_45_m_wide() {
+        assert!(vector::true_aeroways(v4().zoom, v4().latitude));
+        let size = [1440.0, 900.0];
+        let Some((image, asked)) = runway_shot(v4(), size, "b3-dark-v4-1440x900.png") else { return };
+        let frame = ViewFrame::new(&v4(), size, 1.0, 0.0);
+        let tiles: Vec<TileIndex> = asked.into_iter().filter(|t| t.z == 14).collect();
+        let (rows, inside, foreign) = measure(&image, &bands(&frame, &tiles, vector::RUNWAY_WIDTH_M / 2.0));
+        let signed: Vec<f64> = rows.iter().map(|r| r.measured - r.expected).collect();
+        let errors: Vec<f64> = signed.iter().map(|e| e.abs()).collect();
+        let bias = trimmed_mean(signed);
+        let across = trimmed_mean(rows.iter().map(|r| r.measured * r.sin).collect());
+        let mpp = rustradar_core::geo::meters_per_pixel(v4().zoom, v4().latitude);
+        let (shares, shift) = agreement(&image, &reference("dark-v4-1440x900.png"), &[rgb(RUNWAY)]);
+        eprintln!(
+            "V4: {} rows, error mean {bias:+.3} px, median {:.3} px, max {:.3} px, {:.4} within 1 px; across {across:.2} px (45 / mpp {:.2} px at the centre, unpitched); {foreign} of {inside} pixels inside not runway; today's runway kept {:.4} at {shift:?}",
+            rows.len(),
+            median(errors.clone()),
+            errors.iter().copied().fold(0.0, f64::max),
+            share_within(&errors, 1.0),
+            45.0 / mpp,
+            shares[0]
+        );
+        assert!(rows.len() > 300, "{} rows measured", rows.len());
+        assert!(bias.abs() < 0.1, "mean error {bias}");
+        assert!(share_within(&errors, 1.0) > 0.99, "{} within 1 px", share_within(&errors, 1.0));
+        assert_eq!(foreign, 0, "{foreign} of {inside} pixels inside the runways are not runway");
+        assert!(shares[0] > 0.9, "today's runway pixels kept: {}", shares[0]);
+    }
+
+    /// The plan's "width in px equals 45 / mpp within 1 px" taken literally: V4 straight down
+    /// (pitch 0, north up), where the ground's scale is the same across the view.
+    #[test]
+    fn v4_straight_down_draws_the_runways_45_over_mpp_px_wide() {
+        let view = ViewState { pitch: 0.0, bearing: 0.0, ..v4() };
+        let size = [1440.0, 900.0];
+        let Some((image, asked)) = runway_shot(view, size, "b3-dark-v4-straight-down-1440x900.png") else { return };
+        let frame = ViewFrame::new(&view, size, 1.0, 0.0);
+        let tiles: Vec<TileIndex> = asked.into_iter().filter(|t| t.z == 14).collect();
+        let (rows, inside, foreign) = measure(&image, &bands(&frame, &tiles, vector::RUNWAY_WIDTH_M / 2.0));
+        let px = 45.0 / rustradar_core::geo::meters_per_pixel(view.zoom, view.latitude);
+        let across: Vec<f64> = rows.iter().map(|r| r.measured * r.sin).collect();
+        let errors: Vec<f64> = across.iter().map(|w| (w - px).abs()).collect();
+        let mean = trimmed_mean(across);
+        eprintln!(
+            "V4 straight down: {} rows, 45 / mpp = {px:.3} px, across {mean:.3} px on average, error median {:.3}, max {:.3}; {foreign} of {inside} inside not runway",
+            rows.len(),
+            median(errors.clone()),
+            errors.iter().copied().fold(0.0, f64::max)
+        );
+        assert!(rows.len() > 300, "{} rows measured", rows.len());
+        assert!((mean - px).abs() < 0.1, "{mean} px across on average, 45 / mpp {px}");
+        assert!(share_within(&errors, 1.0) > 0.99, "{} within 1 px", share_within(&errors, 1.0));
+        assert_eq!(foreign, 0, "{foreign} of {inside} pixels inside the runways are not runway");
+    }
+
+    /// At the switch nothing jumps (doc 01 §5.7): at Arlanda on the globe, just below the zoom
+    /// where 45 m are 4 px the runway is the map's 4 px line, just above it the 45 m line, each as
+    /// wide as it should be within a tenth of a pixel on average, so the two differ by little more
+    /// than the 0.06 px the zoom step itself makes.
+    #[test]
+    fn nothing_jumps_where_the_runways_turn_true_width() {
+        // the view on the middle of the z12 tile's runway line, straight down
+        let tile = TileIndex::new(2251, 1197, 12);
+        let line = *runways_of(tile).iter().max_by(|a, b| {
+            let len = |l: &[[f64; 2]; 2]| (l[1][0] - l[0][0]).hypot(l[1][1] - l[0][1]);
+            len(a).total_cmp(&len(b))
+        })
+        .expect("a runway line at z12");
+        let [lon, lat] = [(line[0][0] + line[1][0]) / 2.0, (line[0][1] + line[1][1]) / 2.0];
+        let switch = (rustradar_core::geo::EARTH_CIRCUMFERENCE_M * lat.to_radians().cos() * vector::RUNWAY_PX / (512.0 * vector::RUNWAY_WIDTH_M)).log2();
+        let size = [480.0, 320.0];
+        let mut widths = Vec::new();
+        for (zoom, on) in [(switch - 0.02, false), (switch + 0.02, true)] {
+            assert_eq!(vector::true_aeroways(zoom, lat), on, "zoom {zoom}");
+            let view = view(lat, lon, zoom, 0.0, 0.0);
+            let name = format!("b3-switch-{}.png", if on { "above" } else { "below" });
+            let Some((image, _)) = runway_shot(view, size, &name) else { return };
+            let frame = ViewFrame::new(&view, size, 1.0, 0.0);
+            assert!(frame.viewport.is_globe());
+            let mpp = frame.viewport.meters_per_pixel();
+            // the 4 px line below the switch, the 45 m one above
+            let expected = if on { vector::RUNWAY_WIDTH_M / mpp } else { vector::RUNWAY_PX };
+            let (rows, _, _) = measure(&image, &[Band::new(&frame, line, expected / 2.0 * mpp)]);
+            let across = trimmed_mean(rows.iter().map(|r| r.measured * r.sin).collect());
+            eprintln!("zoom {zoom:.4} (switch {switch:.4}): {} rows, {across:.3} px across, {expected:.3} px expected", rows.len());
+            assert!(rows.len() > 50, "{} rows measured", rows.len());
+            assert!((across - expected).abs() < 0.1, "zoom {zoom}: {across} px across, {expected} expected");
+            widths.push(across);
+        }
+        assert!((widths[1] - widths[0]).abs() < 0.2, "the runway jumps from {} to {} px", widths[0], widths[1]);
+    }
+
+    /// The true-width runways are clipped to their tile's square on the flat map, as the map is:
+    /// with only the tile under V4's centre served, at V4 straight down, its runway line runs past
+    /// the square in the tile's buffer and no runway colour shows beyond it.
+    #[test]
+    fn the_true_width_runways_are_clipped_to_their_tile_on_the_flat_map() {
+        let Some(gpu) = gpu() else { return };
+        let view = ViewState { pitch: 0.0, bearing: 0.0, ..v4() };
+        let size = [1440.0, 900.0];
+        let tile = tile_under(&view, 14);
+        // the precondition: the tile's runway line reaches past its square
+        let bytes = DirTiles::fixtures().read(io::OPENFREEMAP, tile).expect("read").expect("the tile");
+        let decoded = decode(tile, &bytes, &Cancel::new()).expect("decoded").expect("something to draw");
+        let past = |p: [f32; 3]| p[0] < 0.0 || p[0] > 1.0 || p[1] < 0.0 || p[1] > 1.0;
+        assert!(decoded.true_width_runways().iter().any(|s| past(s.start) || past(s.end)), "{tile:?}: no runway line past the square");
+        let mut renderer = renderer(&gpu, Arc::new(OneTile(tile, DirTiles::fixtures())));
+        let image = render_with(&gpu, &mut renderer, &dark(view, size), 1.0).expect("rendered");
+        save(&image, "b3-one-tile-v4-straight-down.png");
+        let frame = ViewFrame::new(&view, size, 1.0, 0.0);
+        let corner = |x: u32, y: u32| {
+            let [lon, lat] = osm_tile_to_lng_lat(f64::from(x), f64::from(y), 14);
+            frame.viewport.project([lon, lat, 0.0])
+        };
+        let (nw, se) = (corner(tile.x, tile.y), corner(tile.x + 1, tile.y + 1));
+        let (mut inside, mut outside) = (0usize, 0usize);
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                let d = (nw[0] - px).max(px - se[0]).max(nw[1] - py).max(py - se[1]);
+                let runway = rgb(image.pixel(x, y)) == rgb(RUNWAY);
+                if d < -1.0 {
+                    inside += usize::from(runway);
+                } else if d > 1.0 {
+                    outside += usize::from(runway);
+                }
+            }
+        }
+        eprintln!("{tile:?} at {nw:?}..{se:?}: {inside} runway pixels inside, {outside} outside");
+        assert!(inside > 1_000, "{inside} runway pixels inside");
+        assert_eq!(outside, 0, "{outside} runway pixels outside the square");
     }
 }

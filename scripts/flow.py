@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Trafikverket's traffic flow directions (INSPIRE "TN_RAILWAY_TRAFFICFLOWDIRECTION",
 GeoPackage, SWEREF 99 TM) to the compact file the app ships:
-src-tauri/data/flow.json.
+crates/backend/data/flow.json.
 
     python3 scripts/flow.py path/to/TN_RAILWAY_TRAFFICFLOWDIRECTION.gpkg
 
@@ -104,7 +104,7 @@ def main(path):
         else:
             coords = [(y, x) for x, y in points]
         pieces.append([d, [[round(lon, 6), round(lat, 6)] for lat, lon in coords]])
-    out = "src-tauri/data/flow.json"
+    out = "crates/backend/data/flow.json"
     with open(out, "w") as f:
         json.dump({"pieces": pieces}, f, separators=(",", ":"))
     print(f"{out}: {len(pieces)} one-way tracks")

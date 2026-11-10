@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Trafikverket's track speed limits (BIS "Hastighetskategorier", from
 Lastkajen as a GeoPackage in WGS 84) to the compact file the app ships:
-src-tauri/data/sth.json.
+crates/backend/data/sth.json.
 
     python3 scripts/sth.py path/to/download.gpkg [more.gpkg ...]
 
@@ -63,7 +63,7 @@ def main(paths):
                     speeds.append(v if v is not None else speeds[-1])
                 coords = [[round(x, 6), round(y, 6)] for x, y in points]
                 pieces.append([DIRECTIONS.get(direction, 0), speeds, coords])
-    out = "src-tauri/data/sth.json"
+    out = "crates/backend/data/sth.json"
     with open(out, "w") as f:
         json.dump({"categories": CATEGORIES, "pieces": pieces}, f, separators=(",", ":"))
     print(f"{out}: {len(pieces)} pieces of track")

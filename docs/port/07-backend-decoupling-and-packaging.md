@@ -1151,7 +1151,7 @@ owner decision (section 17). Facts:
 | `scripts/earth-texture.py`, `night-texture.py` | NASA Blue Marble / Black Marble JPEGs | `textures/realistic/earth.color.webp`, `earth.night.webp` (4096 × 2048) | Python, Pillow, NumPy |
 | `scripts/build-rail-overview.py` | Natural Earth railroads GeoJSON | `static/rail/railroads.bin` (`RRO1` format) | Python stdlib |
 | `scripts/street-trees.py` | Malmö and Umeå open data | `static/street-trees/{malmo,umea}.bin` (`RST1` format) | Python stdlib |
-| `scripts/flow.py`, `scripts/sth.py` | Trafikverket GeoPackages | `src-tauri/data/flow.json`, `src-tauri/data/sth.json` | Python stdlib |
+| `scripts/flow.py`, `scripts/sth.py` | Trafikverket GeoPackages | `crates/backend/data/flow.json`, `crates/backend/data/sth.json` (moved from `src-tauri/data/` in stage 1) | Python stdlib |
 
 All outputs are checked in, so none of these block the port. Two break when the frontend is deleted:
 `compress-textures.mjs` loses its encoder (it lives in `node_modules`) and its layer-order source

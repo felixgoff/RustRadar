@@ -45,10 +45,12 @@ fn tile_at(lat: f64, lon: f64, z: u32) -> TileIndex {
     TileIndex::new(x, y, z)
 }
 
+/// E16 held V3 to V6 under 40 MB; T3 added the dark and satellite views of stages 3 and 4 within
+/// 60 MB (`cargo xtask fixtures`' budget).
 #[test]
-fn the_set_stays_under_40_mb() {
+fn the_set_stays_under_60_mb() {
     let bytes = file_bytes(&fixtures_dir());
-    assert!(bytes < 40_000_000, "{bytes} bytes");
+    assert!(bytes < 60_000_000, "{bytes} bytes");
 }
 
 #[test]

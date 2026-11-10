@@ -1,10 +1,27 @@
-Tile fixtures of crates/map (docs/port/00-architecture-and-plan.md, item E16 and section 8)
+Tile fixtures of crates/map (docs/port/00-architecture-and-plan.md, items E16 and T3, section 8)
 
 Downloaded by `cargo xtask fixtures` (crates/xtask/src/fixtures.rs) on 2026-11-10 16:31 UTC.
+Topped up on 2026-11-10 18:52 UTC with the planned tiles the set lacked, from the same
+OpenFreeMap build and RainViewer frame (the tiles held before were left as they were).
 Each folder holds one source's tiles as <z>/<x>/<y>.<ext>, the bytes the server sent with the
 HTTP compression undone; an empty <y>.none marks a tile the server had nothing for (404/204).
-They cover the views V3 to V6 of the plan's section 8 at 1100x720, 1440x900 and 390x844 CSS
-pixels, as the map's tile selection asks for them, and OpenFreeMap's world at zooms 0 to 2.
+They hold every tile the map's tile selection asks for at these views (the plan's section 8 and
+the shots of its stages 3 and 4; lat, lon, zoom, pitch, bearing) at 1100x720, 1440x900 and
+390x844 CSS pixels, of the sources named, and OpenFreeMap's world at zooms 0 to 2:
+  V3 (59.33, 18.07, 9, 0, 0): every source below
+  V4 (59.6519, 17.9186, 13.5, 45, 30): every source below
+  V5 (59.3293, 18.0686, 15.5, 60, 20): every source below
+  V6 (57.7, 11.93, 13, 0, 0): every source below
+  V1 (35, 10, 1.9, 0, 0): openfreemap, esri
+  V2 (52, 10, 4.5, 0, 0): openfreemap, esri
+  V7 (78.2, 15.6, 6, 0, 0): openfreemap, esri
+  V8 (0, 179.5, 3, 0, 0): openfreemap, esri
+  V3 at 11.9 (59.33, 18.07, 11.9, 0, 0): openfreemap
+  V3 at 12.1 (59.33, 18.07, 12.1, 0, 0): openfreemap
+  V4 at 11.9 (59.6519, 17.9186, 11.9, 45, 30): openfreemap
+  V4 at 12.1 (59.6519, 17.9186, 12.1, 45, 30): openfreemap
+  B5 night (0, 180, 1.9, 0, 0): openfreemap
+  B5 day (0, 0, 1.9, 0, 0): openfreemap
 
 These files are third-party data, kept here only so that the tests and headless screenshots run
 without the network. They are not covered by the licence of this repository's code; each stays

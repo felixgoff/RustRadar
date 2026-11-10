@@ -16,9 +16,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Manager};
 
 use crate::CmdResult;
+use crate::osm_platforms::overpass_failed;
 
 /// The main public instance, then a mirror if it fails.
 const URLS: [&str; 2] = [
@@ -118,15 +118,6 @@ fn form_encode(s: &str) -> String {
         }
     }
     out
-}
-
-/// Overpass reports a timeout or lack of memory as a 200 with no elements and
-/// an error remark: that is a failure, not an empty area.
-pub fn overpass_failed(json: &Value) -> Result<(), String> {
-    match json["remark"].as_str() {
-        Some(remark) if remark.contains("error") => Err(format!("Overpass: {remark}")),
-        _ => Ok(()),
-    }
 }
 
 /// The centrelines in an Overpass `out geom` JSON answer. Ways with fewer than
@@ -239,15 +230,10 @@ fn icao(code: &str) -> Option<String> {
 
 /// Taxiway, taxilane and runway centrelines within 4 km of an airport (its
 /// ICAO code and reference point), from OpenStreetMap. Cached in memory and
-/// on disk for a month; empty when they can't be had (offline, Overpass busy).
-#[tauri::command]
-pub async fn airport_taxiways(
-    icao: String,
-    lat: f64,
-    lon: f64,
-    app: AppHandle,
-) -> CmdResult<std::sync::Arc<Vec<Line>>> {
-    let code = self::icao(&icao).ok_or("not an ICAO airport code")?;
+/// on disk for a month (under `cache_dir`, [`crate::Dirs::cache`]); empty when
+/// they can't be had (offline, Overpass busy).
+pub async fn airport(icao: &str, lat: f64, lon: f64, cache_dir: &Path) -> CmdResult<std::sync::Arc<Vec<Line>>> {
+    let code = self::icao(icao).ok_or("not an ICAO airport code")?;
     if !(lat.is_finite() && lon.is_finite() && lat.abs() <= 90.0 && lon.abs() <= 180.0) {
         return Err("not a position".into());
     }
@@ -259,12 +245,8 @@ pub async fn airport_taxiways(
     if cache.failed.get(&code).is_some_and(|until| Instant::now() < *until) {
         return Ok(Default::default());
     }
-    let file = app
-        .path()
-        .app_cache_dir()
-        .ok()
-        .map(|dir| dir.join("taxiways").join(format!("{code}.json")));
-    match load(lat, lon, file.as_deref()).await {
+    let file = cache_dir.join("taxiways").join(format!("{code}.json"));
+    match load(lat, lon, Some(&file)).await {
         Ok(lines) => {
             let lines = std::sync::Arc::new(lines);
             cache.failed.remove(&code);

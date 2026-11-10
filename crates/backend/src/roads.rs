@@ -239,8 +239,7 @@ async fn load(http: &reqwest::Client, key: &str, centre: [f64; 2]) -> Result<Vec
 
 /// The numbered roads' stretches around a point (its square of the map's),
 /// for the realistic map; none without a Trafikverket key or outside Sweden.
-#[tauri::command]
-pub async fn road_widths(lon: f64, lat: f64) -> crate::CmdResult<Arc<Vec<RoadPiece>>> {
+pub async fn widths(lon: f64, lat: f64) -> crate::CmdResult<Arc<Vec<RoadPiece>>> {
     let key = crate::keys::current().trafikverket;
     // (Sweden and a little round it)
     if key.is_empty() || !(10.0..=25.0).contains(&lon) || !(55.0..=69.5).contains(&lat) {

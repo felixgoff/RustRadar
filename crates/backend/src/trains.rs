@@ -9,11 +9,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use tokio::task::AbortHandle;
 
-use crate::CmdResult;
+use crate::trafikverket::TrainEvent;
+use crate::{CmdResult, Following, Wake, now_ms};
 
 const USER_AGENT: &str = concat!(
     "RustRadar/",
@@ -205,10 +207,6 @@ impl Source {
 }
 
 // ---------------------------------------------------------------- helpers
-
-pub(crate) fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
-}
 
 /// Days since 1970-01-01 of a proleptic Gregorian date.
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -418,7 +416,7 @@ async fn from_source(source: Source, view: Area) -> Result<Vec<Train>, String> {
             && s.blocked().is_none()
             && s.refreshing.insert(key.clone())
         {
-            tauri::async_runtime::spawn(refresh(source, key.clone(), area));
+            crate::rt().spawn(refresh(source, key.clone(), area));
         }
         hit
     });
@@ -479,28 +477,32 @@ pub fn sources_for(view: &Area, _zoom: f64) -> Vec<Source> {
     SOURCES.into_iter().filter(|s| keyed && s.covers(view)).collect()
 }
 
-fn followed() -> &'static Mutex<Option<tauri::async_runtime::JoinHandle<()>>> {
-    static F: OnceLock<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> = OnceLock::new();
+fn followed() -> &'static Mutex<Option<AbortHandle>> {
+    static F: OnceLock<Mutex<Option<AbortHandle>>> = OnceLock::new();
     F.get_or_init(Default::default)
 }
 
 /// Streams live updates of a train (its position and its stops) until
-/// `unfollow_train` or another train is followed. Trafikverket's trains only:
-/// the other sources have no stream.
-#[tauri::command]
-pub fn follow_train(id: String, on_event: tauri::ipc::Channel<crate::trafikverket::TrainEvent>) -> CmdResult<()> {
+/// [`unfollow`], another train is followed or the [`Following`] is dropped.
+/// Trafikverket's trains only: the other sources have no stream, so nothing
+/// comes for theirs. `wake` is called after every event.
+pub fn follow(id: String, wake: Wake) -> CmdResult<Following<TrainEvent>> {
     let key = crate::keys::current().trafikverket;
-    let task = (id.starts_with("trafikverket:") && !key.is_empty())
-        .then(|| Ok::<_, String>(tauri::async_runtime::spawn(crate::trafikverket::follow(client()?.clone(), key, id, on_event))))
-        .transpose()?;
+    let http = (id.starts_with("trafikverket:") && !key.is_empty()).then(client).transpose()?.cloned();
+    let streams = http.is_some();
+    let following = Following::spawn(wake, |tx| async move {
+        if let Some(http) = http {
+            crate::trafikverket::follow(http, key, id, tx).await;
+        }
+    });
+    let task = streams.then(|| following.abort_handle());
     if let Some(previous) = std::mem::replace(&mut *followed().lock().unwrap_or_else(|e| e.into_inner()), task) {
         previous.abort();
     }
-    Ok(())
+    Ok(following)
 }
 
-#[tauri::command]
-pub fn unfollow_train() {
+pub fn unfollow() {
     if let Some(task) = followed().lock().unwrap_or_else(|e| e.into_inner()).take() {
         task.abort();
     }
@@ -509,20 +511,19 @@ pub fn unfollow_train() {
 /// The whole way of a train along the track, for the sources that have its
 /// timetable. Made from the track loaded so far: while `complete` is false,
 /// ask again in a moment.
-#[tauri::command]
-pub async fn train_route(id: String) -> CmdResult<crate::trafikverket::TrainRoute> {
+pub async fn route(id: String) -> CmdResult<crate::trafikverket::TrainRoute> {
     let key = crate::keys::current().trafikverket;
     // a whole run is a few hundred kilometres of track: off the async threads
-    tauri::async_runtime::spawn_blocking(move || crate::trafikverket::route(&id, &key))
+    crate::rt()
+        .spawn_blocking(move || crate::trafikverket::route(&id, &key))
         .await
         .map_err(|e| e.to_string())?
 }
 
 /// The signal blocks starting in an area (close in: the signals are only
 /// mapped at street level), and whether its track and signals are all here.
-#[tauri::command]
-pub async fn train_blocks(west: f64, south: f64, east: f64, north: f64) -> CmdResult<TrainBlocks> {
-    tauri::async_runtime::spawn_blocking(move || {
+pub async fn blocks(west: f64, south: f64, east: f64, north: f64) -> CmdResult<TrainBlocks> {
+    crate::rt().spawn_blocking(move || {
         let (blocks, complete) = crate::rail::blocks::blocks_in(south, west, north, east);
         // and the bridges and tunnels their track runs over and through
         let pad = 0.03;
@@ -535,32 +536,29 @@ pub async fn train_blocks(west: f64, south: f64, east: f64, north: f64) -> CmdRe
 
 #[derive(serde::Serialize)]
 pub struct TrainBlocks {
-    blocks: Vec<crate::rail::blocks::Block>,
-    structures: Vec<crate::rail::Structure>,
-    complete: bool,
+    pub blocks: Vec<crate::rail::blocks::Block>,
+    pub structures: Vec<crate::rail::Structure>,
+    pub complete: bool,
 }
 
 /// The trains the map shows close up (by id): streamed live, every few
 /// seconds, like a followed one. Trafikverket's only; an empty list stops it.
-#[tauri::command]
-pub fn watch_trains(ids: Vec<String>) {
+pub fn watch(ids: Vec<String>) {
     let ids: Vec<String> = ids.into_iter().filter(|id| id.starts_with("trafikverket:")).collect();
     crate::trafikverket::watch(&ids);
 }
 
 /// The operators the map leaves out (as trains name them; "" for trains
 /// whose operator isn't known): their trains aren't streamed live.
-#[tauri::command]
-pub fn hide_train_operators(names: Vec<String>) {
+pub fn hide_operators(names: Vec<String>) {
     crate::trafikverket::hide_operators(names);
 }
 
 /// Every stop of a train, for the sources that have its timetable; none for the others.
-#[tauri::command]
-pub async fn train_stops(id: String) -> CmdResult<Vec<crate::trafikverket::Stop>> {
+pub async fn stops(id: &str) -> CmdResult<Vec<crate::trafikverket::Stop>> {
     if id.starts_with("trafikverket:") {
         let key = crate::keys::current().trafikverket;
-        return crate::trafikverket::stops(client()?, &key, &id).await;
+        return crate::trafikverket::stops(client()?, &key, id).await;
     }
     Ok(Vec::new())
 }
@@ -568,8 +566,7 @@ pub async fn train_stops(id: String) -> CmdResult<Vec<crate::trafikverket::Stop>
 /// Trains in an area (degrees; `west > east` crosses the antimeridian) at a
 /// deck.gl zoom, merged from every regional source covering it. A source
 /// that fails is left out (and logged); only when all fail is it an error.
-#[tauri::command]
-pub async fn trains_in_view(west: f64, south: f64, east: f64, north: f64, zoom: f64) -> CmdResult<Vec<Train>> {
+pub async fn in_view(west: f64, south: f64, east: f64, north: f64, zoom: f64) -> CmdResult<Vec<Train>> {
     let view = Area::view(west, south, east, north).ok_or("not an area")?;
     let sources = sources_for(&view, if zoom.is_finite() { zoom } else { 0.0 });
     if sources.contains(&Source::Trafikverket) {
@@ -591,14 +588,14 @@ pub async fn trains_in_view(west: f64, south: f64, east: f64, north: f64, zoom: 
     let now = now_ms();
     let rail = crate::rail::Rail { class: None };
     for t in trains.iter_mut().filter(|t| t.frames.is_empty()) {
-        let report = crate::motion::Fix {
+        let report = crate::rail_motion::Fix {
             lat: t.lat,
             lon: t.lon,
             t_ms: t.position_unix * 1000,
             speed: t.speed_kmh.map(|s| f64::from(s) / 3.6),
             heading: t.heading.map(f64::from),
         };
-        t.frames = crate::motion::simulate(None, &report, None, &[], now, Some(&rail)).frames;
+        t.frames = crate::rail_motion::simulate(None, &report, None, &[], now, Some(&rail)).frames;
     }
     Ok(trains)
 }

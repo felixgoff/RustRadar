@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::motion;
+use crate::rail_motion as motion;
 use crate::trains::{Kind, Train, unix_ms};
+use crate::{BackendEvent, FollowSender, Notifier};
 
 const URL: &str = "https://api.trafikinfo.trafikverket.se/v2/data.json";
 /// How long the delays around now are reused before asking again.
@@ -407,7 +408,6 @@ fn products_seen(run: &Service) {
 }
 
 /// Dev builds: every product seen so far, with the class taken for it.
-#[tauri::command]
 pub fn product_codes() -> Vec<ProductSeen> {
     let seen = products().lock().unwrap();
     let mut out: Vec<ProductSeen> = seen
@@ -1074,20 +1074,30 @@ pub fn parse_stops(body: &str, stations: &HashMap<String, Station>) -> Result<Ve
 
 const REFUSED: &str = "Trafikverket didn't accept the API key (check it on the keys page)";
 
+/// What Trafikverket says of the saved key; on the wire `"none"`, `"invalid"` or `"ok"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyStatus {
+    /// No key saved.
+    None,
+    /// Refused.
+    Invalid,
+    Ok,
+}
+
 /// Whether the saved key works, asked of Trafikverket with the smallest
-/// query there is: "ok", "invalid" (refused), or "none" (no key saved). An
+/// query there is: ok, invalid (refused), or none (no key saved). An
 /// error when Trafikverket can't be reached: the key may be fine.
-#[tauri::command]
-pub async fn trafikverket_key_status() -> crate::CmdResult<&'static str> {
+pub async fn key_status() -> crate::CmdResult<KeyStatus> {
     let key = crate::keys::current().trafikverket;
     if key.is_empty() {
-        return Ok("none");
+        return Ok(KeyStatus::None);
     }
     let http = crate::trains::client()?;
     let query = "<QUERY objecttype=\"TrainStation\" namespace=\"rail.infrastructure\" schemaversion=\"1.4\" limit=\"1\"><INCLUDE>LocationSignature</INCLUDE></QUERY>";
     match post(http, &key, query).await {
-        Ok(_) => Ok("ok"),
-        Err(e) if e == REFUSED => Ok("invalid"),
+        Ok(_) => Ok(KeyStatus::Ok),
+        Err(e) if e == REFUSED => Ok(KeyStatus::Invalid),
         Err(e) => Err(e),
     }
 }
@@ -1294,7 +1304,7 @@ static STREAMS_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::
 
 /// Whether the operators' live streams are bringing reports.
 pub fn streams_live() -> bool {
-    crate::trains::now_ms() - STREAMS_AT.load(std::sync::atomic::Ordering::Relaxed) < LIVE_FOR_MS
+    crate::now_ms() - STREAMS_AT.load(std::sync::atomic::Ordering::Relaxed) < LIVE_FOR_MS
 }
 
 // ------------------------------------------------------ each operator, live
@@ -1366,13 +1376,13 @@ fn operator_streams_wanted() -> HashMap<(String, usize), Vec<String>> {
 /// positions say nothing of operators: by their numbers, from the
 /// timetable) while the map shows Trafikverket's trains, but not those of
 /// operators the map leaves out. Each report moves its train in the trains'
-/// cache at once, and the page is told (`trains-changed`) to show it. An
+/// cache at once, and the UI is told ([`BackendEvent::TrainsChanged`]) to show it. An
 /// operator's stream is opened again when trains new to it start running
 /// (now and then), and closed when it has none left or is left out.
-pub fn start_operator_streams(app: tauri::AppHandle) {
+pub fn start_operator_streams(notifier: Notifier) {
     use std::sync::atomic::Ordering::Relaxed;
-    type Running = HashMap<(String, usize), (Vec<String>, Instant, tauri::async_runtime::JoinHandle<()>)>;
-    tauri::async_runtime::spawn(async move {
+    type Running = HashMap<(String, usize), (Vec<String>, Instant, tokio::task::JoinHandle<()>)>;
+    crate::rt().spawn(async move {
         let mut running: Running = HashMap::new();
         let mut running_key = String::new();
         loop {
@@ -1411,12 +1421,12 @@ pub fn start_operator_streams(app: tauri::AppHandle) {
                 if crate::devlog::ENABLED {
                     eprintln!("[stream] {label}: {} trains", numbers.len());
                 }
-                let (app, query, key) = (app.clone(), trains_query(&numbers), key.clone());
-                let task = tauri::async_runtime::spawn(async move {
+                let (notifier, query, key) = (notifier.clone(), trains_query(&numbers), key.clone());
+                let task = crate::rt().spawn(async move {
                     loop {
                         let still = || crate::keys::current().trafikverket == key;
-                        let heard = |_: usize| STREAMS_AT.store(crate::trains::now_ms(), Relaxed);
-                        stream_positions(&app, &key, &query, &label, still, heard).await;
+                        let heard = |_: usize| STREAMS_AT.store(crate::now_ms(), Relaxed);
+                        stream_positions(&notifier, &key, &query, &label, still, heard).await;
                         tokio::time::sleep(RECONNECT).await;
                     }
                 });
@@ -1429,7 +1439,7 @@ pub fn start_operator_streams(app: tauri::AppHandle) {
 /// One stream of positions, until it ends or `wanted` turns false. Reports
 /// move their trains (`move_trains`); `heard` is told how many came.
 async fn stream_positions(
-    app: &tauri::AppHandle,
+    notifier: &Notifier,
     key: &str,
     query: &str,
     label: &str,
@@ -1485,7 +1495,7 @@ async fn stream_positions(
                 _ = tick.tick() => {
                     if !pending.is_empty() {
                         let reports: Vec<Report> = pending.drain().map(|(_, r)| r).collect();
-                        move_trains(app, http, key, reports).await;
+                        move_trains(notifier, http, key, reports).await;
                     }
                 }
             }
@@ -1532,10 +1542,10 @@ pub fn watch(ids: &[String]) {
 
 /// Keeps one live stream for the trains in view (`watch`), reopened when
 /// the set changes (once it settles) and closed when it empties.
-pub fn start_view_streams(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
+pub fn start_view_streams(notifier: Notifier) {
+    crate::rt().spawn(async move {
         // the trains and the key the stream runs with: a new key restarts it too
-        let mut running: Option<(Vec<String>, String, tauri::async_runtime::JoinHandle<()>)> = None;
+        let mut running: Option<(Vec<String>, String, tokio::task::JoinHandle<()>)> = None;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let key = crate::keys::current().trafikverket;
@@ -1553,11 +1563,11 @@ pub fn start_view_streams(app: tauri::AppHandle) {
             if crate::devlog::ENABLED {
                 eprintln!("[stream] view: {} trains", wanted.len());
             }
-            let (app, query, stream_key) = (app.clone(), trains_query(&wanted), key.clone());
-            let task = tauri::async_runtime::spawn(async move {
+            let (notifier, query, stream_key) = (notifier.clone(), trains_query(&wanted), key.clone());
+            let task = crate::rt().spawn(async move {
                 loop {
                     let still = || crate::keys::current().trafikverket == stream_key;
-                    stream_positions(&app, &stream_key, &query, "view", still, |_| {}).await;
+                    stream_positions(&notifier, &stream_key, &query, "view", still, |_| {}).await;
                     tokio::time::sleep(RECONNECT).await;
                 }
             });
@@ -1567,9 +1577,8 @@ pub fn start_view_streams(app: tauri::AppHandle) {
 }
 
 /// The trains these reports move, worked out and put in the trains' cache.
-async fn move_trains(app: &tauri::AppHandle, http: &reqwest::Client, key: &str, reports: Vec<Report>) {
-    use tauri::Emitter;
-    let now_ms = crate::trains::now_ms();
+async fn move_trains(notifier: &Notifier, http: &reqwest::Client, key: &str, reports: Vec<Report>) {
+    let now_ms = crate::now_ms();
     // only what is newer than what the map has
     let reports: Vec<Report> = reports
         .into_iter()
@@ -1584,7 +1593,7 @@ async fn move_trains(app: &tauri::AppHandle, http: &reqwest::Client, key: &str, 
     let stations = station_cache().lock().unwrap().clone().map(|(_, _, s)| s).unwrap_or_default();
     let delays = delay_cache().lock().unwrap().clone().map(|(_, _, d)| d).unwrap_or_default();
     // the way along the track is worked out off the async threads
-    let worked = tauri::async_runtime::spawn_blocking(move || {
+    let worked = crate::rt().spawn_blocking(move || {
         let trains: Vec<Train> = reports
             .iter()
             .map(|r| train(r, previous(r).as_ref(), &services, &delays, &stations, now_ms))
@@ -1595,7 +1604,7 @@ async fn move_trains(app: &tauri::AppHandle, http: &reqwest::Client, key: &str, 
     let Ok((trains, reports)) = worked else { return };
     remember(&trains, &reports, now_ms, false);
     if crate::trains::patch(crate::trains::Source::Trafikverket, trains) {
-        let _ = app.emit("trains-changed", ());
+        notifier.notify(BackendEvent::TrainsChanged);
     }
 }
 
@@ -1720,7 +1729,7 @@ fn delay_of(stops: &[Stop]) -> Option<i32> {
 
 /// Follows one train until dropped: its position from Trafikverket's stream
 /// of its position reports, its stops again whenever its announcements change.
-pub async fn follow(http: reqwest::Client, key: String, id: String, channel: tauri::ipc::Channel<TrainEvent>) {
+pub async fn follow(http: reqwest::Client, key: String, id: String, channel: FollowSender<TrainEvent>) {
     let Some(rest) = id.strip_prefix("trafikverket:") else { return };
     let (date, ident) = rest.split_once(':').unwrap_or_default();
     let ident = ident.trim_start_matches('~').to_owned();
@@ -1771,7 +1780,7 @@ pub async fn follow(http: reqwest::Client, key: String, id: String, channel: tau
                 delay = push_stops(&http, &key, &id, &channel).await.or(delay);
                 continue;
             }
-            let now = crate::trains::now_ms();
+            let now = crate::now_ms();
             let Ok(reports) = parse_positions(&data) else { continue };
             let Some(report) = reports.into_iter().max_by_key(|r| r.at_ms) else { continue };
             if report.at_ms <= last || now - report.at_ms > STALE_REPORT_MS {
@@ -1801,7 +1810,7 @@ async fn push_stops(
     http: &reqwest::Client,
     key: &str,
     id: &str,
-    channel: &tauri::ipc::Channel<TrainEvent>,
+    channel: &FollowSender<TrainEvent>,
 ) -> Option<i32> {
     let stops = stops(http, key, id).await.ok()?;
     let delay = delay_of(&stops);
@@ -1911,7 +1920,7 @@ pub fn route(id: &str, key: &str) -> Result<TrainRoute, String> {
     let stations = station_cache().lock().unwrap().clone().map(|(_, _, s)| s).unwrap_or_default();
     let delay = delay_cache().lock().unwrap().clone().and_then(|(_, _, d)| d.get(ident).copied());
     let seen = last_places().lock().unwrap().get(id).copied();
-    let now = crate::trains::now_ms();
+    let now = crate::now_ms();
     let lookup = operational_numbers().lock().unwrap().get(id).cloned();
     let drawn = lookup.and_then(|n| drawn_now(&n, now));
     Ok(route_from(&run, delay, &stations, seen.map(|s| s.latest), drawn, now, usize::MAX))
@@ -2597,5 +2606,14 @@ mod tests {
             }
         }
         std::fs::write(format!("{dir}/timeline.jsonl"), out).unwrap();
+    }
+
+    #[test]
+    fn key_statuses_keep_their_names() {
+        let names: Vec<serde_json::Value> = [KeyStatus::None, KeyStatus::Invalid, KeyStatus::Ok]
+            .iter()
+            .map(|s| serde_json::to_value(s).unwrap())
+            .collect();
+        assert_eq!(names, ["none", "invalid", "ok"]);
     }
 }

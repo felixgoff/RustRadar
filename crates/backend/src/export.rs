@@ -4,8 +4,6 @@
 
 use std::path::{Path, PathBuf};
 
-use tauri::{AppHandle, Manager};
-
 /// Longest file name kept, in characters, before the extension.
 const MAX_STEM: usize = 120;
 
@@ -50,20 +48,15 @@ fn unused_path(dir: &Path, name: &str) -> PathBuf {
         .expect("some numbered name is free")
 }
 
-/// Writes `contents` to the Downloads folder (the home folder when there is
-/// none) as `file_name`, numbered if a file of that name exists. Returns the
-/// full path written.
-#[tauri::command]
-pub async fn save_export(app: AppHandle, file_name: String, contents: String) -> Result<String, String> {
-    let paths = app.path();
-    let dir = paths
-        .download_dir()
-        .or_else(|_| paths.home_dir())
-        .map_err(|e| format!("No Downloads folder to save to: {e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't open {}: {e}", dir.display()))?;
-    let path = unused_path(&dir, &safe_file_name(&file_name));
+/// Writes `contents` to `downloads` (the Downloads folder, else the home
+/// folder: [`crate::Dirs::downloads`]) as `file_name`, numbered if a file of
+/// that name exists. Returns the full path written. Blocking file I/O.
+pub fn save(downloads: Option<&Path>, file_name: &str, contents: &str) -> Result<PathBuf, String> {
+    let dir = downloads.ok_or("No Downloads folder to save to")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't open {}: {e}", dir.display()))?;
+    let path = unused_path(dir, &safe_file_name(file_name));
     std::fs::write(&path, contents).map_err(|e| format!("Couldn't save {}: {e}", path.display()))?;
-    Ok(path.to_string_lossy().into_owned())
+    Ok(path)
 }
 
 #[cfg(test)]

@@ -1323,7 +1323,7 @@ pub fn route_for(
 }
 
 /// Tests: every `{x}_{y}.pbf` tile in `dir` (zoom `ZOOM`) as if fetched.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub fn load_tiles_for_tests(dir: &str) {
     let mut st = store().lock().unwrap();
     for e in std::fs::read_dir(dir).unwrap() {

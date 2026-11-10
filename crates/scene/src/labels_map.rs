@@ -951,18 +951,28 @@ mod tests {
 
     #[test]
     fn a_label_half_covered_fades_by_the_share_of_its_patch_it_holds() {
-        // the cover's edge runs through the anchor's patch: 2 of 5 columns are still the label's
+        // the cover's edge runs through the anchor's patch: some of its 5 columns are still the
+        // label's
         let small = boxed(2.0, 2.0);
         let cover = LaidText { glyphs: vec![LaidGlyph { ch: 'x', frame: [0.0, 0.0, 40.0 * 64.0, 40.0 * 64.0], offset: [0.0, 0.0] }], ..small.clone() };
-        // cover at 1.3: 52 px wide, centred on 100: its right edge at 126; the label's anchor at
-        // 126.5 samples x 124.5..128.5; texels (2 px) 62 and 63 hold the cover, 64 the label
+        // the cover at 1.3 is 52 px wide, centred on 100: x 74..126, texels (2 px each) 37 to 63,
+        // so it holds texels 37..=62 (those whose centre it covers); the label, 26 px wide round
+        // its anchor, holds the texels from 63 on that the cover leaves it
         let label = LaidText { glyphs: vec![LaidGlyph { ch: 'x', frame: [0.0, 0.0, 20.0 * 64.0, 20.0 * 64.0], offset: [0.0, 0.0] }], ..small };
-        let f = fades(&[placing([100.0, 100.0], 800.0, &cover), placing([127.0, 100.0], 100.0, &label)]);
-        // x samples 125..129 → texels 62, 63, 63, 64, 64: two of five columns
-        let want = (10.0_f64 / 25.0).powf(2.2);
-        assert_eq!(f[0], 1.0);
-        assert!((f[1] - want).abs() < 1e-12, "{} != {want}", f[1]);
-        assert!(drawn(f[1]));
+        for (anchor, columns) in [
+            // x samples 123..=127 → texels 61, 62, 62, 63, 63: two of five columns
+            (125.0, 2.0),
+            // 124..=128 → 62, 62, 63, 63, 64: three
+            (126.0, 3.0),
+            // 125..=129 → 62, 63, 63, 64, 64: four
+            (127.0, 4.0),
+        ] {
+            let f = fades(&[placing([100.0, 100.0], 800.0, &cover), placing([anchor, 100.0], 100.0, &label)]);
+            let want = (columns * 5.0 / 25.0_f64).powf(2.2);
+            assert_eq!(f[0], 1.0);
+            assert!((f[1] - want).abs() < 1e-12, "anchor {anchor}: {} != {want}", f[1]);
+            assert!(drawn(f[1]));
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub mod geom;
 pub mod gpu_types;
 pub mod ground;
 pub mod hillshade;
+pub mod labels_map;
 pub mod landcover;
 pub mod landcover_ground;
 pub mod lod;

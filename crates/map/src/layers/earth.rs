@@ -17,11 +17,13 @@
 //!   read it as unlit; deck and today's app win. Its normals are the sphere's own: deck's
 //!   `project_normal` turns them by `project_get_orientation_matrix(geometry.position)` on the
 //!   globe, but SimpleMeshLayer calls it before `geometry.position` is set, while it still holds
-//!   its initial `(0, 0, 1, 0)`, whose orientation matrix is the identity. The rig is
-//!   [`LightRig::new`]: the app aims the key light only over buildings on the flat map
-//!   (`buildings && flat`, G:2724), so wherever the earth is drawn the key light has its usual
-//!   direction. [`lit_color`] is the CPU twin of one of its pixels; the dark map's cap at V1 is
-//!   today's to the level (test `v1_dark_matches_todays_app_at_the_centre_and_the_pole`).
+//!   its initial `(0, 0, 1, 0)`, whose orientation matrix is the identity. The rig is the scene's
+//!   one rig (`SceneInput::lights`, [`PrepareCx::set_lights`]), as deck's LightingEffect lights
+//!   every layer; its key light is aimed only over buildings on the flat map (`buildings && flat`,
+//!   G:2724), so wherever the earth is drawn it has its usual direction, [`LightRig::new`]'s
+//!   (but for the frames between a refresh on the flat map and the next one after the camera
+//!   crossed zoom 12). [`lit_color`] is the CPU twin of one of its pixels; the dark map's cap at
+//!   V1 is today's to the level (test `v1_dark_matches_todays_app_at_the_centre_and_the_pole`).
 //!
 //!   Now that the sphere differs from the land, one thing E5's unlit sphere hid shows: on
 //!   SwiftShader a few MSAA samples of its edge-on silhouette facets win the depth test against
@@ -232,8 +234,8 @@ impl Layer for Earth {
         if !self.visible {
             return;
         }
-        // the usual rig: the app aims the key light only on the flat map (module notes)
-        self.pipeline.set_lights(&cx.gpu.queue, &LightRig::new(), cx.view);
+        // the scene's rig, unaimed wherever the globe is drawn (module notes)
+        cx.set_lights(&self.pipeline);
         self.instances.write(&cx.gpu.device, &cx.gpu.queue, &[earth_instance(cx.view, cx.scene.basemap)]);
     }
 

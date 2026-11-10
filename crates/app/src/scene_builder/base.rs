@@ -7,10 +7,15 @@
 //! tiles and the projection are the map layer's, and the tile URL is the app's fetcher's
 //! (`tile_fetcher::TileSources::app` reads OpenFreeMap's TileJSON once; until it has, or if it
 //! cannot, no tile arrives and only the land shows, as today).
+//!
+//! The plain buildings (item B7; G:2694) follow the *buildings* setting
+//! ([`buildings::Input::shown`]; the layer works out the flat map and the basemap), and with them
+//! the scene's key light is aimed at the sun (`scene.aim_lights`, G:2723-2724: from the real sun
+//! over buildings on the flat map, else from its usual direction), once the clocks are set.
 
 use rustradar_core::geo::Basemap;
 use rustradar_map::SceneInput;
-use rustradar_map::layers::vector_map;
+use rustradar_map::layers::{buildings, vector_map};
 
 use crate::state::AppState;
 
@@ -22,6 +27,9 @@ impl Base {
     /// Fills its layers' inputs in `scene` from `state` (see [`super::SceneBuilder::build`]).
     pub fn build(&mut self, state: &AppState, scene: &mut SceneInput) {
         scene.vector_map = vector_map::Input { shown: state.basemap() == Basemap::Dark };
+        let buildings = state.persisted.settings.buildings;
+        scene.buildings = buildings::Input { shown: buildings };
+        scene.aim_lights(buildings);
     }
 }
 
@@ -46,6 +54,22 @@ mod tests {
             let clocks = Clocks { local_ms: 1.7e12, feed_ms: 1.7e12 };
             let scene = SceneBuilder::default().build(&mut state, clocks, 1.0);
             assert_eq!(scene.vector_map.shown, shown, "{basemap:?}");
+        }
+    }
+
+    /// The plain buildings follow the setting (B7), and the key light is aimed at the sun over
+    /// them on the flat map (G:2723-2724), not with the setting off.
+    #[test]
+    fn the_buildings_follow_the_setting_and_aim_the_key_light() {
+        let v4 = ViewState { latitude: 59.6519, longitude: 17.9186, zoom: 13.5, pitch: 45.0, bearing: 30.0, position: None };
+        let clocks = Clocks { local_ms: 1_782_036_000_000.0, feed_ms: 1_782_036_000_000.0 };
+        for on in [true, false] {
+            let mut state = AppState::new(Startup { basemap: Some(Basemap::Dark), ..Default::default() }, None, None, None, v4, [1440.0, 900.0]);
+            state.persisted.settings.buildings = on;
+            let scene = SceneBuilder::default().build(&mut state, clocks, 1.0);
+            assert_eq!(scene.buildings.shown, on);
+            assert_eq!(scene.lights, rustradar_map::renderer::scene_lights(&v4, clocks.feed_ms, on));
+            assert_eq!(scene.lights == rustradar_map::pipelines::mesh::LightRig::new(), !on, "aimed only over buildings");
         }
     }
 

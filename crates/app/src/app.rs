@@ -1,37 +1,283 @@
-//! The interactive window: winit event loop, surface, and input into egui.
+//! The window and the frame loop (plan 2.1–2.2; doc 07 §11.4, §11.7).
+//!
+//! [`run`] makes the tokio runtime, the event loop and the wake, starts the backend, and runs the
+//! winit loop. [`Engine`] draws one frame, the same in the window and in the headless path:
+//!
+//! ```text
+//! 1 clocks   local now; the feed clock from the motion model
+//! 2 poll     the backend's events, every part's answers and due requests (state::AppState::poll)
+//! 3 camera   the running transition, the follow lock (state::AppState::advance_camera)
+//! 4 scene    when due (scene_builder::Pacer) or forced: scene_builder → SceneInput → MapRenderer
+//! 5 ui       the egui pass, its actions applied
+//! 6 render   the map's passes and the composite onto the surface, egui on top; submit
+//! 7 schedule draw again at once while a transition, a gesture or an egui animation runs, else
+//!            by the next scene refresh, egui's repaint delay or a state deadline
+//! ```
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::mpsc::{self, Sender};
+use std::time::{Duration, Instant};
 
+use rustradar_backend::{Backend, BackendEvent, Dirs, Wake};
+use rustradar_map::{Gpu, MapRenderer};
+use rustradar_scene::camera::ViewState;
+use tokio::runtime::Handle;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopBuilder};
-use winit::window::{Window, WindowId};
+use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::gpu::Gpu;
-use crate::renderer::Renderer;
+use crate::input::{self, MapInput};
+use crate::requests::{self, Requests, WakeLatch};
+use crate::scene_builder::{Pacer, SceneBuilder};
+use crate::state::{Action, AppState, Clock};
+use crate::{Options, platform, theme};
 
 type Error = Box<dyn std::error::Error>;
 
-/// Opens the window and runs until it is closed.
-pub fn run() -> Result<(), Error> {
-    run_with(EventLoop::builder())
+/// What reaches the event loop from other threads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserEvent {
+    /// A request finished, a stream delivered, the backend has an event: draw a frame and poll.
+    Wake,
 }
 
-/// Like [`run`], for platforms that must configure the event loop first (Android).
-pub fn run_with(mut builder: EventLoopBuilder<()>) -> Result<(), Error> {
+/// The window's size before it is maximised (doc 07 §5.2, §11.7), CSS pixels.
+pub const WINDOW_SIZE: [f64; 2] = [1440.0, 900.0];
+/// The smallest the window may be made.
+pub const WINDOW_MIN_SIZE: [f64; 2] = [900.0, 600.0];
+
+/// The main window as the Tauri build opened it (doc 07 §11.7): titled `RustRadar`, 1440 × 900,
+/// at least 900 × 600, maximised, and hidden until its first frame is drawn (no flash of an empty
+/// window). `--size` sets the inner size instead of maximising.
+pub fn window_attributes(options: &Options) -> WindowAttributes {
+    let size = options.size.map_or(WINDOW_SIZE, |[w, h]| [f64::from(w), f64::from(h)]);
+    Window::default_attributes()
+        .with_title("RustRadar")
+        .with_inner_size(LogicalSize::new(size[0], size[1]))
+        .with_min_inner_size(LogicalSize::new(WINDOW_MIN_SIZE[0], WINDOW_MIN_SIZE[1]))
+        .with_maximized(options.size.is_none())
+        .with_visible(false)
+}
+
+/// Starts the backend (`Backend::start`, doc 07 §10.1) in `dirs`, or explains in the log why the
+/// app goes on without it (no folders, no HTTP client): the map still runs, without feeds.
+pub fn start_backend(dirs: Option<Dirs>, rt: &Handle, events: Sender<BackendEvent>, wake: Wake) -> Option<Backend> {
+    let Some(dirs) = dirs else {
+        log::error!("this system names no cache or config folder: running without the backend");
+        return None;
+    };
+    match Backend::start(dirs, rt.clone(), events, wake) {
+        Ok(backend) => Some(backend),
+        Err(e) => {
+            log::error!("the backend did not start, running without it: {e}");
+            None
+        }
+    }
+}
+
+/// What a frame leaves for the scheduler (plan 2.2 step 7).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Next {
+    /// Draw again at once: a camera transition, a gesture or an egui animation runs.
+    pub now: bool,
+    /// Else draw again by this local time (Unix ms; infinite when nothing is due).
+    pub at_ms: f64,
+}
+
+/// Everything that draws a frame: the state, the scene builders, the map, egui.
+pub struct Engine {
+    pub state: AppState,
+    pub scene: SceneBuilder,
+    pub pacer: Pacer,
+    pub map: MapRenderer,
+    pub input: MapInput,
+    pub egui: egui::Context,
+    egui_renderer: egui_wgpu::Renderer,
+    /// The scale factor and basemap the last scene was built for.
+    built_for: Option<(f64, rustradar_core::geo::Basemap)>,
+}
+
+impl Engine {
+    /// An engine drawing onto surfaces of `surface_format` (prefer a non-sRGB one: the map's and
+    /// egui's colours are gamma-space values).
+    pub fn new(gpu: &Gpu, surface_format: wgpu::TextureFormat, state: AppState) -> Self {
+        let egui = egui::Context::default();
+        theme::apply(&egui);
+        Engine {
+            state,
+            scene: SceneBuilder::default(),
+            pacer: Pacer::default(),
+            map: MapRenderer::new(gpu, surface_format),
+            input: MapInput::default(),
+            // egui feathers its own edges; it draws after the map's MSAA resolve
+            egui_renderer: egui_wgpu::Renderer::new(&gpu.device, surface_format, egui_wgpu::RendererOptions::default()),
+            egui,
+            built_for: None,
+        }
+    }
+
+    /// The map's share of a window event (after egui has seen it): the controller's gestures unless
+    /// egui wants the pointer. Returns whether to draw a frame.
+    pub fn window_event(&mut self, event: &WindowEvent, scale_factor: f64, local_ms: f64) -> bool {
+        let Some(event) = input::map_event(event, scale_factor) else { return false };
+        let egui_wants_pointer = self.egui.egui_wants_pointer_input();
+        self.input.handle(event, egui_wants_pointer, &mut self.state.controller, local_ms)
+    }
+
+    /// One frame onto `surface` (`surface_size` device pixels, `scale_factor` of them per CSS
+    /// pixel) at the local time `local_ms`, egui's events in `raw_input`. Returns egui's platform
+    /// output (cursor, clipboard, links) and when to draw next.
+    pub fn frame(
+        &mut self,
+        gpu: &Gpu,
+        surface: &wgpu::TextureView,
+        surface_size: [u32; 2],
+        scale_factor: f64,
+        raw_input: egui::RawInput,
+        local_ms: f64,
+    ) -> (egui::PlatformOutput, Next) {
+        // 2 poll
+        let mut wants = self.state.poll(local_ms);
+        // 3 camera: on a canvas of the surface's size in CSS pixels
+        let size = [f64::from(surface_size[0].max(1)) / scale_factor, f64::from(surface_size[1].max(1)) / scale_factor];
+        if self.state.controller.size() != size {
+            self.state.controller.set_size(size);
+        }
+        let (_, camera_wants) = self.state.advance_camera(local_ms);
+        wants.merge(camera_wants);
+
+        // 4 scene: on its interval, or now when something changed
+        let view = self.state.controller.view();
+        let locked = self.state.locked_steady(local_ms);
+        let built_for = (scale_factor, self.state.basemap());
+        if wants.scene || self.built_for != Some(built_for) {
+            self.pacer.force();
+        }
+        self.map.set_camera(view, size);
+        if self.pacer.due(local_ms, view.zoom, locked) || self.map.needs_refresh() {
+            let scene = self.scene.build(&self.state, self.state.clocks(local_ms), scale_factor);
+            self.map.update(scene);
+            self.built_for = Some(built_for);
+        }
+
+        // 5 ui
+        let mut actions = Vec::new();
+        let output = self.egui.run_ui(raw_input, |ui| ui_pass(ui, &self.state, &mut actions));
+        for action in actions {
+            self.state.apply(action, local_ms);
+        }
+
+        // 6 render
+        let repaint_delay = output.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
+        self.render(gpu, surface, surface_size, output.shapes, output.textures_delta, output.pixels_per_point, local_ms);
+
+        // 7 schedule
+        let view = self.state.controller.view();
+        let locked = self.state.locked_steady(local_ms);
+        let mut at_ms = self.pacer.next_due_ms(view.zoom, locked);
+        if let Some(t) = wants.wake_at {
+            at_ms = at_ms.min(t);
+        }
+        if repaint_delay != Duration::MAX {
+            at_ms = at_ms.min(local_ms + repaint_delay.as_secs_f64() * 1000.0);
+        }
+        if self.map.pending() {
+            // tiles and textures on their way: their answers wake the loop too, but look again soon
+            at_ms = at_ms.min(local_ms + 50.0);
+        }
+        let now = self.state.controller.in_transition() || self.state.controller.is_dragging() || repaint_delay.is_zero();
+        (output.platform_output, Next { now, at_ms })
+    }
+
+    /// Step 6: the map's passes and egui's onto `surface`, submitted.
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &mut self,
+        gpu: &Gpu,
+        surface: &wgpu::TextureView,
+        surface_size: [u32; 2],
+        shapes: Vec<egui::epaint::ClippedShape>,
+        mut textures: egui::TexturesDelta,
+        pixels_per_point: f32,
+        local_ms: f64,
+    ) {
+        let (device, queue) = (&gpu.device, &gpu.queue);
+        let primitives = self.egui.tessellate(shapes, pixels_per_point);
+        let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: surface_size, pixels_per_point };
+        // TexturesDelta asserts on drop that both lists were drained
+        for (id, deltas) in textures.set.drain() {
+            for delta in &deltas {
+                self.egui_renderer.update_texture(device, queue, id, delta);
+            }
+        }
+        self.map.prepare(gpu, local_ms);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        // egui's own command buffers go first (spike pitfall 5)
+        let mut commands = self.egui_renderer.update_buffers(device, queue, &mut encoder, &primitives, &screen);
+        self.map.draw(gpu, &mut encoder, surface, surface_size);
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("ui"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: surface,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    })],
+                    ..Default::default()
+                })
+                .forget_lifetime();
+            self.egui_renderer.render(&mut pass, &primitives, &screen);
+        }
+        commands.push(encoder.finish());
+        queue.submit(commands);
+        for id in textures.free.drain() {
+            self.egui_renderer.free_texture(&id);
+        }
+    }
+}
+
+/// The UI pass: what egui draws over the map, and the actions it asks for. Empty until stage 7
+/// (the shell of U6 draws from here).
+fn ui_pass(_ui: &mut egui::Ui, _state: &AppState, _actions: &mut Vec<Action>) {}
+
+/// Opens the window and runs until it is closed.
+pub fn run(options: Options) -> Result<(), Error> {
+    run_with(EventLoop::<UserEvent>::with_user_event(), options)
+}
+
+/// Like [`run`], for platforms that set the event loop up first (Android).
+pub fn run_with(mut builder: EventLoopBuilder<UserEvent>, options: Options) -> Result<(), Error> {
+    // the runtime before the event loop, kept for the process's lifetime (plan 2.1)
+    let rt = requests::runtime()?;
     let event_loop = builder.build()?;
-    // The placeholder globe spins, so redraw every frame (paced by vsync).
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App { started: Instant::now(), view: None, error: None };
+    let latch = WakeLatch::default();
+    let proxy = event_loop.create_proxy();
+    let wake = latch.wake_with(move || proxy.send_event(UserEvent::Wake).is_ok());
+    let (events, events_rx) = mpsc::channel();
+    let backend = start_backend(platform::dirs(), rt.handle(), events, wake.clone());
+    let requests = Requests::new(rt.handle().clone(), wake);
+    let view = options.view.unwrap_or(ViewState::INITIAL);
+    let state = AppState::new(options.startup(), backend, Some(requests), Some(events_rx), view, WINDOW_SIZE);
+    let clock = options.now_ms.map_or_else(Clock::system, Clock::starting_at);
+    event_loop.set_control_flow(ControlFlow::Wait);
+    let mut app = App { options, clock, latch, state: Some(state), view: None, next: None, error: None };
     event_loop.run_app(&mut app)?;
     app.error.map_or(Ok(()), Err)
 }
 
 struct App {
-    started: Instant,
+    options: Options,
+    clock: Clock,
+    latch: WakeLatch,
+    /// The state until the window (and its engine) exists.
+    state: Option<AppState>,
     view: Option<View>,
+    /// What the last frame asked for.
+    next: Option<Next>,
     /// Why start-up failed, reported once the loop has exited.
     error: Option<Error>,
 }
@@ -43,51 +289,43 @@ struct View {
     /// `None` while suspended: Android takes the native window away then.
     surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
-    renderer: Renderer,
+    engine: Engine,
     egui_input: egui_winit::State,
 }
 
 impl View {
-    fn new(event_loop: &ActiveEventLoop) -> Result<Self, Error> {
-        let attributes = Window::default_attributes()
-            .with_title("RustRadar")
-            .with_inner_size(LogicalSize::new(1100.0, 720.0))
-            .with_min_inner_size(LogicalSize::new(360.0, 480.0));
-        let window = Arc::new(event_loop.create_window(attributes)?);
-
-        // The GL backend needs the display connection up front (Wayland above all).
+    fn new(event_loop: &ActiveEventLoop, options: &Options, state: AppState) -> Result<Self, Error> {
+        let window = Arc::new(event_loop.create_window(window_attributes(options))?);
+        // the GL backend needs the display connection up front (Wayland above all)
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(
             event_loop.owned_display_handle(),
         )));
         let surface = instance.create_surface(window.clone())?;
         let gpu = Gpu::for_surface(instance, &surface)?;
-
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1))
             .ok_or("the graphics adapter cannot present to this window")?;
-        // A gamma-space format keeps CSS colours and egui's blending exact (see Renderer::new).
+        // a gamma-space format keeps the CSS colours and egui's blending exact (plan 1.4.1)
         let formats = surface.get_capabilities(&gpu.adapter).formats;
         config.format = formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(config.format);
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&gpu.device, &config);
-
-        let renderer = Renderer::new(&gpu, config.format);
+        let engine = Engine::new(&gpu, config.format, state);
         let egui_input = egui_winit::State::new(
-            renderer.egui_ctx().clone(),
+            engine.egui.clone(),
             egui::ViewportId::ROOT,
             &window,
             Some(window.scale_factor() as f32),
             window.theme(),
             Some(gpu.device.limits().max_texture_dimension_2d as usize),
         );
-        let info = gpu.adapter.get_info();
-        log::info!("{} ({:?}), {:?}, MSAA x{}", info.name, info.backend, config.format, renderer.msaa_samples());
-        Ok(Self { window, gpu, surface: Some(surface), config, renderer, egui_input })
+        log::info!("{}, {:?}, map MSAA x{}", gpu.describe(), config.format, engine.map.samples());
+        Ok(View { window, gpu, surface: Some(surface), config, engine, egui_input })
     }
 
     fn resize(&mut self, width: u32, height: u32) {
-        // A zero-sized surface (minimised window) is invalid: keep the old one until it grows back.
+        // a zero-sized surface (a minimised window) is invalid: keep the old one until it grows back
         if width == 0 || height == 0 {
             return;
         }
@@ -98,56 +336,97 @@ impl View {
         }
     }
 
-    fn redraw(&mut self, time: f32) {
-        let Some(surface) = &self.surface else { return };
+    /// Draws a frame and presents it. `None` when there was nothing to draw onto (suspended,
+    /// occluded, a surface being remade).
+    fn redraw(&mut self, local_ms: f64) -> Option<Next> {
+        let surface = self.surface.as_ref()?;
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 surface.configure(&self.gpu.device, &self.config);
-                return;
+                return None;
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return None,
             wgpu::CurrentSurfaceTexture::Validation => {
                 log::error!("surface texture validation error");
-                return;
+                return None;
             }
         };
         let target = frame.texture.create_view(&Default::default());
         let input = self.egui_input.take_egui_input(&self.window);
         let size = [self.config.width, self.config.height];
-        let output = self.renderer.render(&self.gpu, &target, size, input, time);
-        self.egui_input.handle_platform_output(&self.window, output);
+        let (platform, next) = self.engine.frame(&self.gpu, &target, size, self.window.scale_factor(), input, local_ms);
+        self.egui_input.handle_platform_output(&self.window, platform);
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
+        Some(next)
     }
 }
 
-impl ApplicationHandler for App {
+impl App {
+    fn redraw(&mut self) {
+        let now = self.clock.now_ms();
+        let Some(view) = &mut self.view else { return };
+        self.next = view.redraw(now);
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        if let (StartCause::ResumeTimeReached { .. }, Some(view)) = (cause, &self.view) {
+            view.window.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         match &mut self.view {
-            None => match View::new(event_loop) {
-                Ok(view) => self.view = Some(view),
-                Err(e) => {
-                    self.error = Some(e);
-                    event_loop.exit();
+            None => {
+                let Some(state) = self.state.take() else { return };
+                match View::new(event_loop, &self.options, state) {
+                    Ok(view) => {
+                        self.view = Some(view);
+                        // the first frame now, then show the window: a hidden window gets no redraw
+                        // request on every platform
+                        self.redraw();
+                        if let Some(view) = &self.view {
+                            view.window.set_visible(true);
+                            view.window.request_redraw();
+                        }
+                    }
+                    Err(e) => {
+                        self.error = Some(e);
+                        event_loop.exit();
+                    }
                 }
-            },
-            // Back from the background: the window has a new native surface.
+            }
+            // back from the background: the window has a new native surface
             Some(view) if view.surface.is_none() => match view.gpu.instance.create_surface(view.window.clone()) {
                 Ok(surface) => {
                     surface.configure(&view.gpu.device, &view.config);
                     view.surface = Some(surface);
                     view.window.request_redraw();
                 }
-                Err(e) => log::error!("cannot recreate the surface: {e}"),
+                Err(e) => log::error!("cannot remake the window surface: {e}"),
             },
             Some(_) => {}
         }
     }
 
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Wake => {
+                // taken before the frame polls, so a wake raised meanwhile is sent again
+                self.latch.reset();
+                if let Some(view) = &self.view {
+                    view.window.request_redraw();
+                }
+            }
+        }
+    }
+
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        // Android destroys the native window here; the surface must go before it does.
-        // Desktop never suspends, and iOS keeps its view, so only Android needs this.
+        // Android destroys the native window here and the surface must go before it does; the
+        // desktop never suspends and iOS keeps its view
         if cfg!(target_os = "android")
             && let Some(view) = &mut self.view
         {
@@ -156,20 +435,77 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let now = self.clock.now_ms();
         let Some(view) = &mut self.view else { return };
-        // egui sees every event first; `consumed` will gate map gestures once the map takes input.
-        let _response = view.egui_input.on_window_event(&view.window, &event);
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => view.resize(size.width, size.height),
-            WindowEvent::RedrawRequested => view.redraw(self.started.elapsed().as_secs_f32()),
+        // egui sees every event first
+        let response = view.egui_input.on_window_event(&view.window, &event);
+        if response.repaint {
+            view.window.request_redraw();
+        }
+        match &event {
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+                return;
+            }
+            WindowEvent::Resized(size) => {
+                view.resize(size.width, size.height);
+                view.window.request_redraw();
+            }
+            WindowEvent::RedrawRequested => {
+                self.redraw();
+                return;
+            }
             _ => {}
+        }
+        if view.engine.window_event(&event, view.window.scale_factor(), now) {
+            view.window.request_redraw();
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(view) = &self.view {
-            view.window.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(view) = &self.view else { return };
+        let now = self.clock.now_ms();
+        match self.next {
+            Some(next) if next.now || next.at_ms <= now => {
+                // continuous: each frame waits for the display (vsync), so this is paced
+                event_loop.set_control_flow(ControlFlow::Wait);
+                view.window.request_redraw();
+            }
+            Some(next) if next.at_ms.is_finite() => {
+                let wait = Duration::from_secs_f64(((next.at_ms - now) / 1000.0).max(0.0));
+                event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + wait));
+            }
+            Some(_) => event_loop.set_control_flow(ControlFlow::Wait),
+            // nothing was drawn (occluded, suspended): look again in a while
+            None => event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use winit::dpi::Size;
+
+    use super::*;
+
+    #[test]
+    fn the_window_opens_as_the_tauri_one_did() {
+        let a = window_attributes(&Options::default());
+        assert_eq!(a.title, "RustRadar");
+        assert_eq!(a.inner_size, Some(Size::Logical(LogicalSize::new(1440.0, 900.0))));
+        assert_eq!(a.min_inner_size, Some(Size::Logical(LogicalSize::new(900.0, 600.0))));
+        assert!(a.maximized);
+        assert!(!a.visible, "hidden until the first frame");
+        let sized = window_attributes(&Options { size: Some([1100, 720]), ..Default::default() });
+        assert_eq!(sized.inner_size, Some(Size::Logical(LogicalSize::new(1100.0, 720.0))));
+        assert!(!sized.maximized);
+        assert!(!sized.visible);
+    }
+
+    #[test]
+    fn without_folders_the_app_goes_on_without_the_backend() {
+        let rt = requests::runtime().expect("runtime");
+        let (tx, _rx) = mpsc::channel();
+        assert!(start_backend(None, rt.handle(), tx, requests::no_wake()).is_none());
     }
 }

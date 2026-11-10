@@ -15,6 +15,11 @@ name = "rustradar-app"
 path = "src/main.rs"
 
 [dependencies]
+rustradar-core = { workspace = true }
+rustradar-scene = { workspace = true }
+rustradar-map = { workspace = true }
+rustradar-backend = { workspace = true }
+tokio = { workspace = true }
 # These five must move together: egui-wgpu 0.37 pins wgpu 30 and
 # egui-winit 0.37 pins winit 0.30 (winit 0.31 is still beta).
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }

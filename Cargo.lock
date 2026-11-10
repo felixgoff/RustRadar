@@ -5023,6 +5023,11 @@ dependencies = [
  "log",
  "png 0.18.1",
  "pollster",
+ "rustradar-backend",
+ "rustradar-core",
+ "rustradar-map",
+ "rustradar-scene",
+ "tokio",
  "wgpu",
  "winit",
 ]

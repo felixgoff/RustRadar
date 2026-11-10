@@ -31,6 +31,7 @@
 
 pub mod aircraft;
 pub mod airport;
+pub mod basemap;
 pub mod blocks;
 pub mod camera;
 pub mod flight;

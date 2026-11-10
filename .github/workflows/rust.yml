@@ -100,8 +100,12 @@ jobs:
           # fails unless the driver loads and lists a device
           VK_ICD_FILENAMES="${icds[0]}" vulkaninfo --summary | grep -E "deviceName|driverInfo"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # The port's jobs use the Rust its engineers check it with, not the newest stable:
+      # each release's clippy adds lints, and -D warnings would turn them red with no
+      # change on the branch. Raise this with the code (native-targets too).
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.97.0"
           components: clippy
 
       - uses: swatinem/rust-cache@v2
@@ -122,8 +126,9 @@ jobs:
             exit 1
           fi
 
+      # --no-fail-fast: every failing test binary in one run, not only the first
       - name: Rust tests
-        run: cargo test --workspace --exclude rustradar --locked
+        run: cargo test --workspace --exclude rustradar --locked --no-fail-fast
 
       # The shots the GPU tests drew (target/shots), to look at beside docs/port/reference.
       - uses: actions/upload-artifact@v4
@@ -182,8 +187,10 @@ jobs:
           sdkmanager "ndk;27.0.12077973"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # the native job's Rust
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.97.0"
           targets: ${{ matrix.target }}
 
       - uses: swatinem/rust-cache@v2

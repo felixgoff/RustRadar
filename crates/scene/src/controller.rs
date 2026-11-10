@@ -23,14 +23,20 @@
 //! limits shift by `log2(cos lat)`; a pan north or south adds `log2(cos new / cos old)` to the zoom;
 //! and an anchored zoom that moves the latitude adjusts the zoom the same way.
 //!
-//! Not here: the lock on an aircraft (`lockedView`, item A10, which re-aims through
-//! [`Controller::set_view`] after each gesture and each frame, as `onViewStateChange` does today),
-//! and the mapping of winit's events onto these calls (item B8).
+//! The lock on an aircraft is a pure function here ([`locked_view`], `lockedView`, item A10, with
+//! [`released_ease_back`]); the app's `state::camera` runs it each frame and re-aims through
+//! [`Controller::set_view`], which covers both of today's call sites (each rendered frame, and
+//! `onViewStateChange` after each gesture). Not here: the mapping of winit's events onto these
+//! calls (item B8).
 
 use glam::DMat4;
-use rustradar_core::geo::{cos_angle, unwrap_longitude};
+use rustradar_core::geo::{cos_angle, effective_exaggeration, elevation, meters_per_pixel, unwrap_longitude};
+use rustradar_core::motion::aircraft::Pose;
 
-use crate::camera::{viewport_for, zoom_adjust, Limits, ViewState, Viewport, LIMITS, MAX_LATITUDE, MIN_PITCH};
+use crate::camera::{
+    viewport_for, zoom_adjust, Limits, ViewState, Viewport, CAMERA_HEIGHTS, FLAT_ABOVE_ZOOM, FOLLOW_MAX_PITCH, LIMITS, MAX_LATITUDE,
+    MIN_PITCH,
+};
 use crate::geom::{js_max, js_min};
 
 /// `Math.PI / 180`.
@@ -1636,6 +1642,70 @@ impl Controller {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The lock on an aircraft (Globe.svelte `lockedView`, G:3089-3129; doc 01 §3.9, doc 03 §11.4)
+// ---------------------------------------------------------------------------------------------
+
+/// Locked on the globe, the aircraft's height may reach this much of the camera's
+/// (`LOCK_CAMERA_ABOVE`, G:3074).
+pub const LOCK_CAMERA_ABOVE: f64 = 0.9;
+/// Metres per degree, to push the locked camera's aim ahead along the bearing
+/// (`METRES_PER_DEGREE`, G:3070).
+pub const METRES_PER_DEGREE: f64 = 111_320.0;
+
+/// What [`locked_view`] gives: the view aimed at the aircraft, and how far the locked camera may
+/// tilt now (`lockedMaxPitch`, which `lockedView` sets as it goes and `limits()` hands to deck).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LockedView {
+    pub view: ViewState,
+    /// [`FOLLOW_MAX_PITCH`] on the flat map; on the globe the tilt that keeps the camera above the
+    /// aircraft, at most that.
+    pub max_pitch: f64,
+}
+
+/// The view `v` with its centre moved so the camera is locked on an aircraft drawn at `pose`
+/// (`lockedView(v, flight)`, G:3089-3129): `pose` is the one the model is drawn at
+/// (`motion.pose(flight, motion.now())`, or the camera shakes against it), raised by
+/// `elevation(pose.altFt, effectiveExaggeration(exaggeration, v.zoom))` as the aircraft is drawn.
+/// `height_px` is the map's height in CSS pixels (`container.clientHeight`).
+///
+/// - **Flat map** (zoom above 12): the camera's target is raised to the aircraft's own height
+///   (`position: [0, 0, altitude]`), which centres it at any tilt, bearing and zoom.
+/// - **Globe**: the camera aims at a point on the ground, so once tilted an aircraft at altitude
+///   rides above the centre of the screen; the aim is pushed ahead along the bearing until the
+///   aircraft is on the camera's axis. That only works while the camera stays above the
+///   aircraft, so the tilt stops where it would sink below it (`acos(altitude / (0.9 · camera))`,
+///   at most 85°), and `position` is unset.
+pub fn locked_view(v: &ViewState, pose: &Pose, exaggeration: f64, height_px: f64) -> LockedView {
+    let (lon, lat) = (pose.lon, pose.lat);
+    let altitude = elevation(pose.alt_ft, effective_exaggeration(exaggeration, v.zoom));
+    if v.zoom > FLAT_ABOVE_ZOOM {
+        let view = ViewState { longitude: lon, latitude: lat, position: Some([0.0, 0.0, altitude]), ..*v };
+        return LockedView { view, max_pitch: FOLLOW_MAX_PITCH };
+    }
+    let camera = CAMERA_HEIGHTS * height_px * meters_per_pixel(v.zoom, lat);
+    let max_pitch = js_min(FOLLOW_MAX_PITCH, js_min(1.0, altitude / (LOCK_CAMERA_ABOVE * camera)).acos() / DEG);
+    let tilt = js_min(v.pitch, max_pitch);
+    let pitch = tilt * DEG;
+    let height = js_min(altitude, LOCK_CAMERA_ABOVE * camera * pitch.cos());
+    let lift = height * pitch.tan();
+    let latitude = js_max(-MAX_PAN_LATITUDE, js_min(MAX_PAN_LATITUDE, lat + (lift * (v.bearing * DEG).cos()) / METRES_PER_DEGREE));
+    let longitude = lon + (lift * (v.bearing * DEG).sin()) / (METRES_PER_DEGREE * js_max(0.05, (lat * DEG).cos()));
+    LockedView { view: ViewState { longitude, latitude, pitch: tilt, position: None, ..*v }, max_pitch }
+}
+
+/// Released from a lock closer or steeper than the free camera allows (G:3213-3221): where to
+/// ease back to over [`EASE_BACK_MS`] (`goTo({ zoom: min(zoom, 20), pitch: min(pitch, 60) }, 600,
+/// ["zoom", "pitch"])`), or `None` when the view is within zoom 20 and pitch 60. Those are
+/// [`LIMITS`]' values on every basemap, the realistic map's 75° included, as today.
+pub fn released_ease_back(view: &ViewState) -> Option<ViewPatch> {
+    (view.zoom > LIMITS.max_zoom || view.pitch > LIMITS.max_pitch).then(|| ViewPatch {
+        zoom: Some(js_min(view.zoom, LIMITS.max_zoom)),
+        pitch: Some(js_min(view.pitch, LIMITS.max_pitch)),
+        ..ViewPatch::default()
+    })
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -2437,5 +2507,191 @@ mod tests {
         let mut c = Controller::new(view(10.0, 50.0, 15.0, 0.0, 0.0), SIZE);
         c.fly_to_vehicle(11.9, 57.7, 0.0);
         assert_eq!(settle(&mut c, 0.0).zoom, 15.0);
+    }
+}
+
+/// The lock on an aircraft (item A10): [`locked_view`] against cases worked out by hand from
+/// G:3094-3129 (the expected values are that arithmetic done in IEEE doubles, as JavaScript does).
+#[cfg(test)]
+mod follow_tests {
+    use rustradar_core::assert_close;
+    use rustradar_core::motion::aircraft::Phase;
+
+    use super::*;
+
+    fn view(longitude: f64, latitude: f64, zoom: f64, bearing: f64, pitch: f64) -> ViewState {
+        ViewState { longitude, latitude, zoom, bearing, pitch, position: None }
+    }
+
+    /// An aircraft drawn at `lon, lat`, `alt_ft` feet up (the rest of the pose is not read).
+    fn pose(lon: f64, lat: f64, alt_ft: f64) -> Pose {
+        Pose { lon, lat, alt_ft, heading: 123.0, track: 120.0, pitch: 4.0, bank: -3.0, gear: 0.0, phase: Phase::Cruise }
+    }
+
+    #[test]
+    fn on_the_globe_the_aim_is_pushed_ahead_so_the_aircraft_is_on_the_camera_axis() {
+        // zoom 8 at the equator on a 900 px canvas: the camera is 1.5 · 900 · 305.748 m = 412 760 m
+        // out; 10 000 ft at true scale is 3 048 m, far below 0.9 of that, so the tilt is free up to
+        // 85°; tilted 45° the aim is 3 048 · tan 45° m north of the aircraft
+        let v = view(10.0, 0.0, 8.0, 0.0, 45.0);
+        let locked = locked_view(&v, &pose(10.5, 0.0, 10_000.0), 1.0, 900.0);
+        assert_eq!(locked.max_pitch, FOLLOW_MAX_PITCH);
+        let w = locked.view;
+        assert_close!(w.latitude, 3048.0 / METRES_PER_DEGREE, 12);
+        assert_close!(w.latitude, 0.02738052461372619, 14);
+        assert_eq!(w.longitude, 10.5, "bearing 0: nothing east");
+        assert_eq!((w.zoom, w.bearing, w.pitch, w.position), (8.0, 0.0, 45.0, None));
+
+        // turned 90° the aim moves east instead, by lift / (111 320 · cos lat); exaggeration 10 is
+        // 2.8 at zoom 10, so 20 000 ft is drawn 17 068.8 m up
+        let v = view(18.0, 45.0, 10.0, 90.0, 70.0);
+        let locked = locked_view(&v, &pose(18.0, 45.0, 20_000.0), 10.0, 900.0);
+        assert_close!(locked.max_pitch, 74.93474803422166, 11);
+        assert_eq!(locked.view.pitch, 70.0, "under the cap");
+        assert_close!(locked.view.longitude, 18.595770399349984, 11);
+        assert_close!(locked.view.longitude - 18.0, 17_068.8 * (70.0 * DEG).tan() / (METRES_PER_DEGREE * (45.0 * DEG).cos()), 12);
+        assert_close!(locked.view.latitude, 45.0, 12);
+    }
+
+    #[test]
+    fn on_the_globe_the_tilt_stops_where_the_camera_would_sink_below_the_aircraft() {
+        // the case above tilted 80°: held at acos(17 068.8 / (0.9 · 72 966.34 m)) = 74.93°
+        let v = view(18.0, 45.0, 10.0, 90.0, 80.0);
+        let locked = locked_view(&v, &pose(18.0, 45.0, 20_000.0), 10.0, 900.0);
+        let camera = CAMERA_HEIGHTS * 900.0 * meters_per_pixel(10.0, 45.0);
+        assert_close!(camera, 72_966.34039693215, 8);
+        assert_close!(locked.max_pitch, (17_068.8 / (0.9 * camera)).acos() / DEG, 12);
+        assert_eq!(locked.view.pitch, locked.max_pitch);
+        assert_close!(locked.view.longitude, 18.80559696735826, 11);
+
+        // zoom 12 is still the globe; 40 000 ft is above 0.9 of a camera 10 319 m out at 60°N on a
+        // 720 px canvas: no tilt at all, the aim on the aircraft
+        let v = view(18.2, 60.1, 12.0, 200.0, 50.0);
+        let locked = locked_view(&v, &pose(18.0, 60.0, 40_000.0), 10.0, 720.0);
+        assert_eq!(locked.max_pitch, 0.0);
+        assert_eq!(locked.view, ViewState { longitude: 18.0, latitude: 60.0, zoom: 12.0, bearing: 200.0, pitch: 0.0, position: None });
+    }
+
+    #[test]
+    fn on_the_ground_the_aim_is_the_aircraft_and_the_tilt_opens_to_85() {
+        // a negative altitude is drawn at 0: acos(0) = 90°, held at 85; nothing to push ahead
+        let v = view(18.3, 59.2, 9.0, 10.0, 40.0);
+        let locked = locked_view(&v, &pose(18.0, 59.0, -50.0), 10.0, 900.0);
+        assert_eq!(locked.max_pitch, 85.0);
+        assert_eq!(locked.view, ViewState { longitude: 18.0, latitude: 59.0, zoom: 9.0, bearing: 10.0, pitch: 40.0, position: None });
+        // and a view tilted past 85 comes back to it
+        let locked = locked_view(&ViewState { pitch: 88.0, ..v }, &pose(18.0, 59.0, 0.0), 10.0, 900.0);
+        assert_eq!(locked.view.pitch, 85.0);
+    }
+
+    #[test]
+    fn near_the_poles_the_aim_stops_at_85_and_the_longitude_step_at_cos_0_05() {
+        // zoom 6, 35 000 ft at true scale, tilted 60° north from 84.99°N: 18 477.5 m ahead would be
+        // 85.156°, clamped to 85
+        let v = view(0.0, 84.0, 6.0, 0.0, 60.0);
+        let locked = locked_view(&v, &pose(0.0, 84.99, 35_000.0), 1.0, 900.0);
+        assert_eq!(locked.max_pitch, 85.0);
+        assert_eq!(locked.view.latitude, 85.0);
+        assert_eq!(locked.view.longitude, 0.0);
+        // turned east at 88°N: cos 88° = 0.035 is taken as 0.05, so 18 477.5 m is 3.32° of longitude
+        let v = view(0.0, 84.0, 6.0, 90.0, 60.0);
+        let locked = locked_view(&v, &pose(0.0, 88.0, 35_000.0), 1.0, 900.0);
+        assert_close!(locked.max_pitch, 78.1287025650075, 11);
+        assert_close!(locked.view.longitude, 3.3197121838204775, 11);
+        assert_close!(locked.view.longitude, 10_668.0 * (60.0 * DEG).tan() / (METRES_PER_DEGREE * 0.05), 12);
+        assert_eq!(locked.view.latitude, 85.0, "the pose's 88° is beyond the pans' limit");
+    }
+
+    #[test]
+    fn a_bearing_to_the_north_west_moves_the_aim_both_ways() {
+        // zoom 11 at 59.3°N on a 720 px canvas: exaggeration is gone (true scale at 11), 5 000 ft
+        // = 1 524 m; tilted 30° the aim is 1 524 · tan 30° = 879.9 m ahead along −45°
+        let v = view(18.0, 59.3, 11.0, -45.0, 30.0);
+        let locked = locked_view(&v, &pose(18.0, 59.3, 5_000.0), 10.0, 720.0);
+        assert_eq!(locked.max_pitch, 85.0);
+        assert_close!(locked.view.latitude, 59.30558902618277, 11);
+        assert_close!(locked.view.longitude, 17.989052778940426, 11);
+        let lift = 1524.0 * (30.0 * DEG).tan();
+        assert_close!(lift, 879.8818102449897, 9);
+        assert_close!(locked.view.latitude - 59.3, lift * (-45.0 * DEG).cos() / METRES_PER_DEGREE, 12);
+    }
+
+    #[test]
+    fn on_the_flat_map_the_target_is_raised_to_the_aircraft() {
+        // zoom 14.5: true scale, 3 000 ft = 914.4 m; centred on the pose at any tilt and bearing,
+        // which are kept, and the tilt may reach 85°
+        let v = view(18.0, 59.6, 14.5, 30.0, 60.0);
+        let locked = locked_view(&v, &pose(17.9, 59.65, 3000.0), 10.0, 900.0);
+        assert_eq!(locked.max_pitch, FOLLOW_MAX_PITCH);
+        assert_eq!(
+            locked.view,
+            ViewState { longitude: 17.9, latitude: 59.65, zoom: 14.5, bearing: 30.0, pitch: 60.0, position: Some([0.0, 0.0, 3000.0 * 0.3048]) }
+        );
+        // the flat map does not cap the tilt itself (deck's 85° limit does)
+        let steep = locked_view(&ViewState { pitch: 84.0, ..v }, &pose(17.9, 59.65, 3000.0), 10.0, 900.0);
+        assert_eq!(steep.view.pitch, 84.0);
+        // just past the swap, a pose on the ground: raised by 0
+        let ground = locked_view(&view(18.0, 59.6, 12.01, 0.0, 0.0), &pose(18.0, 59.6, 0.0), 10.0, 900.0);
+        assert_eq!(ground.view.position, Some([0.0, 0.0, 0.0]));
+    }
+
+    /// Where the aircraft drawn at `p` (raised as the aircraft builder raises it) is on screen once
+    /// locked from `v` on a `size` canvas: its distance from the centre, px, and its depth (NDC z).
+    fn locked_on_screen(v: ViewState, p: &Pose, size: [f64; 2]) -> (LockedView, f64, f64) {
+        let locked = locked_view(&v, p, 10.0, size[1]);
+        let altitude = elevation(p.alt_ft, effective_exaggeration(10.0, v.zoom));
+        let [x, y, depth] = viewport_for(&locked.view, size).project([p.lon, p.lat, altitude]);
+        (locked, (x - size[0] / 2.0).hypot(y - size[1] / 2.0), depth)
+    }
+
+    #[test]
+    fn the_locked_aircraft_is_at_the_centre_of_the_screen() {
+        // what the lock is for: the pose, raised as it is drawn, projects to the middle of the
+        // canvas through the viewport the map draws with, on the globe and the flat map, tilted,
+        // turned, low and high. The flat map's raised target is exact; the globe's aim, pushed
+        // ahead on a flat earth with 111 320 m to the degree, is within a pixel or two
+        let size = [1100.0, 720.0];
+        for (zoom, pitch, bearing, alt_ft, within) in [
+            (5.0, 50.0, 30.0, 35_000.0, 2.0),
+            (8.0, 45.0, 0.0, 10_000.0, 0.5),
+            (9.0, 40.0, 250.0, 8_000.0, 0.5),
+            (11.0, 55.0, 160.0, 12_000.0, 0.5),
+            (12.0, 60.0, 120.0, 3_000.0, 0.1),
+            (12.5, 60.0, 120.0, 3_000.0, 1e-6),
+            (16.0, 80.0, 300.0, 1_200.0, 1e-6),
+            (19.5, 84.0, 45.0, 200.0, 1e-6),
+        ] {
+            let (_, off, depth) = locked_on_screen(view(18.0, 59.0, zoom, bearing, pitch), &pose(17.95, 59.6, alt_ft), size);
+            let what = format!("zoom {zoom} pitch {pitch} bearing {bearing} at {alt_ft} ft");
+            eprintln!("{what}: {off:.4} px off the centre");
+            assert!(off < within, "{what}: {off} px off the centre");
+            assert!(depth.abs() < 1.0, "{what}: in front of the camera's near plane, depth {depth}");
+        }
+    }
+
+    #[test]
+    fn tilted_to_its_cap_on_the_globe_the_aircraft_comes_inside_the_near_plane_as_today() {
+        // today's trap, kept: at the cap the camera is just above the aircraft (0.9 of its height
+        // over the aim is the aircraft's), so the aircraft is a tenth of the camera's distance in
+        // front of it, closer than deck's near plane (a third): it is not drawn at all, and the flat
+        // earth's error shows tens of pixels there
+        let size = [1100.0, 720.0];
+        let (locked, off, depth) = locked_on_screen(view(18.0, 59.0, 10.0, 250.0, 70.0), &pose(17.95, 59.6, 20_000.0), size);
+        assert!(locked.max_pitch < 70.0 && locked.view.pitch == locked.max_pitch, "{locked:?}");
+        eprintln!("at the cap: {off:.1} px off the centre, depth {depth}");
+        assert!(depth < -1.0, "clipped by the near plane: depth {depth}");
+    }
+
+    #[test]
+    fn released_closer_or_steeper_than_the_free_camera_eases_back_to_zoom_20_and_pitch_60() {
+        assert_eq!(released_ease_back(&view(18.0, 59.6, 20.0, 0.0, 60.0)), None, "within the limits");
+        assert_eq!(
+            released_ease_back(&view(18.0, 59.6, 21.5, 30.0, 40.0)),
+            Some(ViewPatch { zoom: Some(20.0), pitch: Some(40.0), ..ViewPatch::default() })
+        );
+        assert_eq!(
+            released_ease_back(&view(18.0, 59.6, 14.0, 30.0, 80.0)),
+            Some(ViewPatch { zoom: Some(14.0), pitch: Some(60.0), ..ViewPatch::default() })
+        );
     }
 }

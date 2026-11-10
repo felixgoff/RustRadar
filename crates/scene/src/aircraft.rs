@@ -444,6 +444,13 @@ enum StandsOn {
     BuiltIn(ModelKind),
 }
 
+/// A group's key: `t-<name>` or `k-<kind>` (G:2610).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum GroupKey<'m> {
+    Published(&'m str),
+    BuiltIn(ModelKind),
+}
+
 /// A group being filled, with the published model it draws (`group.real`).
 struct Filling<'m> {
     real: Option<&'m AircraftModel>,
@@ -505,7 +512,7 @@ impl AircraftBuilder {
         let label_all = inputs.labelling && zoom >= AIRCRAFT_LABEL_MIN_ZOOM;
 
         let mut scene = AircraftScene { frame, selected, hovered: inputs.hovered, ..Default::default() };
-        let mut groups: IndexMap<String, Filling<'_>> = IndexMap::new();
+        let mut groups: IndexMap<GroupKey<'_>, Filling<'_>> = IndexMap::new();
         // per label: the group and instance whose raised position it takes
         let mut label_at: Vec<Option<(usize, usize)>> = Vec::new();
 
@@ -557,8 +564,8 @@ impl AircraftBuilder {
                 // balloons, ground vehicles and anything else with no published model
                 let (kind, _) = model_for(&f.icon);
                 let key = match real {
-                    Some(real) => format!("t-{}", real.name),
-                    None => format!("k-{}", kind.as_str()),
+                    Some(real) => GroupKey::Published(&real.name),
+                    None => GroupKey::BuiltIn(kind),
                 };
                 let entry = groups.entry(key);
                 let g = entry.index();

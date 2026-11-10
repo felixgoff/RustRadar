@@ -105,8 +105,9 @@ pub struct ViewState {
     /// aircraft, aimed at terrain). `None` is deck's `position: undefined`.
     ///
     /// deck applies it in both projections, but only the flat one has a use for it: on the globe
-    /// it moves the view centre along the polar axis (common z), which is why the app never sets
-    /// it there.
+    /// it moves the view centre along the polar axis (common z). The app leaves it unset there,
+    /// except while the terrain aim eases a raised target back to the ground after a zoom out past
+    /// 12 (G:3204-3212), and deck then shifts the centre that way; this port does the same.
     pub position: Option<[f64; 3]>,
 }
 
@@ -411,7 +412,7 @@ impl ViewportBase {
         let camera_position = [view_matrix_inverse[12], view_matrix_inverse[13], view_matrix_inverse[14]];
         let viewport_matrix = translate(&scale3(&IDENTITY, [width / 2.0, -height / 2.0, 1.0]), [1.0, -1.0, 0.0]);
         let pixel_projection_matrix = multiply(&viewport_matrix, &vpm);
-        // deck warns and carries on with `null`; NaN makes every unprojection NaN the same way
+        // deck warns and keeps `null` (its unproject then throws); here every unprojection is NaN
         let pixel_unprojection_matrix = invert(&pixel_projection_matrix).unwrap_or([f64::NAN; 16]);
         ViewportBase {
             width,
@@ -1642,7 +1643,11 @@ mod tests {
                     assert!((x - pixel[0]).hypot(y - pixel[1]) < tolerance, "{v:?} {pixel:?} at {target_z} m: {x}, {y}");
                 }
             }
-            // the view centre is the middle of the canvas
+            // the view centre is inside the frustum: on the inner side of every plane
+            for plane in vp.frustum_planes().all() {
+                assert!(plane.normal.dot(vp.center) < plane.distance, "{v:?}: {plane:?}");
+            }
+            // and the middle of the canvas
             let [x, y, _] = vp.project([v.longitude, v.latitude, 0.0]);
             assert!((x - 720.0).hypot(y - 450.0) < 1e-6, "{v:?}: {x}, {y}");
             let [lon, lat] = vp.unproject([720.0, 450.0], 0.0);

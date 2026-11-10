@@ -432,20 +432,22 @@ impl MapRenderer {
     pub fn rebuild(&mut self, gpu: &Gpu, surface_format: wgpu::TextureFormat) {
         // the old device's resources go before the new ones are made
         self.layers.clear();
+        let catching = {
+            let mut watched = self.errors.lock();
+            watched.first = None;
+            watched.catching
+        };
+        // caught from the start: an error while the layers are made is the card's (plan 2.2: the
+        // rebuild failed)
+        if catching {
+            self.errors.install(&gpu.device);
+        }
         let GpuParts { bindings, frames, target, composite, layers } = GpuParts::new(gpu, surface_format, &self.tiles);
         self.bindings = bindings;
         self.frames = frames;
         self.target = target;
         self.composite = composite;
         self.layers = layers;
-        let catching = {
-            let mut watched = self.errors.lock();
-            watched.first = None;
-            watched.catching
-        };
-        if catching {
-            self.errors.install(&gpu.device);
-        }
         log::info!("map rebuilt on {}", gpu.describe());
     }
 

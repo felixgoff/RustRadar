@@ -190,9 +190,11 @@ These are deliberate, or left for a later item.
   - This container has no Android SDK or NDK.
   - Installing the SDK means accepting Google's SDK licence, which is for the owner to do.
   - The Rust side was checked with `cargo check` and clippy for `aarch64-linux-android` and `aarch64-apple-ios`, through stand-in C compilers (E17's recipe). The CI run is the first real build.
-- **Build facts to note on the first good CI run:**
-  - `unzip -l` of the APK shows only `lib/arm64-v8a/librustradar_app.so` (no `libc++_shared.so`).
-  - The APK's size.
+- **The first CI run** (run 42865363833, commit `314b0d0`) built both artifacts:
+  - **The debug APK: 155 MB.** It holds a debug `librustradar_app.so` of 149 MB: unoptimised code, line tables, and the 27 MB of embedded assets. A release library (optimised, LTO, stripped) is far smaller; risk K14 measures that in P8.
+  - **The simulator app** (39 MB zipped), with the iPhone library alongside it. The app's `Info.plist` came out as specified: `com.felix.rustradar`, iOS 15, the ink launch screen, `ITSAppUsesNonExemptEncryption = false`.
+- **Still to check on a downloaded APK:**
+  - `unzip -l` shows only `lib/arm64-v8a/librustradar_app.so` (no `libc++_shared.so`).
   - For Play only, 16 KB pages: `zipalign -c -P 16 -v 4` passes and `llvm-readelf -l librustradar_app.so` shows LOAD alignment 0x4000.
 
 ## 8. Results

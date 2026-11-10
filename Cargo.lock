@@ -5068,6 +5068,7 @@ version = "0.1.0"
 dependencies = [
  "basisu_c_sys",
  "bytemuck",
+ "epaint",
  "glam",
  "image",
  "log",

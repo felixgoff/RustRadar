@@ -1221,6 +1221,31 @@ mod tests {
         assert_eq!(atlas.take_dirty(), None);
     }
 
+    /// The pen sits `buffer − glyph_left` columns into a glyph's picture, so its ink starts its
+    /// left side bearing from the pen: to the right of it for most glyphs, to the left for a `j`
+    /// (today's app draws each glyph its whole-pixel bearing to the left: the module docs).
+    #[test]
+    fn glyphs_keep_their_side_bearings() {
+        let mut atlas = GlyphAtlas::new(FontSettings::LABELS);
+        let canvas = FontCanvas::new(Face::LABEL, 64.0);
+        let [w, _] = atlas.size();
+        for ch in ['S', 'j', 'l', 'm', 'Ö'] {
+            let f = atlas.frame(Face::LABEL, ch);
+            let bearing = -canvas.measure_text(ch).actual_bounding_box_left;
+            // the first column of the picture inside the edge (0.75)
+            let first = (0..f.width as u32)
+                .find(|&x| (0..f.height as u32).any(|y| atlas.pixels()[((f.y as u32 + y) * w + f.x as u32 + x) as usize] >= 191))
+                .expect("ink");
+            // the pen, from the picture's left: `anchor_x` is the pen from the picture's middle
+            let pen = f.width / 2.0 - f.anchor_x;
+            let ink = f64::from(first) - pen;
+            assert!((ink - bearing).abs() <= 1.0, "{ch}: ink {ink} from the pen, bearing {bearing}");
+            if ch == 'j' {
+                assert!(bearing < 0.0, "j reaches left of its pen: {bearing}");
+            }
+        }
+    }
+
     #[test]
     fn stockholm_is_laid_out_centred_on_its_anchor() {
         let mut atlas = GlyphAtlas::new(FontSettings::LABELS);

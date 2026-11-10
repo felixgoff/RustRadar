@@ -15,3 +15,6 @@ basisu_c_sys = { workspace = true }
 image = { workspace = true }
 pollster = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+epaint = { workspace = true }

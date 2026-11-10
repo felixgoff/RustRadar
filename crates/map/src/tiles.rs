@@ -18,7 +18,7 @@
 //! 4. refines (`updateTileStates`): which cached tiles are drawn, with the [`Refinement`] strategy
 //!    (deck's `best-available`, the app's `keepCoarserUntilIn`, or none). A tile is ready to stand
 //!    in only once it has content: a tile that failed, or has nothing there, is not, so a loaded
-//!    parent stays drawn over it;
+//!    parent stays drawn in its place;
 //! 5. prunes requests (`_pruneRequests`): while more tiles are loading than `max_requests`, those
 //!    neither selected nor visible are cancelled, oldest first;
 //! 6. trims the cache (`_resizeCache`) to `max_cache_size` tiles (by default five times the

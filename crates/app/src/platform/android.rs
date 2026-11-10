@@ -91,9 +91,12 @@ fn wake() -> bool {
     wake.is_some()
 }
 
-/// The activity's new insets (`nativeInsets`).
+/// The activity's new insets (`nativeInsets`; logged, for the device checks).
 pub fn report_insets(insets: Insets) {
     if let Ok(mut i) = INSETS.lock() {
+        if *i != insets {
+            log::info!("window insets {insets:?}");
+        }
         *i = insets;
     }
     wake();

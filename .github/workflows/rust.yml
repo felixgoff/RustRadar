@@ -100,9 +100,11 @@ jobs:
           lavapipe=(/usr/share/vulkan/icd.d/lvp_icd*.json)
           test -f "$swiftshader"
           test -f "${lavapipe[0]}"
-          echo "VK_ICD_FILENAMES=$swiftshader" >> "$GITHUB_ENV"
-          echo "LAVAPIPE_ICD=${lavapipe[0]}" >> "$GITHUB_ENV"
-          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          {
+            echo "VK_ICD_FILENAMES=$swiftshader"
+            echo "LAVAPIPE_ICD=${lavapipe[0]}"
+            echo "WGPU_BACKEND=vulkan"
+          } >> "$GITHUB_ENV"
           # fails unless each driver loads and lists a device
           for icd in "$swiftshader" "${lavapipe[0]}"; do
             VK_ICD_FILENAMES="$icd" vulkaninfo --summary | grep -E "deviceName|driverInfo"

@@ -42,7 +42,10 @@
 //! `ShaderInputs.setProps` reads it as `{}` and so draws with its default Phong material,
 //! [`Material::DECK_DEFAULT`], lit, exactly as `material: true`; only an `unlit: true` material
 //! leaves the colour alone. Checked by running luma's `ShaderInputs` on `{ phongMaterial: false }`
-//! under node. The specs read `material: false` as unlit.
+//! under node, and against today's app: the earth sphere's lit colour at the pole of the reference
+//! picture (test `material_false_is_lit_by_decks_default`). The specs read `material: false` as
+//! unlit. The test `building_roofs_match_the_reference_picture` checks the rig, `aim_key_light`
+//! and the Phong formula against the plain buildings' roofs of the reference picture at V4.
 
 use std::num::NonZeroU64;
 use std::ops::Range;
@@ -949,6 +952,72 @@ pub(crate) mod tests {
         assert!((turn * f.y_axis).abs_diff_eq(DVec3::Z, 1e-12));
         let expected = turn * DVec3::from_array(rig.key_direction);
         assert!(u.key_render.iter().zip(expected.to_array()).all(|(a, b)| (f64::from(*a) - b).abs() < 1e-7));
+    }
+
+    /// The light rig, `aim_key_light`, luma's Phong and a material against today's app itself: the
+    /// roofs of the plain buildings at Arlanda in the reference picture `dark-v4-1440x900.png`
+    /// (view V4 at 2026-06-21 10:00 UTC, `docs/port/reference/README.md`) are the colour the CPU
+    /// twin of the shader gives a roof there, with the key light aimed at that sun as the app aims
+    /// it over buildings (weight `sunlight(up) · clamp(zoom − 12, 0, 1)`, G:2723-2724), the
+    /// buildings' material and colour (`BUILDING_MATERIAL`, `BUILDING_COLOR`, G:972-978), and the
+    /// camera light from where deck's camera is. (The GPU agrees with the twin: the tests above.)
+    #[test]
+    fn building_roofs_match_the_reference_picture() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/port/reference/dark-v4-1440x900.png");
+        let reference = image::open(&path).expect("reference picture").to_rgb8();
+        let view = ViewState { longitude: 17.9186, latitude: 59.6519, zoom: 13.5, pitch: 45.0, bearing: 30.0, position: None };
+        let vf = ViewFrame::new(&view, [1440.0, 900.0], 1.0, 0.0);
+        let now = 1_782_036_000_000.0;
+        let to_sun = rustradar_core::sun::local_sun(rustradar_core::sun::sun_direction(now), view.latitude, view.longitude);
+        let weight = rustradar_core::sun::sunlight(to_sun[2]) * (view.zoom - 12.0).clamp(0.0, 1.0);
+        assert_eq!(weight, 1.0);
+        let rig = LightRig::aimed(to_sun, weight);
+        let material = Material { ambient: 0.42, diffuse: 0.6, shininess: 16.0, specular_color: [60.0, 66.0, 80.0], unlit: false };
+        let color = [58.0, 68.0, 84.0].map(|c: f64| c / 255.0);
+        let camera = glam::Vec3::from(vf.globals.camera_common).as_dvec3();
+        // two hangar roofs south-east of the terminals, some 10 to 20 m up
+        for [x, y] in [[1145u32, 712u32], [1060, 760]] {
+            let got = reference.get_pixel(x, y).0;
+            for h in [10.0, 20.0] {
+                let lnglat = vf.viewport.unproject([f64::from(x) + 0.5, f64::from(y) + 0.5], h);
+                let at = vf.common_offset(lnglat, h).as_dvec3();
+                let expected = rig.shade(&material, color, DVec3::Z, camera - at, DVec3::from_array(rig.key_direction)).map(|c| c * 255.0);
+                eprintln!("roof at ({x}, {y}), {h} m: {got:?} in the picture, {expected:.1?} by the twin");
+                assert!(got.iter().zip(expected).all(|(g, e)| (f64::from(*g) - e).abs() <= 1.0), "({x}, {y}): {got:?} against {expected:?}");
+            }
+        }
+        // the usual key light would have lit them otherwise
+        let usual = LightRig::new().shade(&material, color, DVec3::Z, DVec3::new(0.0, -0.6, 0.8), DVec3::from_array(key_light_unit()));
+        assert!((usual[0] * 255.0 - 63.4).abs() > 5.0, "{usual:?}");
+    }
+
+    /// deck 9.4 lights a SimpleMeshLayer given `material: false` with luma's default material: the
+    /// earth sphere (`GROUND` `[50,50,50]`, G:451-464) where it shows past the land's ±85.06°, at
+    /// the north pole in the reference picture `dark-v1-1440x900.png`, has the colour the CPU twin
+    /// gives it with [`Material::DECK_DEFAULT`] and the usual rig (its normals are the sphere's,
+    /// in common space), not `[50,50,50]`.
+    #[test]
+    fn material_false_is_lit_by_decks_default() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/port/reference/dark-v1-1440x900.png");
+        let reference = image::open(&path).expect("reference picture").to_rgb8();
+        let view = ViewState { longitude: 10.0, latitude: 35.0, zoom: 1.9, pitch: 0.0, bearing: 0.0, position: None };
+        let vf = ViewFrame::new(&view, [1440.0, 900.0], 1.0, 0.0);
+        let rig = LightRig::new();
+        let camera = glam::Vec3::from(vf.globals.camera_common).as_dvec3();
+        // the sphere of 6.3e6 m lies 70 972 m below deck's globe
+        let depth = 6.3e6 - 6_370_972.0;
+        for x in [700u32, 720, 740] {
+            let y = 185;
+            let lnglat = vf.viewport.unproject([f64::from(x) + 0.5, f64::from(y) + 0.5], depth);
+            assert!(lnglat[1] > 85.06, "{lnglat:?} is not past the land");
+            let p = vf.viewport.project_position([lnglat[0], lnglat[1], depth]);
+            let lit = rig.shade(&Material::DECK_DEFAULT, [50.0 / 255.0; 3], p.normalize(), camera - (p - vf.common_centre), DVec3::from_array(rig.key_direction));
+            let expected = lit.map(|c| c * 255.0);
+            let got = reference.get_pixel(x, y).0;
+            eprintln!("earth at ({x}, {y}): {got:?} in the picture, {expected:.1?} by the twin");
+            assert!(got.iter().zip(expected).all(|(g, e)| (f64::from(*g) - e).abs() <= 1.0), "({x}, {y}): {got:?} against {expected:?}");
+            assert_ne!(got, [50, 50, 50]);
+        }
     }
 
     /// One placed mesh of a test scene.

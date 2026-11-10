@@ -23,6 +23,9 @@ use rustradar_scene::camera::ViewState;
 
 use crate::app::{Engine, start_backend};
 use crate::requests::{self, Requests, no_wake};
+use crate::state::aircraft::Aircraft;
+use crate::state::liveries::Liveries;
+use crate::state::taxiways::Taxiways;
 use crate::state::{AppState, Clock, system_now_ms};
 use crate::tile_fetcher;
 use crate::{Options, SHOT_SIZE};
@@ -93,7 +96,14 @@ pub fn render_on(gpu: &Gpu, options: &Options) -> Result<Shot, Error> {
     let (size, scale) = canvas(options);
     let view = options.view.unwrap_or(ViewState::INITIAL);
     let requests = Requests::new(rt.handle().clone(), no_wake());
-    let state = AppState::new(options.startup(), backend, Some(requests), Some(events_rx), view, size.map(f64::from));
+    let mut state = AppState::new(options.startup(), backend, Some(requests), Some(events_rx), view, size.map(f64::from));
+    // a shot never touches the network (plan section 8): without a --fixture folder the feeds
+    // that would ask the backend have no source (A1, A2, A11)
+    if options.fixture.is_none() {
+        state.aircraft = Aircraft::with_feeds(None);
+        state.liveries = Liveries::with_source(None);
+        state.taxiways = Taxiways::with_source(None);
+    }
 
     let mut engine = Engine::new(gpu, FORMAT, state);
     // the shot's tiles, never the network's; the frames are drawn in a loop: nothing to wake

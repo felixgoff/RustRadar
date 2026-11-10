@@ -61,7 +61,7 @@ impl Aircraft {
     pub fn build(&mut self, state: &mut AppState, scene: &mut SceneInput) {
         let inputs = Self::inputs(state, scene);
         let (feed_now, local_now) = (scene.feed_now_ms, scene.local_now_ms);
-        let AppState { aircraft, motion, liveries, .. } = state;
+        let AppState { aircraft, motion, liveries, taxiways, .. } = state;
         let reference = aircraft.reference().map(|r| &**r);
         let shown = aircraft.shown(None);
         self.latest = self.builder.build(
@@ -71,6 +71,8 @@ impl Aircraft {
             |f| motion.pose(f, feed_now),
             |f| liveries.for_flight(f, reference, local_now),
         );
+        // the taxiway networks of the airports aircraft are on the ground at, close in (A11)
+        taxiways.taxiways_for(&self.latest.taxi_wanted, motion, local_now);
     }
 }
 

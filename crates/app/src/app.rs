@@ -28,11 +28,11 @@ use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopBuilder};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::input::{self, MapInput};
+use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
-use crate::{Options, platform, theme};
+use crate::{Options, platform, theme, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -145,6 +145,8 @@ impl Engine {
         if self.state.controller.size() != size {
             self.state.controller.set_size(size);
         }
+        // the click and double click whose 300 ms are up, before the camera moves (B8)
+        self.input.update(&mut self.state.controller, local_ms);
         let (_, camera_wants) = self.state.advance_camera(local_ms);
         wants.merge(camera_wants);
 
@@ -169,6 +171,12 @@ impl Engine {
         for action in actions {
             self.state.apply(action, local_ms);
         }
+        // what may take the keys as of this pass (B8; no dialog closes the shortcuts yet), and
+        // deck's cursor over the map (nothing is hovered until A9)
+        let typing = self.egui.text_edit_focused();
+        self.input.set_key_gate(KeyGate { typing, ui_focused: self.egui.egui_wants_keyboard_input(), shortcuts_off: false });
+        let mut platform_output = output.platform_output;
+        self.input.set_cursor(&self.egui, &mut platform_output, &self.state.controller, false);
 
         // 6 render
         let repaint_delay = output.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
@@ -181,6 +189,8 @@ impl Engine {
         if let Some(t) = wants.wake_at {
             at_ms = at_ms.min(t);
         }
+        // a click or double click waiting out its 300 ms (B8)
+        at_ms = at_ms.min(self.input.next_due_ms());
         if repaint_delay != Duration::MAX {
             at_ms = at_ms.min(local_ms + repaint_delay.as_secs_f64() * 1000.0);
         }
@@ -189,7 +199,7 @@ impl Engine {
             at_ms = at_ms.min(local_ms + 50.0);
         }
         let now = self.state.controller.in_transition() || self.state.controller.is_dragging() || repaint_delay.is_zero();
-        (output.platform_output, Next { now, at_ms })
+        (platform_output, Next { now, at_ms })
     }
 
     /// Step 6: the map's passes and egui's onto `surface`, submitted.
@@ -316,7 +326,9 @@ impl View {
         config.format = formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(config.format);
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&gpu.device, &config);
-        let engine = Engine::new(&gpu, config.format, state);
+        let mut engine = Engine::new(&gpu, config.format, state);
+        // the map's tiles: the --fixture folder's, else the network through the backend's cache (T1)
+        tile_fetcher::connect(&mut engine.map, &engine.state);
         let egui_input = egui_winit::State::new(
             engine.egui.clone(),
             egui::ViewportId::ROOT,

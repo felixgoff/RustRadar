@@ -25,9 +25,12 @@ use std::sync::mpsc::Receiver;
 use rustradar_map::io::{FetchError, FetchRequest, FetchResult, TileFetcher, answered};
 use rustradar_scene::tiles::TileIndex;
 
-/// The committed fixtures folder.
+/// The committed fixtures folder, `crates/map/tests/data/tiles`. Found from the `crates` folder,
+/// so that another crate's tests or headless path can take this file in with
+/// `#[path = "../../map/tests/common/fixture_tiles.rs"]` (or the like) and still find the set.
 pub fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tiles")
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest.parent().unwrap_or(manifest).join("map/tests/data/tiles")
 }
 
 /// What the set holds for a tile.
@@ -38,7 +41,7 @@ pub enum Held {
     /// The server had nothing there.
     Nothing,
     /// The set has no answer for it.
-    NotHeld,
+    Missing,
 }
 
 /// A [`TileFetcher`] over a fixtures folder.
@@ -86,11 +89,11 @@ impl FixtureTiles {
     pub fn held(&self, source: &str, tile: TileIndex) -> Held {
         // (a source name is a folder name: nothing that climbs out of the set)
         if source.is_empty() || source.starts_with('.') || source.contains(['/', '\\']) {
-            return Held::NotHeld;
+            return Held::Missing;
         }
         let dir = self.root.join(source).join(tile.z.to_string()).join(tile.x.to_string());
         let stem = tile.y.to_string();
-        let Ok(entries) = fs::read_dir(&dir) else { return Held::NotHeld };
+        let Ok(entries) = fs::read_dir(&dir) else { return Held::Missing };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.file_stem().and_then(|s| s.to_str()) != Some(stem.as_str()) {
@@ -101,7 +104,7 @@ impl FixtureTiles {
                 _ => Held::Tile(path),
             };
         }
-        Held::NotHeld
+        Held::Missing
     }
 
     /// The answer for `tile` of `source` (see the module's list).
@@ -111,7 +114,7 @@ impl FixtureTiles {
                 fs::read(&path).map(Some).map_err(|e| FetchError::Failed(format!("{}: {e}", path.display())))
             }
             Held::Nothing => Ok(None),
-            Held::NotHeld => {
+            Held::Missing => {
                 self.misses.lock().unwrap_or_else(|e| e.into_inner()).push((source.to_owned(), tile));
                 Ok(None)
             }

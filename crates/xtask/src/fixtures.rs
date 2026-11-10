@@ -9,7 +9,8 @@
 //! each source; and OpenFreeMap's whole world at zooms 0 to 2 (V1's globe):
 //! - `openfreemap/`: OpenFreeMap's vector tiles, deck's rule for `map-*` and `label-tiles`
 //!   ([`VECTOR_TILES`]), plus on the flat map the distance LOD of the buildings
-//!   ([`city_lod`]) and of the realistic ground ([`ground_lod`]) at their zooms up to 14. The URL
+//!   ([`city_lod`]) and of the realistic ground ([`ground_lod`]) at their zooms up to 14, and the
+//!   trees' z14 tiles from [`TREES_ZOOM`] to [`SGL_FROM_ZOOM`] (none of V3 to V6 needs them). The URL
 //!   template is `tiles[0]` of the TileJSON at [`OPENFREEMAP_TILEJSON`], read at run time (it
 //!   names the planet build), never hard-coded (doc 01 §5.6); the TileJSON is kept as
 //!   `openfreemap/tilejson.json`.
@@ -17,8 +18,10 @@
 //! - `terrarium/`: Mapzen's terrarium heights the hillshade shades ([`HILLSHADE_TILES`]).
 //! - `rainviewer/`: one RainViewer radar frame, the latest past one of its frame list (the frame
 //!   list is kept as `rainviewer/weather-maps.json`), at the radar's tiles ([`RADAR_TILES`]).
-//! - `streets-gl/`: the Streets GL z16 tiles the two distance LODs take close in, on the flat map
-//!   from [`SGL_FROM_ZOOM`] (V5: one tile under the view's centre and the few around it).
+//! - `streets-gl/`: the Streets GL z16 tiles of the realistic map on the flat map: those the two
+//!   distance LODs take close in (their deepest level is Streets GL's at any zoom; of V3 to V6
+//!   only V5 is close enough to reach it), and from [`SGL_FROM_ZOOM`] the trees' tiles around
+//!   the view's centre ([`tree_tiles`]; V5 again).
 //!
 //! Each tile is written as `<source>/<z>/<x>/<y>.<ext>` with exactly the bytes the server sent,
 //! the HTTP compression undone (what `backend::tiles` hands the map). A tile the server has
@@ -29,8 +32,8 @@
 //! honours `HTTPS_PROXY` and the system's certificates, and keeps an HTTP client out of this
 //! crate. Everything is fetched into a staging folder first; the old set is replaced only when
 //! every tile has arrived. The tiles change with each planet build, imagery update and radar
-//! frame, so re-running gives a new set; the test `the_committed_fixtures_are_the_plan` says when
-//! the committed set no longer matches the selection code.
+//! frame, so re-running gives a new set; the test `the_committed_fixtures_hold_the_plan` says when
+//! the selection code asks for a tile the committed set lacks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -40,11 +43,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rustradar_scene::camera::{ViewState, viewport_for};
+use rustradar_core::geo::meters_per_pixel;
+use rustradar_scene::camera::{CAMERA_HEIGHTS, ViewState, viewport_for};
 use rustradar_scene::hillshade::{HILLSHADE_MAX_ZOOM, TERRAIN_ATTRIBUTION_FULL, TERRARIUM_URL};
 use rustradar_scene::lod::{Lod, distance_tile_indices};
 use rustradar_scene::streets_gl::{SGL_FROM_ZOOM, SGL_TILES, SGL_ZOOM};
 use rustradar_scene::tiles::{IMAGERY_TILES, RADAR_TILES, TileIndex, TilesetOptions, VECTOR_TILES, tile_indices};
+use rustradar_scene::trees::{TREE_TILE_ZOOM, tiles_around};
 
 /// OpenFreeMap's TileJSON (G:308); its `tiles[0]` is the URL template of the current planet build.
 pub const OPENFREEMAP_TILEJSON: &str = "https://tiles.openfreemap.org/planet";
@@ -124,6 +129,25 @@ pub fn ground_lod() -> Lod {
     Lod { levels: vec![9, 10, 11, 12, 13, 14, 16], bias: 0.5, max_distance: 80_000.0 }
 }
 
+/// `TREES_ZOOM` (G:1003): the realistic map plants trees on the flat map from this zoom.
+pub const TREES_ZOOM: f64 = 14.0;
+
+/// The trees' tiles around the centre of `view` on a canvas `height` CSS pixels high (G:2695-2704,
+/// tree-layer.ts:690-693): none below [`TREES_ZOOM`] or on the globe; from [`SGL_FROM_ZOOM`]
+/// Streets GL's z16 tiles within `min(2400, max(900, 1.6·d))` metres, else OpenFreeMap's
+/// [`TREE_TILE_ZOOM`] tiles within `min(4800, max(900, 1.6·d))`, where `d` is how far the camera
+/// is from the point it looks at, `CAMERA_HEIGHTS · height · metresPerPixel(zoom, latitude)`.
+pub fn tree_tiles(view: &View, height: f64) -> Vec<TileIndex> {
+    if !view.state().is_flat() || view.zoom < TREES_ZOOM {
+        return Vec::new();
+    }
+    let sgl = view.zoom >= SGL_FROM_ZOOM;
+    let distance = CAMERA_HEIGHTS * height * meters_per_pixel(view.zoom, view.latitude);
+    let radius = if sgl { 2400f64 } else { 4800.0 }.min(900f64.max(1.6 * distance));
+    let zoom = if sgl { SGL_ZOOM } else { TREE_TILE_ZOOM };
+    tiles_around(view.longitude, view.latitude, radius, zoom).into_iter().map(|t| t.tile).collect()
+}
+
 /// A tile as `(z, x, y)`: sorted by zoom, then column, then row.
 pub type Zxy = (u32, u32, u32);
 
@@ -156,15 +180,20 @@ pub fn plan() -> BTreeMap<&'static str, BTreeSet<Zxy>> {
             }
             // the buildings' and the realistic ground's tiles by distance (512 px tiles, no
             // zoom offset: `log2(512 / tileSize) + zoomOffset` is 0); their zooms up to 14 are
-            // OpenFreeMap's and 16 is Streets GL's, which the map asks for from SGL_FROM_ZOOM
+            // OpenFreeMap's and 16 is Streets GL's (the realistic map's source for it, G:1051,
+            // realistic-ground.ts:826)
             for lod in [city_lod(), ground_lod()] {
                 for tile in distance_tile_indices(&viewport, &lod, None, 0.0) {
                     if tile.z <= OPENFREEMAP_MAX_ZOOM {
                         plan.entry(OPENFREEMAP).or_default().insert(zxy(tile));
-                    } else if tile.z == SGL_ZOOM && view.zoom >= SGL_FROM_ZOOM {
+                    } else if tile.z == SGL_ZOOM {
                         plan.entry(STREETS_GL).or_default().insert(zxy(tile));
                     }
                 }
+            }
+            for tile in tree_tiles(view, size[1]) {
+                let source = if tile.z == SGL_ZOOM { STREETS_GL } else { OPENFREEMAP };
+                plan.entry(source).or_default().insert(zxy(tile));
             }
         }
     }
@@ -591,9 +620,57 @@ mod tests {
         assert!(sgl.iter().all(|t| t.0 == SGL_ZOOM));
         // V5's centre (59.3293, 18.0686) at z16
         assert!(sgl.contains(&(16, 36057, 19273)));
-        // only V5 is closer in than SGL_FROM_ZOOM; its LODs take z16 within a few kilometres
+        // only V5 is close enough for the LODs' deepest level and for Streets GL's trees; both
+        // take z16 within a few kilometres
         assert!(sgl.iter().all(|&(_, x, y)| x.abs_diff(36057) < 40 && y.abs_diff(19273) < 40), "{sgl:?}");
-        assert!(sgl.len() < 100, "{}", sgl.len());
+        assert!(sgl.len() < 250, "{}", sgl.len());
+        for view in &VIEWS {
+            let state = view.state();
+            for size in SIZES {
+                let viewport = viewport_for(&state, size);
+                let deepest = [city_lod(), ground_lod()]
+                    .iter()
+                    .flat_map(|lod| distance_tile_indices(&viewport, lod, None, 0.0))
+                    .any(|t| t.z == SGL_ZOOM);
+                assert_eq!(deepest, view.name == "V5", "{} {size:?}", view.name);
+            }
+        }
+    }
+
+    #[test]
+    fn trees_take_tiles_around_the_centre_from_zoom_14_on_the_flat_map() {
+        let at = |zoom: f64| View { name: "", latitude: 59.3293, longitude: 18.0686, zoom, pitch: 0.0, bearing: 0.0 };
+        // on the globe and below TREES_ZOOM, none
+        assert!(tree_tiles(&at(12.0), 900.0).is_empty());
+        assert!(tree_tiles(&at(13.9), 900.0).is_empty());
+        // from 14, OpenFreeMap's z14 tiles: at 14.2 and 900 px the camera is 1.5·900·mpp off,
+        // 1.6 times that is under 4800 m
+        let mpp = meters_per_pixel(14.2, 59.3293);
+        let radius = 1.6 * 1.5 * 900.0 * mpp;
+        assert!(radius > 900.0 && radius < 4800.0, "{radius}");
+        let tiles = tree_tiles(&at(14.2), 900.0);
+        assert!(!tiles.is_empty() && tiles.iter().all(|t| t.z == TREE_TILE_ZOOM), "{tiles:?}");
+        assert_eq!(tiles, tiles_around(18.0686, 59.3293, radius, 14).into_iter().map(|t| t.tile).collect::<Vec<_>>());
+        // a short canvas still reaches 900 m; a tall one stops at 4800 m
+        assert_eq!(tree_tiles(&at(14.2), 10.0), tiles_around(18.0686, 59.3293, 900.0, 14).into_iter().map(|t| t.tile).collect::<Vec<_>>());
+        assert_eq!(tree_tiles(&at(14.2), 1e5), tiles_around(18.0686, 59.3293, 4800.0, 14).into_iter().map(|t| t.tile).collect::<Vec<_>>());
+        // from SGL_FROM_ZOOM, Streets GL's z16 tiles within at most 2400 m
+        let v5 = VIEWS.iter().find(|v| v.name == "V5").unwrap();
+        let tiles = tree_tiles(v5, 900.0);
+        assert!(tiles.iter().all(|t| t.z == SGL_ZOOM));
+        assert!(tiles.contains(&TileIndex::new(36057, 19273, 16)));
+        assert_eq!(tree_tiles(v5, 1e5), tiles_around(18.0686, 59.3293, 2400.0, 16).into_iter().map(|t| t.tile).collect::<Vec<_>>());
+        // and every one of them is in the plan
+        let plan = plan();
+        for size in SIZES {
+            for tile in tree_tiles(v5, size[1]) {
+                assert!(plan[STREETS_GL].contains(&zxy(tile)), "{}", tile.id());
+            }
+        }
+        // V3, V4 and V6 plant none
+        for view in VIEWS.iter().filter(|v| v.name != "V5") {
+            assert!(tree_tiles(view, 900.0).is_empty(), "{}", view.name);
+        }
     }
 
     #[test]
@@ -720,18 +797,21 @@ mod tests {
         (tiles, others)
     }
 
+    /// The set holds every planned tile. Tiles the plan no longer asks for are let be: they cost
+    /// space, not correctness, and a re-run (which fetches the day's planet build and radar frame
+    /// for everything) is needed only when a planned tile is missing.
     #[test]
-    fn the_committed_fixtures_are_the_plan() {
+    fn the_committed_fixtures_hold_the_plan() {
         let (tiles, others) = committed();
         let held: BTreeSet<(String, Zxy)> = tiles.iter().map(|(s, t, _)| (s.clone(), *t)).collect();
         let planned: BTreeSet<(String, Zxy)> =
             plan().into_iter().flat_map(|(s, tiles)| tiles.into_iter().map(move |t| (s.to_owned(), t))).collect();
         let missing: Vec<_> = planned.difference(&held).collect();
-        let extra: Vec<_> = held.difference(&planned).collect();
         assert!(
-            missing.is_empty() && extra.is_empty(),
-            "the fixtures no longer match the selection: run `cargo xtask fixtures`\nmissing: {missing:?}\nextra: {extra:?}"
+            missing.is_empty(),
+            "the fixtures lack tiles the selection asks for: run `cargo xtask fixtures`\nmissing: {missing:?}"
         );
+        assert!(held.iter().all(|(source, _)| plan().contains_key(source.as_str())), "a source the plan has not");
         assert_eq!(held.len(), tiles.len(), "a tile held twice");
         for (source, tile, ext) in &tiles {
             assert!(ext == extension(source) || ext == NOTHING_EXT, "{source} {tile:?}.{ext}");

@@ -1,6 +1,6 @@
 Tile fixtures of crates/map (docs/port/00-architecture-and-plan.md, item E16 and section 8)
 
-Downloaded by `cargo xtask fixtures` (crates/xtask/src/fixtures.rs) on 2026-11-10 15:47 UTC.
+Downloaded by `cargo xtask fixtures` (crates/xtask/src/fixtures.rs) on 2026-11-10 16:31 UTC.
 Each folder holds one source's tiles as <z>/<x>/<y>.<ext>, the bytes the server sent with the
 HTTP compression undone; an empty <y>.none marks a tile the server had nothing for (404/204).
 They cover the views V3 to V6 of the plan's section 8 at 1100x720, 1440x900 and 390x844 CSS
@@ -44,9 +44,9 @@ terrarium/
     - United States 3DEP (formerly NED) and global GMTED2010 and SRTM terrain data courtesy of the U.S. Geological Survey
 
 rainviewer/
-  One weather radar frame from RainViewer, https://www.rainviewer.com, frame of 2026-11-10 15:40 UTC
-  (1794325200), the latest past frame of https://api.rainviewer.com/public/weather-maps.json (kept as rainviewer/weather-maps.json).
-  Template: https://tilecache.rainviewer.com/v2/radar/a3e7530652f8/256/{z}/{x}/{y}/2/1_1.png
+  One weather radar frame from RainViewer, https://www.rainviewer.com, frame of 2026-11-10 16:30 UTC
+  (1794328200), the latest past frame of https://api.rainviewer.com/public/weather-maps.json (kept as rainviewer/weather-maps.json).
+  Template: https://tilecache.rainviewer.com/v2/radar/47622fe604ca/256/{z}/{x}/{y}/2/1_1.png
   Weather data by RainViewer. The RainViewer API is free for personal and educational use, with
   this credit and a link to rainviewer.com: https://www.rainviewer.com/api.html,
   https://www.rainviewer.com/terms.html

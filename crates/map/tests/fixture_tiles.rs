@@ -75,8 +75,8 @@ fn a_held_tile_is_served_and_any_other_reads_as_nothing() {
     // a tile the set lacks, a source it lacks, a name that would leave the folder
     assert_eq!(tiles.read("openfreemap", TileIndex::new(0, 0, 15)), Ok(None));
     assert_eq!(tiles.read("mapterhorn", TileIndex::ROOT), Ok(None));
-    assert_eq!(tiles.held("../tiles/openfreemap", TileIndex::ROOT), Held::NotHeld);
-    assert_eq!(tiles.held("", TileIndex::ROOT), Held::NotHeld);
+    assert_eq!(tiles.held("../tiles/openfreemap", TileIndex::ROOT), Held::Missing);
+    assert_eq!(tiles.held("", TileIndex::ROOT), Held::Missing);
     assert_eq!(
         tiles.misses(),
         [("openfreemap".to_owned(), TileIndex::new(0, 0, 15)), ("mapterhorn".to_owned(), TileIndex::ROOT)]
@@ -148,7 +148,7 @@ fn every_tile_the_shot_views_select_is_held() {
             for (source, opts) in sources {
                 for tile in tile_indices(&viewport, &opts) {
                     asked += 1;
-                    assert_ne!(tiles.held(source, tile), Held::NotHeld, "{} {size:?}: {source} {}", view.0, tile.id());
+                    assert_ne!(tiles.held(source, tile), Held::Missing, "{} {size:?}: {source} {}", view.0, tile.id());
                 }
             }
         }

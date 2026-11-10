@@ -87,18 +87,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # lavapipe, Mesa's CPU Vulkan driver. Its ICD file is lvp_icd.json or
-      # lvp_icd.x86_64.json, depending on the Mesa version.
-      - name: Install software Vulkan (lavapipe)
+      # Two CPU Vulkan drivers. SwiftShader, from the runner's Google Chrome, is the
+      # one the tests must pass on: the port's engineers check them with it (plan
+      # section 8). lavapipe, Mesa's, runs them once more, not required (below).
+      # lavapipe's ICD file is lvp_icd.json or lvp_icd.x86_64.json, depending on
+      # the Mesa version.
+      - name: Software Vulkan (SwiftShader, lavapipe)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
-          icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
-          test -f "${icds[0]}"
-          echo "VK_ICD_FILENAMES=${icds[0]}" >> "$GITHUB_ENV"
+          swiftshader="$(find /opt/google/chrome -name vk_swiftshader_icd.json -print -quit)"
+          lavapipe=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          test -f "$swiftshader"
+          test -f "${lavapipe[0]}"
+          echo "VK_ICD_FILENAMES=$swiftshader" >> "$GITHUB_ENV"
+          echo "LAVAPIPE_ICD=${lavapipe[0]}" >> "$GITHUB_ENV"
           echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
-          # fails unless the driver loads and lists a device
-          VK_ICD_FILENAMES="${icds[0]}" vulkaninfo --summary | grep -E "deviceName|driverInfo"
+          # fails unless each driver loads and lists a device
+          for icd in "$swiftshader" "${lavapipe[0]}"; do
+            VK_ICD_FILENAMES="$icd" vulkaninfo --summary | grep -E "deviceName|driverInfo"
+          done
 
       # The port's jobs use the Rust its engineers check it with, not the newest stable:
       # each release's clippy adds lints, and -D warnings would turn them red with no
@@ -122,7 +130,7 @@ jobs:
           out="$(cargo test --workspace --exclude rustradar --locked --lib -- --nocapture --exact gpu::tests::the_device_asks_for_the_texture_compression_the_adapter_has 2>&1)"
           printf '%s\n' "$out" | grep -E "compression|skipped"
           if printf '%s\n' "$out" | grep -q "skipped:"; then
-            echo "::error::wgpu found no adapter on lavapipe: the GPU tests would only print skipped"
+            echo "::error::wgpu found no adapter on SwiftShader: the GPU tests would only print skipped"
             exit 1
           fi
 
@@ -137,6 +145,14 @@ jobs:
           name: native-shots
           path: target/shots
           if-no-files-found: warn
+
+      # A second rasteriser, as every real GPU is one: a failure here (an annotation; the
+      # job stays green) is a test that holds on SwiftShader only, for its owner to
+      # loosen to what section 8 asks (properties that hold across rasterisers).
+      - name: Rust tests on lavapipe (not required)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: VK_ICD_FILENAMES="$LAVAPIPE_ICD" cargo test --workspace --exclude rustradar --locked --no-fail-fast
 
       - name: Clippy
         if: ${{ !cancelled() }}

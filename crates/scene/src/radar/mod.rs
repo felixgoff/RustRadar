@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(t.id, "4/9/5");
         let levels: Vec<(f64, usize)> = t.levels.iter().map(|l| (l.km, l.from_band)).collect();
         assert_eq!(levels, [(1.5, 1), (3.0, 2), (4.5, 4), (6.0, 5), (8.0, 7), (10.0, 9), (12.0, 11)]);
-        // the vertices are the TypeScript's, value for value; the triangles are earcutr's
+        // the vertices are the TypeScript's, value for value (the triangles are not compared here)
         assert_eq!(t.slices.positions.len(), 7368);
         assert_eq!(checksum(&t.slices.positions), 14627129.456626892);
         assert_eq!(t.slices.band_vertex_starts, [0, 0, 11, 25, 109, 250, 413, 594, 1527, 2677, 3305, 3561, 3684, 3684, 3684]);

@@ -7,10 +7,10 @@
 //! fill are in [`super::iso`].
 //!
 //! Deck.gl's binary `PolygonData` becomes [`MergedMesh`] (plain arrays: in wgpu, a band range of
-//! a [`RadarMesh`] is just an index sub-range with a base vertex). Triangles come from `earcutr`
-//! ([`crate::geom::earcut`]), which can pick other triangles than math.gl's earcut for the same
-//! polygon (same area): never depend on triangle order. Deviations, all where the TypeScript
-//! would throw: [`parse_volume_polygons`] returns an error for a truncated blob.
+//! a [`RadarMesh`] is just an index sub-range with a base vertex). Triangles come from
+//! [`crate::geom::earcut`] (a port of earcut 2.2.4): math.gl's earcut's own. Deviations, all
+//! where the TypeScript would throw: [`parse_volume_polygons`] returns an error for a truncated
+//! blob.
 
 use rustradar_core::num::{js_round, js_string};
 

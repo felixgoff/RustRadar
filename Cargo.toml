@@ -34,7 +34,6 @@ pollster = "1"
 # Maths, GPU structs, geometry
 glam = "0.34"
 bytemuck = { version = "1", features = ["derive"] }
-earcutr = "0.5"
 contour = { version = "0.13.1", features = ["f32"] }
 
 # Textures, images, 2D raster, font outlines

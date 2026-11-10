@@ -309,7 +309,9 @@ impl FrameSlot {
 }
 
 /// This frame's [`Frame`]s, one uniform buffer bound at dynamic offsets. Cleared and refilled by
-/// the layers' `prepare` every frame, uploaded once before the passes.
+/// the layers' `prepare` every frame, uploaded once before the passes. Slot 0 always holds a zero
+/// frame ([`FrameArena::DEFAULT`]), which the renderer binds at the start of the map pass, so a
+/// pipeline that never reads `frame` need not bind one.
 pub struct FrameArena {
     stride: usize,
     staging: Vec<u8>,
@@ -321,10 +323,15 @@ pub struct FrameArena {
 impl FrameArena {
     const INITIAL_CAPACITY: usize = 256;
 
+    /// The zero frame of slot 0.
+    pub const DEFAULT: FrameSlot = FrameSlot(0);
+
     pub fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> Self {
         let stride = (device.limits().min_uniform_buffer_offset_alignment as usize).max(size_of::<Frame>());
         let (buffer, group) = Self::allocate(device, layout, stride, Self::INITIAL_CAPACITY);
-        FrameArena { stride, staging: Vec::new(), capacity: Self::INITIAL_CAPACITY, buffer, group }
+        let mut arena = FrameArena { stride, staging: Vec::new(), capacity: Self::INITIAL_CAPACITY, buffer, group };
+        arena.clear();
+        arena
     }
 
     fn allocate(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, stride: usize, capacity: usize) -> (wgpu::Buffer, wgpu::BindGroup) {
@@ -349,18 +356,15 @@ impl FrameArena {
         (buffer, group)
     }
 
-    /// Forgets last frame's frames.
+    /// Forgets last frame's frames (all but the zero frame of slot 0).
     pub fn clear(&mut self) {
         self.staging.clear();
+        self.push(&Frame::zeroed());
     }
 
-    /// How many frames were pushed since [`Self::clear`].
-    pub fn len(&self) -> usize {
+    /// How many frames it holds, the zero frame included.
+    pub fn count(&self) -> usize {
         self.staging.len() / self.stride
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.staging.is_empty()
     }
 
     /// Adds a frame for this frame's passes.
@@ -373,15 +377,13 @@ impl FrameArena {
 
     /// Uploads the pushed frames, growing the buffer (doubling) when they do not fit.
     pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, layout: &wgpu::BindGroupLayout) {
-        let needed = self.len();
+        let needed = self.count();
         if needed > self.capacity {
             let capacity = needed.next_power_of_two();
             (self.buffer, self.group) = Self::allocate(device, layout, self.stride, capacity);
             self.capacity = capacity;
         }
-        if !self.staging.is_empty() {
-            queue.write_buffer(&self.buffer, 0, &self.staging);
-        }
+        queue.write_buffer(&self.buffer, 0, &self.staging);
     }
 
     /// Binds `slot` as group 1.
@@ -498,6 +500,24 @@ pub mod model {
     /// `project_common(offset)`.
     pub fn project_common(g: &Globals, offset: [f32; 3]) -> [f32; 4] {
         mul(&g.view_proj, [offset[0], offset[1], offset[2], 1.0])
+    }
+
+    /// `local_basis(local)`: east, north and up at a local point, in the render frame.
+    pub fn local_basis(g: &Globals, f: &Frame, [u, v]: [f32; 2]) -> [[f32; 3]; 3] {
+        if g.mode == MODE_FLAT {
+            return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        }
+        let cos_c = g.centre[0];
+        let sin_c = g.centre[1];
+        let d = local_offset(f, [u, v]);
+        let lon = sin_vers((d[0] - 512.0 * (d[0] / 512.0).round_ties_even()) * RADIANS_PER_UNIT);
+        let lat = sin_vers(delta_latitude(g, d[1] * RADIANS_PER_UNIT));
+        let cos_lat = cos_c * (1.0 - lat[1]) - sin_c * lat[0];
+        let sin_lat = sin_c * (1.0 - lat[1]) + cos_c * lat[0];
+        let cl = 1.0 - lon[1];
+        let sl = lon[0];
+        let rx = |p: [f32; 3]| [p[0], cos_c * p[1] - sin_c * p[2], sin_c * p[1] + cos_c * p[2]];
+        [rx([cl, sl, 0.0]), rx([-sl * sin_lat, cl * sin_lat, cos_lat]), rx([sl * cos_lat, -cl * cos_lat, sin_lat])]
     }
 
     /// Clip space to CSS pixels from the top left (y down), in f32 as the GPU's viewport transform.
@@ -919,6 +939,80 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         let px = model::clip_to_pixels(&vf.globals, clip);
         assert!((f64::from(px[0]) - expected[0]).abs() < 0.01 && (f64::from(px[1]) - expected[1]).abs() < 0.01, "{px:?} vs {expected:?}");
         assert!((expected[0] - 500.0).abs() < 1e-6 && (expected[1] - 400.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_local_basis_is_east_north_up_at_the_vertex() {
+        let dot = |a: [f32; 3], b: [f32; 3]| f64::from(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]);
+        let unit = |a: [f32; 3]| {
+            let l = dot(a, a).sqrt() as f32;
+            [a[0] / l, a[1] / l, a[2] / l]
+        };
+        let mut checked = 0;
+        for (latitude, zoom) in [(0.0, 1.0), (59.3, 4.0), (-70.0, 8.0), (80.0, 11.0)] {
+            let view = ViewState { longitude: 100.0, latitude, zoom, bearing: 40.0, pitch: 30.0, position: None };
+            let vf = ViewFrame::new(&view, [1000.0, 700.0], 1.0, 0.0);
+            let g = &vf.globals;
+            for sample in samples(&vf, &[0.0]) {
+                let [u, v, _] = sample.local;
+                let [east, north, up] = model::local_basis(g, &sample.frame, [u, v]);
+                // up points away from the globe's centre, which sits at (0, 256, 0) below the
+                // view centre in the render frame
+                let (_, rel) = model::project_local(g, &sample.frame, [u, v, 0.0]);
+                let from_centre = [rel[0] + g.centre_offset[0], rel[1] + g.centre_offset[1] - 256.0, rel[2] + g.centre_offset[2]];
+                assert!(dot(up, unit(from_centre)) > 1.0 - 1e-6, "{}: up {up:?}", sample.about);
+                // a step east and a step north move along east and north
+                let step = 1e-3 / f64::from(sample.frame.scale) as f32;
+                let (_, e) = model::project_local(g, &sample.frame, [u + step, v, 0.0]);
+                let (_, n) = model::project_local(g, &sample.frame, [u, v - step, 0.0]);
+                let moved = |p: [f32; 3]| unit([p[0] - rel[0], p[1] - rel[1], p[2] - rel[2]]);
+                assert!(dot(east, moved(e)) > 0.999, "{}: east {east:?} vs {:?}", sample.about, moved(e));
+                assert!(dot(north, moved(n)) > 0.999, "{}: north {north:?} vs {:?}", sample.about, moved(n));
+                for a in [east, north, up] {
+                    assert!((dot(a, a) - 1.0).abs() < 1e-5);
+                }
+                assert!(dot(east, north).abs() < 1e-5 && dot(east, up).abs() < 1e-5 && dot(north, up).abs() < 1e-5);
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "{checked}");
+        // the flat map's render frame is east, north, up already
+        let vf = ViewFrame::new(&ViewState { zoom: 15.0, ..ViewState::INITIAL }, [800.0, 600.0], 1.0, 0.0);
+        assert_eq!(model::local_basis(&vf.globals, &Frame::zeroed(), [0.3, 0.6]), [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    }
+
+    /// Instances placed at a scene refresh stay where the camera puts them while it moves on.
+    #[test]
+    fn common_offsets_follow_the_camera_between_refreshes() {
+        for (refresh, now) in [
+            (
+                ViewState { longitude: 18.0, latitude: 59.3, zoom: 9.0, bearing: 0.0, pitch: 0.0, position: None },
+                ViewState { longitude: 18.3, latitude: 59.4, zoom: 9.6, bearing: 35.0, pitch: 40.0, position: None },
+            ),
+            (
+                ViewState { longitude: 179.999, latitude: -16.0, zoom: 15.0, bearing: 10.0, pitch: 45.0, position: None },
+                ViewState { longitude: -179.999, latitude: -16.001, zoom: 15.2, bearing: 15.0, pitch: 50.0, position: Some([0.0, 0.0, 40.0]) },
+            ),
+        ] {
+            let size = [900.0, 600.0];
+            let at_refresh = ViewFrame::new(&refresh, size, 1.0, 0.0);
+            let vf = ViewFrame::following(&now, size, 1.0, 0.5, &at_refresh);
+            assert_eq!(vf.common_centre, at_refresh.common_centre);
+            for (x, y) in [(450.0, 300.0), (100.0, 80.0), (820.0, 560.0)] {
+                let [lon, lat] = vf.viewport.unproject([x, y], 25.0);
+                let offset = at_refresh.common_offset([lon, lat], 25.0);
+                let got = model::clip_to_pixels(&vf.globals, model::project_common(&vf.globals, offset.into()));
+                let expected = vf.viewport.project([lon, lat, 25.0]);
+                assert!(
+                    (f64::from(got[0]) - expected[0]).hypot(f64::from(got[1]) - expected[1]) < 0.01,
+                    "{now:?}: {got:?} vs {expected:?}"
+                );
+            }
+        }
+        // across zoom 12 the old offsets mean nothing: the frame measures from its own centre
+        let at_refresh = ViewFrame::new(&ViewState { zoom: 11.9, ..ViewState::INITIAL }, [900.0, 600.0], 1.0, 0.0);
+        let vf = ViewFrame::following(&ViewState { zoom: 12.1, ..ViewState::INITIAL }, [900.0, 600.0], 1.0, 0.0, &at_refresh);
+        assert_eq!(vf.common_centre, vf.viewport.center);
     }
 
     /// The Rust structs and the WGSL structs have the same members at the same offsets.

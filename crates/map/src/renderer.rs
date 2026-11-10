@@ -143,7 +143,8 @@ impl MapRenderer {
         let scene_view = ViewFrame::new(&scene.view, scene.size, scene.map_scale, 0.0);
         MapRenderer {
             frames,
-            target: MapTarget::new(device, scene.map_size(), samples),
+            // sized by the first `prepare`
+            target: MapTarget::new(device, [1, 1], samples),
             composite: Composite::new(device, surface_format),
             layers,
             camera: scene.view,
@@ -244,6 +245,7 @@ impl MapRenderer {
             let mut pass = self.target.begin_pass(encoder, CLEAR);
             pass.set_stencil_reference(SHADOW_STENCIL_REFERENCE);
             pass.set_bind_group(GLOBALS_GROUP, self.bindings.globals_group(), &[]);
+            self.frames.bind(&mut pass, FrameArena::DEFAULT);
             let cx = DrawCx {
                 scene: &self.scene,
                 view: &self.view,

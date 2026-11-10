@@ -121,8 +121,9 @@ pub struct DrawCx<'a> {
     pub scene: &'a SceneInput,
     pub view: &'a ViewFrame,
     pub frames: &'a FrameArena,
-    /// Group 0; the renderer binds it at the start of the pass, and it stays bound across
-    /// pipelines that start with the standard groups.
+    /// Group 0. At the start of the map pass the renderer binds it, and group 1 to the zero frame
+    /// ([`FrameArena::DEFAULT`]); both stay bound across pipelines made with
+    /// [`crate::pipelines::build`].
     pub globals: &'a wgpu::BindGroup,
     pub pass: Pass,
 }

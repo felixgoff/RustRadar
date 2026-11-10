@@ -1,5 +1,7 @@
 //! The egui overlay. Placeholder for now: one panel with a search field and a button.
 
+pub mod map_error;
+
 use crate::theme;
 
 /// Everything the UI remembers between frames.

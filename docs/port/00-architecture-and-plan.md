@@ -877,7 +877,7 @@ are.
 | ☐ | Feature | Spec | Item |
 |---|---|---|---|
 | ☐ | Live feed with intervals, back-off, regional or world view | 06 §3.4 | A1 |
-| ☐ | Motion model: smoothing, delay, prediction, flare, taxi snap, gear | 05 §10 | S1.18–S1.20 |
+| ☑ | Motion model: smoothing, delay, prediction, flare, taxi snap, gear | 05 §10 | S1.18–S1.20 |
 | ☐ | Icons with outlines below zoom 11 at flat pitch; size floor 8–24 px | 03 §2, §6 | A3, A4 |
 | ☐ | 3D models, two LODs, depth and material by zoom, landing gear | 03 §5 | A5 |
 | ☐ | Liveries fading in over zoom 6–8 | 03 §17 | A2, A3 |
@@ -1208,6 +1208,102 @@ The plan proceeds on the defaults below; an answer only changes the item named.
    on-screen controls).
 9. **Formatting.** Default: English number grouping, dates and sorting for everyone.
 10. **Arch package.** Default: none (not produced today).
+
+---
+
+## Stage 1 status
+
+Checked on 2026-11-10 at commit `280050e` on `rust-port`.
+
+**Done.** Items S1.1–S1.34 are committed. S1.35 (settings bridge) was not built, because the owner has not
+asked for it (section 9, question 1). S1.2 was reported partial: it left `roads.rs` in the shim, and S1.3 then
+moved it (as `roads::widths`). The checks of S1.1–S1.3 still hold:
+- `cargo tree -p rustradar-core` lists no workspace crate.
+- `rustradar-scene` pulls in no tokio, reqwest or wgpu.
+- `rustradar-backend` pulls in no tauri.
+- `tauri` and `tokio::spawn` appear in `crates/backend/src` only in comments.
+
+Only one parity line of section 4 is ticked: the motion model. Its items are all in stage 1 and their acceptance
+has passed (all 46 cases, golden poses). The app starts using it in stage 4. The folders line also needs E17, so
+it stays unticked.
+
+**Checks**
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | clean |
+| `cargo test --workspace` (SwiftShader) | 1131 passed, 0 failed, 22 ignored |
+| `cargo clippy --workspace --all-targets` | no warnings |
+| `cargo check -p rustradar` (shim) | passes |
+| `bun run check` | 0 errors, 0 warnings |
+| `bun test src` | 394 pass |
+
+The 1131 passing tests, by crate:
+
+| Crate | Passed | Ignored |
+|---|---|---|
+| core | 601 unit + 2 in `tests/motion.rs` | 0 |
+| scene | 303 | 1 |
+| backend | 193 | 21 |
+| fr24 | 17 | 0 |
+| xtask | 11 | 0 |
+| app | 1 (`frame_is_not_uniform`, really rendered on SwiftShader) | 0 |
+| shim | 2 | 0 |
+| doc-tests | 1 | 0 |
+
+**TypeScript twins.** Every one of the 387 TypeScript tests stage 1 ports has a Rust `#[test]` of the same name,
+none of them ignored: 254 in core and 133 in scene. Names are in snake case. Ports dropped `describe` prefixes
+and split camelCase (`syncClock` → `sync_clock`); an apostrophe was either dropped or turned into `_`
+(`isn't` → `isn_t`). The 7 TypeScript tests with no twin are the ones planned for stage 2:
+- `trackpad.test.ts` (3)
+- `ktx2-transcode.test.ts` (4)
+
+Core and scene hold 907 tests in all:
+- 387 twins;
+- 519 new tests;
+- 1 stale ignored copy, described below.
+
+**Ignored tests (22)**
+- **scene, 1:** `landcover::tests::land_cover_traced_into_rounded_outlines_a_wood_and_a_field_towns_and_water_left_out`.
+  Its reason reads "needs landcover_ground::cover_outlines (S1.29 …)". That port now runs in `landcover_ground.rs`
+  under the same name, so this copy can be deleted.
+- **backend, 21:** these were ignored before the port and give no reason string.
+  - 10 need the network: `building_lod::real_buildings`, `dwd::live_run`, `geocode::live_photon`,
+    `liveries::real_logos`, `mrms::live_volume`, `roads::real_roads`, `runways::downloads_the_list`,
+    `ships::{live_ship_details, live_vesselfinder}`, `taxiways::downloads_copenhagen`.
+  - 11 need data named by an environment variable (`RAIL_TILE`, `RAIL_TILES`, `SIGNAL_TILES`, `LIVE_DIR`,
+    `NUMBERS`): `blocks::signal_headings_on_real_track`; `rail::{a_real_tile, lund_to_malmo,
+    through_malmo_city_tunnel, a_train_from_lund_to_malmo_is_drawn_on_the_track,
+    hjarup_offers_the_track_running_the_trains_way}`; `trafikverket::{replay_live, print_queries, bench_frames,
+    replay_routes, replay_route_timeline}`.
+
+**Still to do.** None of these stops the build or the tests.
+1. **Time zones are already wrong.** `Cargo.lock` pins `jiff-tzdb 0.1.8` (tz database 2026c). That version lacks
+   the permanent summer time of Manitoba and Inuvik that began in November 2026. So `America/Winnipeg`,
+   `Rainy_River`, `Canada/Central` and `Inuvik` have shown the wrong clock since then. To fix:
+   1. Run `cargo update -p jiff-tzdb` and check that the new version carries 2026d or later.
+   2. Re-run `scripts/port/zone-names.mjs`.
+   3. Run `cargo test -p rustradar-core time::`.
+2. **Two scripts write to a folder that is gone.** `scripts/sth.py` and `scripts/flow.py` still write to
+   `src-tauri/data/`, which is now `crates/backend/data/`.
+3. **Unused shim dependencies.** `src-tauri/Cargo.toml` still lists `futures-util` and `reqwest`.
+4. **Duplicated helpers.** Eighteen files keep their own copies of JavaScript's `Math.min`/`Math.max`,
+   `Number()`, truthiness, white space or `trim()`. In core: geo, places, weather, trains, labels, routes,
+   ship_details, flightpath. In scene: screen, building_shadow, hillshade, geom, landcover, overture, ground,
+   bridges, rail, trees. They should become public helpers in `core::num`.
+5. **Duplicated tables.**
+   - `liveries.rs` has a private `airline_icao`; use `reference::airline_icao`.
+   - `scene::ship_models` and a test in `core::trains` copy the ship colours; use `core::ships::ship_color`.
+6. **One radar palette.** It is defined twice, in `backend::radar` and `scene::radar::mesh`. A test keeps the two
+   equal. Moving it into core needs an item that owns `backend::radar` (W4).
+7. **Unknown train kinds.** `model::TrainKind` rejects them when deserialising, where the TypeScript drew them as
+   "other". Adding `#[serde(other)]` on `Other` would restore that; the model's owner decides.
+8. **One rustdoc warning.** `scene/src/road_widths.rs:59` links a public doc to the private `INDEX_DEG`.
+9. **Stage 12 paths.** Tests read `static/…` through `CARGO_MANIFEST_DIR`; update them when `static/` moves to
+   `assets/`.
+10. **Disk space.** The container's disk holds about 39 GB, not the 252 GB `df` reports, and `target/` grows past
+    20 GB. A full `cargo test --workspace` needed old test binaries, the cross-target folders and
+    `target/debug/incremental` deleted first.
 
 
 

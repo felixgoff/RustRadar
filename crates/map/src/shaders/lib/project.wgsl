@@ -57,7 +57,8 @@ struct Globals {
     camera_render: vec3<f32>,
     // metres per CSS pixel at the view centre (deck's `metersPerPixel`)
     metres_per_pixel: f32,
-    // canvas width and height in CSS pixels, map pixels per CSS pixel, seconds of the local clock
+    // canvas width and height in CSS pixels, map pixels per CSS pixel, and the local clock in
+    // seconds since the renderer's first frame
     viewport: vec4<f32>,
     // flat: world y of the view centre minus world y of the view's latitude (0 unless `position`
     // moves the centre north or south); the rest unused

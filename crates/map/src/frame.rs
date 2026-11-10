@@ -65,7 +65,8 @@ pub struct Globals {
     pub camera_render: [f32; 3],
     /// Metres per CSS pixel at the view centre (deck's `metersPerPixel`).
     pub metres_per_pixel: f32,
-    /// Canvas width and height in CSS pixels, map pixels per CSS pixel, seconds of the local clock.
+    /// Canvas width and height in CSS pixels, map pixels per CSS pixel, and the local clock in
+    /// seconds since the renderer's first frame (for animations).
     pub viewport: [f32; 4],
     /// Flat: world y of the view centre minus world y of the view's latitude; the rest 0.
     pub mercator: [f32; 4],

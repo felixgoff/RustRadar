@@ -8,7 +8,7 @@
 use super::{DrawCx, Init, Layer, PrepareCx};
 
 /// What the scene builder hands this layer (`SceneInput`'s field of the same name).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct Input {}
 
 /// Rows 3k and 3l: `map-*`, `aeroway-true-*` (dark basemap).

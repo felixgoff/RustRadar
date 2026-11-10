@@ -21,7 +21,7 @@ use crate::target::{CLEAR, Composite, MAP_FORMAT, MapTarget};
 /// Everything the map draws from, as plain data (plan 1.4.7): the view, what is common to all
 /// layers, and one `Input` per layer group, filled by the app's scene builders at each scene
 /// refresh. `map` knows nothing about flights, trains or the UI.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SceneInput {
     /// The camera the instances were placed with (the scene refresh's).
     pub view: ViewState,

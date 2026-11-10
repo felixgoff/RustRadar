@@ -1,0 +1,58 @@
+Tile fixtures of crates/map (docs/port/00-architecture-and-plan.md, item E16 and section 8)
+
+Downloaded by `cargo xtask fixtures` (crates/xtask/src/fixtures.rs) on 2026-11-10 15:47 UTC.
+Each folder holds one source's tiles as <z>/<x>/<y>.<ext>, the bytes the server sent with the
+HTTP compression undone; an empty <y>.none marks a tile the server had nothing for (404/204).
+They cover the views V3 to V6 of the plan's section 8 at 1100x720, 1440x900 and 390x844 CSS
+pixels, as the map's tile selection asks for them, and OpenFreeMap's world at zooms 0 to 2.
+
+These files are third-party data, kept here only so that the tests and headless screenshots run
+without the network. They are not covered by the licence of this repository's code; each stays
+under its owner's terms, below. Do not use them for anything else.
+
+openfreemap/
+  Vector tiles (OpenMapTiles schema) from OpenFreeMap, https://openfreemap.org
+  Template: https://tiles.openfreemap.org/planet/20261101_080013_pt/{z}/{x}/{y}.pbf
+  (read from the TileJSON at https://tiles.openfreemap.org/planet, kept as openfreemap/tilejson.json)
+  Credit as the TileJSON asks: OpenFreeMap © OpenMapTiles Data from OpenStreetMap
+  Map data © OpenStreetMap contributors, available under the Open Database License (ODbL) 1.0,
+  https://www.openstreetmap.org/copyright. Schema © OpenMapTiles, https://openmaptiles.org
+  (CC-BY 4.0). OpenFreeMap's terms: https://openfreemap.org/tos/
+
+esri/
+  Esri World Imagery, https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer
+  Template: https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+  Credit as the service asks: Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community
+  Under Esri's terms of use for the service: https://goto.arcgisonline.com/maps/World_Imagery
+
+terrarium/
+  Terrain Tiles (Mapzen / Tilezen Joerd, terrarium encoding) from the AWS Open Data registry,
+  https://registry.opendata.aws/terrain-tiles/
+  Template: https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
+  Attribution as https://github.com/tilezen/joerd/blob/master/docs/attribution.md asks:
+    - Mapzen
+    - ArcticDEM terrain data DEM(s) were created from DigitalGlobe, Inc., imagery and funded under National Science Foundation awards 1043681, 1559691, and 1542736
+    - Australia terrain data © Commonwealth of Australia (Geoscience Australia) 2017
+    - Austria terrain data © offene Daten Österreichs – Digitales Geländemodell (DGM) Österreich
+    - Canada terrain data contains information licensed under the Open Government Licence – Canada
+    - Europe terrain data produced using Copernicus data and information funded by the European Union - EU-DEM layers
+    - Global ETOPO1 terrain data U.S. National Oceanic and Atmospheric Administration
+    - Mexico terrain data source: INEGI, Continental relief, 2016
+    - New Zealand terrain data Copyright 2011 Crown copyright (c) Land Information New Zealand and the New Zealand Government (All rights reserved)
+    - Norway terrain data © Kartverket
+    - United Kingdom terrain data © Environment Agency copyright and/or database right 2015. All rights reserved
+    - United States 3DEP (formerly NED) and global GMTED2010 and SRTM terrain data courtesy of the U.S. Geological Survey
+
+rainviewer/
+  One weather radar frame from RainViewer, https://www.rainviewer.com, frame of 2026-11-10 15:40 UTC
+  (1794325200), the latest past frame of https://api.rainviewer.com/public/weather-maps.json (kept as rainviewer/weather-maps.json).
+  Template: https://tilecache.rainviewer.com/v2/radar/a3e7530652f8/256/{z}/{x}/{y}/2/1_1.png
+  Weather data by RainViewer. The RainViewer API is free for personal and educational use, with
+  this credit and a link to rainviewer.com: https://www.rainviewer.com/api.html,
+  https://www.rainviewer.com/terms.html
+
+streets-gl/
+  Vector tiles from Streets GL (https://github.com/StrandedKitty/streets-gl, by StrandedKitty)
+  Template: https://tiles.streets.gl/vector/{z}/{x}/{y}
+  Map data © OpenStreetMap contributors, available under the Open Database License (ODbL) 1.0,
+  https://www.openstreetmap.org/copyright

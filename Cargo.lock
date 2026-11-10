@@ -7980,6 +7980,7 @@ dependencies = [
  "indexmap 2.14.2",
  "resvg",
  "rustradar-core",
+ "rustradar-scene",
  "serde",
  "serde_json",
  "skrifa",

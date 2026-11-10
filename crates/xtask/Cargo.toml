@@ -8,6 +8,8 @@ publish = false
 [dependencies]
 # Only for shared constants.
 rustradar-core = { workspace = true }
+# The fixtures' tiles are the ones the map's tile selection asks for.
+rustradar-scene = { workspace = true }
 wuff = { workspace = true }
 resvg = { workspace = true }
 serde_json = { workspace = true }

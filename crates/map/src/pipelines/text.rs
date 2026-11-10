@@ -846,11 +846,12 @@ mod tests {
         pixel_offset: [f64; 2],
         /// The background's fill and its border's colour and width.
         background: Option<([u8; 4], [u8; 4], f64)>,
+        angle: f64,
     }
 
     impl Spec {
         fn new(at: [f64; 2], text: &str, size: f64, color: [u8; 4]) -> Spec {
-            Spec { at, text: text.to_string(), face: Face::LABEL, layout: TextLayout::DEFAULT, size, color, pixel_offset: [0.0; 2], background: None }
+            Spec { at, text: text.to_string(), face: Face::LABEL, layout: TextLayout::DEFAULT, size, color, pixel_offset: [0.0; 2], background: None, angle: 0.0 }
         }
     }
 
@@ -901,7 +902,7 @@ mod tests {
                 let mut backgrounds = Vec::new();
                 for spec in &draw.labels {
                     let laid = atlas.layout(spec.face, &spec.text, &spec.layout);
-                    let label = Label::at(cx.view, [spec.at[0], spec.at[1], 0.0], spec.size, spec.color).with_pixel_offset(spec.pixel_offset);
+                    let label = Label::at(cx.view, [spec.at[0], spec.at[1], 0.0], spec.size, spec.color).with_pixel_offset(spec.pixel_offset).with_angle(spec.angle);
                     glyphs.extend(label.glyphs(&laid));
                     if let Some((fill, line, width)) = spec.background {
                         backgrounds.push(label.background(&laid, fill).with_border(line, width));
@@ -1175,6 +1176,35 @@ mod tests {
             eprintln!("{text}: ink box {ours:?}, the outlines' {outlines:?}");
             for (side, (a, b)) in ["left", "top", "right", "bottom"].iter().zip(ours.iter().zip(&outlines)) {
                 assert!((a - b).abs() <= 0.75, "{text}: the ink box's {side} is {a}, the outlines' {b}");
+            }
+        }
+    }
+
+    /// A billboard label stays level on the screen when the map turns, unless it has an angle
+    /// (anticlockwise); a ground-plane label (`billboard: false`) reads along east and turns with
+    /// the map, on the globe and on the flat map.
+    #[test]
+    fn labels_turn_with_their_angle_or_the_ground() {
+        let Some(gpu) = gpu() else { return };
+        let mut bench = Bench::new(&gpu);
+        // a wide text: its ink box is wide when it reads across the screen, tall when up it
+        let wide = |ink: [f64; 4]| (ink[2] - ink[0]) > 3.0 * (ink[3] - ink[1]);
+        let tall = |ink: [f64; 4]| (ink[3] - ink[1]) > 3.0 * (ink[2] - ink[0]);
+        for zoom in [6.0, 14.0] {
+            for (billboard, bearing, angle, reads_across) in
+                [(true, 0.0, 0.0, true), (true, 90.0, 0.0, true), (true, 0.0, 90.0, false), (false, 0.0, 0.0, true), (false, 90.0, 0.0, false), (false, 90.0, 90.0, true)]
+            {
+                let style = TextStyle { billboard, ..TextStyle::LABELS };
+                let label = Spec { angle, ..Spec::new(STOCKHOLM, "Stockholm", 14.0, CITY) };
+                let v = view(STOCKHOLM, zoom, 0.0, bearing);
+                let (image, _) = bench.shoot(&gpu, v, 1.0, vec![Draw { style, ..Draw::labels(vec![label]) }]);
+                let (columns, rows) = whole(&image);
+                let ink = ink_box(&image, 1.0, columns, rows, fill).expect("drawn");
+                let about = format!("zoom {zoom} billboard {billboard} bearing {bearing} angle {angle}: ink {ink:?}");
+                assert!(if reads_across { wide(ink) } else { tall(ink) }, "{about}");
+                // still the label's size: about as long as it is wide level
+                let long = (ink[2] - ink[0]).max(ink[3] - ink[1]);
+                assert!((long - 66.0).abs() < 2.5, "{about}");
             }
         }
     }

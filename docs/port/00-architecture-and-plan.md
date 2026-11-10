@@ -1261,12 +1261,13 @@ and split camelCase (`syncClock` → `sync_clock`); an apostrophe was either dro
 Core and scene hold 907 tests in all:
 - 387 twins;
 - 519 new tests;
-- 1 stale ignored copy, described below.
+- 1 stale ignored copy, described below (deleted since by C1).
 
-**Ignored tests (22)**
-- **scene, 1:** `landcover::tests::land_cover_traced_into_rounded_outlines_a_wood_and_a_field_towns_and_water_left_out`.
-  Its reason reads "needs landcover_ground::cover_outlines (S1.29 …)". That port now runs in `landcover_ground.rs`
-  under the same name, so this copy can be deleted.
+**Ignored tests (22 at the check; 21 after C1)**
+- **scene, 1 (deleted by C1):**
+  `landcover::tests::land_cover_traced_into_rounded_outlines_a_wood_and_a_field_towns_and_water_left_out`.
+  Its reason read "needs landcover_ground::cover_outlines (S1.29 …)". That port runs in `landcover_ground.rs`
+  under the same name, so C1 deleted this copy; scene has no ignored test left.
 - **backend, 21:** these were ignored before the port and give no reason string.
   - 10 need the network: `building_lod::real_buildings`, `dwd::live_run`, `geocode::live_photon`,
     `liveries::real_logos`, `mrms::live_volume`, `roads::real_roads`, `runways::downloads_the_list`,
@@ -1277,28 +1278,38 @@ Core and scene hold 907 tests in all:
     hjarup_offers_the_track_running_the_trains_way}`; `trafikverket::{replay_live, print_queries, bench_frames,
     replay_routes, replay_route_timeline}`.
 
-**Still to do.** None of these stops the build or the tests.
-1. **Time zones are already wrong.** `Cargo.lock` pins `jiff-tzdb 0.1.8` (tz database 2026c). That version lacks
-   the permanent summer time of Manitoba and Inuvik that began in November 2026. So `America/Winnipeg`,
-   `Rainy_River`, `Canada/Central` and `Inuvik` have shown the wrong clock since then. To fix:
-   1. Run `cargo update -p jiff-tzdb` and check that the new version carries 2026d or later.
-   2. Re-run `scripts/port/zone-names.mjs`.
-   3. Run `cargo test -p rustradar-core time::`.
-2. **Two scripts write to a folder that is gone.** `scripts/sth.py` and `scripts/flow.py` still write to
-   `src-tauri/data/`, which is now `crates/backend/data/`.
-3. **Unused shim dependencies.** `src-tauri/Cargo.toml` still lists `futures-util` and `reqwest`.
+**Still to do.** None of these stops the build or the tests. Item C1 (stage-1 cleanup) resolved 1, 2, 3, 5, 7
+and 8; 4, 6, 9 and 10 remain.
+1. **Resolved (C1).** ~~Time zones are already wrong.~~ `Cargo.lock` pinned `jiff-tzdb 0.1.8` (tz database
+   2026c), which lacks the permanent summer time of Manitoba and Inuvik that began in November 2026, so
+   `America/Winnipeg`, `Rainy_River`, `Canada/Central` and `Inuvik` showed the wrong clock. C1 moved the lock to
+   `jiff-tzdb 0.1.9` (tz database 2026e; `jiff` itself stays 0.2.37) and re-ran `scripts/port/zone-names.mjs`:
+   only the generated table's header changed, as Node's ICU already had 2026e. The test
+   `zones_named_by_the_table_beyond_the_ported_cases` in `time.rs` now checks that the four zones read CST/MST
+   in January 2026 and CDT/MDT in January 2027. When the tz database changes again: `cargo update -p jiff-tzdb`, re-run the script,
+   `cargo test -p rustradar-core time::`.
+2. **Resolved (C1).** ~~Two scripts write to a folder that is gone.~~ `scripts/sth.py` and `scripts/flow.py`
+   now write to `crates/backend/data/` (run them from the repository root, as before); doc 07's table of
+   generators says so too.
+3. **Resolved (C1).** ~~Unused shim dependencies.~~ `futures-util` and `reqwest` are gone from
+   `src-tauri/Cargo.toml`; `cargo check -p rustradar` and `cargo test -p rustradar` pass.
 4. **Duplicated helpers.** Eighteen files keep their own copies of JavaScript's `Math.min`/`Math.max`,
    `Number()`, truthiness, white space or `trim()`. In core: geo, places, weather, trains, labels, routes,
    ship_details, flightpath. In scene: screen, building_shadow, hillshade, geom, landcover, overture, ground,
-   bridges, rail, trees. They should become public helpers in `core::num`.
-5. **Duplicated tables.**
-   - `liveries.rs` has a private `airline_icao`; use `reference::airline_icao`.
-   - `scene::ship_models` and a test in `core::trains` copy the ship colours; use `core::ships::ship_color`.
+   bridges, rail, trees. They should become public helpers in `core::num`. (Left for a later item: C1 kept to
+   the small, safe changes.)
+5. **Resolved (C1).** ~~Duplicated tables.~~
+   - `liveries.rs` imports `reference::airline_icao`; its private copy is gone.
+   - `scene::ship_models::ship_color` calls `rustradar_core::ships::ship_color` (as `f64`), and the test
+     `core::trains::clear_of_the_ship_palette_and_of_the_selection_amber` maps the colour keys through it, as
+     the TypeScript did.
 6. **One radar palette.** It is defined twice, in `backend::radar` and `scene::radar::mesh`. A test keeps the two
    equal. Moving it into core needs an item that owns `backend::radar` (W4).
-7. **Unknown train kinds.** `model::TrainKind` rejects them when deserialising, where the TypeScript drew them as
-   "other". Adding `#[serde(other)]` on `Other` would restore that; the model's owner decides.
-8. **One rustdoc warning.** `scene/src/road_widths.rs:59` links a public doc to the private `INDEX_DEG`.
+7. **Resolved (C1).** ~~Unknown train kinds.~~ `model::TrainKind::Other` carries `#[serde(other)]`: any kind
+   this build does not know reads as `Other` (and is sent on as `"other"`), as the TypeScript drew it. Test
+   `model::train::tests::an_unknown_train_kind_reads_as_other`.
+8. **Resolved (C1).** ~~One rustdoc warning.~~ `scene/src/road_widths.rs` names `INDEX_DEG` in plain code
+   text instead of linking it.
 9. **Stage 12 paths.** Tests read `static/…` through `CARGO_MANIFEST_DIR`; update them when `static/` moves to
    `assets/`.
 10. **Disk space.** The container's disk holds about 39 GB, not the 252 GB `df` reports, and `target/` grows past

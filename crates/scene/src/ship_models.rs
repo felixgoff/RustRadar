@@ -126,19 +126,10 @@ const CONTAINERS: [Rgb; 9] = [
     [190.0, 160.0, 60.0],
 ];
 
-/// VesselFinder's type colours (`ships.ts` `shipColor`): unlisted types take the unknown's grey.
-/// A copy of the table `core::ships` (S1.13) ports, which had not landed when this was written.
+/// VesselFinder's type colours (`ships.ts` `shipColor`, `core::ships`): unlisted types take the
+/// unknown's grey.
 fn ship_color(kind: u8) -> Rgb {
-    match kind {
-        2 => [72.0, 198.0, 194.0],
-        3 => [98.0, 152.0, 240.0],
-        4 => [116.0, 188.0, 112.0],
-        5 => [236.0, 128.0, 156.0],
-        6 => [218.0, 92.0, 92.0],
-        7 => [228.0, 234.0, 242.0],
-        8 => [192.0, 136.0, 236.0],
-        _ => [140.0, 152.0, 168.0],
-    }
+    rustradar_core::ships::ship_color(kind).map(f64::from)
 }
 
 /// The type colour, a touch darker, for the hull's topsides.

@@ -316,36 +316,8 @@ mod tests {
         assert!(found[0].x < 1.0);
     }
 
-    #[test]
-    #[ignore = "needs landcover_ground::cover_outlines (S1.29, after this item); port it there under this name"]
-    fn land_cover_traced_into_rounded_outlines_a_wood_and_a_field_towns_and_water_left_out() {
-        let size = 32;
-        let mut classes = vec![lc::NONE; size * size];
-        for y in 0..size {
-            for x in 0..size {
-                classes[y * size + x] = if x < 12 {
-                    lc::CONIFERS
-                } else if x < 24 {
-                    lc::ARABLE
-                } else {
-                    lc::BUILT
-                };
-            }
-        }
-        // a scrap of heath too small to keep
-        classes[5 * size + 5] = lc::HEATH;
-        let _grid = LandGrid { size, classes };
-        // The TypeScript goes on (`landcover.test.ts:63-70`):
-        //   const areas = coverOutlines({ size, classes });
-        //   expect(areas).toHaveLength(2);
-        //   const xs = areas.map((a) => a.polygon[0].map(([x]) => x));
-        //   // the wood's outline about its 12 columns, the field's from there to 24
-        //   expect(Math.max(...xs[0])).toBeGreaterThan(10);
-        //   expect(Math.max(...xs[0])).toBeLessThan(14);
-        //   expect(Math.min(...xs[1])).toBeGreaterThan(10);
-        //   expect(Math.max(...xs[1])).toBeLessThan(26);
-        panic!("cover_outlines is landcover_ground's (S1.29)");
-    }
+    // (`land cover traced into rounded outlines: a wood and a field, towns and water left out` is in
+    // `landcover_ground.rs`, beside `cover_outlines`)
 
     // New tests (no TypeScript twin).
 

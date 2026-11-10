@@ -56,7 +56,7 @@ struct Segment {
     piece: usize,
 }
 
-/// The stretches known, indexed by [`INDEX_DEG`] cells, the squares asked for, and a version
+/// The stretches known, indexed by cells of `INDEX_DEG` (0.002°), the squares asked for, and a version
 /// bumped as stretches come in (the ground's tiles drawn again with them).
 #[derive(Debug, Clone, Default)]
 pub struct RoadWidths {

@@ -301,6 +301,8 @@ impl AppState {
         self.trains.set_flight_open(self.flight.selected_id().is_some());
         self.trains.poll(&mut cx);
         self.blocks.poll(&mut cx);
+        let other_panel = self.flight.selected_id().is_some() || self.trains.selected_id().is_some() || self.flight.focus_airport().is_some();
+        self.ships.set_other_panel_open(other_panel);
         self.ships.poll(&mut cx);
         self.weather.poll(&mut cx);
         self.radar.poll(&mut cx);

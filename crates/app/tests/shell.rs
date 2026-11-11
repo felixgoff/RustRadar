@@ -547,3 +547,25 @@ fn the_keys_through_the_window() {
     assert!(!w.engine.state.shortcuts.filters_open());
     assert!(!w.engine.state.closable());
 }
+
+/// A click on the Filters button through the window's frames opens the filter panel; the pointer
+/// over the card is egui's (the map takes no gesture there), off it the map's.
+#[test]
+fn the_filters_button_takes_a_click() {
+    let Some(gpu) = gpu() else { return };
+    let mut w = Window::new(&gpu, state());
+    // the app's own slots: no search box yet, so the toolbar is 12 below the brand (y 69–101)
+    let at = Pos2::new(76.0, 85.0);
+    let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+    w.frame(&gpu, Vec::new(), NOW_MS);
+    w.frame(&gpu, vec![Event::PointerMoved(at)], NOW_MS + 16.0);
+    w.frame(&gpu, vec![Event::PointerMoved(at)], NOW_MS + 32.0);
+    assert!(w.engine.egui.is_pointer_over_egui(), "over the card");
+    w.frame(&gpu, vec![button(true)], NOW_MS + 48.0);
+    w.frame(&gpu, vec![button(false)], NOW_MS + 64.0);
+    assert!(w.engine.state.shortcuts.filters_open(), "the Filters button toggled the panel");
+    // between the cards and beside the column the pointer is the map's
+    w.frame(&gpu, vec![Event::PointerMoved(Pos2::new(600.0, 400.0))], NOW_MS + 80.0);
+    w.frame(&gpu, Vec::new(), NOW_MS + 96.0);
+    assert!(!w.engine.egui.is_pointer_over_egui(), "over the map");
+}

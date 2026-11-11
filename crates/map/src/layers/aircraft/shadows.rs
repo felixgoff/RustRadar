@@ -97,7 +97,8 @@ pub struct Cast {
     /// deck's `getTransformMatrix`: `shadowMatrix(orientation, scale, toSun, height)`, column-major,
     /// metres east, north and up at [`Self::position`].
     pub transform: [f64; 16],
-    /// `[4, 8, 16, round(alpha · 255)]`.
+    /// `[4, 8, 16, round(alpha · 255)]`, the alpha read back from the `Float32Array` today's app
+    /// keeps it in ([`color_alpha`]).
     pub color: [u8; 4],
 }
 
@@ -122,7 +123,14 @@ pub fn cast(index: usize, aircraft: &MeshInstance, sun: [f64; 3], fade: f64) -> 
     // aircraft are raised onto their wheels, so the ground is the map
     let transform = shadow_matrix(aircraft.orientation, aircraft.scale, to_sun, height, 0.0);
     let [r, g, b] = SHADOW_COLOR;
-    Some(Cast { instance: index, to_sun, alpha, position: [lon, lat, 0.0], transform, color: [r, g, b, clamp_u8(js_round(alpha * 255.0))] })
+    Some(Cast { instance: index, to_sun, alpha, position: [lon, lat, 0.0], transform, color: [r, g, b, color_alpha(alpha)] })
+}
+
+/// The colour's alpha for a shadow of opacity `alpha`: `Math.round(alpha[i] · 255)`, where today's
+/// app keeps the opacities in a `Float32Array` (G:2818), so the product rounds from the nearest
+/// `f32`.
+pub fn color_alpha(alpha: f64) -> u8 {
+    clamp_u8(js_round(f64::from(alpha as f32) * 255.0))
 }
 
 /// The shadows `group` casts, in its aircraft's order (the layer's `data: casting`).
@@ -362,7 +370,7 @@ mod tests {
                 assert_eq!(c.position, [a.position[0], a.position[1], 0.0]);
                 assert_eq!(c.transform, shadow_matrix(orientation_of(&a.pose), a.scale, to_sun, a.position[2], 0.0));
                 assert_eq!(a.orientation, orientation_of(&a.pose));
-                assert_eq!(c.color, [4, 8, 16, js_round(alpha * 255.0) as u8]);
+                assert_eq!(c.color, [4, 8, 16, js_round(f64::from(alpha as f32) * 255.0) as u8]);
                 // the sun due south, 54° up: the shadow falls north by height / tan(altitude)
                 let altitude = to_sun[2].asin().to_degrees();
                 assert!((altitude - 53.8).abs() < 0.1 && to_sun[0].abs() < 0.002 && to_sun[1] < 0.0, "{to_sun:?} at {altitude}°");
@@ -381,6 +389,16 @@ mod tests {
         // faded in by half at zoom 10: half as dark
         let c = cast(0, a320, sun, 0.5).unwrap();
         assert_eq!((c.alpha, c.color[3]), (0.25, 64));
+    }
+
+    /// The colour's alpha rounds from the opacity as a `Float32Array` holds it: just under 13.5 / 255
+    /// in a double, the nearest `f32` is just over, and today's app draws 14, not 13.
+    #[test]
+    fn the_colour_alpha_rounds_from_an_f32() {
+        let a = 0.052_941_176_469_588_236;
+        assert!(a * 255.0 < 13.5 && f64::from(a as f32) * 255.0 > 13.5);
+        assert_eq!(color_alpha(a), 14);
+        assert_eq!((color_alpha(0.5), color_alpha(0.25), color_alpha(SHADOW_MIN_ALPHA)), (128, 64, 13));
     }
 
     /// None at night, none faded out (zoom 9), none fainter than 0.05: high up, or under a sun

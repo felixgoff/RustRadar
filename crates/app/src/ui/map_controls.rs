@@ -33,8 +33,12 @@
 //! eased over 220 ms; no zoom, keys or help buttons, the compass hidden while it is off; the menus
 //! as sheets of their own, [`super::menus::settings`] with its keys entry).
 //!
-//! Deviations: the tooltips show for a disabled button too (egui's tooltip on hover); a press that
-//! closes the menu is the egui pass's press, so a press and its release in one frame both act.
+//! The popover's box is a whole number of pixels tall (Chromium lays it out at fractional heights
+//! and paints its edges on whole pixels): its bottom on the column's, its top edge up to a pixel
+//! above Chromium's, the content where Chromium puts it.
+//!
+//! Deviations: a disabled button shows its tooltip as an enabled one does (U3's icon button); the
+//! phone layout is not drawn yet (above).
 
 use egui::{Align2, Area, Context, Event, Id, Key, Order, Rect, ScrollArea, Ui, Vec2};
 

@@ -28,6 +28,12 @@
 //! - **Focus rings** follow Chromium's `:focus-visible`: shown after the keyboard was used, not
 //!   when a click put the keyboard there (the first item after a click on the trigger).
 //!
+//! **Checked** against Chromium's layout of today's component (opened by a click and with Enter
+//! then Down, and `Saved`; `tests/altitude_chart.rs`): the menu's border, items, highlight and
+//! focus ring on Chromium's pixels, the texts on its ink or within a pixel. In the flight panel
+//! (`tests/altitude_chart_panel.rs`) it opens over the pinned footer, and Escape closes it before
+//! the panel.
+//!
 //! The menu's state is the component's: it starts afresh when the chart is drawn again after a
 //! pass without it (the panel reopened, the Overview tab chosen again); a save still running
 //! then completes and shows its file, unseen, as the old component's promise did.
@@ -40,8 +46,7 @@
 //!   lets the panel scroll to an absolutely placed box; a panel shorter than the window grows
 //!   instead of scrolling.
 //! - Without a backend (it did not start) a save answers
-//!   [`NO_BACKEND`](super::keys_dialog::NO_BACKEND) (today's plain-browser page downloaded the
-//!   file).
+//!   [`NO_BACKEND`] (today's plain-browser page downloaded the file).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};

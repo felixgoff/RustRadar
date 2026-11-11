@@ -44,9 +44,14 @@
 //! panel reopened, the Overview tab chosen again), as the component mounts again today.
 //!
 //! **Checked** against Chromium's layout of today's component (mounted by Svelte in a 360 px
-//! panel with app.css, 328 px of chart; `tests/altitude_chart.rs`): the header's texts, the grid,
-//! the labels, the area, the line, the dot, the read point's box, the table's rules and columns
-//! and the export menu land on Chromium's pixels, or within one; see the test for the states.
+//! panel with app.css, 328 px of chart; the states of `tests/altitude_chart.rs`: climbing, the
+//! point read by the pointer either side of the middle and by the keys, descending, low, five
+//! hours, ended without a zone, the table, the menu by pointer and by keys, saved, empty): the
+//! grid rows, the area, the line, the dot and its ring, the box of the point read, the table's
+//! rules, the menu's border and the focus rings land on Chromium's pixels; the header's texts,
+//! the tick and end labels and the table's cells on its ink, or within a pixel (texts are placed
+//! on CSS's baselines, [`css_shift`]); a wrapped message's second row sits a pixel lower (egui
+//! puts each row on a whole pixel).
 //!
 //! Deviations:
 //! - A click on the plot does not give it the keyboard (Chromium focuses it, showing the last

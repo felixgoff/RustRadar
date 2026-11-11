@@ -21,6 +21,7 @@ pub mod attribution;
 pub mod filters;
 pub mod flight_panel;
 pub mod fonts;
+pub mod hover_card;
 pub mod icons;
 pub mod keys_dialog;
 pub mod lists;

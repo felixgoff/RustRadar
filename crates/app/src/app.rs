@@ -33,8 +33,8 @@ use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
-use crate::ui::{attribution, keys_dialog, map_controls, map_error, modebar, shell, shortcuts, theme, tooltip};
-use crate::{Options, platform, tile_fetcher};
+use crate::ui::{attribution, hover_card, keys_dialog, map_controls, map_error, modebar, shell, shortcuts, theme, tooltip};
+use crate::{Options, images, platform, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -238,12 +238,18 @@ impl Engine {
         let map = &mut self.map;
         let mut retry = None;
         let draw_shell = self.shell;
+        // the hovered aircraft's card with the shell (U18), read before the pass: reading the
+        // hover loader's cache refreshes its recency
+        let card = if draw_shell { self.state.hover_card(local_ms) } else { None };
         let output = self.egui.run_ui(raw_input, |ui| {
             if draw_shell {
                 ui_pass(ui, &self.state, local_ms, &mut actions);
             }
             // deck's tooltip at the pointer, over the map and under the panels (T8)
             tooltip::ui(ui.ctx(), self.state.pick.tooltip());
+            // the hover card by the pointer over an aircraft, over the map and under the panels
+            // (with the shell only: the headless shots and the map's tests draw the map alone)
+            hover_card::ui(ui.ctx(), card.as_ref());
             // over everything else: the card while an error stops the map (B9)
             retry = map_error::ui(ui.ctx(), map, Some(&adapter));
         });
@@ -451,6 +457,8 @@ impl View {
         engine.shell = true;
         // the map's tiles: the --fixture folder's, else the network through the backend's cache (T1)
         tile_fetcher::connect(&mut engine.map, &engine.state);
+        // remote pictures (photos, logos) through the backend's picture cache (U18)
+        images::connect(&engine.egui, &engine.state);
         // wgpu's errors and a lost device stop the map with the error card, not the app (B9)
         engine.map.catch_errors(&gpu, engine.state.requests.as_ref().map(|r| r.wake()));
         let egui_input = egui_winit::State::new(
@@ -529,6 +537,8 @@ impl View {
             Ok(gpu) => {
                 surface.configure(&gpu.device, &self.config);
                 self.engine.rebuild(&gpu, self.config.format);
+                // the new egui context needs the picture loader again (U18)
+                images::connect(&self.engine.egui, &self.engine.state);
                 self.egui_input = egui_winit::State::new(
                     self.engine.egui.clone(),
                     egui::ViewportId::ROOT,

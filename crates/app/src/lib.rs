@@ -16,6 +16,7 @@ pub mod app;
 pub mod assets;
 pub mod dev;
 pub mod headless;
+pub mod images;
 pub mod input;
 pub mod persist;
 pub mod platform;

@@ -238,3 +238,101 @@ fn body(ui: &mut Ui, state: &AppState, filters: &mut TrainFilters) {
     // 3. the delayed ones only
     ToggleRow::new("rustradar::filters::trains::delayed", DELAYED_ONLY).hint(DELAYED_HINT).show(ui, &mut filters.delayed_only);
 }
+
+#[cfg(test)]
+mod tests {
+    use egui::{Context, Event, PointerButton, RawInput};
+    use rustradar_core::settings::Mode;
+    use rustradar_core::train_list::TrainSort;
+    use rustradar_scene::camera::ViewState;
+
+    use super::*;
+    use crate::dev::demo_trains;
+    use crate::persist::tests::TempDir;
+    use crate::state::Startup;
+    use crate::state::trains::FIXTURE_TRAINS;
+    use crate::ui::shell::{self, Slots};
+
+    const T0: f64 = 1_782_036_000_000.0;
+    const V3: ViewState = ViewState { longitude: 18.07, latitude: 59.33, zoom: 9.0, bearing: 0.0, pitch: 0.0, position: None };
+
+    fn trains() -> Vec<Train> {
+        let mut trains = demo_trains(V3.latitude, V3.longitude, T0 as i64);
+        trains[5].operator = None;
+        trains
+    }
+
+    #[test]
+    fn the_chips_counts_and_colours() {
+        let trains = trains();
+        let kinds = kind_options(&trains);
+        let shown: Vec<(&str, usize)> = kinds.iter().map(|k| (k.label, k.count)).collect();
+        assert_eq!(shown, [("High-speed", 1), ("Intercity", 2), ("Regional", 3), ("Suburban", 0), ("Other", 0)]);
+        assert_eq!(kinds[0].color, Color32::from_rgb(226, 92, 196));
+        // most trains first, the unknown operator last, then those left out that run nothing
+        let operators = operator_options(&trains, &["Arriva".to_owned(), "SJ".to_owned()]);
+        let shown: Vec<(&str, &str, usize)> = operators.iter().map(|o| (o.name.as_str(), o.label.as_str(), o.count)).collect();
+        assert_eq!(shown, [("SJ", "SJ", 2), ("Öresundståg", "Öresundståg", 1), ("Skånetrafiken", "Skånetrafiken", 1), ("Snälltåget", "Snälltåget", 1), ("", "Unknown", 1), ("Arriva", "Arriva", 0)]);
+        // an operator's own colour, or its kind's (other) without one; none for the unknown
+        assert_eq!(operators[0].color, Some(Color32::from_rgb(232, 232, 236)));
+        assert_eq!(operators[5].color, Some(Color32::from_rgb(158, 150, 140)));
+        assert_eq!(operators[4].color, None);
+        // Reset keeps the sort
+        let set = TrainFilters { hidden_kinds: vec![TrainKind::Regional], hidden_operators: vec!["SJ".into()], delayed_only: true, sort: TrainSort::Speed };
+        assert_eq!(reset(&set), TrainFilters { sort: TrainSort::Speed, ..DEFAULT_TRAIN_FILTERS });
+    }
+
+    /// One pass of the shell over `events`: the actions.
+    fn pass(ctx: &Context, state: &AppState, time: f64, events: Vec<Event>) -> Vec<crate::state::Action> {
+        let mut actions = Vec::new();
+        let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 1200.0))), time: Some(time), events, ..Default::default() };
+        let mut output = ctx.run_ui(raw, |ui| {
+            shell::show(ui.ctx(), state, T0, &mut actions, &Slots::APP);
+        });
+        output.textures_delta.clear();
+        actions
+    }
+
+    fn click(ctx: &Context, state: &AppState, at: Pos2, time: f64) -> Vec<crate::state::Action> {
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        let mut actions = pass(ctx, state, time, vec![Event::PointerMoved(at)]);
+        actions.extend(pass(ctx, state, time + 0.05, vec![button(true)]));
+        actions.extend(pass(ctx, state, time + 0.1, vec![button(false)]));
+        actions
+    }
+
+    #[test]
+    fn a_chip_reset_and_close_reach_the_state() {
+        let dir = TempDir::new("train-filters");
+        std::fs::write(dir.0.join(FIXTURE_TRAINS), serde_json::to_vec(&trains()).unwrap()).unwrap();
+        let startup = Startup { fixture: Some(dir.0.clone()), ..Default::default() };
+        let mut s = AppState::new(startup, None, None, None, V3, [1440.0, 1200.0]);
+        s.persisted.settings.mode = Mode::Trains;
+        for t in [T0, T0 + 16.0, T0 + 32.0] {
+            s.poll(t);
+        }
+        assert!(s.apply(Action::Open(Open::Filters, true), T0 + 40.0));
+        let ctx = Context::default();
+        theme::apply(&ctx);
+        for time in [0.0, 1.0, 2.0, 3.0] {
+            pass(&ctx, &s, time, Vec::new());
+        }
+        let card = ctx.memory(|m| m.area_rect(Id::unique(("rustradar::sidebar", "filters")))).expect("the filter panel");
+        // Chromium: the first chip (High-speed) at 16 + 1 in, 94.8 under the card's top
+        let chip = Pos2::new(card.left() + 17.0 + 40.0, card.top() + 94.8 + 13.0);
+        let actions = click(&ctx, &s, chip, 4.0);
+        assert_eq!(actions, [Action::SetTrainFilters]);
+        assert!(s.apply(Action::SetTrainFilters, T0 + 50.0));
+        assert_eq!(s.persisted.train_filters.hidden_kinds, [TrainKind::HighSpeed]);
+        // Reset: left of the close button in the header's row
+        let reset = Pos2::new(card.right() - 1.0 - 8.0 - 32.0 - 8.0 - 19.0, card.top() + 1.0 + 8.0 + 16.0);
+        let actions = click(&ctx, &s, reset, 5.0);
+        assert_eq!(actions, [Action::SetTrainFilters]);
+        assert!(s.apply(Action::SetTrainFilters, T0 + 60.0));
+        assert_eq!(s.persisted.train_filters, DEFAULT_TRAIN_FILTERS);
+        // the close button
+        let close = Pos2::new(card.right() - 1.0 - 8.0 - 16.0, card.top() + 1.0 + 8.0 + 16.0);
+        let actions = click(&ctx, &s, close, 6.0);
+        assert_eq!(actions, [Action::Open(Open::Filters, false)]);
+    }
+}

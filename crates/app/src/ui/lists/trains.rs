@@ -399,7 +399,8 @@ fn no_match(ui: &mut Ui) -> bool {
     message(ui, |ui, width| {
         text::label(ui, text::wrapped(NO_MATCH, &message_style(), width), Sense::hover());
         ui.add_space(MESSAGE_GAP);
-        clicked = Button::text_only(SHOW_ALL).show(ui).clicked();
+        // a button takes the message's colour (`color: inherit`)
+        clicked = Button::text_only(SHOW_ALL).color(theme::TEXT_2).show(ui).clicked();
     });
     clicked
 }
@@ -512,4 +513,263 @@ fn row(ui: &mut Ui, t: &Train, sort: TrainSort, centre: LatLon, selected: bool) 
         }
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Context, Event, PointerButton, RawInput};
+    use rustradar_core::model::TrainKind;
+    use rustradar_core::settings::Mode;
+
+    use super::*;
+    use crate::dev::demo_trains;
+    use crate::persist::tests::TempDir;
+    use crate::state::Startup;
+    use crate::state::trains::FIXTURE_TRAINS;
+    use crate::ui::shell::{self, Slots};
+
+    const T0: f64 = 1_782_036_000_000.0;
+    const V3: ViewState = ViewState { longitude: 18.07, latitude: 59.33, zoom: 9.0, bearing: 0.0, pitch: 0.0, position: None };
+
+    /// The demo trains through V3's centre, `edit` given each.
+    fn trains(edit: impl Fn(usize, &mut Train)) -> Vec<Train> {
+        let mut trains = demo_trains(V3.latitude, V3.longitude, T0 as i64);
+        for (i, t) in trains.iter_mut().enumerate() {
+            edit(i, t);
+        }
+        trains
+    }
+
+    /// A state answering `trains` from a fixture folder, trains the focus, polled until they are
+    /// in.
+    fn state(dir: &TempDir, trains: &[Train]) -> AppState {
+        std::fs::write(dir.0.join(FIXTURE_TRAINS), serde_json::to_vec(trains).unwrap()).unwrap();
+        let startup = Startup { fixture: Some(dir.0.clone()), ..Default::default() };
+        let mut s = AppState::new(startup, None, None, None, V3, [1440.0, 900.0]);
+        s.persisted.settings.mode = Mode::Trains;
+        for t in [T0, T0 + 16.0, T0 + 32.0] {
+            s.poll(t);
+        }
+        assert!(s.trains.loaded());
+        s
+    }
+
+    /// One pass of the shell with the app's slots over `events`: the actions.
+    fn pass(ctx: &Context, state: &AppState, time: f64, events: Vec<Event>) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), time: Some(time), events, ..Default::default() };
+        let mut output = ctx.run_ui(raw, |ui| {
+            shell::show(ui.ctx(), state, T0, &mut actions, &Slots::APP);
+        });
+        output.textures_delta.clear();
+        actions
+    }
+
+    /// A click at `at`: the pointer there, pressed, then released.
+    fn click(ctx: &Context, state: &AppState, at: Pos2, time: f64) -> Vec<Action> {
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        let mut actions = pass(ctx, state, time, vec![Event::PointerMoved(at)]);
+        actions.extend(pass(ctx, state, time + 0.05, vec![button(true)]));
+        actions.extend(pass(ctx, state, time + 0.1, vec![button(false)]));
+        actions
+    }
+
+    fn settled(state: &AppState) -> Context {
+        let ctx = Context::default();
+        theme::apply(&ctx);
+        for time in [0.0, 1.0, 2.0, 3.0] {
+            pass(&ctx, state, time, Vec::new());
+        }
+        ctx
+    }
+
+    fn row_rect(ctx: &Context, id: &str) -> Rect {
+        ctx.read_response(Id::unique(("rustradar::lists::trains::row", id))).expect("the row").rect
+    }
+
+    #[test]
+    fn words_numbers_and_places() {
+        assert_eq!(capital("on time"), "On time");
+        assert_eq!(capital("5 min late"), "5 min late");
+        assert_eq!(capital(""), "");
+        assert_eq!(capital("öresund"), "Öresund");
+        let centre = list_centre(&V3);
+        assert_eq!((centre.lat, centre.lon), (59.35, 18.05));
+        // Chromium's placeholders: 70 + (i·23 mod 50), 110 + (i·31 mod 80)
+        let widths: Vec<(f32, f32)> = (0..SKELETON_ROWS).map(skeleton_widths).collect();
+        assert_eq!(widths, [(70.0, 110.0), (93.0, 141.0), (116.0, 172.0), (89.0, 123.0), (112.0, 154.0), (85.0, 185.0)]);
+        assert_eq!(more_text(150), None);
+        assert_eq!(more_text(160).as_deref(), Some("10 more; search or filter to narrow the list."));
+        assert_eq!(more_text(1400).as_deref(), Some("1,250 more; search or filter to narrow the list."));
+        let mut t = demo_trains(59.33, 18.07, T0 as i64).remove(1);
+        assert_eq!(measure_text(&t, TrainSort::Delay, centre).as_deref(), Some("79 km/h"));
+        assert_eq!(measure_text(&t, TrainSort::Distance, centre).as_deref(), Some("2 km"));
+        t.speed_kmh = None;
+        assert_eq!(measure_text(&t, TrainSort::Speed, centre), None);
+        let mut tone = |m: Option<i32>| {
+            t.delay_minutes = m;
+            delay_badge(&t)
+        };
+        assert_eq!(tone(Some(0)), Some(("On time".to_owned(), Tone::Good)));
+        assert_eq!(tone(Some(7)), Some(("7 min late".to_owned(), Tone::Warn)));
+        assert_eq!(tone(Some(34)), Some(("34 min late".to_owned(), Tone::Bad)));
+        assert_eq!(tone(Some(-2)), Some(("2 min early".to_owned(), Tone::Good)));
+        assert_eq!(tone(None), None);
+        // Chromium's boxes: the header 27.59, placeholder rows 40, rows 53.3 with a badge and
+        // 52.99 without
+        // (Chromium's layout units are 1/64 px: 19.6 lays out as 19.59)
+        assert!((header_height() - 27.59).abs() < 0.02, "{}", header_height());
+        assert_eq!(skeleton_row_height(), 40.0);
+        assert!((row_height(Some(18.5)) - 53.3).abs() < 0.02);
+        assert!((row_height(None) - 52.99).abs() < 0.02);
+    }
+
+    #[test]
+    fn listed_filtered_running_searched_and_sorted() {
+        let dir = TempDir::new("train-list-listed");
+        let mut s = state(
+            &dir,
+            &trains(|i, t| match i {
+                0 => t.delay_minutes = Some(12),
+                1 => t.delay_minutes = Some(3),
+                2 => t.kind = TrainKind::Suburban,
+                // stood at its last stop a minute ago: left off 30 s after
+                3 => t.ended_unix = Some((T0 / 1000.0) as i64 - 60),
+                _ => {}
+            }),
+        );
+        let names = |s: &AppState, q: &str| listed(s, q, T0).iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+        // by delay, latest first; ties by name (Ö with the O's, as Chromium sorts them)
+        assert_eq!(names(&s, ""), ["Demo Skånetrafiken 100", "Demo SJ 101", "Demo Inlandsbanan 105", "Demo Öresundståg 102", "Demo Snälltåget 104"]);
+        assert_eq!(names(&s, "  sj "), ["Demo SJ 101"]);
+        assert_eq!(names(&s, "oresund"), ["Demo Öresundståg 102"], "folded");
+        s.persisted.train_filters.hidden_kinds = vec![TrainKind::Suburban];
+        s.persisted.train_filters.sort = TrainSort::Name;
+        assert_eq!(names(&s, ""), ["Demo Inlandsbanan 105", "Demo SJ 101", "Demo Skånetrafiken 100", "Demo Snälltåget 104"]);
+        assert_eq!(body(&s, 4), Body::Rows);
+        assert_eq!(body(&s, 0), Body::NoMatch);
+        // the delayed ones only: 5 min or more
+        s.persisted.train_filters.delayed_only = true;
+        assert_eq!(names(&s, ""), ["Demo Skånetrafiken 100"]);
+        // Show all keeps the sort
+        let all = shown_all(&s.persisted.train_filters);
+        assert_eq!(all, TrainFilters { sort: TrainSort::Name, ..DEFAULT_TRAIN_FILTERS });
+    }
+
+    #[test]
+    fn loading_failed_and_empty() {
+        // nothing to ask: the page without Tauri says the feeds failed
+        let mut none = AppState::new(Startup::default(), None, None, None, V3, [1440.0, 900.0]);
+        none.persisted.settings.mode = Mode::Trains;
+        none.poll(T0);
+        assert_eq!(body(&none, 0), Body::NoneInView { failed: true });
+        // a fixture folder without trains answers "no key": the trains are not offered
+        let dir = TempDir::new("train-list-empty");
+        let s = state(&dir, &[]);
+        assert_eq!(body(&s, 0), Body::NoneInView { failed: false });
+    }
+
+    #[test]
+    fn a_row_picks_its_train_and_the_pointer_highlights_it() {
+        let dir = TempDir::new("train-list-pick");
+        let mut s = state(&dir, &trains(|_, _| {}));
+        let ctx = settled(&s);
+        let id = "trafikverket:demo:3";
+        let row = row_rect(&ctx, id);
+        assert!((row.width() - 302.0).abs() < 0.5, "the list card's content width: {row:?}");
+        let i = s.trains.trains().iter().position(|t| t.id == id).unwrap();
+        let actions = click(&ctx, &s, row.center(), 4.0);
+        assert!(actions.contains(&Action::HoverTrain(Some(i))), "{actions:?}");
+        assert!(actions.contains(&Action::PickTrain(i)), "{actions:?}");
+        assert!(s.apply(Action::HoverTrain(Some(i)), T0 + 50.0));
+        assert_eq!(s.hovered_train.as_deref(), Some(id));
+        assert!(!s.apply(Action::HoverTrain(Some(i)), T0 + 50.0), "the same train again changes nothing");
+        assert!(s.apply(Action::PickTrain(i), T0 + 60.0));
+        assert_eq!(s.trains.selected_id(), Some(id));
+        // the camera flies to it, at zoom 10 or closer
+        s.controller.update(T0 + 60.0 + 10_000.0);
+        assert!((s.controller.view().zoom - 10.0).abs() < 1e-9, "{:?}", s.controller.view());
+        // the pointer off the rows lets go of the highlight
+        let actions = pass(&ctx, &s, 5.0, vec![Event::PointerMoved(Pos2::new(700.0, 500.0))]);
+        assert!(actions.contains(&Action::HoverTrain(None)), "{actions:?}");
+        assert!(s.apply(Action::HoverTrain(None), T0 + 70.0));
+        assert_eq!(s.hovered_train, None);
+    }
+
+    #[test]
+    fn the_sort_and_show_all_hand_over_the_filters() {
+        let dir = TempDir::new("train-list-sort");
+        let mut s = state(&dir, &trains(|_, _| {}));
+        let ctx = settled(&s);
+        let sort = ctx.read_response(Id::unique("rustradar::lists::trains::sort-tip")).expect("the sort").rect;
+        // the third option, Name: the box 8 in, its options 68.5 wide 2 apart inside 3 px
+        let name = Pos2::new(sort.left() + PAD + 3.0 + 2.0 * (68.5 + 2.0) + 34.25, sort.top() + 17.0);
+        let actions = click(&ctx, &s, name, 4.0);
+        assert!(actions.contains(&Action::SetTrainFilters), "{actions:?}");
+        let handed = s.train_filters_handed.take().expect("the filters handed over");
+        assert_eq!(handed.sort, TrainSort::Name);
+        s.train_filters_handed.set(Some(handed));
+        assert!(s.apply(Action::SetTrainFilters, T0 + 50.0));
+        assert_eq!(s.persisted.train_filters.sort, TrainSort::Name);
+
+        // a search no train matches: Show all empties it and the filters, the sort kept
+        s.search.hand_over("nothing like it".into());
+        assert!(s.apply(Action::Search(Ask::Typed), T0 + 60.0));
+        s.persisted.train_filters.delayed_only = true;
+        let ctx = settled(&s);
+        assert_eq!(body(&s, listed(&s, pass_query(&s), T0).len()), Body::NoMatch);
+        let card = ctx.memory(|m| m.area_rect(Id::unique(("rustradar::sidebar", "list")))).expect("the list card");
+        let top = card.top() + theme::BORDER + theme::SPACE_3 + header_height() + 42.19 + MESSAGE_PAD + message_style().line_px() + MESSAGE_GAP;
+        let actions = click(&ctx, &s, Pos2::new(card.left() + theme::BORDER + theme::SPACE_2 + MESSAGE_PAD + 30.0, top + 16.0), 4.0);
+        assert_eq!(actions, [Action::Search(Ask::EmptyQuery), Action::SetTrainFilters]);
+        assert_eq!(s.train_filters_handed.take(), Some(TrainFilters { sort: TrainSort::Name, ..DEFAULT_TRAIN_FILTERS }));
+    }
+
+    /// The train hovered in the list is the one the map highlights, while trains are the focus.
+    #[test]
+    fn the_hovered_train_is_highlighted_on_the_map() {
+        let dir = TempDir::new("train-list-highlight");
+        let mut s = state(&dir, &trains(|_, _| {}));
+        let mut builder = crate::scene_builder::SceneBuilder::default();
+        let highlighted = |s: &mut AppState, builder: &mut crate::scene_builder::SceneBuilder| {
+            let clocks = s.clocks(T0 + 100.0);
+            let scene = builder.build(s, clocks, 1.0);
+            let t = &scene.trains.scene;
+            t.icons.iter().zip(&t.ids).filter(|(icon, _)| icon.highlighted).map(|(_, id)| id.clone()).collect::<Vec<_>>()
+        };
+        assert!(highlighted(&mut s, &mut builder).is_empty());
+        let i = s.trains.trains().iter().position(|t| t.id == "trafikverket:demo:4").unwrap();
+        assert!(s.apply(Action::HoverTrain(Some(i)), T0 + 50.0));
+        assert_eq!(highlighted(&mut s, &mut builder), ["trafikverket:demo:4"]);
+        // the hover belongs to the trains' list: another focus draws none
+        s.persisted.settings.mode = Mode::Ships;
+        assert!(highlighted(&mut s, &mut builder).is_empty());
+    }
+
+    /// At most 150 rows; the rest are counted in a note.
+    #[test]
+    fn at_most_150_rows() {
+        let dir = TempDir::new("train-list-many");
+        let base = trains(|_, _| {});
+        let many: Vec<Train> = (0..160)
+            .map(|k| {
+                let mut t = base[k % base.len()].clone();
+                t.id = format!("{}:{k}", t.id);
+                t.name = format!("Train {}", 1000 + k);
+                t
+            })
+            .collect();
+        let s = state(&dir, &many);
+        assert_eq!(listed(&s, "", T0).len(), 160);
+        let ctx = settled(&s);
+        let drawn = |k: usize| ctx.read_response(Id::unique(("rustradar::lists::trains::row", many[k].id.as_str()))).is_some();
+        // by delay, then by name: Train 1000 to 1149 drawn, 1150 on not
+        assert!(drawn(0) && drawn(149));
+        assert!(!drawn(150) && !drawn(159));
+    }
+
+    /// The trains' query as the shell hands it to the list.
+    fn pass_query(s: &AppState) -> &str {
+        s.search.list_query(Mode::Trains)
+    }
 }

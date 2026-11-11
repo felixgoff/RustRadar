@@ -990,3 +990,194 @@ fn footer(ui: &mut Ui, rect: Rect, view: &View<'_>, actions: &mut Vec<Action>) {
         x += size.x + panel::FOOTER_GAP;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::{self, Sender};
+
+    use egui::{Event, PointerButton, RawInput};
+    use rustradar_core::settings::Mode;
+    use rustradar_scene::camera::ViewState;
+
+    use super::*;
+    use crate::dev::demo_trains;
+    use crate::persist::tests::TempDir;
+    use crate::state::Startup;
+    use crate::state::trains::FIXTURE_TRAINS;
+    use crate::ui::shell::{self, Panel, Slots};
+
+    const T0: f64 = 1_782_036_000_000.0;
+    const V3: ViewState = ViewState { longitude: 18.07, latitude: 59.33, zoom: 9.0, bearing: 0.0, pitch: 0.0, position: None };
+
+    /// Feeds that log what is asked and answer the stops when the test sends.
+    #[derive(Clone, Default)]
+    struct Fake {
+        asked: Arc<Mutex<Vec<String>>>,
+        stops: Arc<Mutex<Vec<Sender<Result<Vec<TrainStop>, String>>>>>,
+    }
+
+    impl Fake {
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+
+        /// Answers the latest stops ask.
+        fn answer(&self, answer: Result<Vec<TrainStop>, String>) {
+            self.stops.lock().unwrap().pop().expect("an ask out").send(answer).unwrap();
+        }
+    }
+
+    impl PanelFeeds for Fake {
+        fn stops(&mut self, id: &str) -> Answer<Result<Vec<TrainStop>, String>> {
+            self.asked.lock().unwrap().push(format!("stops {id}"));
+            let (tx, rx) = mpsc::channel();
+            self.stops.lock().unwrap().push(tx);
+            Answer::Channel(rx)
+        }
+
+        fn media(&mut self, source: TrainSource, product: Option<String>, operator: Option<String>) -> Answer<TrainMedia> {
+            self.asked.lock().unwrap().push(format!("media {} {product:?} {operator:?}", source.as_str()));
+            Answer::ready(TrainMedia { photo: None, logo: Some("https://example.invalid/logo.png".into()) })
+        }
+    }
+
+    fn stop(name: &str) -> TrainStop {
+        TrainStop { name: name.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn words_and_styles() {
+        assert_eq!(js_length("Demo SJ 101"), 11);
+        assert_eq!(js_length("Arlanda Express 7041"), 20);
+        assert_eq!(js_length("Öresundståg 1234"), 16, "one unit each");
+        let mut t = demo_trains(59.33, 18.07, T0 as i64).remove(1);
+        assert_eq!(speed_text(&t), "79 km/h");
+        assert!(moving(&t, T0 as i64));
+        t.speed_kmh = None;
+        assert_eq!(speed_text(&t), "—");
+        assert!(moving(&t, T0 as i64), "a direction is enough");
+        t.heading = None;
+        t.frames.clear();
+        assert!(!moving(&t, T0 as i64), "bare");
+        assert!(timetabled(&t));
+        assert_eq!(delay_badge(&t), Some(("On time".to_owned(), Tone::Good)));
+        assert_eq!((title_style(false).size, title_style(false).line_px()), (22.0, 22.0 * 1.1));
+        assert_eq!((title_style(true).size, title_style(true).line_px()), (17.0, 17.0 * 1.25));
+        assert_eq!(destination_style(true).line_px(), 21.0);
+    }
+
+    #[test]
+    fn the_stops_every_minute_and_the_pictures_once() {
+        let state = AppState::new(Startup::default(), None, None, None, V3, [1440.0, 900.0]);
+        let fake = Fake::default();
+        let mut loads = Loads { feeds: Some(Box::new(fake.clone())), resolved: true, ..Default::default() };
+        let mut trains = demo_trains(59.33, 18.07, T0 as i64);
+        let sj = trains.remove(1);
+        // opened: the stops and the pictures asked at once
+        assert_eq!(loads.update(&state, &sj, T0, 1), Some(T0 + STOPS_REFRESH_MS));
+        assert_eq!(fake.asked(), ["stops trafikverket:demo:1", "media trafikverket Some(\"Demo SJ\") Some(\"SJ\")"]);
+        assert_eq!((loads.stops(), loads.stops_failed()), (None, false), "loading");
+        // the logo came: kept; a failure with no stops known says so
+        loads.update(&state, &sj, T0 + 16.0, 2);
+        assert_eq!(loads.media().and_then(|m| m.logo.as_deref()), Some("https://example.invalid/logo.png"));
+        fake.answer(Err("unreachable".into()));
+        loads.update(&state, &sj, T0 + 32.0, 3);
+        assert_eq!((loads.stops(), loads.stops_failed()), (None, true));
+        // the same train again (a refresh of the map) asks nothing until the minute is up
+        loads.update(&state, &sj, T0 + 59_000.0, 4);
+        assert_eq!(fake.asked().len(), 2);
+        loads.update(&state, &sj, T0 + 60_000.0, 5);
+        assert_eq!(fake.asked().len(), 3);
+        fake.answer(Ok(vec![stop("Stockholm Central")]));
+        loads.update(&state, &sj, T0 + 60_016.0, 6);
+        assert_eq!((loads.stops().map(<[TrainStop]>::len), loads.stops_failed()), (Some(1), false));
+        // a later failure keeps the stops on show
+        loads.update(&state, &sj, T0 + 120_000.0, 7);
+        fake.answer(Err("unreachable".into()));
+        loads.update(&state, &sj, T0 + 120_016.0, 8);
+        assert_eq!((loads.stops().map(<[TrainStop]>::len), loads.stops_failed()), (Some(1), false));
+        // another train: its own stops, at once; another product and operator: new pictures
+        let other = trains.remove(0);
+        loads.update(&state, &other, T0 + 130_000.0, 9);
+        assert_eq!(loads.stops(), None);
+        assert_eq!(fake.asked()[4..], ["stops trafikverket:demo:0".to_owned(), "media trafikverket Some(\"Demo Skånetrafiken\") Some(\"Skånetrafiken\")".to_owned()]);
+        // closed and opened again (a pass without the panel): asked anew
+        loads.update(&state, &other, T0 + 140_000.0, 11);
+        assert_eq!(fake.asked().len(), 8);
+        // no product and no operator: no pictures asked
+        let mut plain = other.clone();
+        plain.id = "trafikverket:2026-06-21:1".into();
+        plain.name = "Train 1".into();
+        plain.operator = None;
+        loads.update(&state, &plain, T0 + 150_000.0, 12);
+        assert_eq!(fake.asked().last().map(String::as_str), Some("stops trafikverket:2026-06-21:1"));
+        assert_eq!(loads.media(), None);
+    }
+
+    #[test]
+    fn the_fixture_folder_s_stops() {
+        let dir = TempDir::new("train-stops");
+        let mut feeds = FixtureFeeds { dir: dir.0.clone() };
+        let answer = |a: Answer<Result<Vec<TrainStop>, String>>| a.poll().expect("answered at once");
+        assert!(answer(feeds.stops("trafikverket:demo:1")).is_err(), "no file: a failure");
+        let stops = HashMap::from([("trafikverket:demo:1".to_owned(), vec![stop("Uppsala C")])]);
+        std::fs::write(dir.0.join(FIXTURE_STOPS), serde_json::to_vec(&stops).unwrap()).unwrap();
+        assert_eq!(answer(feeds.stops("trafikverket:demo:1")).unwrap(), [stop("Uppsala C")]);
+        assert_eq!(answer(feeds.stops("trafikverket:demo:2")).unwrap(), [], "a train it does not name has no timetable");
+        assert_eq!(feeds.media(TrainSource::Trafikverket, Some("SJ".into()), None).poll(), Some(TrainMedia::default()));
+        // the demo: no timetable at once
+        assert_eq!(answer(DemoFeeds.stops("trafikverket:demo:1")).unwrap(), []);
+    }
+
+    /// One pass of the shell over `events`: the actions.
+    fn pass(ctx: &Context, state: &AppState, time: f64, events: Vec<Event>) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), time: Some(time), events, ..Default::default() };
+        let mut output = ctx.run_ui(raw, |ui| {
+            shell::show(ui.ctx(), state, T0, &mut actions, &Slots::APP);
+        });
+        output.textures_delta.clear();
+        actions
+    }
+
+    fn click(ctx: &Context, state: &AppState, at: Pos2, time: f64) -> Vec<Action> {
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        let mut actions = pass(ctx, state, time, vec![Event::PointerMoved(at)]);
+        actions.extend(pass(ctx, state, time + 0.05, vec![button(true)]));
+        actions.extend(pass(ctx, state, time + 0.1, vec![button(false)]));
+        actions
+    }
+
+    #[test]
+    fn close_and_follow() {
+        let dir = TempDir::new("train-panel");
+        std::fs::write(dir.0.join(FIXTURE_TRAINS), serde_json::to_vec(&demo_trains(59.33, 18.07, T0 as i64)).unwrap()).unwrap();
+        let startup = Startup { fixture: Some(dir.0.clone()), ..Default::default() };
+        let mut s = AppState::new(startup, None, None, None, V3, [1440.0, 900.0]);
+        s.persisted.settings.mode = Mode::Trains;
+        for t in [T0, T0 + 16.0, T0 + 32.0] {
+            s.poll(t);
+        }
+        let i = s.trains.trains().iter().position(|t| t.id == "trafikverket:demo:1").unwrap();
+        assert!(s.apply(Action::PickTrain(i), T0 + 40.0));
+        let ctx = Context::default();
+        theme::apply(&ctx);
+        for time in [0.0, 1.0, 2.0, 3.0] {
+            pass(&ctx, &s, time, Vec::new());
+        }
+        let panel = ctx.memory(|m| m.area_rect(Id::unique(("rustradar::shell::panel", Panel::Train)))).expect("the panel");
+        // Chromium: 362 wide, the strip 67.98 high, the footer 57 at the bottom
+        assert!((panel.width() - 362.0).abs() < 0.5, "{panel:?}");
+        // the close button: centred in the strip's last 40 px
+        let close = Pos2::new(panel.right() - 1.0 - 20.0, panel.top() + 1.0 + 33.5);
+        assert_eq!(click(&ctx, &s, close, 4.0), [Action::CloseTrain]);
+        // Follow: the footer's first button, 16 in from the right past the source's button
+        let follow = Pos2::new(panel.right() - 1.0 - 16.0 - 119.67 - 8.0 - 40.0, panel.bottom() - 1.0 - 28.0);
+        assert_eq!(click(&ctx, &s, follow, 5.0), [Action::ToggleFollow]);
+        assert!(s.apply(Action::ToggleFollow, T0 + 50.0));
+        assert!(s.trains.following());
+        assert!(s.apply(Action::CloseTrain, T0 + 60.0));
+        assert_eq!(s.trains.selected_id(), None);
+        assert!(!s.apply(Action::CloseTrain, T0 + 70.0), "nothing left to close");
+    }
+}

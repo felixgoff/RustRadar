@@ -210,6 +210,10 @@ fn the_pointer_over_a_train_shows_its_tooltip_a_drag_hides_it_and_a_click_select
     let outside = (0..shot.height).flat_map(|py| (0..shot.width).map(move |px| (px, py))).filter(|&(px, py)| !(px >= x && px < x + w && py >= y && py < y + h)).filter(|&(px, py)| shot.pixel(px, py) != before.pixel(px, py)).count();
     assert_eq!(outside, 0, "the map is as it was");
 
+    // it stays while the pointer and the camera rest (the trains move on under it)
+    window.frame(gpu, NOW_MS + 150.0);
+    assert_eq!(window.engine.state.pick.tooltip(), Some(&shown), "kept while nothing moves");
+
     // a drag moves the camera: the tooltip goes, and stays gone once the drag ends where it is
     let view = window.engine.state.controller.view();
     window.button(ElementState::Pressed, NOW_MS + 200.0);

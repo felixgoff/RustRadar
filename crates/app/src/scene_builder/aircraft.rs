@@ -21,8 +21,8 @@
 //!   [`state::flight`](crate::state::flight), item A8): the row takes the feed's place in the
 //!   flights drawn.
 //!
-//! Not there yet, so handed in as none: the flight under the pointer (`hoveredId`: A9's
-//! `state::pick`), which adds it to [`Aircraft::inputs`].
+//! - the flight under the pointer (`hoveredId`: [`state::pick`](crate::state::pick), item A9),
+//!   drawn highlighted.
 //!
 //! The result is [`Aircraft::latest`], handed to the aircraft layers as `SceneInput`'s
 //! `aircraft.scene` (`rustradar_map::layers::aircraft::Input`, item A4).
@@ -58,7 +58,7 @@ impl Aircraft {
             labelling: settings.aircraft_labels,
             selected: state.flight.selected().map(|f| f.id),
             follow: state.flight.following(),
-            hovered: None,
+            hovered: state.pick.hovered_id(),
         }
     }
 

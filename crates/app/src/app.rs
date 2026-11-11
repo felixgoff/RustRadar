@@ -123,7 +123,19 @@ impl Engine {
     pub fn window_event(&mut self, event: &WindowEvent, scale_factor: f64, local_ms: f64) -> bool {
         let Some(event) = input::map_event(event, scale_factor) else { return false };
         let egui_wants_pointer = self.egui.egui_wants_pointer_input();
-        self.input.handle(event, egui_wants_pointer, &mut self.state.controller, local_ms)
+        let held = self.input.dragging();
+        let draw = self.input.handle(event, egui_wants_pointer, &mut self.state.controller, local_ms);
+        // a press the map took: what it is on, for the click that may follow (A9, `_onPointerDown`)
+        if !held && self.input.dragging() {
+            let at = match event {
+                input::MapEvent::Touch { at, .. } => Some(at),
+                _ => self.input.pointer(),
+            };
+            if let Some(at) = at {
+                self.state.pick_press(self.map.scene(), at);
+            }
+        }
+        draw
     }
 
     /// One frame onto `surface` (`surface_size` device pixels, `scale_factor` of them per CSS
@@ -149,6 +161,12 @@ impl Engine {
         self.input.update(&mut self.state.controller, local_ms);
         let (_, camera_wants) = self.state.advance_camera(local_ms);
         wants.merge(camera_wants);
+        // hover and clicks against the scene the map draws, before the scene refresh (A9): a new
+        // highlight or selection refreshes it now
+        let pointer = self.input.pointer().filter(|_| !self.egui.is_pointer_over_egui());
+        let clicks = self.input.take_clicks();
+        let picked = self.state.pick_frame(self.map.scene(), pointer, self.input.dragging(), &clicks, local_ms);
+        wants.merge(picked);
 
         // 4 scene: on its interval, or now when something changed
         let view = self.state.controller.view();
@@ -172,11 +190,11 @@ impl Engine {
             self.state.apply(action, local_ms);
         }
         // what may take the keys as of this pass (B8; no dialog closes the shortcuts yet), and
-        // deck's cursor over the map (nothing is hovered until A9)
+        // deck's cursor over the map (a pointing hand over anything pickable: A9)
         let typing = self.egui.text_edit_focused();
         self.input.set_key_gate(KeyGate { typing, ui_focused: self.egui.egui_wants_keyboard_input(), shortcuts_off: false });
         let mut platform_output = output.platform_output;
-        self.input.set_cursor(&self.egui, &mut platform_output, &self.state.controller, false);
+        self.input.set_cursor(&self.egui, &mut platform_output, &self.state.controller, self.state.pick.hovering());
 
         // 6 render
         let repaint_delay = output.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);

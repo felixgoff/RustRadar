@@ -1308,6 +1308,15 @@ mod tests {
         scene.picks(viewport).pick(viewport, pointer, ratio).map(|hit| *hit.key)
     }
 
+    /// The pointer, in whole CSS pixels as hammer.js reports it, whose pixel as luma.gl reads it
+    /// is nearest `target`: at pixel ratio 1 the pointer's pixel, whose centre is half a pixel
+    /// right of and below the pointer; at 2 the device pixel 0.75 px right of it and 0.25 px below
+    /// (`cssToDevicePixels`). So a distance from an aircraft is measured from where deck looks.
+    fn pointer_for([x, y]: [f64; 2], ratio: f64) -> [f64; 2] {
+        let (sx, sy) = if ratio == 1.0 { (0.5, 0.5) } else { (0.75, 0.25) };
+        [(x - sx).round(), (y - sy).round()]
+    }
+
     /// Eight ways out from a point.
     fn compass() -> [[f64; 2]; 8] {
         let d = std::f64::consts::FRAC_1_SQRT_2;
@@ -1331,13 +1340,11 @@ mod tests {
         for ratio in [1.0, 2.0] {
             assert_eq!(picked(&scene, &viewport, [x, y], ratio), Some(1), "on it");
             for (k, [dx, dy]) in compass().into_iter().enumerate() {
-                let at = |d: f64| [x + dx * (r + d), y + dy * (r + d)];
+                let at = |d: f64| pointer_for([x + dx * (r + d), y + dy * (r + d)], ratio);
                 assert_eq!(picked(&scene, &viewport, at(8.0), ratio), None, "8 px out along {dx},{dy} at {ratio}");
-                // at pixel ratio 2 luma.gl reads the pointer as the device pixel 0.75 px right of
-                // it and 0.25 px below, and deck's 12-pixel circle has gaps between its lattice
-                // points on the diagonals: 5 px out down and to the right is 5.7 px from where
-                // deck looks, and its nearest lattice point falls 0.1 device pixel short of the
-                // disc, as it would in today's app
+                // whole pixels land within 0.7 px of a point on a diagonal, and at pixel ratio 2
+                // deck's circle of 12 device pixels has gaps between its lattice points there: a
+                // pointer 5.5 px out finds none inside the disc, as in today's app
                 if ratio == 1.0 || k % 2 == 0 {
                     assert_eq!(picked(&scene, &viewport, at(5.0), ratio), Some(1), "5 px out along {dx},{dy} at {ratio}");
                 }
@@ -1373,6 +1380,7 @@ mod tests {
                 ([cx, y1 + 5.0], [cx, y1 + 8.0]),
                 ([cx, y0 - 5.0], [cx, y0 - 8.0]),
             ] {
+                let (at5, at8) = (pointer_for(at5, ratio), pointer_for(at8, ratio));
                 assert_eq!(picked(&scene, &viewport, at5, ratio), Some(1), "{at5:?} at {ratio}");
                 assert_eq!(picked(&scene, &viewport, at8, ratio), None, "{at8:?} at {ratio}");
             }

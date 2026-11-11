@@ -46,11 +46,13 @@ pub mod taxiways;
 pub mod trains;
 pub mod weather;
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustradar_backend::{Backend, BackendEvent};
+use rustradar_core::filters::Filters;
 use rustradar_core::geo::Basemap;
 use rustradar_core::motion::aircraft::Motion;
 use rustradar_core::settings::{Mode, Persisted};
@@ -200,6 +202,13 @@ pub enum Action {
     RetryFeed,
     /// The search box's typing, picks and clearing ([`AppState::search_ask`]).
     Search(search::Ask),
+    /// A list's pick: `select(id, {fly: true})` (the most tracked list, U9).
+    PickFlight(u32),
+    /// The most tracked list's "Try again" (`refreshTop`).
+    RetryTop,
+    /// The aircraft filter panel's change: the filters it handed over in
+    /// [`AppState::filters_handed`] replace `persisted.filters` (U9).
+    SetFilters,
 }
 
 /// The app's state: the camera, the clocks' sync, settings, and one part per feed.
@@ -229,6 +238,9 @@ pub struct AppState {
     pub weather: weather::Weather,
     pub radar: radar::Radar,
     pub search: search::Search,
+    /// The aircraft filter panel's new filters, for the [`Action::SetFilters`] it pushes with
+    /// them (the action is `Copy`).
+    pub filters_handed: Cell<Option<Filters>>,
 }
 
 impl AppState {
@@ -272,6 +284,7 @@ impl AppState {
             weather: Default::default(),
             radar: Default::default(),
             search: Default::default(),
+            filters_handed: Cell::new(None),
         }
     }
 
@@ -390,6 +403,21 @@ impl AppState {
                 true
             }
             Action::Search(ask) => self.search_ask(ask, local_ms),
+            Action::PickFlight(id) => {
+                self.select_flight(Some(id), flight::SelectOptions { fly: true, ..Default::default() }, local_ms);
+                true
+            }
+            Action::RetryTop => {
+                self.aircraft.retry_top();
+                true
+            }
+            Action::SetFilters => match self.filters_handed.take() {
+                Some(filters) if filters != self.persisted.filters => {
+                    self.persisted.filters = filters;
+                    true
+                }
+                _ => false,
+            },
         }
     }
 }

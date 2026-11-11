@@ -103,10 +103,10 @@ impl Slots {
     /// The app's components: each item puts its function in its slot here.
     pub const APP: Slots = Slots {
         search: Some(super::search::show),
-        aircraft_filters: None,
+        aircraft_filters: Some(super::filters::aircraft::show),
         train_filters: None,
         ship_filters: None,
-        aircraft_list: None,
+        aircraft_list: Some(super::lists::flights::show),
         train_list: None,
         ship_list: None,
         airport_panel: None,

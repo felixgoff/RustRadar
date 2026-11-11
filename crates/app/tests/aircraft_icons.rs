@@ -413,24 +413,42 @@ fn a_selected_icon_is_selection_blue() {
 
 /// The app's whole V2 scene with the snapshot over the committed tiles, to be looked at beside
 /// today's picture: the silhouettes' white middles (pure white: the place names are
-/// `(241,238,231)`) are all at icons.
+/// `(241,238,231)`) are all at aircraft. Most are icons; the aircraft with no published model
+/// (balloons, ground vehicles: item A5's built-in meshes, white too) are drawn as meshes beside
+/// them.
 #[test]
 fn the_app_draws_the_icons_over_the_map_at_v2() {
     let Some(gpu) = gpu() else { return };
     let (built, _) = app_scene(V2.view(), None);
     let (image, _) = map_shot_with_tiles(&gpu, &built, 1.0, Arc::new(DirTiles::fixtures()), |_| Vec::new());
     save(&image, "a4-v2-map.png");
-    let icons = &built.aircraft.scene.icons;
+    let aircraft = &built.aircraft.scene;
+    let icons = &aircraft.icons;
     let at = on_screen(&built, icons, Sight::Clear);
     let white = components(&image, Rect::whole(&image), |p| p[0] >= 250 && p[1] >= 250 && p[2] >= 250);
-    eprintln!("the app's V2: {} pure white blobs for {} icons on screen", white.len(), at.len());
-    assert!(white.len() >= 3);
     let viewport = viewport_for(&built.view, built.size);
-    for blob in &white {
-        let near = icons.iter().any(|icon| {
+    let at_icon = |blob: &Component| {
+        icons.iter().any(|icon| {
             let [x, y, _] = viewport.project(icon.position);
             (blob.centroid[0] - x).hypot(blob.centroid[1] - y) < extent(icon)
-        });
-        assert!(near, "pure white at {:?} with no aircraft under it", blob.centroid);
+        })
+    };
+    // a mesh spans `screenPx` along its largest dimension, about its position
+    let at_mesh = |blob: &Component| {
+        aircraft.groups.iter().flat_map(|g| &g.instances).any(|m| {
+            let [x, y, _] = viewport.project(m.position);
+            (blob.centroid[0] - x).hypot(blob.centroid[1] - y) < aircraft.frame.screen_px(m.size_m) * 0.6 + 1.0
+        })
+    };
+    let on_icons = white.iter().filter(|b| at_icon(b)).count();
+    eprintln!(
+        "the app's V2: {} pure white blobs, {on_icons} at icons, for {} icons on screen and {} meshes",
+        white.len(),
+        at.len(),
+        aircraft.mesh_count()
+    );
+    assert!(on_icons >= 3);
+    for blob in &white {
+        assert!(at_icon(blob) || at_mesh(blob), "pure white at {:?} with no aircraft under it", blob.centroid);
     }
 }

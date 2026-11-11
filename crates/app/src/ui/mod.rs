@@ -12,9 +12,11 @@
 //! airports, T8), [`shell`] and [`sidebar`] (the desktop shell, the page's keys: U6).
 
 pub mod anim;
+pub mod attribution;
 pub mod fonts;
 pub mod icons;
 pub mod map_error;
+pub mod modebar;
 pub mod shell;
 pub mod sidebar;
 pub mod text;

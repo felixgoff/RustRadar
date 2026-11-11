@@ -113,6 +113,11 @@ impl SceneBuilder {
         // the signal blocks (T5) see this refresh's trains as drawn (G:2733-2735)
         let on_map: Vec<&rustradar_core::model::Train> = state.trains.on_map().iter().collect();
         state.blocks.build(&state.persisted.settings, &on_map, self.trains.builder().drawn(), &mut scene);
+        // dev builds: the reports each train is drawn from (T9; G:2741, `import.meta.env.DEV`)
+        if cfg!(debug_assertions) {
+            let now_ms = scene.local_now_ms.floor() as i64;
+            scene.trains.sightings = rustradar_map::layers::sightings::Input::of(&on_map, state.trains.selected(), self.trains.builder().drawn(), now_ms);
+        }
         self.flight.build(state, &mut scene);
         self.aircraft.build(state, &mut scene);
         scene
@@ -194,5 +199,60 @@ mod tests {
                 assert_eq!((scene.rail.shown, scene.rail.speeds), (true, speeds), "{basemap:?} {shows:?}");
             }
         }
+    }
+
+    /// Debug builds (the tests') hand the trains layer each sighted train's latest report and
+    /// where it most likely is, and the selected train's label (T9).
+    #[test]
+    fn a_debug_build_marks_the_trains_sightings() {
+        use rustradar_core::model::{Sighting, Train, TrainKind, TrainSource};
+        use rustradar_core::settings::Mode;
+        const NOW: f64 = 1_782_036_000_000.0;
+        let now = NOW as i64;
+        let view = ViewState { longitude: 18.07, latitude: 59.33, zoom: 14.0, bearing: 0.0, pitch: 0.0, position: None };
+        let train = Train {
+            id: "trafikverket:2026-06-21:523".into(),
+            source: TrainSource::Trafikverket,
+            name: "SJ 523".into(),
+            kind: TrainKind::Intercity,
+            lat: 59.33,
+            lon: 18.07,
+            heading: Some(90.0),
+            speed_kmh: Some(60.0),
+            destination: None,
+            operator: Some("SJ".into()),
+            delay_minutes: None,
+            position_unix: now / 1000,
+            frames: vec![(59.33, 18.07, now), (59.33, 18.08, now + 30_000)],
+            reports: vec![Sighting { lat: 59.33, lon: 18.069, unix_ms: now - 2_000, speed_kmh: Some(60.0), latest: true }],
+            predicted: vec![(59.33, 18.0705, now - 10_000), (59.33, 18.0805, now + 20_000)],
+            cars: None,
+            tail: Vec::new(),
+            structures: Vec::new(),
+            ended_unix: None,
+            shape: None,
+            model: None,
+        };
+        let dir = std::env::temp_dir().join(format!("rustradar-sightings-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::state::trains::FIXTURE_TRAINS), serde_json::to_vec(&vec![train.clone()]).unwrap()).unwrap();
+        let startup = Startup { basemap: Some(Basemap::Dark), fixture: Some(dir.clone()), ..Default::default() };
+        let mut state = AppState::new(startup, None, None, None, view, [1100.0, 720.0]);
+        state.persisted.settings.mode = Mode::Trains;
+        state.poll(NOW);
+        let clocks = Clocks { local_ms: NOW, feed_ms: NOW };
+        let mut builder = SceneBuilder::default();
+        let sightings = builder.build(&mut state, clocks, 1.0).trains.sightings;
+        assert_eq!(sightings.latest, [[18.069, 59.33]]);
+        assert_eq!(sightings.predicted.len(), 1);
+        assert!(sightings.labels.is_empty(), "nothing selected");
+        state.select_train(Some(train), NOW);
+        state.poll(NOW);
+        let sightings = builder.build(&mut state, clocks, 1.0).trains.sightings;
+        assert!(sightings.predicted[0].selected);
+        assert_eq!(sightings.labels.len(), 1);
+        assert!(sightings.labels[0].1.starts_with("live 2 s · 60 km/h · drawn "), "{}", sightings.labels[0].1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

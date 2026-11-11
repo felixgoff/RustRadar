@@ -41,6 +41,9 @@ use crate::state::DrawState;
 pub struct Input {
     /// This scene refresh's trains (item T2): their icons further out; empty without trains.
     pub scene: TrainsScene,
+    /// Dev builds: the reports each train is drawn from (item T9, [`super::sightings`]); empty
+    /// in a release build.
+    pub sightings: super::sightings::Input,
 }
 
 /// `train-icons`' props: deck's IconLayer defaults lying on the ground (`billboard: false`,
@@ -111,11 +114,12 @@ impl Icons {
 /// Rows 13–17: train route, halo, trains, sightings, ring.
 pub struct Trains {
     icons: Icons,
+    sightings: super::sightings::Sightings,
 }
 
 impl Trains {
     pub fn new(init: &Init<'_>) -> Self {
-        Trains { icons: Icons::new(init) }
+        Trains { icons: Icons::new(init), sightings: super::sightings::Sightings::new(init) }
     }
 
     /// How many train icons this frame draws.
@@ -132,6 +136,7 @@ impl Layer for Trains {
     fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
         let scene = &cx.scene.trains.scene;
         self.icons.prepare(cx, &scene.icons);
+        self.sightings.prepare(cx);
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
@@ -140,7 +145,8 @@ impl Layer for Trains {
         }
         // the route and the halo go here (T6), under the trains
         self.icons.draw(pass);
-        // the dev sightings (T9) and the ring (T6) go here, over them
+        // the dev sightings (T9), then the ring (T6) goes here, over them
+        self.sightings.draw(pass, cx);
     }
 }
 

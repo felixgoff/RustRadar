@@ -69,6 +69,7 @@ pub mod radar;
 pub mod rail;
 pub mod route;
 pub mod ships;
+pub mod sightings;
 pub mod sky;
 pub mod terrain;
 pub mod trains;

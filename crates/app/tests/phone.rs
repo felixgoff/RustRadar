@@ -24,7 +24,7 @@ use common::{NOW_MS, fixtures};
 use egui::{Color32, Pos2, SafeAreaInsets, Vec2};
 use rustradar_app::app::Engine;
 use rustradar_app::state::flight::SelectOptions;
-use rustradar_app::state::shortcuts::Menu;
+use rustradar_app::state::shortcuts::{Menu, Open};
 use rustradar_app::state::{Action, AppState, Startup};
 use rustradar_app::ui::sheet::Detent;
 use rustradar_app::ui::theme;
@@ -249,6 +249,16 @@ fn peek_half_and_full_with_the_safe_areas() {
             assert!(!near(pixel(&image, 360, bottom + 1), theme::LINE, 3), "the rail's bottom at {name}");
         }
     }
+    // the filter panel open in the full sheet: its own card 8 px in, the list under it
+    window.engine.state.apply(Action::ToggleOpen(Open::Filters), NOW_MS);
+    let image = window.shot(&gpu, NOW_MS);
+    save(&image, "u19-sheet-filters.png");
+    let top = 844 - 34 - 699 - 1;
+    // under the head (22 + 36): the card's top border from x 8 to 381
+    let card = (top + 58..top + 80).find(|&y| near(pixel(&image, 100, y), theme::LINE, 3)).expect("the filter card's top");
+    assert_eq!(column_of(&image, card + 20, 0, 40, theme::LINE), Some(8), "the card's left");
+    assert_eq!(pixel(&image, 381, card + 20), rgb(theme::LINE), "the card's right");
+    assert_eq!(pixel(&image, 4, card + 20), rgb(theme::SURFACE), "the sheet's fill beside it");
 }
 
 /// A `--fixture` folder holding the synthetic snapshot, with details for flight `id`.

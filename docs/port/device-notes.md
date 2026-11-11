@@ -201,7 +201,29 @@ These are deliberate, or left for a later item.
   - `unzip -l` shows only `lib/arm64-v8a/librustradar_app.so` (no `libc++_shared.so`).
   - For Play only, 16 KB pages: `zipalign -c -P 16 -v 4` passes and `llvm-readelf -l librustradar_app.so` shows LOAD alignment 0x4000.
 
-## 8. Results
+## 8. Checklist U19: the phone layout
+
+The phone layout (`ui::phone`, `ui::sheet`) is drawn whenever the window is at most 899 px wide or at most 500 px
+high (doc 06 §2.2), and kept clear of the safe area the platform glue hands egui. `tests/phone.rs` checks it at
+390 × 844 with a 47 px top and 34 px bottom inset injected, and on its side with 47 px side insets; what follows needs
+a real phone. Compare with today's app in a phone's browser where a step says so.
+
+| # | Step | Expected | Android | iPhone |
+|---|---|---|---|---|
+| 1 | Start in portrait | The search and mode icons in one bar under the status bar or notch; the sheet at its lowest (handle, Filters, the list's top) above the gesture bar or home indicator, its fill reaching the screen's bottom; the map controls (Layers, Settings, Tilt) at the right, 24 px above the sheet. | ☐ | ☐ |
+| 2 | Tap the handle three times | The sheet steps half, full, then lowered again, each easing over about a fifth of a second. At full it stops short of the search bar. | ☐ | ☐ |
+| 3 | Drag the handle up slowly and let go between two heights; drag it below its lowest | It follows the finger and settles at the nearest height; below the lowest it stops 40 px down and comes back. The map does not pan while dragging. The controls ride on the sheet. | ☐ | ☐ |
+| 4 | Scroll the list inside the half-open sheet | The list scrolls; the map does not move. | ☐ | ☐ |
+| 5 | Tap an aircraft on the map | The search bar slides up and fades; the sheet lowers to the flight's strip, route and footer (Live, Follow, Flightradar24). Raise it: the tabs follow the route, the photo after them. | ☐ | ☐ |
+| 6 | Close the flight (×) | The search bar comes back; the sheet returns to the height the list had. | ☐ | ☐ |
+| 7 | Open an airport from a flight's route | The board opens half up with its strip, tabs and footer; the board scrolls between them. | ☐ | ☐ |
+| 8 | Raise the sheet, then press back (Android) | Back lowers the sheet when nothing else is open; the next back leaves the app. | ☐ | – |
+| 9 | Tap Settings in the controls | The menu rises from the bottom as a sheet of its own, the screen's width, over the list's sheet, with "API keys and Flightradar24 login" at its end; a tap on the map closes it. | ☐ | ☐ |
+| 10 | Type in the search | The keyboard comes up; the results hang under the bar, as wide as it. | ☐ | ☐ |
+| 11 | Turn the phone on its side | The bar (320 wide) and the sheet run down the left, clear of the cutout; the controls stand 24 px from the bottom at the right; the credits sit at the bottom right. | ☐ | ☐ |
+| 12 | Switch to ships and trains (mode icons) | The sheet's head reads "N ships in view" / "N trains in view"; the lists have no header of their own; a train's footer has Follow only. | ☐ | ☐ |
+
+## 9. Results
 
 | Date | Device, OS | Build (commit) | Who | Notes |
 |---|---|---|---|---|

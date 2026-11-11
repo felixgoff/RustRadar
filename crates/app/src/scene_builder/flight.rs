@@ -170,3 +170,37 @@ impl Flight {
         scene.markers = marks;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `drawnAhead`: the estimate starts at the aircraft as drawn and eases from its height into
+    /// its own profile over 15 km, never below the ground.
+    #[test]
+    fn the_estimate_ahead_starts_at_the_aircraft_and_eases_into_its_profile() {
+        let motion = Motion::new();
+        // a straight descent east to west, about 4.8 km between points, from 3000 ft to the ground
+        let ahead: Vec<PathPoint> = (0..6).map(|i| [5.0 - 0.07 * f64::from(i), 52.3, 3000.0 - 600.0 * f64::from(i)]).collect();
+        let pos = [5.0, 52.3, 1500.0];
+        let path = drawn_ahead(&ahead, pos, &motion, 1, 2.0);
+        assert_eq!(path[0], pos, "from the aircraft as drawn");
+        let profile = drawn_route(&ahead, &motion, 1, 2.0);
+        assert_eq!(profile[1][2], elevation(2400.0, 2.0), "drawRoute's heights: exaggerated feet, no airport near");
+        // the first point is replaced by the aircraft, so dz is against the estimate's own start
+        let dz = pos[2] - profile[0][2];
+        let mut walked = 0.0;
+        for i in 1..path.len() {
+            walked += distance_km([profile[i - 1][0], profile[i - 1][1]], [profile[i][0], profile[i][1]]) * 1000.0;
+            let expected = if walked - distance_km([profile[i - 1][0], profile[i - 1][1]], [profile[i][0], profile[i][1]]) * 1000.0 < AHEAD_BLEND_M {
+                (profile[i][2] + dz * (1.0 - walked / AHEAD_BLEND_M).max(0.0)).max(0.0)
+            } else {
+                profile[i][2]
+            };
+            assert!((path[i][2] - expected).abs() < 1e-9, "point {i}: {} against {expected}", path[i][2]);
+        }
+        assert!(path[1][2] < profile[1][2], "eased down toward the aircraft");
+        assert_eq!(path[5][2], profile[5][2], "past 15 km its own profile");
+        assert!(path.iter().all(|p| p[2] >= 0.0));
+    }
+}

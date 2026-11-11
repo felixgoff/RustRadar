@@ -12,7 +12,11 @@
 //!   `Live`, Follow pressed; taller than the window, so it scrolls under its pinned footer;
 //! - `ended` (`u10-flight-ended.png`): the stream ended 95 s after its last report: the altitude
 //!   and speed dimmed, the estimate's badge neutral, the track in `--text-3`, the three sign-in
-//!   values named in one note, the hollow dot and `Last seen 11:58 CEST`.
+//!   values named in one note, the hollow dot and `Last seen 11:58 CEST`;
+//! - `diverted` (`u10-flight-diverted.png`): the photo at 5:2 and `Diverted to Göteborg
+//!   Landvetter Airport` under the distances, GOT as the destination;
+//! - `board` (`u10-flight-board.png`): opened from Arlanda's board, the back row `ARN departures
+//!   and arrivals` over the strip and the short photo; the back row returns to the board.
 //!
 //! Each was compared by eye, part by part, with Chromium's rendering of today's
 //! `FlightPanel.svelte` given the same props (server-rendered with Svelte, laid out with app.css
@@ -267,6 +271,8 @@ enum Fixture {
     Ended,
     /// Live, diverted to Gothenburg, the camera free, no adsb.lol.
     Diverted,
+    /// Live, opened from Arlanda's board: the back row over the short photo.
+    FromBoard,
 }
 
 /// The state of `fixture` at [`NOW_MS`]: the flight selected 10 s before, the stream's events
@@ -282,7 +288,10 @@ fn fixture(fixture: Fixture) -> AppState {
     for t in [t0 - 2_000.0, t0 - 1_000.0] {
         s.poll(t);
     }
-    s.select_flight(Some(ID), SelectOptions::default(), t0);
+    if fixture == Fixture::FromBoard {
+        s.open_airport("ARN", t0);
+    }
+    s.select_flight(Some(ID), SelectOptions { from_board: fixture == Fixture::FromBoard, ..Default::default() }, t0);
     let send = |event| sender.lock().unwrap().as_ref().expect("the stream started").send(event).unwrap();
     match fixture {
         Fixture::Loading => {}
@@ -299,6 +308,7 @@ fn fixture(fixture: Fixture) -> AppState {
             d.schedule.as_mut().unwrap().diverted_id = 3;
             send(FollowEvent::Details(Box::new(d)));
         }
+        Fixture::FromBoard => send(FollowEvent::Details(Box::new(details(seen)))),
     }
     let mut t = t0;
     while t <= NOW_MS {
@@ -308,7 +318,7 @@ fn fixture(fixture: Fixture) -> AppState {
     }
     let want = match fixture {
         Fixture::Loading => FollowState::Connecting,
-        Fixture::Live | Fixture::Diverted => FollowState::Live,
+        Fixture::Live | Fixture::Diverted | Fixture::FromBoard => FollowState::Live,
         Fixture::Ended => FollowState::Ended,
     };
     assert_eq!(s.flight.follow_state(), want);
@@ -767,4 +777,30 @@ fn a_diverted_flight() {
     let route_top = photo_top + 144 + 42;
     let badge = bounds(&image, area(1063, route_top, 1423, route_top + 200), |p| close(p, theme::DANGER, 40)).expect("the badge's text");
     assert!(badge.x0 >= 1079 && badge.x0 <= 1086, "16 px in, its 6 px padding: {badge:?}");
+}
+
+#[test]
+fn opened_from_a_board_the_back_row_returns_to_it() {
+    let state = fixture(Fixture::FromBoard);
+    if let Some(gpu) = gpu() {
+        let mut canvas = Canvas::new(&gpu);
+        let (_, image) = canvas.settle(&gpu, &state);
+        save(&image, "u10-flight-board.png");
+        let b = panel_box(&image);
+        // the back row (4 + 16.8 + 4 and its rule) over the strip, the photo 5:2 under them
+        let rule = b.y0 + 1 + 25;
+        assert!(close(pixel(&image, 1300, rule), theme::LINE, 2), "the back row's rule at {rule}");
+        let ink = bounds(&image, area(1063, b.y0 + 1, 1300, rule), |p| p[0] > 120).expect("the arrow and the label");
+        assert!(ink.x0 >= 1079 && ink.x0 <= 1082, "16 px in: {ink:?}");
+        let photo_top = rule + 1 + 68;
+        assert!(close(pixel(&image, 1100, photo_top + 140), Color32::from_rgb(70, 80, 70), 6), "the short picture's ground");
+    }
+    // a click on the back row closes the flight: the board shows again, as it was
+    let ctx = context();
+    let mut s = state;
+    let actions = click_panel(&ctx, &s, |r| Pos2::new(r.left() + 120.0, r.top() + 1.0 + 12.0));
+    assert_eq!(actions, [Action::CloseFlight]);
+    assert!(s.apply(Action::CloseFlight, NOW_MS));
+    assert_eq!(s.airport.code(), Some("ARN"));
+    assert_eq!(shell::panels(&s), [shell::Panel::Airport]);
 }

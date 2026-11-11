@@ -5087,6 +5087,7 @@ dependencies = [
  "rustradar-scene",
  "serde_json",
  "tokio",
+ "webbrowser",
  "wgpu",
  "winit",
 ]

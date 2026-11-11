@@ -5,10 +5,41 @@
 use rustradar_backend::Dirs;
 
 pub mod android;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod desktop;
 pub mod ios;
 
 /// Whether this build runs on a phone (`cfg(mobile)` in the Tauri build; doc 07 §11.7).
 pub const PHONE: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// What [`reveal`] answers on the phones, where there is no file manager to show a file in (the
+/// opener's `UnsupportedPlatform`; doc 07 §11.3).
+pub const NOT_ON_THIS_PLATFORM: &str = "Not available on this platform.";
+
+/// Opens `url` in the system's browser (`openUrl(url)`; doc 07 §11.2): [`desktop::open_url`] on
+/// the desktop; on the phones the `webbrowser` crate too, as egui-winit opens the UI's links
+/// there (an Android intent, `UIApplication.open`), not yet tried on a device.
+pub fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return desktop::open_url(url);
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    return webbrowser::open(url).map_err(|e| format!("Couldn't open {url}: {e}"));
+}
+
+/// Shows `path` in the file manager (`revealItemInDir(path)`, whose failures every caller ignores):
+/// [`desktop::reveal`] on a thread of its own, a failure logged. The phones have none
+/// ([`NOT_ON_THIS_PLATFORM`]).
+pub fn reveal(path: impl Into<std::path::PathBuf>) {
+    let path = path.into();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    std::thread::spawn(move || {
+        if let Err(e) = desktop::reveal(&path) {
+            log::warn!("couldn't show {} in the file manager: {e}", path.display());
+        }
+    });
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    log::info!("couldn't show {}: {NOT_ON_THIS_PLATFORM}", path.display());
+}
 
 /// The folders the backend reads and writes, resolved once at start (doc 07 §11.1).
 ///

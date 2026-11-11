@@ -17,6 +17,7 @@ pub mod assets;
 pub mod dev;
 pub mod headless;
 pub mod input;
+pub mod persist;
 pub mod platform;
 pub mod requests;
 pub mod scene_builder;

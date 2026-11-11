@@ -53,7 +53,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rustradar_backend::{Backend, BackendEvent};
 use rustradar_core::geo::Basemap;
 use rustradar_core::motion::aircraft::Motion;
-use rustradar_core::settings::Persisted;
+use rustradar_core::settings::{Mode, Persisted};
 use rustradar_scene::camera::{self as cam, ViewState};
 use rustradar_scene::controller::Controller;
 
@@ -177,6 +177,11 @@ pub enum Action {
     SetPitch(f64),
     /// `flyTo(lon, lat, zoom?)`.
     FlyTo { longitude: f64, latitude: f64, zoom: Option<f64> },
+    /// The focus (the mode bar, keys `p i s`; the trains only while offered): [`AppState::set_mode`].
+    SetMode(Mode),
+    /// Another kind also on the map or not (the mode bar's eye, `Shift+P I S`):
+    /// [`AppState::toggle_shown`].
+    ToggleShown(Mode),
 }
 
 /// The app's state: the camera, the clocks' sync, settings, and one part per feed.
@@ -220,10 +225,8 @@ impl AppState {
         view: ViewState,
         size: [f64; 2],
     ) -> Self {
-        let mut persisted = Persisted::default();
-        if let Some(basemap) = startup.basemap {
-            persisted.settings.basemap = basemap;
-        }
+        // the saved settings from the backend's config folder, `--basemap` over them (U5)
+        let (settings, persisted) = settings::Store::open(backend.as_ref().map(Backend::dirs), &startup);
         let mut controller = Controller::new(view, size);
         // `createDeck` starts free (`controllerFor(false)`) with the basemap's limits
         controller.set_limits(cam::limits(persisted.settings.basemap, None), cam::max_zoom_now(None));
@@ -236,7 +239,7 @@ impl AppState {
             controller,
             motion: Motion::new(),
             update_ready: None,
-            settings: Default::default(),
+            settings,
             shortcuts: Default::default(),
             camera: Default::default(),
             pick: Default::default(),
@@ -357,6 +360,8 @@ impl AppState {
                 self.controller.fly_to(longitude, latitude, zoom, local_ms);
                 true
             }
+            Action::SetMode(mode) => self.set_mode(mode),
+            Action::ToggleShown(kind) => self.toggle_shown(kind),
         }
     }
 }

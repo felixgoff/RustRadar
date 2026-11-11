@@ -522,6 +522,16 @@ impl App {
         let Some(view) = &mut self.view else { return };
         self.next = view.redraw(now);
     }
+
+    /// Writes a settings change still waiting for its 500 ms, and waits for the disk.
+    fn flush_settings(&mut self) {
+        let state = match (&mut self.view, &mut self.state) {
+            (Some(view), _) => &mut view.engine.state,
+            (None, Some(state)) => state,
+            (None, None) => return,
+        };
+        state.settings.flush(&state.persisted);
+    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -578,6 +588,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        // a phone may end the app in the background: the settings not yet written go now (U5)
+        self.flush_settings();
         // Android destroys the native window here and the surface must go before it does; the
         // desktop never suspends and iOS keeps its view
         if cfg!(target_os = "android")
@@ -585,6 +597,11 @@ impl ApplicationHandler<UserEvent> for App {
         {
             view.surface = None;
         }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // the window closed or the system ends the app: the settings not yet written go now (U5)
+        self.flush_settings();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

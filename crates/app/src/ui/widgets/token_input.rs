@@ -415,7 +415,8 @@ impl<'a> TokenInput<'a> {
             for (i, s) in suggestions.iter().enumerate() {
                 let row = Rect::from_min_size(list.min + Vec2::splat(theme::BORDER + LIST_PAD) + Vec2::new(0.0, i as f32 * row_h), Vec2::new(width - 2.0 * (theme::BORDER + LIST_PAD), row_h));
                 let r = ui.interact(row, id.with(("row", i)), Sense::hover()).on_hover_cursor(CursorIcon::PointingHand);
-                if r.hovered() {
+                // `contains_pointer`: egui does not hover a widget while a button is down
+                if r.contains_pointer() {
                     hovered = Some(i);
                     if ui.input(|inp| inp.pointer.primary_pressed()) {
                         picked = Some(s.value.clone());
@@ -661,5 +662,42 @@ mod tests {
         assert!(ctx.memory(|m| m.has_focus(edit)));
         let state: State = ctx.data(|d| d.get_temp(state_id)).unwrap_or_default();
         assert!(!state.open);
+    }
+
+    #[test]
+    fn pressing_a_row_adds_it_and_keeps_the_focus() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut values: Vec<String> = vec![];
+        let (mut edit, mut state_id) = (Id::NULL, Id::NULL);
+        pass(&ctx, 0.0, vec![], |ui| {
+            ui.set_width(286.0);
+            state_id = ui.make_persistent_id(Id::NULL.with("airlines"));
+            edit = state_id.with("edit");
+            airlines().show(ui, &mut values);
+        });
+        ctx.memory_mut(|m| m.request_focus(edit));
+        let draw = |t: f64, events: Vec<egui::Event>, values: &mut Vec<String>| {
+            pass(&ctx, t, events, |ui| {
+                ui.set_width(286.0);
+                airlines().show(ui, values);
+            })
+        };
+        draw(0.1, vec![], &mut values);
+        draw(0.2, vec![], &mut values);
+        let list = ctx.data(|d| d.get_temp::<State>(state_id)).and_then(|s| s.list).expect("the list is open on focus");
+        // the second row: Lufthansa (the airlines in the order given, none chosen)
+        let row_h = 2.0 * ROW_PAD.y + Style::ui(theme::TEXT_MD, theme::WEIGHT_REGULAR, theme::TEXT_1).line_px();
+        let at = list.min + Vec2::new(40.0, theme::BORDER + LIST_PAD + row_h * 1.5);
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        draw(0.3, vec![egui::Event::PointerMoved(at)], &mut values);
+        let state: State = ctx.data(|d| d.get_temp(state_id)).unwrap_or_default();
+        assert_eq!(state.active, 1, "the row the pointer entered is active");
+        draw(0.4, vec![button(true)], &mut values);
+        assert_eq!(values, strings(&["DLH"]), "added on the press");
+        draw(0.5, vec![button(false)], &mut values);
+        draw(0.6, vec![], &mut values);
+        assert!(ctx.memory(|m| m.has_focus(edit)), "the input keeps the focus");
+        assert_eq!(values, strings(&["DLH"]), "the release adds nothing more");
     }
 }

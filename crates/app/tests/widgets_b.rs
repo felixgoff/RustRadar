@@ -57,9 +57,15 @@ impl Canvas {
 
     /// A frame at egui time `time` with `draw` as the UI.
     fn frame(&mut self, gpu: &Gpu, time: f64, draw: impl FnMut(&mut egui::Ui)) {
+        self.frame_with(gpu, time, None, draw);
+    }
+
+    /// A frame at egui time `time` with the pointer at `pointer` and `draw` as the UI.
+    fn frame_with(&mut self, gpu: &Gpu, time: f64, pointer: Option<Pos2>, draw: impl FnMut(&mut egui::Ui)) {
         let raw = RawInput {
             screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(SIZE[0] as f32, SIZE[1] as f32))),
             time: Some(time),
+            events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
             ..Default::default()
         };
         let output = self.ctx.run_ui(raw, draw);
@@ -630,6 +636,64 @@ fn todays_ship_sort_and_search() {
         eprintln!("{what}: ink {ours:?}, today {theirs:?}");
         for (a, b, edge) in [(ours.x0, theirs.x0, "left"), (ours.x1, theirs.x1, "right"), (ours.y0, theirs.y0, "top"), (ours.y1, theirs.y1, "bottom")] {
             assert!(a.abs_diff(b) <= 1, "{what}'s {edge}: {ours:?}, today {theirs:?}");
+        }
+    }
+}
+
+/// One of each hoverable part, the pointer over the one named.
+fn hover_card(ui: &mut egui::Ui, rects: &mut Vec<egui::Rect>) {
+    rects.clear();
+    card(ui, "hover", Pos2::new(16.0, 16.0), 320.0, 16.0, 16.0, |ui| {
+        let list = [Chip::new(Kind::Category, "Gliders", false), Chip::new(Kind::Category, "Drones", true)];
+        rects.extend(chips::chips(ui, Id::NULL.with("hover-chips"), &list, true).iter().map(|r| r.rect));
+        let sorts = [Choice::new(0u8, "Size"), Choice::new(1, "Name"), Choice::new(2, "Distance")];
+        rects.push(Segmented::new("hover-sort", "Sort", &sorts).hide_legend().show(ui, &mut 0).rect);
+        let tabs = [Tab::new(0u8, "Overview"), Tab::new(1, "Route")];
+        rects.push(Tabs::new("hover-tabs", &tabs).show(ui, &mut 0).rect);
+        rects.push(chips::text_button(ui, Id::NULL.with("hover-reset"), "Reset", true).rect);
+    });
+}
+
+#[test]
+fn hover_states() {
+    let Some(gpu) = gpu() else { return };
+    // where the pointer rests: an off chip, an on chip, the second option, the second tab, the link
+    let mut rects = Vec::new();
+    let mut canvas = Canvas::new(&gpu);
+    for time in [0.0, 1.0] {
+        canvas.frame(&gpu, time, |ui| hover_card(ui, &mut rects));
+    }
+    let [off, on, sort, tabs, reset] = [rects[0], rects[1], rects[2], rects[3], rects[4]];
+    let option_w = (sort.width() - 6.0 - 4.0) / 3.0;
+    let second_option = Pos2::new(sort.min.x + 3.0 + option_w * 1.5 + 2.0, sort.center().y);
+    let second_tab = Pos2::new(tabs.min.x + 110.0, tabs.center().y);
+    for (what, at) in [("an off chip", off.center()), ("an on chip", on.center()), ("an option", second_option), ("a tab", second_tab), ("the link", reset.center())] {
+        let mut canvas = Canvas::new(&gpu);
+        // the pointer arrives at 1 s; egui hit-tests against the last pass's widgets, so the
+        // hover (and its 150 ms transition) starts at 2 s and is over at 3 s
+        for (time, pointer) in [(0.0, None), (1.0, Some(at)), (2.0, Some(at)), (3.0, Some(at))] {
+            canvas.frame_with(&gpu, time, pointer, |ui| hover_card(ui, &mut rects));
+        }
+        let image = canvas.read(&gpu);
+        save(&image, &format!("u4-hover-{}.png", what.replace(' ', "-")));
+        let p = |x: f32, y: f32| pixel(&image, x as u32, y as u32);
+        match what {
+            "an off chip" => assert_eq!(p(off.max.x - 5.0, off.center().y), rgb(theme::SURFACE_HOVER), "{what}"),
+            "an on chip" => assert_eq!(p(on.max.x - 5.0, on.center().y), rgb(theme::SURFACE_RAISED), "{what}: the on fill wins"),
+            "an option" => assert_eq!(p(second_option.x - option_w / 2.0 + 3.0, second_option.y), rgb(theme::SURFACE_HOVER), "{what}"),
+            "a tab" => {
+                // --text-1 under the pointer: the label's brightest ink is --text-1, not --text-3
+                let r = px(egui::Rect::from_center_size(second_tab, Vec2::new(60.0, 20.0)));
+                let brightest = r.pixels().map(|(x, y)| lum(pixel(&image, x, y))).fold(0.0, f64::max);
+                assert!(brightest > 200.0, "{what}: {brightest}");
+            }
+            _ => {
+                let want = [0usize, 1, 2].map(|c| f64::from(theme::AMBER_SOFT.to_array()[c]) + f64::from(theme::SURFACE.to_array()[c]) * (1.0 - f64::from(theme::AMBER_SOFT.a()) / 255.0));
+                let got = p(reset.min.x + 1.5, reset.center().y);
+                for c in 0..3 {
+                    assert!((f64::from(got[c]) - want[c]).abs() <= 1.0, "{what}: {got:?} for {want:?}");
+                }
+            }
         }
     }
 }

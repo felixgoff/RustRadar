@@ -67,9 +67,9 @@ pub struct Pass<'a> {
 
 impl Pass<'_> {
     /// The focus's search query (`trainQuery`, `shipQuery`): the trains' and ships' lists and
-    /// counts match it. Empty, as today's starts, until item U8 keeps it in `state::search`.
+    /// counts match it (`state::search`, U8; the aircraft's query narrows no list).
     pub fn query(&self) -> &str {
-        ""
+        self.state.search.list_query(self.state.persisted.settings.mode)
     }
 }
 
@@ -102,7 +102,7 @@ pub struct Slots {
 impl Slots {
     /// The app's components: each item puts its function in its slot here.
     pub const APP: Slots = Slots {
-        search: None,
+        search: Some(super::search::show),
         aircraft_filters: None,
         train_filters: None,
         ship_filters: None,

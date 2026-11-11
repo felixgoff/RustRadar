@@ -9,7 +9,9 @@
 //! and scale, cached as egui textures and tinted when drawn).
 //!
 //! Components: [`map_error`] (B9), [`tooltip`] (the map's tooltip over ships, trains, signals and
-//! airports, T8), [`shell`] and [`sidebar`] (the desktop shell, the page's keys: U6).
+//! airports, T8), [`shell`] and [`sidebar`] (the desktop shell, the page's keys: U6), [`modebar`]
+//! and [`attribution`] (the mode bar, the credits and the dev readout: U7), [`search`] (the search
+//! box and its dropdown: U8).
 
 pub mod anim;
 pub mod attribution;
@@ -17,6 +19,7 @@ pub mod fonts;
 pub mod icons;
 pub mod map_error;
 pub mod modebar;
+pub mod search;
 pub mod shell;
 pub mod sidebar;
 pub mod text;

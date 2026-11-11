@@ -554,8 +554,9 @@ fn the_keys_through_the_window() {
 fn the_filters_button_takes_a_click() {
     let Some(gpu) = gpu() else { return };
     let mut w = Window::new(&gpu, state());
-    // the app's own slots: no search box yet, so the toolbar is 12 below the brand (y 69–101)
-    let at = Pos2::new(76.0, 85.0);
+    // the app's own slots: the search box (U8) 12 below the brand, the toolbar 12 below it
+    // (y 119–151)
+    let at = Pos2::new(76.0, 135.0);
     let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
     w.frame(&gpu, Vec::new(), NOW_MS);
     w.frame(&gpu, vec![Event::PointerMoved(at)], NOW_MS + 16.0);

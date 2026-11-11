@@ -1760,3 +1760,130 @@ files) still open.
 - Everything listed under "Pending for the owner" in the stage 2 status.
 
 **Disk.** 11 GB free after this review's runs, 29 GB used on the volume.
+
+---
+
+## Performance (P1)
+
+Item P1 (new): the app in release builds, measured and its hot paths fixed without changing what is drawn. Measured on
+2026-11-11 in this container (4 vCPU Intel Xeon at 2.3 GHz, 2 MB L2 a core, SwiftShader Vulkan), with other
+engineers' builds running beside it (load average 1–5 on 4 cores; the tables give medians). Release means the
+workspace's profile (fat LTO, one codegen unit, `cargo build -p rustradar-app --release`, 3½–7 min here).
+Commit `77db1dd`.
+
+**What made V2 slow was drawing, not decoding.** Gap 6 of the stages 3-4 status put the 75 s of a dark V2 shot on
+the vector map's tile decode. In release every fixture tile decodes in 1.2 ms on average, V2's z5 tiles in 1.1 ms,
+and the release shot took just as long (74–76 s, labels still pending at the 60 s wait). The time went to SwiftShader:
+one map pass at V2 costs about 5 s of CPU rasterisation (V2's 29 z5 tiles hold 267 000 path segments of roads and
+borders, each an instanced 12-index quad through the globe projection, at 4× MSAA; a satellite V2 pass costs
+0.17 s), and the headless loop drew a whole frame each time it looked whether the tiles were in. The tile layers
+take at most 4 uploads a frame (`UploadBudget::per_frame`) and keep 6 requests in flight, so V2's 29 vector-map
+and 29 label tiles need 17 frames: 17 × 4–5 s. The window on SwiftShader or llvmpipe is as slow per frame; a real
+GPU is not.
+
+**Changes** (all in `77db1dd`; pictures pixel-identical, below)
+1. **A shot draws only its last frame.** `app::Engine::draw` (default true; the window never changes it): an undrawn
+   frame still polls, builds the scene, runs egui (its textures kept) and runs `MapRenderer::prepare`, then submits
+   the staged uploads with an empty submit. `app::headless` runs undrawn frames until no layer is pending, then
+   egui's second (time 1, undrawn) and third (time 2, drawn) frames. `map::headless::render_with` (the map
+   crate's tests) prepares until settled, then renders two frames (it rendered every frame, then one more).
+2. **The shot's wait is configurable:** `--wait SECONDS` (only with `--screenshot`), else `RUSTRADAR_SHOT_WAIT`
+   (seconds), else `map::headless::MAX_WAIT`: 30 s in release builds, 60 s (as before) in debug builds
+   (`map::headless::max_wait`, `wait_from`). The log says when the map settled (`the map settled after … ms`).
+3. **Collision passes** (`scene::labels_map::CollisionMap`, used by the place labels and the aircraft labels every
+   frame the camera moves): each quad row's texels as slices (no index checks), the 5 × 5 patch's columns worked
+   out once per label instead of once per sample, the texel bounds' `ceil` inline (baseline x86-64 has no rounding
+   instruction, so `f64::ceil` is a libm call; four per glyph quad). Test
+   `the_collision_loops_match_the_plain_ones` keeps B4's loops and checks the map and every fade bit for bit.
+4. **Aircraft positions as JavaScript reads them:** `core::model::f32_as_js` formats on the stack (no heap string;
+   test against `to_string` over 200 000 bit patterns), and `scene::aircraft::AircraftBuilder` keeps each flight's
+   `[lon, lat]` by id while its report's bits are the same (it was two formats and parses per flight per frame).
+5. **`crates/app/examples/perf.rs`**: `perf decode` (every fixture tile through each tile layer's decode step:
+   vector map, labels, buildings, imagery), `perf frame` (N synthetic aircraft over a view as a `--fixture` feed,
+   settle, warm-up, then drawn frames and the scene builders and map prepare alone; `--pan`, `--labels`,
+   `--basemap`, `--trace`), `perf fixture DIR` (a `--fixture` folder of N aircraft with the committed tiles linked
+   in). Run it with `cargo run -p rustradar-app --release --example perf -- …`.
+
+**Shots** (release, `--size 1440x900 --now 1782036000000`, committed tiles; wall time of the whole process: device,
+pipelines, backend start and the one drawn frame; V2's dark frame is about 5 s of it):
+
+| Shot | Before | After | Settled after | Picture |
+|---|---|---|---|---|
+| V1 dark | 6.7–7.2 s | 2.3 s | 82 ms | identical |
+| V2 dark | 74–76 s, labels pending at 60 s | **6.4 s** | 158 ms | identical |
+| V3 dark | 5.3–5.9 s | 1.6 s | 152 ms | identical |
+| V4 dark | 5.9–6.2 s | 1.4 s | 157 ms | identical |
+| V5 dark | 2.2–2.5 s | 1.3 s | 63 ms | identical |
+| V2 satellite | 4.4 s | 1.4 s | 234 ms | identical |
+| V2 dark, 2000 aircraft (`perf fixture`) | 71 s, labels pending | 5.5 s | 185 ms | identical |
+| V3 dark, the same fixture | 6.2 s | 1.6 s | 131 ms | identical |
+| V2 dark, **debug** build | about 75 s | 8.4 s | 355 ms | identical |
+
+"Identical" is every pixel of the after picture against the before binary's (built from the tree at `10e0d9b`,
+before this item's changes). The before V2 pictures were taken at the 60 s timeout with the labels' tiles still
+pending and are still identical: the tiles missing then drew nothing in view. Compared with `dark-v2-1440x900.png`: the same map and names as stages 3-4
+found.
+
+**Per-tile decode** (release, `perf decode --repeat 3`, the fastest of three, every committed fixture tile; before
+and after alike within noise, as nothing in the decode path changed):
+
+| Step | Tiles | Mean | Median | p95 | Worst |
+|---|---|---|---|---|---|
+| Vector map (MVT decode, grid cut, earcut, paths) | 261 | 1.23 ms | 0.19 ms | 2.76 ms | 106 ms (9/282/150) |
+| — V2's z5 tiles | 29 | 1.14 ms | 1.17 ms | | 2.65 ms |
+| Place labels | 261 | 0.62 ms | 0.04 ms | 3.45 ms | 7.75 ms (2/2/1, 1.5 MB) |
+| Plain buildings (z13–14) | 122 | 0.25 ms | 0.03 ms | 1.27 ms | 2.29 ms |
+| Imagery (JPEG to RGBA) | 573 | 0.30 ms | 0.31 ms | 0.39 ms | 0.45 ms |
+
+Under 30 ms: every tile but one. 9/282/150 (Stockholm's archipelago: one water polygon with thousands of islands as
+holes) takes 106 ms, 96 % of it in earcut 2.2.4: `eliminateHoles` walks the whole outer ring twice per hole
+(`findHoleBridge`), and the hashed ear search then cuts 28 000 triangles. 9/283/149 and 9/282/151 take 25 and 22 ms.
+Not changed, as the port must give earcut.js's own triangles: an index for `findHoleBridge` would have to keep its
+ring-order tie-breaks exactly, and even with the bridging free the ear search alone stays at 50–60 ms. Today's app
+runs the same earcut on this polygon; here it runs on the worker pool, off the frame.
+
+**Frame CPU with 2000 aircraft** (release, `perf frame --aircraft 2000 --frames 60`, 1440 × 900, the scene refresh
+forced every frame as when the camera is locked on an aircraft close in; "builders" is `SceneBuilder::build`, "map
+prepare" `MapRenderer::update` + `prepare`, both with warm caches; "whole frame" is `Engine::frame`'s CPU time,
+taken right after SwiftShader's 0.3–0.5 s of rendering has filled every core's caches with its own work):
+
+| Case | Builders | Map prepare | Builders + prepare | Whole frame |
+|---|---|---|---|---|
+| V2, aircraft labels on, camera panning | 1.39 ms | 4.62 ms | 6.0 ms | 9.9 ms |
+| V2, aircraft labels off (the default), panning | 1.27 ms | 2.46 ms | 3.7 ms | 6.5 ms |
+| V2, labels on, camera still | 1.37 ms | 2.44 ms | 3.8 ms | 7.3 ms |
+| V4, 2000 airframes (meshes), labels on, panning | 2.67 ms | 2.26 ms | 4.9 ms | 6.9 ms |
+| Stress: V3 (2000 aircraft within 100 km), labels on, panning | 2.87 ms | 5.93 ms | 8.8 ms | 11.6 ms |
+
+Load-independent, from callgrind over the same 10 refreshes (V2, labels on, panning): 77.2 million instructions a
+refresh before, 58.7 million after (builders 17.6 → 12.9, map prepare 59.3 → 45.5; the aircraft labels' collision
+pass 33.4 → 21.5, the place labels' 15.8 → 13.8). What is left, by size: the two collision passes (about three quarters
+of the map prepare: the aircraft labels' 1 800 backgrounds and glyphs, then the place labels', drawn texel by texel into
+half-resolution maps of 720 × 450 that are cleared every pass), the motion model's poses, deck's tile traversal
+for the vector map and the labels (the same selection worked out twice), the label anchors' projections.
+
+**Targets**
+- V2 settles in under 10 s: **met** (6.4 s in all, 158 ms of it settling; debug 8.4 s).
+- A vector map tile decodes and tessellates in under 30 ms: **met for 260 of 261 fixture tiles** (mean 1.2 ms); not
+  for the archipelago tile (106 ms, above).
+- Per-frame CPU under 8 ms with 2000 aircraft: **met for the CPU work of a frame** (builders and map prepare 6.0 ms
+  in the worst realistic case, 3.7 ms with today's default of no aircraft labels); the whole `Engine::frame` on
+  SwiftShader is 6.5–9.9 ms, inflated by caches SwiftShader has just used; the stress case of 2000 aircraft in one
+  city's sky is 8.8 ms.
+
+**For the next engineers**
+- Shots and `render_with` no longer draw while waiting, so a test's settle costs its layers' work, not frames: a
+  dark V2 test pays one or two map passes (about 5 s each on SwiftShader), not 17. A test that wants to see an
+  intermediate frame must draw it itself (`Engine::frame` with `engine.draw = true`, or `MapRenderer::render`).
+- `MAX_WAIT` is now 30 s in release builds; `--wait` and `RUSTRADAR_SHOT_WAIT` override it. The log line `the map
+  settled after … ms (… frames)` replaces guessing from the wall time.
+- A layer whose `pending()` waits for something only `draw` does would now spin until the wait ends: keep pending
+  on what `prepare` takes in (every layer does today).
+- The map's GPU cost on SwiftShader is untouched: the window under SwiftShader or llvmpipe still takes about 5 s a
+  frame at dark V2, and the map crate's unit tests take 15 min here (most of it GPU tests).
+- Ideas not done, each kept exact: one tile selection shared by the vector map and the labels (same `DeckSelect`,
+  same viewport); collision maps of `u16` labels below 65 536 rows, or cleared only where drawn; earcut with a
+  compact node layout (`u32` links, positions apart) for the archipelago tile.
+- The scratchpad folder is shared by every engineer of a run and was emptied once while this item ran: keep files
+  that matter in a subfolder of your own and expect to lose them.
+- `target/release` was deleted after the measurements (disk).

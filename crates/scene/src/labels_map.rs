@@ -318,6 +318,8 @@ pub struct MapLabel {
     pub iata: Option<String>,
     /// [`label_text`].
     pub text: String,
+    /// The feature's name ([`name_of`]): an airport's tooltip says it (G:3419, item T8).
+    pub name: String,
     /// [`label_size`], CSS pixels.
     pub size: f64,
     /// [`label_color`].
@@ -334,6 +336,7 @@ impl MapLabel {
             lat,
             iata: p.is_airport().then(|| p.iata.as_ref().map_or_else(|| "undefined".to_owned(), Prop::js_string)),
             text: label_text(p),
+            name: name_of(p),
             size: label_size(p),
             color: label_color(p),
             priority: label_priority(p),
@@ -995,7 +998,7 @@ mod tests {
     }
 
     fn at(lon: f64, lat: f64, iata: Option<&str>) -> MapLabel {
-        MapLabel { lon, lat, iata: iata.map(str::to_owned), text: "x".into(), size: 12.0, color: PLACE_COLOR, priority: 100.0 }
+        MapLabel { lon, lat, iata: iata.map(str::to_owned), text: "x".into(), name: String::new(), size: 12.0, color: PLACE_COLOR, priority: 100.0 }
     }
 
     #[test]

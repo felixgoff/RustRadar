@@ -19,7 +19,9 @@
 //! - the camera's view: icons or cars, the icons' size step.
 //!
 //! The train hovered in the sidebar's list (`hoveredTrainId`) is drawn highlighted; the list comes
-//! with stage 7 (its hover sets [`Trains::hovered`]), so until then no train is.
+//! with stage 7 (its hover sets [`Trains::hovered`]), so until then no train is. Close in, the car
+//! under the pointer ([`state::pick::Pick::hovered_car`](crate::state::pick::Pick::hovered_car),
+//! item T8) is highlighted as deck's `autoHighlight` does.
 //!
 //! The selected train ([`state::trains::Trains::selected`](crate::state::trains::Trains::selected),
 //! `selectedTrain`), in `buildLayers()`'s order (G:2732-2737):
@@ -77,6 +79,10 @@ impl Trains {
         if self.latest.cars {
             let models = rustradar_map::layers::train_cars::models();
             self.latest.car_layers = self.builder.car_layers(&list, &scene.view, scene.size, models, now_ms);
+            // the car under the pointer (T8: deck's `autoHighlight`)
+            if let Some(car) = state.pick.hovered_car() {
+                self.latest.car_layers.highlight(car);
+            }
         }
         scene.trains.scene = self.latest.clone();
         // the selected train's way ahead from where it is drawn now (G:2737), under the trains

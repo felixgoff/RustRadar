@@ -116,6 +116,8 @@ pub struct Shown {
     pub text: String,
     /// The airport's code, `None` for a place.
     pub iata: Option<String>,
+    /// The feature's name (`nameOf`): an airport's tooltip says it (item T8).
+    pub name: String,
     /// Where it is, degrees.
     pub lon: f64,
     pub lat: f64,
@@ -382,7 +384,7 @@ impl Layer for Labels {
             let label = Label::at(cx.view, [f.lon, f.lat, 0.0], f.size, color);
             glyphs.extend(label.glyphs(placing.text));
             let Some(rect) = labels_map::bounds(labels_map::glyph_quads(placing.text, anchor, f.size * label_scale, perspective)) else { continue };
-            shown.push(Shown { text: f.text.clone(), iata: f.iata.clone(), lon: f.lon, lat: f.lat, anchor, depth, rect, fade, priority: f.priority, color: f.color, size: f.size });
+            shown.push(Shown { text: f.text.clone(), iata: f.iata.clone(), name: f.name.clone(), lon: f.lon, lat: f.lat, anchor, depth, rect, fade, priority: f.priority, color: f.color, size: f.size });
         }
         self.batch.set_glyphs(&cx.gpu.device, &cx.gpu.queue, &glyphs);
         input.drawn.set(shown);

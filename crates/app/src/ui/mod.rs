@@ -8,7 +8,8 @@
 //! Icons (U2): [`icons`] (the Lucide icons of doc 06 §26, rasterised with resvg per size, stroke
 //! and scale, cached as egui textures and tinted when drawn).
 //!
-//! Components: [`map_error`] (B9).
+//! Components: [`map_error`] (B9), [`tooltip`] (the map's tooltip over ships, trains, signals and
+//! airports, T8).
 
 pub mod anim;
 pub mod fonts;
@@ -16,3 +17,4 @@ pub mod icons;
 pub mod map_error;
 pub mod text;
 pub mod theme;
+pub mod tooltip;

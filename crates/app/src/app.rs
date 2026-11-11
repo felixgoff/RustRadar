@@ -33,7 +33,7 @@ use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
-use crate::ui::{map_error, theme};
+use crate::ui::{map_error, theme, tooltip};
 use crate::{Options, platform, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
@@ -233,6 +233,8 @@ impl Engine {
         let mut retry = None;
         let output = self.egui.run_ui(raw_input, |ui| {
             ui_pass(ui, &self.state, &mut actions);
+            // deck's tooltip at the pointer, over the map and under the panels (T8)
+            tooltip::ui(ui.ctx(), self.state.pick.tooltip());
             // over everything else: the card while an error stops the map (B9)
             retry = map_error::ui(ui.ctx(), map, Some(&adapter));
         });

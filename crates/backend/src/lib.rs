@@ -16,6 +16,7 @@ pub mod dwd;
 pub mod export;
 pub mod flow;
 pub mod geocode;
+pub mod images;
 pub mod keys;
 pub mod lines;
 pub mod liveries;

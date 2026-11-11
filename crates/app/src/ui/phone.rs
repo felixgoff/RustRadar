@@ -589,6 +589,27 @@ mod tests {
     }
 
     #[test]
+    fn escape_and_back_lower_a_raised_sheet_last_on_a_phone() {
+        let mut s = state([390.0, 844.0]);
+        assert!(!s.apply(Action::CloseTop, 0.0), "nothing to close");
+        assert!(s.apply(Action::Sheet(Detent::Full), 0.0));
+        assert!(s.closable());
+        assert!(s.apply(Action::ToggleOpen(Open::Filters), 0.0));
+        // the filter panel first, then the sheet, then nothing
+        assert!(s.apply(Action::CloseTop, 0.0));
+        assert!(!s.shortcuts.filters_open());
+        assert_eq!(s.sheet.detent(), Detent::Full);
+        assert!(s.apply(Action::CloseTop, 0.0));
+        assert_eq!(s.sheet.detent(), Detent::Peek);
+        assert!(!s.apply(Action::CloseTop, 0.0));
+        // on the desktop the sheet is not there to lower
+        let mut desk = state([1440.0, 900.0]);
+        desk.apply(Action::Sheet(Detent::Half), 0.0);
+        assert!(!desk.closable());
+        assert!(!desk.apply(Action::CloseTop, 0.0));
+    }
+
+    #[test]
     fn the_counts_with_their_noun() {
         let c = Counts { listed: 1234, total: 5678, where_: "in view" };
         assert_eq!(counts_rest(&c, Mode::Aircraft), " of 5,678 flights in view");

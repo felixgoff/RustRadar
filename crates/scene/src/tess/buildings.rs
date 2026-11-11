@@ -46,8 +46,8 @@
 //! Deviations, invisible: a wall of no length or no height is left out (deck draws it, with no
 //! area); a ring whose ClosePath is missing, or of fewer than three points, is left out
 //! (`rustradar_core::mvt::Feature::rings`; loaders.gl keeps one of three points or more without
-//! its ClosePath, unclosed); the roof's triangles are `crate::geom::earcut`'s (`earcutr`), not
-//! math.gl's, so where a hole touches its outline they can differ (doc 05 §13.1). On the flat map
+//! its ClosePath, unclosed); the roof's triangles are `crate::geom::earcut`'s, the earcut 2.2.4
+//! deck runs (doc 05 §13.1). On the flat map
 //! deck also cuts each tile's buildings at the tile's square (MVTLayer's `ClipExtension`); that is
 //! the layer's (the map side's), as is the stencil rule of the shadows.
 

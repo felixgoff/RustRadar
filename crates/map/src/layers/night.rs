@@ -46,8 +46,6 @@
 //!   the minute has turned.
 //! - The world's copies on the flat map (above): deck draws one world, and today's flat map shows
 //!   the ink past the antimeridian, where the port shows the land's copy.
-//! - earcut is `scene::geom::earcut` (`earcutr`, a port of the earcut deck uses): for parts of a
-//!   few points the same algorithm, ear for ear.
 //!
 //! The scene builder must set [`Input::shown`] (`daylight`, on by default); a `SceneInput::new`
 //! has no night on it.

@@ -10,8 +10,8 @@
 //!
 //! Transliterated as written: `Math.min`/`Math.max`/`Math.hypot` are [`js_min`], [`js_max`] and
 //! [`js_hypot`]; the hull's sort orders as the TypeScript's comparator does for finite numbers
-//! (a NaN cannot make it panic). Triangles come from [`earcut`] (`earcutr`), which may cut a
-//! face with a courtyard into other triangles than math.gl does (same area). `pitched` answers
+//! (a NaN cannot make it panic). Triangles come from [`earcut`] (math.gl's earcut, the same
+//! code as earcut 2.2.4), so they are the TypeScript's own. `pitched` answers
 //! only for the twelve names; the TypeScript's `shape in SHAPES` is also true for the names on
 //! `Object.prototype` ("toString", "constructor", …), for which it then builds nothing.
 

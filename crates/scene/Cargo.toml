@@ -9,7 +9,6 @@ publish = false
 rustradar-core = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
-earcutr = { workspace = true }
 tiny-skia = { workspace = true }
 skrifa = { workspace = true }
 serde = { workspace = true }

@@ -68,6 +68,7 @@ pub mod night;
 pub mod radar;
 pub mod rail;
 pub mod route;
+pub mod ship_models;
 pub mod ships;
 pub mod sightings;
 pub mod sky;

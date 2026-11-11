@@ -36,9 +36,17 @@
 //! Clocks: the ships' frames are timed on this machine's clock, so everything here takes the local
 //! clock as whole Unix milliseconds (`Date.now()`), not the flight feed's.
 //!
-//! Left to other items: the models' meshes and their highlight (H3, from [`ShipsScene::models`]
-//! and [`ShipsScene::hovered`]), the selection halo and ring and the pick records (H4; an icon
-//! carries its ship's list [`ShipIcon::index`] and MMSI).
+//! **Models** (item H3; doc 02 §4.6, `shipMeshLayers`, G:1761-1812): each shown model of
+//! [`ShipsScene::models`] carries what its instance needs: where its ship is drawn, its scale
+//! (metres per model unit across, along, up), its heading (deck's orientation `[0, −heading, 0]` on
+//! the flat map, where models are drawn), the hull's offset east and north (deck's translation),
+//! its colour ([`SHIP_MESH_COLOR`], [`SHIP_MESH_OLD_COLOR`] for an old position: the mesh's own
+//! colours, faded) and whether it is highlighted [`MESH_HIGHLIGHT`] (the ship hovered in the
+//! sidebar's list, `highlightedObjectIndex`; under the pointer, [`ShipsScene::hover_model`]). The
+//! meshes are [`crate::ship_models`]'; the map's `layers::ship_models` draws them.
+//!
+//! Left to other items: the selection halo and ring and the pick records (H4; an icon carries its
+//! ship's list [`ShipIcon::index`] and MMSI, a model its [`ShipModel::index`]).
 
 use std::collections::HashMap;
 
@@ -64,6 +72,12 @@ pub const SHIP_ALPHA: u8 = 235;
 pub const SHIP_OLD_ALPHA: u8 = 105;
 /// The icon of the ship hovered in the sidebar's list (`highlightColor`, G:1860).
 pub const ICON_HIGHLIGHT: [u8; 4] = [55, 142, 240, 200];
+/// A model's colour: its mesh's own colours as they are (`SHIP_MESH_COLOR`, G:1602)...
+pub const SHIP_MESH_COLOR: [u8; 4] = [255, 255, 255, 255];
+/// ...faded for an old position (`SHIP_MESH_OLD_COLOR`, G:1603).
+pub const SHIP_MESH_OLD_COLOR: [u8; 4] = [255, 255, 255, 120];
+/// The model under the pointer or hovered in the sidebar's list (`highlightColor`, G:1803).
+pub const MESH_HIGHLIGHT: [u8; 4] = [55, 142, 240, 110];
 
 /// A ship as the easing sees it: its reported position and heading (as JavaScript reads it) and
 /// its frames.
@@ -89,6 +103,12 @@ pub struct ShipModel {
     /// The zoom from which it is long enough on screen to be a model:
     /// `log2(metersPerPixel(0, lat) · SHIP_MESH_MIN_PX / length)`.
     pub min_zoom: f64,
+    /// [`SHIP_MESH_COLOR`], or [`SHIP_MESH_OLD_COLOR`] for an old position (`getColor`, item H3).
+    pub color: [u8; 4],
+    /// Drawn with [`MESH_HIGHLIGHT`]: the ship hovered in the sidebar's list
+    /// (`highlightedObjectIndex`), or under the pointer ([`ShipsScene::hover_model`]); set at each
+    /// refresh.
+    pub highlighted: bool,
 }
 
 /// The models of one class (`ship-mesh-<class>`), in the list's order.
@@ -202,8 +222,21 @@ pub struct ShipsScene {
     /// (item H3 draws them).
     pub models: Vec<ModelGroup>,
     /// The index in the list of the ship hovered in the sidebar's list (`hoveredShipIndex`), if
-    /// it is on the map: its icon is highlighted here, its model by H3.
+    /// it is on the map: its icon or its model is highlighted.
     pub hovered: Option<usize>,
+}
+
+impl ShipsScene {
+    /// Highlights the model of the ship at list index `index`, if it is drawn as one: deck's
+    /// `autoHighlight` on the model under the pointer (the icons have none). For the pick records
+    /// (item H4) to call with the hovered model.
+    pub fn hover_model(&mut self, index: usize) {
+        for m in self.models.iter_mut().flat_map(|g| g.models.iter_mut()) {
+            if m.index == index {
+                m.highlighted = true;
+            }
+        }
+    }
 }
 
 /// The icons' angles on the screen, kept while neither the camera nor the list changes
@@ -264,6 +297,9 @@ impl ShipBuilder {
                 east,
                 north,
                 min_zoom: ((meters_per_pixel(0.0, ship.lat) * SHIP_MESH_MIN_PX) / place.length).log2(),
+                // the colours are the mesh's own; old positions fade
+                color: if ship.old { SHIP_MESH_OLD_COLOR } else { SHIP_MESH_COLOR },
+                highlighted: false,
             };
             match data.models.iter_mut().find(|g| g.cls == place.cls) {
                 Some(group) => group.models.push(model),
@@ -356,7 +392,9 @@ impl ShipBuilder {
                 .iter()
                 .map(|(g, shown)| {
                     let group = &data.models[*g];
-                    ModelGroup { cls: group.cls, models: shown.iter().map(|&k| data.placed(&group.models[k])).collect() }
+                    // a ship hovered in the sidebar's list lights up as if under the pointer
+                    let model = |k: usize| ShipModel { highlighted: hovered == Some(group.models[k].index), ..data.placed(&group.models[k]) };
+                    ModelGroup { cls: group.cls, models: shown.iter().map(|&k| model(k)).collect() }
                 })
                 .collect();
             (models, split.icons)
@@ -704,5 +742,36 @@ mod tests {
         let mut b = ShipBuilder::new();
         b.set_list(&list, NOW);
         assert_eq!(b.drawn().models()[0].models[0].heading, 12.3, "not 12.300000190734863");
+    }
+
+    /// Close in, models in white (the mesh's own colours) or faded white for an old position; the
+    /// ship hovered in the list, or under the pointer, highlighted; nothing else.
+    #[test]
+    fn models_are_white_faded_when_old_and_highlighted_when_hovered() {
+        let big = |mmsi, kind, old| {
+            let mut s = ship(mmsi, ahead(HARBOUR, 90.0, 300.0 * f64::from(mmsi)), kind, Some(45.0));
+            s.dims = Some([60, 60, 8, 8]);
+            s.old = old;
+            s
+        };
+        let list = [big(1, 4, false), big(2, 4, true), big(3, 6, false), ship(4, HARBOUR, 6, None)];
+        let mut b = ShipBuilder::new();
+        let scene = b.build(&list, true, &view(15.0), SIZE, Some(2), NOW);
+        let models: Vec<&ShipModel> = scene.models.iter().flat_map(|g| &g.models).collect();
+        assert_eq!(models.iter().map(|m| m.index).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(models.iter().map(|m| m.color).collect::<Vec<_>>(), [SHIP_MESH_COLOR, SHIP_MESH_OLD_COLOR, SHIP_MESH_COLOR]);
+        assert_eq!(models.iter().map(|m| m.highlighted).collect::<Vec<_>>(), [false, true, false]);
+        assert_eq!((SHIP_MESH_COLOR, SHIP_MESH_OLD_COLOR, MESH_HIGHLIGHT), ([255; 4], [255, 255, 255, 120], [55, 142, 240, 110]));
+        // the old one's icon would be faded too, but it is a model: only the moored ship is an icon
+        assert_eq!(scene.icons.iter().map(|i| i.index).collect::<Vec<_>>(), [3]);
+        // the hover moves on: the highlight follows it, the kept split is not marked
+        let mut scene = b.build(&list, false, &view(15.0), SIZE, None, NOW);
+        assert!(scene.models.iter().flat_map(|g| &g.models).all(|m| !m.highlighted));
+        // under the pointer
+        scene.hover_model(2);
+        scene.hover_model(3);
+        let lit: Vec<usize> = scene.models.iter().flat_map(|g| &g.models).filter(|m| m.highlighted).map(|m| m.index).collect();
+        assert_eq!(lit, [2]);
+        assert!(scene.icons.iter().all(|i| !i.highlighted), "a moored ship's icon is not lit by the pointer");
     }
 }

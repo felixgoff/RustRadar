@@ -22,8 +22,8 @@
 //! Instances are rebuilt in each `prepare` from the scene and this frame's view (common offsets
 //! from the frame's centre, plan 1.4.2) and written to the GPU only when they change.
 //!
-//! The other rows are other items': the halo under the ships and the ring over them (H4), the
-//! models before the icons close in (H3, from [`ShipsScene::models`]).
+//! Close in, the models are drawn before the icons ([`super::ship_models`], item H3, from
+//! [`ShipsScene::models`]). The halo under the ships and the ring over them are item H4's.
 //!
 //! Stage 2 stub (E4): keep `new(&Init) -> Self` and the row in `layers::ordered`.
 
@@ -110,17 +110,24 @@ impl Icons {
 
 /// Rows 9–11: ship halo, ships, ship ring.
 pub struct Ships {
+    /// Close in, the ships drawn as models (item H3).
+    models: super::ship_models::ShipModels,
     icons: Icons,
 }
 
 impl Ships {
     pub fn new(init: &Init<'_>) -> Self {
-        Ships { icons: Icons::new(init) }
+        Ships { models: super::ship_models::ShipModels::new(init), icons: Icons::new(init) }
     }
 
     /// How many ship icons this frame draws.
     pub fn icons_drawn(&self) -> usize {
         self.icons.len()
+    }
+
+    /// This frame's model draws: deck's layer ids and how many models each draws.
+    pub fn models_drawn(&self) -> Vec<(String, u32)> {
+        self.models.drawn()
     }
 }
 
@@ -131,6 +138,7 @@ impl Layer for Ships {
 
     fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
         let scene = &cx.scene.ships.scene;
+        self.models.prepare(cx, &scene.models);
         self.icons.prepare(cx, &scene.icons);
     }
 
@@ -138,7 +146,8 @@ impl Layer for Ships {
         if cx.pass != Pass::Map {
             return;
         }
-        // the selection halo (H4), then the models (H3) go here, under the icons
+        // the selection halo (H4) goes here, under the models
+        self.models.draw(pass, cx);
         self.icons.draw(pass);
         // the selection ring (H4) goes here, over them
     }

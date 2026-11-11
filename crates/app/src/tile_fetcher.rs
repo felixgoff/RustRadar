@@ -152,6 +152,11 @@ impl TileFetcher for BackendTiles {
         self.rt.spawn(async move {
             let FetchRequest { source, tile, cancel } = request;
             let get = async {
+                // the rail map's tracks (T4): the backend's own rail tiles, kept for routing
+                // (`railtiles:` today), not a URL of the table
+                if &*source == rustradar_map::layers::rail::RAIL_TILES {
+                    return rustradar_backend::rail::tile(tile.z, tile.x, tile.y).await.map(|t| t.map(|b| b.to_vec()));
+                }
                 let source = sources.resolve(&tiles, &source).await?;
                 tiles.tile(&source, tile.z, tile.x, tile.y).await
             };

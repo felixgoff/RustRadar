@@ -24,7 +24,7 @@ pub mod realistic;
 pub mod ships;
 pub mod trains;
 
-use rustradar_map::layers::earth;
+use rustradar_map::layers::{earth, rail};
 use rustradar_map::renderer::map_scale;
 use rustradar_map::SceneInput;
 
@@ -104,6 +104,9 @@ impl SceneBuilder {
         scene.earth = earth::Input::SHOWN;
         self.realistic.build(state, &mut scene);
         self.base.build(state, &mut scene);
+        // the rail map (T4; G:2679) on every basemap, coloured by speed unless it shows the blocks
+        let settings = &state.persisted.settings;
+        scene.rail = rail::Input { shown: settings.rail_map, speeds: rustradar_scene::rail::rail_speeds(settings.rail_map, settings.rail_shows) };
         self.radar.build(state, &mut scene);
         self.ships.build(state, &mut scene);
         self.trains.build(state, &mut scene);
@@ -167,6 +170,26 @@ mod tests {
             assert_eq!(scene.local_now_ms, 1.7e12);
             assert_eq!(scene.feed_now_ms, 1.7e12 + 300.0);
             assert!(scene.earth.shown);
+        }
+    }
+
+    /// The rail map (T4) follows the setting on every basemap, coloured by speed unless it shows
+    /// the signal blocks (`railSpeeds`).
+    #[test]
+    fn the_rail_map_follows_its_settings() {
+        use rustradar_core::settings::RailShows;
+        let view = ViewState { longitude: 18.07, latitude: 59.33, zoom: 9.0, bearing: 0.0, pitch: 0.0, position: None };
+        let clocks = Clocks { local_ms: 1.7e12, feed_ms: 1.7e12 };
+        for basemap in [Basemap::Dark, Basemap::Satellite, Basemap::Realistic] {
+            let mut state = AppState::new(Startup { basemap: Some(basemap), ..Default::default() }, None, None, None, view, [1100.0, 720.0]);
+            let scene = SceneBuilder::default().build(&mut state, clocks, 1.0);
+            assert!(!scene.rail.shown, "off by default");
+            for (shows, speeds) in [(RailShows::Speeds, true), (RailShows::Blocks, false)] {
+                state.persisted.settings.rail_map = true;
+                state.persisted.settings.rail_shows = shows;
+                let scene = SceneBuilder::default().build(&mut state, clocks, 1.0);
+                assert_eq!((scene.rail.shown, scene.rail.speeds), (true, speeds), "{basemap:?} {shows:?}");
+            }
         }
     }
 }

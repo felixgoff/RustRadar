@@ -241,7 +241,7 @@ fn shell_desktop() {
     let Some(gpu) = gpu() else { return };
     let mut s = state();
     // the airport board open: its panel at the panels' place
-    s.flight.set_focus_airport(Some("ARN".into()));
+    s.airport.open("ARN", NOW_MS);
     let mut canvas = Canvas::new(&gpu);
     let (placed, image) = canvas.settle(&gpu, &s, &slots());
     save(&image, "u6-shell-desktop.png");
@@ -345,7 +345,7 @@ fn a_panel_enters_from_8_px_to_the_right() {
     canvas.frame(&gpu, 0.0, &s, &slots);
     canvas.frame(&gpu, 0.5, &s, &slots);
     // the board opens at 1 s: its first frame sizes it, the next shows it moving in
-    s.flight.set_focus_airport(Some("ARN".into()));
+    s.airport.open("ARN", NOW_MS);
     let mut seen = Vec::new();
     for time in [1.0, 1.04, 1.08, 1.2, 1.5] {
         let placed = canvas.frame(&gpu, time, &s, &slots);
@@ -363,9 +363,9 @@ fn a_panel_enters_from_8_px_to_the_right() {
     }
     assert!(seen[1].1 > 1424.5 && seen[1].2 < surface - 1.0, "moving in at 1.04 s: {seen:?}");
     // closed and opened again: it enters again
-    s.flight.set_focus_airport(None);
+    s.airport.close();
     canvas.frame(&gpu, 2.0, &s, &slots);
-    s.flight.set_focus_airport(Some("ARN".into()));
+    s.airport.open("ARN", NOW_MS);
     canvas.frame(&gpu, 2.5, &s, &slots);
     let placed = canvas.frame(&gpu, 2.54, &s, &slots);
     assert!(placed.panel.expect("the panel").1.right() > 1424.5, "entering again");
@@ -375,7 +375,7 @@ fn a_panel_enters_from_8_px_to_the_right() {
 fn a_tall_panel_stops_16_from_the_top() {
     let Some(gpu) = gpu() else { return };
     let mut s = state();
-    s.flight.set_focus_airport(Some("ARN".into()));
+    s.airport.open("ARN", NOW_MS);
     let mut canvas = Canvas::new(&gpu);
     let (placed, _) = canvas.settle(&gpu, &s, &Slots { airport_panel: Some(tall_panel), ..Slots::APP });
     let (_, rect) = placed.panel.expect("the panel");

@@ -52,9 +52,9 @@
 //! asks for are downloaded one airport at a time (`airportRunways([code])`); a failed one is asked
 //! for again a minute later, at the next route that wants it (`reference.svelte.ts`).
 //!
-//! **Map marks** held here until their owners exist: the focused airport (the board's code, item
-//! U13: [`Flight::set_focus_airport`]) and the searched place (item U8: [`Flight::set_place`]),
-//! which the flight scene builder draws.
+//! **Map marks** held here until their owners exist: the searched place (item U8:
+//! [`Flight::set_place`]), which the flight scene builder draws (the open board's airport is
+//! `state::airport`'s).
 //!
 //! **Sources** ([`FlightFeeds`]): the backend, the `--fixture` folder, a test's, or none (no
 //! backend: a stream "fails" at once, as `followFlight` rejects outside Tauri, and nothing is
@@ -75,8 +75,7 @@
 //!   changed them; the camera's step ran before it in that frame, so the lock follows one frame
 //!   later.
 //! - Not ported yet, for want of their owners: closing the ship and the train on a selection
-//!   (items H1, T1), closing the airport board when the aircraft leave the map (U13), the window's
-//!   visibility (adsb.lol is asked while the app runs).
+//!   (items H1, T1), the window's visibility (adsb.lol is asked while the app runs).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -379,7 +378,6 @@ pub struct Flight {
 
     // map marks of other items
     place: Option<MarkedPlace>,
-    focus_airport: Option<String>,
 
     /// The row and `following` last handed to the camera (its own start: none, not following).
     handed: (Option<LiveFlight>, bool),
@@ -525,7 +523,6 @@ impl Flight {
             route: None,
             route_for: None,
             place: None,
-            focus_airport: None,
             handed: (None, false),
         }
     }
@@ -647,16 +644,6 @@ impl Flight {
     /// on Escape, and on any selection on the map). Item U8 calls it.
     pub fn set_place(&mut self, place: Option<MarkedPlace>) {
         self.place = place;
-    }
-
-    /// The airport whose board is open (`boardCode`), marked on the map.
-    pub fn focus_airport(&self) -> Option<&str> {
-        self.focus_airport.as_deref()
-    }
-
-    /// The airport whose board is open, or none (item U13's `boardCode`).
-    pub fn set_focus_airport(&mut self, code: Option<String>) {
-        self.focus_airport = code.map(|c| c.to_uppercase());
     }
 
     /// Lets go of the camera (`following = false`: `pickPlace`, a picked train or ship).

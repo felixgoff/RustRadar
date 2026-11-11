@@ -110,7 +110,7 @@ impl Slots {
         train_list: None,
         ship_list: None,
         airport_panel: None,
-        flight_panel: Some(super::flight_panel::show),
+        flight_panel: None,
         ship_panel: None,
         train_panel: None,
     };
@@ -157,7 +157,7 @@ pub enum Panel {
 pub fn panels(state: &AppState) -> Vec<Panel> {
     let flight = state.flight.selected().is_some();
     let mut open = Vec::new();
-    if state.flight.focus_airport().is_some() && !flight {
+    if state.airport.code().is_some() && !flight {
         open.push(Panel::Airport);
     }
     if flight {
@@ -174,7 +174,7 @@ pub fn panels(state: &AppState) -> Vec<Panel> {
 
 /// Whether a flight, an airport board, a ship or a train is open (`detailOpen`).
 pub fn detail_open(state: &AppState) -> bool {
-    state.flight.selected().is_some() || state.flight.focus_airport().is_some() || state.ships.selected().is_some() || state.trains.selected().is_some()
+    state.flight.selected().is_some() || state.airport.code().is_some() || state.ships.selected().is_some() || state.trains.selected().is_some()
 }
 
 /// How far the map controls stand left of their place (`inset`): [`PANEL_INSET`] while a detail
@@ -374,7 +374,7 @@ mod tests {
         assert!(panels(&s).is_empty());
         assert!(!detail_open(&s));
         assert_eq!(controls_inset(&s), 0.0);
-        s.flight.set_focus_airport(Some("ARN".into()));
+        s.airport.open("ARN", 0.0);
         assert_eq!(panels(&s), [Panel::Airport]);
         assert!(detail_open(&s));
         assert_eq!(controls_inset(&s), 372.0);

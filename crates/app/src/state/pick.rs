@@ -541,7 +541,7 @@ impl AppState {
     /// `onClick` with what the press picked (`None`: nothing pickable). Returns whether the
     /// selection or the marks on the map changed.
     pub fn click_map(&mut self, target: Option<Target>, local_ms: f64) -> bool {
-        let before = (self.flight.selected_id(), self.flight.focus_airport().map(str::to_owned), self.flight.place().is_some(), self.trains.selected_id().map(str::to_owned), self.ships.selected_mmsi());
+        let before = (self.flight.selected_id(), self.airport.code().map(str::to_owned), self.flight.place().is_some(), self.trains.selected_id().map(str::to_owned), self.ships.selected_mmsi());
         match target {
             // onselect(flight): `place = null; select(f.id)`
             Some(Target::Aircraft(id)) => {
@@ -549,12 +549,7 @@ impl AppState {
                 self.select_flight(Some(id), SelectOptions::default(), local_ms);
             }
             // onairport(iata): `openAirport` (`p.iata` is truthy)
-            Some(Target::Label(Some(code))) if !code.is_empty() => {
-                self.flight.set_focus_airport(Some(code));
-                if self.flight.selected_id().is_some() {
-                    self.select_flight(None, SelectOptions::default(), local_ms);
-                }
-            }
+            Some(Target::Label(Some(code))) if !code.is_empty() => self.open_airport(&code, local_ms),
             // a place's name: nothing, not even a deselect
             Some(Target::Label(_)) => {}
             // onshipselect(ship): `place = null; selectShip(s)` (H4)
@@ -581,7 +576,7 @@ impl AppState {
                 self.select_flight(None, SelectOptions::default(), local_ms);
             }
         }
-        before != (self.flight.selected_id(), self.flight.focus_airport().map(str::to_owned), self.flight.place().is_some(), self.trains.selected_id().map(str::to_owned), self.ships.selected_mmsi())
+        before != (self.flight.selected_id(), self.airport.code().map(str::to_owned), self.flight.place().is_some(), self.trains.selected_id().map(str::to_owned), self.ships.selected_mmsi())
     }
 
     /// The hover card's data now (`hoverCard`), or `None` when no flight is hovered.
@@ -829,7 +824,7 @@ mod tests {
         assert!(state.flight.place().is_some());
         // an airport's code: its board, the flight let go, the place kept
         assert!(state.click_map(Some(Target::Label(Some("arn".into()))), NOW));
-        assert_eq!(state.flight.focus_airport(), Some("ARN"));
+        assert_eq!(state.airport.code(), Some("ARN"));
         assert_eq!(state.flight.selected_id(), None);
         assert!(state.flight.place().is_some());
         // nothing: let go, and the place goes

@@ -651,12 +651,7 @@ impl Search {
 
 /// `openAirport(code)`: the board of `code`, the flight, the ship and the train let go.
 fn open_board(state: &mut AppState, code: &str, now_ms: f64) {
-    state.flight.set_focus_airport(Some(code.to_uppercase()));
-    if state.flight.selected_id().is_some() {
-        state.select_flight(None, SelectOptions::default(), now_ms);
-    }
-    state.select_ship(None, now_ms);
-    state.select_train(None, now_ms);
+    state.open_airport(code, now_ms);
 }
 
 /// What a picked row stands for, taken before the box is reset.
@@ -1092,19 +1087,19 @@ mod tests {
         fake.answer_find(0, Ok(vec![airport("ARN"), airport("essa")]));
         s.poll(T0 + 300.0);
         assert!(s.apply(Action::Search(Ask::Pick(Row::Flight(0))), T0 + 400.0));
-        assert_eq!(s.flight.focus_airport(), Some("ARN"));
+        assert_eq!(s.airport.code(), Some("ARN"));
         assert_eq!(s.flight.selected_id(), None, "the flight lets go");
         s.advance_camera(T0 + 10_000.0);
         let v = s.controller.view();
         assert!((v.zoom - AIRPORT_ZOOM).abs() < 1e-9 && (v.latitude - 59.6519).abs() < 1e-6, "{v:?}");
         // an id that is no IATA code flies there and opens nothing
-        s.flight.set_focus_airport(None);
+        s.airport.close();
         type_(&mut s, "essa", T0 + 11_000.0);
         s.poll(T0 + 11_250.0);
         fake.answer_find(1, Ok(vec![airport("essa")]));
         s.poll(T0 + 11_300.0);
         assert!(s.apply(Action::Search(Ask::Pick(Row::Flight(0))), T0 + 11_400.0));
-        assert_eq!(s.flight.focus_airport(), None);
+        assert_eq!(s.airport.code(), None);
     }
 
     #[test]

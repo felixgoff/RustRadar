@@ -309,12 +309,12 @@ fn a_click_on_an_airport_code_opens_its_board_and_on_a_place_does_nothing() {
     let wants = state.pick_frame(renderer.scene(), None, false, &[click(pointer(place))], NOW_MS);
     assert!(!wants.scene);
     assert_eq!(state.flight.selected_id(), Some(flight), "a place's name does not deselect");
-    assert_eq!(state.flight.focus_airport(), None);
+    assert_eq!(state.airport.code(), None);
     // a click on the airport's code: its board, the flight let go
     state.pick_press(renderer.scene(), pointer(airport));
     let wants = state.pick_frame(renderer.scene(), None, false, &[click(pointer(airport))], NOW_MS);
     assert!(wants.scene);
-    assert_eq!(state.flight.focus_airport(), Some(code.as_str()));
+    assert_eq!(state.airport.code(), Some(code.as_str()));
     assert_eq!(state.flight.selected_id(), None);
 }
 

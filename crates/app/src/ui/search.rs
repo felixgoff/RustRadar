@@ -940,7 +940,7 @@ mod tests {
         let mem: Memory = h.ctx.data(|d| d.get_temp(memory_id())).unwrap();
         assert_eq!(mem.active.as_deref(), Some("f:airport:ARN"));
         h.key(Key::Enter);
-        assert_eq!(h.state.flight.focus_airport(), Some("ARN"), "the airport's board");
+        assert_eq!(h.state.airport.code(), Some("ARN"), "the airport's board");
         assert_eq!(h.state.search.query(Mode::Aircraft), "", "reset");
         let shown = h.frame(Vec::new()).unwrap();
         assert!(!shown.focused && shown.dropdown.is_none(), "closed and blurred");
@@ -963,7 +963,7 @@ mod tests {
     #[test]
     fn escape_closes_and_blurs_and_does_not_close_the_top_thing() {
         let mut h = Harness::new();
-        h.state.flight.set_focus_airport(Some("ARN".into()));
+        h.state.airport.open("ARN", 0.0);
         h.frame(Vec::new());
         h.frame(vec![Event::Key { key: Key::Slash, physical_key: Some(Key::Slash), pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
         h.typed("sk1");
@@ -972,7 +972,7 @@ mod tests {
         assert!(shown.dropdown.is_none());
         let shown = h.frame(Vec::new()).unwrap();
         assert!(!shown.focused, "blurred");
-        assert_eq!(h.state.flight.focus_airport(), Some("ARN"), "the board stays: Escape went no further");
+        assert_eq!(h.state.airport.code(), Some("ARN"), "the board stays: Escape went no further");
         assert_eq!(h.state.search.query(Mode::Aircraft), "sk1", "the text stays");
         // focused again: open again, the results still there
         h.frame(vec![Event::Key { key: Key::Slash, physical_key: Some(Key::Slash), pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
@@ -981,7 +981,7 @@ mod tests {
         h.key(Key::Escape);
         h.frame(Vec::new());
         h.key(Key::Escape);
-        assert_eq!(h.state.flight.focus_airport(), None);
+        assert_eq!(h.state.airport.code(), None);
     }
 
     #[test]

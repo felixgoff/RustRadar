@@ -1080,7 +1080,7 @@ impl AppState {
             self.select_flight(None, SelectOptions::default(), now_ms);
         }
         // (the ship closes too: item H1)
-        self.flight.set_focus_airport(None);
+        self.airport.close();
     }
 
     /// `pickTrain(train)`: picked from the list or the search, so the place marker goes, the
@@ -1753,12 +1753,12 @@ mod tests {
     fn a_train_closes_the_flight_and_the_board_and_a_flight_the_train() {
         let canned = Canned::default();
         let (mut s, _tx) = started(&canned);
-        s.flight.set_focus_airport(Some("arn".into()));
+        s.airport.open("arn", T0);
         s.select_flight(Some(42), SelectOptions::default(), T0 + 100.0);
         assert_eq!(s.flight.selected_id(), Some(42));
         s.select_train(Some(train(7, 59.33, 18.07)), T0 + 200.0);
         assert_eq!(s.flight.selected_id(), None);
-        assert_eq!(s.flight.focus_airport(), None);
+        assert_eq!(s.airport.code(), None);
         assert_eq!(s.trains.selected_id(), Some("trafikverket:2026-06-21:7"));
         s.poll(T0 + 300.0);
         assert!(s.trains.selected().is_some(), "no flight is open");

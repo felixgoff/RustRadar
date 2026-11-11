@@ -292,8 +292,8 @@ impl AppState {
             self.select_ship(None, now_ms);
         } else if self.trains.selected_id().is_some() {
             self.select_train(None, now_ms);
-        } else if self.flight.focus_airport().is_some() {
-            self.flight.set_focus_airport(None);
+        } else if self.airport.code().is_some() {
+            self.airport.close();
         } else if self.shortcuts.filters_open {
             self.shortcuts.filters_open = false;
         } else {
@@ -313,7 +313,7 @@ impl AppState {
             || self.flight.selected_id().is_some()
             || self.ships.selected_mmsi().is_some()
             || self.trains.selected_id().is_some()
-            || self.flight.focus_airport().is_some()
+            || self.airport.code().is_some()
             || s.filters_open
     }
 
@@ -626,9 +626,9 @@ mod tests {
         // everything open at once, bottom to top: the filters, the board, a flight opened from it
         // (the board stays under it), the searched place, a menu, the help and the keys dialog
         assert!(s.apply(Action::ToggleOpen(Open::Filters), T0));
-        s.flight.set_focus_airport(Some("arn".into()));
+        s.airport.open("arn", T0);
         s.select_flight(Some(42), SelectOptions { hint: Some(flight(42)), from_board: true, ..Default::default() }, T0);
-        assert_eq!(s.flight.focus_airport(), Some("ARN"), "kept under the flight");
+        assert_eq!(s.airport.code(), Some("ARN"), "kept under the flight");
         s.flight.set_place(Some(MarkedPlace { lon: 18.07, lat: 59.33, name: "Stockholm".into() }));
         assert!(s.apply(Action::SetMenu(Some(Menu::Layers)), T0));
         assert!(s.apply(Action::Open(Open::Help, true), T0));
@@ -643,7 +643,7 @@ mod tests {
                 s.shortcuts.menu().is_some(),
                 s.flight.place().is_some(),
                 s.flight.selected_id().is_some(),
-                s.flight.focus_airport().is_some(),
+                s.airport.code().is_some(),
                 s.shortcuts.filters_open(),
             );
             assert!(s.apply(Action::CloseTop, T0));

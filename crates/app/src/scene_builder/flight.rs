@@ -154,7 +154,7 @@ impl Flight {
             }
         }
 
-        let focus = state.flight.focus_airport().and_then(|code| reference.as_ref().and_then(|r| r.airport(Some(code)).cloned()));
+        let focus = state.airport.code().and_then(|code| reference.as_ref().and_then(|r| r.airport(Some(code)).cloned()));
         marks.focus_airport = focus.as_ref().map(airport_mark);
         marks.place = state.flight.place().map(|p| PlaceMark { lon: p.lon, lat: p.lat, name: p.name.clone() });
 

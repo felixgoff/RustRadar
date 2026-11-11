@@ -785,7 +785,7 @@ impl AppState {
             self.select_flight(None, SelectOptions::default(), now_ms);
         }
         self.select_train(None, now_ms);
-        self.flight.set_focus_airport(None);
+        self.airport.close();
     }
 
     /// `pickShip(ship)`: picked from the list or the search, so the place marker goes, the
@@ -1343,7 +1343,7 @@ mod tests {
         let canned = Canned::default();
         let mut s = loaded(&canned, &[ship(1, 4), ship(2, 3)]);
         let train = demo_trains(57.70, 11.93, T0 as i64)[0].clone();
-        s.flight.set_focus_airport(Some("got".into()));
+        s.airport.open("got", T0);
         s.select_flight(Some(42), SelectOptions::default(), T0 + 100.0);
         assert_eq!(s.flight.selected_id(), Some(42));
         s.select_train(Some(train.clone()), T0 + 150.0);
@@ -1352,7 +1352,7 @@ mod tests {
         s.select_ship(Some(ship(1, 4)), T0 + 200.0);
         assert_eq!(s.flight.selected_id(), None);
         assert_eq!(s.trains.selected(), None);
-        assert_eq!(s.flight.focus_airport(), None);
+        assert_eq!(s.airport.code(), None);
         s.poll(T0 + 300.0);
         assert_eq!(s.ships.selected_mmsi(), Some(1), "nothing else is open");
         // a flight selected afterwards closes the ship at the next poll
@@ -1374,7 +1374,7 @@ mod tests {
         assert_eq!(s.trains.selected(), None);
         s.poll(T0 + 950.0);
         assert_eq!(s.ships.selected_mmsi(), Some(1));
-        s.flight.set_focus_airport(Some("GOT".into()));
+        s.airport.open("GOT", T0 + 1000.0);
         s.poll(T0 + 1000.0);
         assert_eq!(s.ships.selected(), None);
     }

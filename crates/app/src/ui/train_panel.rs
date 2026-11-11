@@ -55,6 +55,12 @@
 //! stops…`). A panel not drawn in the pass before (closed, or another panel over it) starts again,
 //! as the component mounts again.
 //!
+//! **Checked** against Chromium's layout of today's component, server-rendered by Svelte with the
+//! same props and laid out with app.css at 1440 × 900 (a moving train with its stops, a long name
+//! with a stale report, a bare strip with no timetable; `tests/train_ui.rs`): every box, rule,
+//! badge, dot, line and button lands on Chromium's pixels or within one; text sits up to a pixel
+//! lower (egui's baseline).
+//!
 //! Deviations:
 //! - The panel's asks run from the UI pass (as the component's effects do today), not from a part
 //!   of `state`: no state file holds them.

@@ -20,8 +20,8 @@
 //!   (failed) or `No trains in view.`, then the coverage line (12 px `--text-3`); the message's
 //!   parts 12 apart, padding 8, 13 px `--text-2`.
 //! - **None match**: `No trains in view match the search and filters.` and the `.button` `Show all
-//!   trains`: the search emptied ([`Ask::EmptyQuery`]) and the filters back to their defaults with
-//!   the sort kept.
+//!   trains` (in the message's `--text-2`: app.css's buttons inherit their colour): the search
+//!   emptied ([`Ask::EmptyQuery`]) and the filters back to their defaults with the sort kept.
 //! - **Rows** (at most [`LIMIT`]; buttons: a `minmax(0, 1fr) auto` grid, gaps `2px 8px`, padding 8,
 //!   radius 4):
 //!   - line 1: the 8 × 8 swatch (radius 2, the train's map colour, tooltip `{kind} train`) and 8 px
@@ -38,6 +38,12 @@
 //!     highlights its train on the map, off the rows nothing ([`Action::HoverTrain`]).
 //! - **Notes** (11 px `--text-3`, padding `8px 8px 4px`): past [`LIMIT`] rows `{n} more; search or
 //!   filter to narrow the list.`; the coverage line (no top padding after the first note).
+//!
+//! **Checked** against Chromium's layout of today's component, server-rendered by Svelte with the
+//! same props and laid out with app.css at 1440 × 900 (the demo trains sorted by delay with one
+//! selected, loading, failed, none matching; `tests/train_ui.rs`): every box, rule,
+//! badge, swatch and button lands on Chromium's pixels or within one; text sits up to a pixel lower
+//! (egui's baseline).
 //!
 //! Deviations: the digits are Overpass's own (no `tabular-nums` in egui); text takes egui's
 //! baseline, up to a pixel lower than Chromium's (U1); a part's tooltip shows while the pointer

@@ -24,6 +24,15 @@
 //! close button is `Action::Open(Open::Filters, false)`. The train state sends the operators left
 //! out to the backend (`hideTrainOperators`) at its next poll.
 //!
+//! **Checked** against Chromium's layout of today's component, server-rendered by Svelte with the
+//! same props and laid out with app.css at 1440 × 900 (a kind and an operator left out, one no
+//! longer running, an unknown operator; `tests/train_ui.rs`): every box, rule, chip, swatch,
+//! switch and button lands on Chromium's pixels or within one; text sits up to a pixel lower
+//! (egui's baseline).
+//!
+//! The card's content ends on a whole pixel below the height the sidebar solves (at most a pixel
+//! further): egui's debug builds mark a fractional edge in orange.
+//!
 //! Deviations: `tabular-nums` as in the shell (U6); text takes egui's baseline (U1).
 
 use egui::{Color32, Frame, Id, Margin, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2};

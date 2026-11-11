@@ -49,7 +49,7 @@ pub const MIN_CONTENT: f32 = 34.0;
 /// The input's outer minimum width and height (Chromium's `padding: 1px 2px` round it).
 pub const INPUT_MIN_WIDTH: f32 = 80.0 + 2.0 * INPUT_PAD.x;
 pub const INPUT_HEIGHT: f32 = 26.0 + 2.0 * INPUT_PAD.y;
-pub const INPUT_PAD: Vec2 = Vec2::new(2.0, 1.0);
+pub const INPUT_PAD: Vec2 = text_field::NATIVE_PADDING;
 /// A chip: height, left padding, text's maximum width, gap to the button, the button's side.
 pub const CHIP_HEIGHT: f32 = 24.0;
 pub const CHIP_PAD: f32 = theme::SPACE_2;
@@ -104,6 +104,8 @@ pub struct State {
     hovered: Option<usize>,
     /// Where the list was last drawn: the pointer over it does not take the focus from the input.
     list: Option<Rect>,
+    /// Whether the input had the focus when last drawn (`onfocus` / `onblur` are the changes).
+    focused: bool,
 }
 
 impl State {
@@ -286,7 +288,8 @@ impl<'a> TokenInput<'a> {
         self
     }
 
-    /// The input across the available width; `changed()` when a value was added or removed.
+    /// The input across the available width; `changed()` when a value was added or removed. The
+    /// response's rect is the whole input, label to hint.
     pub fn show(mut self, ui: &mut Ui, values: &mut Vec<String>) -> Response {
         let id = ui.make_persistent_id(self.id_salt);
         let edit_id = id.with("edit");
@@ -326,28 +329,31 @@ impl<'a> TokenInput<'a> {
 
         // the field: chips, then the input
         let chip_style = Style::ui(theme::TEXT_SM, 600, theme::AMBER);
-        let chips: Vec<(String, Arc<Galley>)> = values
+        // the text's box is as wide as the text, at most 150 px (the ellipsis may end short of it)
+        let chips: Vec<(String, Arc<Galley>, f32)> = values
             .iter()
             .map(|v| {
                 let t = (self.chip)(v);
+                let w = text::measure(ui.ctx(), text::job(&t, &chip_style)).x.min(CHIP_TEXT_MAX);
                 let g = ui.painter().layout_job(text::truncated(&t, &chip_style, CHIP_TEXT_MAX));
-                (t, g)
+                (t, g, w)
             })
             .collect();
-        let mut sizes: Vec<Vec2> = chips.iter().map(|(_, g)| Vec2::new(CHIP_PAD + g.size().x + CHIP_GAP + REMOVE, CHIP_HEIGHT)).collect();
+        let mut sizes: Vec<Vec2> = chips.iter().map(|(_, _, w)| Vec2::new(CHIP_PAD + w + CHIP_GAP + REMOVE, CHIP_HEIGHT)).collect();
         sizes.push(Vec2::new(INPUT_MIN_WIDTH, INPUT_HEIGHT));
         let content_w = width - 2.0 * (theme::BORDER + PAD.x);
         let (items, content_h) = flow(&sizes, content_w, GAP, MIN_CONTENT);
         let field_h = content_h + 2.0 * (theme::BORDER + PAD.y);
         let (field, _) = ui.allocate_exact_size(Vec2::new(width, field_h), Sense::hover());
+        let mut whole = response.rect.union(field);
         let border = transition_color(ui.ctx(), id.with("border"), if focused { theme::AMBER } else { theme::LINE_CONTROL }, anim::HOVER);
         ui.painter().rect(field, CornerRadius::same(theme::RADIUS_SM), theme::INK, Stroke::new(theme::BORDER, border), StrokeKind::Inside);
         let origin = field.min + Vec2::splat(theme::BORDER) + PAD;
         let mut removed = None;
-        for (i, (full, galley)) in chips.iter().enumerate() {
+        for (i, (full, galley, text_w)) in chips.iter().enumerate() {
             let r = items[i].translate(origin.to_vec2());
             ui.painter().rect_filled(r, CornerRadius::same(theme::RADIUS), theme::AMBER_SOFT);
-            let text_w = galley.size().x;
+            let text_w = *text_w;
             let text_rect = Rect::from_min_size(Pos2::new(r.left() + CHIP_PAD, r.center().y - galley.size().y / 2.0), galley.size());
             ui.painter().galley(text_rect.min, galley.clone(), Color32::PLACEHOLDER);
             tooltip::show(ui.interact(r, id.with(("chip", i)), Sense::hover()), full);
@@ -372,15 +378,18 @@ impl<'a> TokenInput<'a> {
         let query_before = state.query.clone();
         let edit = text_field::edit(ui, edit_id, &mut state.query, input, &Style::ui(theme::TEXT_MD, theme::WEIGHT_REGULAR, theme::TEXT_1), self.placeholder, false);
         ui.ctx().options_mut(|o| o.input_options.surrender_focus_on = surrender);
-        if edit.gained_focus() {
+        // the focus may have come between passes (a request, Tab) as well as in this one
+        let has_focus = edit.has_focus();
+        if has_focus && !state.focused {
             state.focus();
         }
         if state.query != query_before {
             state.input();
         }
-        if edit.lost_focus() {
+        if !has_focus && state.focused {
             state.blur();
         }
+        state.focused = has_focus;
         // a click in the field's padding focuses the input
         let around = ui.interact(field, id.with("field"), Sense::CLICK);
         if around.clicked() && !edit.has_focus() {
@@ -398,6 +407,7 @@ impl<'a> TokenInput<'a> {
             let row_h = 2.0 * ROW_PAD.y + row_line;
             let list_h = 2.0 * (theme::BORDER + LIST_PAD) + suggestions.len() as f32 * row_h;
             let (list, _) = ui.allocate_exact_size(Vec2::new(width, list_h), Sense::hover());
+            whole = whole.union(list);
             state.list = Some(list);
             ui.painter().rect(list, CornerRadius::same(theme::RADIUS), theme::SURFACE_RAISED, Stroke::new(theme::BORDER, theme::LINE), StrokeKind::Inside);
             let mut hovered = None;
@@ -430,10 +440,12 @@ impl<'a> TokenInput<'a> {
         }
         if let Some(hint) = self.hint {
             ui.add_space(GAP - ui.spacing().item_spacing.y);
-            text::label(ui, text::wrapped(hint, &Style::ui(theme::TEXT_XS, theme::WEIGHT_REGULAR, theme::TEXT_3), width), Sense::hover());
+            whole = whole.union(text::label(ui, text::wrapped(hint, &Style::ui(theme::TEXT_XS, theme::WEIGHT_REGULAR, theme::TEXT_3), width), Sense::hover()).rect);
         }
         ui.data_mut(|d| d.insert_temp(id, state));
         response |= edit;
+        // the response covers the whole input: label, field, suggestions and hint
+        response.rect = whole;
         if *values != before {
             response.mark_changed();
         }

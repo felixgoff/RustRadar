@@ -13,7 +13,8 @@
 //! - **Adornments**: an optional leading icon 8 px before the text (the search box's `Search`
 //!   16/1.75, `--text-3`, `--text-2` while focused, at once: only the border has a transition),
 //!   and room kept at the right end for one the caller draws ([`Field::trailing`]: a key cap, a
-//!   spinner, a clear button).
+//!   spinner, a clear button). The search box's input keeps Chromium's `padding: 1px 2px`
+//!   ([`TextField::native_padding`]); the filter and keys fields set their own.
 //! - **Behaviour**: egui's `TextEdit` (so the platform's text input and IME work as for any egui
 //!   field), single line. A click anywhere in the frame focuses it (the input's padding, or the
 //!   search box's `<label>`). Enter does nothing here (no form): the caller reads it. Escape
@@ -39,6 +40,8 @@ pub const SEARCH_HEIGHT: f32 = 36.0 + 2.0 * theme::BORDER;
 pub const PAD_X: f32 = theme::SPACE_3;
 /// Between the icon, the text and the trailing adornment.
 pub const GAP: f32 = theme::SPACE_2;
+/// Chromium's own padding round an `<input>` that does not set one.
+pub const NATIVE_PADDING: Vec2 = Vec2::new(2.0, 1.0);
 /// The character a password shows.
 pub const BULLET: char = '\u{2022}';
 
@@ -65,12 +68,13 @@ pub struct TextField<'a> {
     icon: Option<Spec>,
     trailing: f32,
     width: Option<f32>,
+    native_padding: bool,
 }
 
 impl<'a> TextField<'a> {
     /// The filter panel's field: 13 px, 36 px tall.
     pub fn new(id_salt: impl Hash + std::fmt::Debug, text: &'a mut String) -> Self {
-        TextField { id_salt: Id::NULL.with(id_salt), text, placeholder: "", size: theme::TEXT_MD, height: HEIGHT, password: false, icon: None, trailing: 0.0, width: None }
+        TextField { id_salt: Id::NULL.with(id_salt), text, placeholder: "", size: theme::TEXT_MD, height: HEIGHT, password: false, icon: None, trailing: 0.0, width: None, native_padding: false }
     }
 
     pub fn placeholder(mut self, placeholder: &'a str) -> Self {
@@ -107,6 +111,13 @@ impl<'a> TextField<'a> {
         self
     }
 
+    /// Keep Chromium's own `padding: 1px 2px` round the input inside the frame (the search box's
+    /// `<input>` does not reset it, so its text starts 2 px after the icon's gap).
+    pub fn native_padding(mut self) -> Self {
+        self.native_padding = true;
+        self
+    }
+
     /// The outer width (default: the available width).
     pub fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
@@ -133,7 +144,10 @@ impl<'a> TextField<'a> {
         }
         let right = if self.trailing > 0.0 { inner.right() - self.trailing - GAP } else { inner.right() };
         let trailing = Rect::from_min_max(Pos2::new(inner.right() - self.trailing, inner.top()), inner.max);
-        let text_rect = Rect::from_min_max(Pos2::new(left, inner.top()), Pos2::new(right.max(left), inner.bottom()));
+        let mut text_rect = Rect::from_min_max(Pos2::new(left, inner.top()), Pos2::new(right.max(left), inner.bottom()));
+        if self.native_padding {
+            text_rect = text_rect.shrink2(NATIVE_PADDING);
+        }
 
         let style = Style::ui(self.size, theme::WEIGHT_REGULAR, theme::TEXT_1);
         let response = edit(ui, edit_id, self.text, text_rect, &style, self.placeholder, self.password);

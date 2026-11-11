@@ -177,7 +177,8 @@ impl DualRange {
         painter.rect_filled(span, CornerRadius::ZERO, theme::AMBER);
         for &is_high in &order {
             let (r, focused) = thumbs[usize::from(is_high)];
-            painter.circle(r.center(), THUMB / 2.0 - THUMB_BORDER / 2.0, theme::INK, Stroke::new(THUMB_BORDER, theme::AMBER));
+            // egui strokes a circle outside its radius
+            painter.circle(r.center(), THUMB / 2.0 - THUMB_BORDER, theme::INK, Stroke::new(THUMB_BORDER, theme::AMBER));
             if focused {
                 paint_focus(painter, r, THUMB / 2.0, theme::FOCUS_RING_OFFSET);
             }

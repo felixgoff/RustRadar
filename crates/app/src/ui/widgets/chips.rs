@@ -15,8 +15,10 @@
 //! - **FilterChips** ([`FilterChips`]): the model is the *hidden* values; a click takes a value
 //!   out of `hidden` or appends it; `All` (disabled while nothing is hidden) empties `hidden`,
 //!   `None` (disabled while everything is) hides every option. An optional hint (12 px
-//!   `--text-3`) follows 8 px under the chips. Disabled: legend and chips at opacity 0.45 and
-//!   nothing reacts; the hint stays readable.
+//!   `--text-3`) follows 8 px under the chips. Disabled: legend and chips at opacity 0.45, the
+//!   chips inert; the hint stays readable. The links keep working, as today: HTML leaves the
+//!   buttons in a disabled fieldset's first legend enabled (the ships' disabled Size group shows
+//!   an amber `None`).
 //! - **Text button** ([`text_button`], `.text-button`): padding `2px 4px`, radius 4, 12 px at 600
 //!   in `--amber`; under the pointer `--amber-soft` behind it; disabled `--text-3`.
 
@@ -293,7 +295,9 @@ impl<'a, T: PartialEq + Copy> FilterChips<'a, T> {
                     if self.disabled {
                         ui.multiply_opacity(DISABLED_OPACITY);
                     }
-                    let links = legend(ui, id.with("legend"), self.label, &[("All", enabled && !hidden.is_empty()), ("None", enabled && hidden.len() != self.options.len())]);
+                    // a disabled fieldset leaves its first legend's buttons enabled (HTML's rule):
+                    // today's links still work, faded with the legend
+                    let links = legend(ui, id.with("legend"), self.label, &[("All", !hidden.is_empty()), ("None", hidden.len() != self.options.len())]);
                     ui.add_space(LEGEND_GAP);
                     let shown: Vec<Chip<'_>> = self
                         .options

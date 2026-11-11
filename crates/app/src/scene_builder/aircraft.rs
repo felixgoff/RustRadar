@@ -17,9 +17,12 @@
 //!   ([`state::liveries::Liveries::for_flight`](crate::state::liveries::Liveries::for_flight)),
 //!   with the reference data's airlines.
 //!
-//! Not there yet, so handed in as none: the selected flight and whether the camera follows it
-//! (`selected`, `follow`: item A8's `state::flight` and A10's lock), and the flight under the
-//! pointer (`hoveredId`: A9's `state::pick`). Those items add them to [`Aircraft::inputs`].
+//! - the selected flight's row shown and whether the camera follows it (`selected`, `follow`:
+//!   [`state::flight`](crate::state::flight), item A8): the row takes the feed's place in the
+//!   flights drawn.
+//!
+//! Not there yet, so handed in as none: the flight under the pointer (`hoveredId`: A9's
+//! `state::pick`), which adds it to [`Aircraft::inputs`].
 //!
 //! The result is [`Aircraft::latest`], handed to the aircraft layers as `SceneInput`'s
 //! `aircraft.scene` (`rustradar_map::layers::aircraft::Input`, item A4).
@@ -53,8 +56,8 @@ impl Aircraft {
             show_aircraft: shown_kinds(settings.mode, &settings.also_show).aircraft,
             // the map's label font is embedded: ready from the first frame (`fontsReady`)
             labelling: settings.aircraft_labels,
-            selected: None,
-            follow: false,
+            selected: state.flight.selected().map(|f| f.id),
+            follow: state.flight.following(),
             hovered: None,
         }
     }
@@ -64,9 +67,9 @@ impl Aircraft {
         let inputs = Self::inputs(state, scene);
         let label_scale = state.persisted.settings.label_size;
         let (feed_now, local_now) = (scene.feed_now_ms, scene.local_now_ms);
-        let AppState { aircraft, motion, liveries, taxiways, .. } = state;
+        let AppState { aircraft, motion, liveries, taxiways, flight, .. } = state;
         let reference = aircraft.reference().map(|r| &**r);
-        let shown = aircraft.shown(None);
+        let shown = aircraft.shown(flight.selected());
         self.latest = self.builder.build(
             &inputs,
             assets::published(),

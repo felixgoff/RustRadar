@@ -70,8 +70,9 @@
 //! - A follow stream that cannot start (no backend) ends at once, not a microtask later.
 //! - A stream replaced by a new one (another selection, a resume) is dropped with the events it
 //!   had not delivered; today a late event of the same id from the old channel still lands.
-//! - The camera gets the row shown and `following` at the end of the step that changed them; the
-//!   camera's step ran before it in that frame, so the lock follows one frame later.
+//! - The camera gets the row shown and `following` when they change, at the end of the step that
+//!   changed them; the camera's step ran before it in that frame, so the lock follows one frame
+//!   later.
 //! - Not ported yet, for want of their owners: closing the ship and the train on a selection
 //!   (items H1, T1), closing the airport board when the aircraft leave the map (U13), the window's
 //!   visibility (adsb.lol is asked while the app runs).
@@ -378,6 +379,9 @@ pub struct Flight {
     // map marks of other items
     place: Option<MarkedPlace>,
     focus_airport: Option<String>,
+
+    /// The row and `following` last handed to the camera (its own start: none, not following).
+    handed: (Option<LiveFlight>, bool),
 }
 
 impl Default for Flight {
@@ -521,6 +525,7 @@ impl Flight {
             route_for: None,
             place: None,
             focus_airport: None,
+            handed: (None, false),
         }
     }
 
@@ -1048,10 +1053,14 @@ impl AppState {
     pub fn sync_flight(&mut self, now_ms: f64) {
         let adsb_on = self.persisted.settings.adsb;
         self.flight.sync(&self.aircraft, &mut self.motion, adsb_on, now_ms);
-        if self.camera.selected() != self.flight.selected.as_ref() {
-            self.camera.set_selected(self.flight.selected.clone());
+        // handed over when they change (`state::camera`'s contract), so the camera keeps what
+        // nothing here has changed
+        let now = (self.flight.selected.clone(), self.flight.following);
+        if now != self.flight.handed {
+            self.camera.set_selected(now.0.clone());
+            self.camera.set_follow(now.1);
+            self.flight.handed = now;
         }
-        self.camera.set_follow(self.flight.following);
     }
 }
 

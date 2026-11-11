@@ -37,6 +37,7 @@ pub mod shortcuts;
 pub mod sidebar;
 pub mod text;
 pub mod theme;
+pub mod toast;
 pub mod tooltip;
 pub mod train_panel;
 pub mod widgets;

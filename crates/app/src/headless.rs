@@ -87,6 +87,13 @@ pub fn render(options: &Options) -> Result<Shot, Error> {
 
 /// [`render`] on `gpu`.
 pub fn render_on(gpu: &Gpu, options: &Options) -> Result<Shot, Error> {
+    render_on_with(gpu, options, |_| {})
+}
+
+/// [`render_on`], with `setup` given the app's state before the first frame: settings a test wants
+/// other than today's defaults (the shot's own folders hold no saved ones), such as the night off
+/// under a check of the land.
+pub fn render_on_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppState)) -> Result<Shot, Error> {
     let rt = requests::runtime()?;
     let folders = ShotFolders::new()?;
     // the frames are drawn in a loop here: nothing needs waking
@@ -104,6 +111,7 @@ pub fn render_on(gpu: &Gpu, options: &Options) -> Result<Shot, Error> {
         state.liveries = Liveries::with_source(None);
         state.taxiways = Taxiways::with_source(None);
     }
+    setup(&mut state);
 
     let mut engine = Engine::new(gpu, FORMAT, state);
     // the shot's tiles, never the network's; the frames are drawn in a loop: nothing to wake

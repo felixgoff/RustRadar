@@ -80,7 +80,7 @@ fn edge(image: &Image, angle: f64) -> f64 {
 /// backend started. The disc of land is `(50,50,50)` on `(30,30,30)`, its edge where E1 puts the
 /// globe's limb (within 1.5 px, as E5's own check), at scale 1 and 2. From an empty `--fixture`
 /// folder, so no tile is drawn: the dark map's sea (B2) has the ink's colour and would hide the
-/// disc's edge.
+/// disc's edge; and with the *daylight* setting off: the night (B5) shades the disc's night side.
 #[test]
 fn a_shot_draws_the_globe_of_e5_with_the_backend_started() {
     let Some(gpu) = gpu() else { return };
@@ -88,7 +88,7 @@ fn a_shot_draws_the_globe_of_e5_with_the_backend_started() {
     std::fs::create_dir_all(&no_tiles).expect("an empty fixture folder");
     for (size, scale) in [([1100, 720], 1.0), ([640, 400], 2.0)] {
         let options = Options { size: Some(size), scale: Some(scale), now_ms: Some(1.76e12), fixture: Some(no_tiles.clone()), ..Default::default() };
-        let shot = headless::render_on(&gpu, &options).expect("shot");
+        let shot = headless::render_on_with(&gpu, &options, |state| state.persisted.settings.daylight = false).expect("shot");
         eprintln!("{size:?} at {scale}: {}", shot.adapter);
         assert!(shot.backend, "the backend started");
         let image = &shot.image;
@@ -130,7 +130,9 @@ fn a_satellite_shot_has_the_earth_but_no_land() {
 }
 
 /// The binary itself: `--screenshot` with every request sent to a proxy that is not there (no
-/// network) starts the backend, writes the PNG and exits cleanly, without a panic.
+/// network) starts the backend, writes the PNG and exits cleanly, without a panic. At a fixed
+/// `--now` in the morning over V1's centre, so the night (B5) is not over it whatever the time the
+/// test runs.
 #[test]
 fn the_binary_writes_a_shot_without_the_network() {
     let Some(_gpu) = gpu() else { return };
@@ -138,7 +140,7 @@ fn the_binary_writes_a_shot_without_the_network() {
     let _ = std::fs::remove_file(&out);
     let dead = "http://127.0.0.1:9";
     let run = Command::new(env!("CARGO_BIN_EXE_rustradar-app"))
-        .args(["--screenshot", out.to_str().expect("utf-8 path"), "--size", "800x500", "--view", "35,10,1.9"])
+        .args(["--screenshot", out.to_str().expect("utf-8 path"), "--size", "800x500", "--view", "35,10,1.9", "--now", "1782036000000"])
         .env("HTTPS_PROXY", dead)
         .env("HTTP_PROXY", dead)
         .env("ALL_PROXY", dead)

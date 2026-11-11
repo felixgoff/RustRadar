@@ -8,7 +8,7 @@
 //!
 //! | Builder | Fills | Item |
 //! |---|---|---|
-//! | [`base`] | the vector map (dark basemap) | B2 |
+//! | [`base`] | the vector map (dark basemap), the night, the place labels, the plain buildings | B2, B4, B5, B7 |
 //! | [`aircraft`] | aircraft icons, meshes, shadows, labels and their pick records | A3 |
 //! | [`flight`] | the selected flight's trail, route, markers and ring | A8 |
 //! | [`trains`] | train icons, cars, the selected train's route | T2, T6 |

@@ -9,6 +9,7 @@ pub mod shots;
 
 use std::path::Path;
 
+use rustradar_app::state::AppState;
 use rustradar_app::{Options, headless};
 use rustradar_core::geo::Basemap;
 use rustradar_map::Gpu;
@@ -42,7 +43,14 @@ pub fn options(view: ViewState, basemap: Basemap, size: [u32; 2], scale: f64) ->
 /// checked.
 #[track_caller]
 pub fn app_shot(gpu: &Gpu, options: &Options) -> Image {
-    let shot = headless::render_on(gpu, options).unwrap_or_else(|e| panic!("the shot of {options:?}: {e}"));
+    app_shot_with(gpu, options, |_| {})
+}
+
+/// [`app_shot`] with `setup` given the app's state before the first frame
+/// (`headless::render_on_with`): settings other than today's defaults.
+#[track_caller]
+pub fn app_shot_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppState)) -> Image {
+    let shot = headless::render_on_with(gpu, options, setup).unwrap_or_else(|e| panic!("the shot of {options:?}: {e}"));
     let (size, scale) = headless::canvas(options);
     assert_eq!([shot.image.width, shot.image.height], headless::surface_size(size, scale), "the shot's size");
     shot.image

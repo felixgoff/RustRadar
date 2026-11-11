@@ -8,6 +8,10 @@
 //! (`tile_fetcher::TileSources::app` reads OpenFreeMap's TileJSON once; until it has, or if it
 //! cannot, no tile arrives and only the land shows, as today).
 //!
+//! The night (item B5; G:2692) follows the *daylight* setting, and the place and airport labels
+//! (item B4; G:2743-2752) the *labels* and *label size* settings, on every basemap; the flight
+//! builder then fills in the airports whose labels give way to markers (`labels.marked`).
+//!
 //! The plain buildings (item B7; G:2694) follow the *buildings* setting
 //! ([`buildings::Input::shown`]; the layer works out the flat map and the basemap), and with them
 //! the scene's key light is aimed at the sun (`scene.aim_lights`, G:2723-2724: from the real sun
@@ -15,19 +19,30 @@
 
 use rustradar_core::geo::Basemap;
 use rustradar_map::SceneInput;
-use rustradar_map::layers::{buildings, vector_map};
+use rustradar_map::layers::{buildings, labels, night, vector_map};
 
 use crate::state::AppState;
 
-/// The base map: the vector map's tile source on the dark basemap.
+/// The base map: the vector map's tile source on the dark basemap, the night, the place and
+/// airport labels, the plain buildings.
 #[derive(Debug, Default)]
-pub struct Base {}
+pub struct Base {
+    /// Where the labels layer writes the labels it draws, kept across refreshes so that picking
+    /// (A9) reads the labels on screen, not an empty list until the next frame.
+    drawn: labels::Drawn,
+}
 
 impl Base {
     /// Fills its layers' inputs in `scene` from `state` (see [`super::SceneBuilder::build`]).
     pub fn build(&mut self, state: &AppState, scene: &mut SceneInput) {
+        let settings = &state.persisted.settings;
         scene.vector_map = vector_map::Input { shown: state.basemap() == Basemap::Dark };
-        let buildings = state.persisted.settings.buildings;
+        // the night (B5; `if (daylight && !realistic)`, G:2692): the layer leaves realistic out
+        scene.night = night::Input { shown: settings.daylight };
+        // the place and airport labels (B4; G:2743-2752) on every basemap while the *labels*
+        // setting is on, at the *label size*; the flight builder adds the airports it marks
+        scene.labels = labels::Input { shown: settings.labels, label_scale: settings.label_size, marked: Vec::new(), drawn: self.drawn.clone() };
+        let buildings = settings.buildings;
         scene.buildings = buildings::Input { shown: buildings };
         scene.aim_lights(buildings);
     }
@@ -70,6 +85,61 @@ mod tests {
             assert_eq!(scene.buildings.shown, on);
             assert_eq!(scene.lights, rustradar_map::renderer::scene_lights(&v4, clocks.feed_ms, on));
             assert_eq!(scene.lights == rustradar_map::pipelines::mesh::LightRig::new(), !on, "aimed only over buildings");
+        }
+    }
+
+    /// The night follows *daylight* (B5) and the labels *labels* and *label size* (B4), on every
+    /// basemap (the night layer itself leaves realistic out).
+    #[test]
+    fn the_night_and_the_labels_follow_their_settings() {
+        let clocks = Clocks { local_ms: 1.7e12, feed_ms: 1.7e12 };
+        for basemap in [Basemap::Dark, Basemap::Satellite, Basemap::Realistic] {
+            for on in [true, false] {
+                let mut state = AppState::new(Startup { basemap: Some(basemap), ..Default::default() }, None, None, None, V3, [1100.0, 720.0]);
+                state.persisted.settings.daylight = on;
+                state.persisted.settings.labels = !on;
+                state.persisted.settings.label_size = if on { 1.25 } else { 0.85 };
+                let scene = SceneBuilder::default().build(&mut state, clocks, 1.0);
+                assert_eq!(scene.night.shown, on, "{basemap:?}");
+                assert_eq!(scene.labels.shown, !on, "{basemap:?}");
+                assert_eq!(scene.labels.label_scale, state.persisted.settings.label_size);
+                assert!(scene.labels.marked.is_empty(), "no flight, no airport marked");
+            }
+        }
+        // today's defaults: both on, at size 1
+        let mut state = AppState::new(Startup { basemap: Some(Basemap::Dark), ..Default::default() }, None, None, None, V3, [1100.0, 720.0]);
+        let scene = SceneBuilder::default().build(&mut state, clocks, 1.0);
+        assert!(scene.night.shown && scene.labels.shown);
+        assert_eq!(scene.labels.label_scale, 1.0);
+    }
+
+    /// B5's acceptance through the whole app (`--screenshot --view 0,180,1.9 --now <equinox noon
+    /// UTC>`, default settings): the antipode of the sun is ocean in full night, the dark sea
+    /// `(30,30,30)` four times toward `(2,6,14)` at 46/255, `(15,17,21)` ± 2; at `--view 0,0,1.9`
+    /// the sea under the sun keeps `(30,30,30)`.
+    #[test]
+    fn an_equinox_noon_shot_has_the_night_opposite_the_sun() {
+        let gpu = match Gpu::headless() {
+            Ok(gpu) => gpu,
+            Err(GpuError::NoAdapter(e)) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        for (lon, expected) in [(180.0, [15, 17, 21]), (0.0, [30, 30, 30])] {
+            let options = Options {
+                view: Some(ViewState { latitude: 0.0, longitude: lon, zoom: 1.9, pitch: 0.0, bearing: 0.0, position: None }),
+                basemap: Some(Basemap::Dark),
+                size: Some([1100, 720]),
+                scale: Some(1.0),
+                now_ms: Some(1_774_008_000_000.0),
+                ..Default::default()
+            };
+            let shot = headless::render_on(&gpu, &options).expect("the shot");
+            let centre = shot.image.pixel(550, 360);
+            eprintln!("0,{lon},1.9 at equinox noon: centre {centre:?}");
+            assert!((0..3).all(|i| i32::from(centre[i]).abs_diff(expected[i]) <= 2), "0,{lon}: {centre:?}, expected {expected:?}");
         }
     }
 

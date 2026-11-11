@@ -207,6 +207,9 @@ fn scene() -> SceneInput {
     let shot = touchdown + 15_000.0;
     let view = ViewState { longitude: 4.86, latitude: 52.315, zoom: 11.0, pitch: 0.0, bearing: 0.0, position: None };
     let mut state = AppState::new(Startup { basemap: Some(Basemap::Dark), ..Default::default() }, None, None, None, view, SIZE);
+    // the trail is measured against the bare land: the night (B5), over Schiphol at the recorded
+    // landing's hour, is off
+    state.persisted.settings.daylight = false;
     let now = Arc::new(Mutex::new(reports[0].ms + 500.0));
     let reference = ReferenceData {
         airports: vec![airport(1, "AMS", "EHAM", 52.3086, 4.7639, -11), airport(2, "MUC", "EDDM", 48.3538, 11.7861, 1487)],

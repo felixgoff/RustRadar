@@ -4,6 +4,8 @@
 //!   them): a real wgpu error stops the map at its last picture, the card goes over its middle,
 //!   "Copy details" copies the details of this device, "Retry" clears the error and the map draws
 //!   again with no card;
+//! - the window's side (`app::Engine`): the card from the engine's own UI pass, and a lost device
+//!   rebuilt at once through `Engine::rebuild`, the same frame drawn on the new device;
 //! - the device lost under the app's whole scene (the scene builders' scene with the synthetic
 //!   snapshot: the vector map with true-width runways, buildings with their shadows, aircraft
 //!   models with gear and shadows, icons, labels; and the satellite map's imagery), the renderer
@@ -22,6 +24,7 @@ use common::NOW_MS;
 use common::fixtures::{self, ARLANDA, STOCKHOLM, WORLD};
 use common::shots::{NamedView, Rect, V3, V4, bounds, close, components, count, gpu, pixel, save};
 use egui::{Event, PointerButton, Pos2, RawInput, Vec2};
+use rustradar_app::app::Engine;
 use rustradar_app::scene_builder::SceneBuilder;
 use rustradar_app::state::{AppState, Startup};
 use rustradar_app::theme;
@@ -337,4 +340,98 @@ fn the_card_goes_over_a_stopped_map_until_retry() {
     let again = window.read(&gpu);
     save(&again, "b9-map-error-retried.png");
     assert_eq!(differing_pixels(&again, &picture), 0, "the map drawn again, no card");
+}
+
+/// The engine's frames on `target` at `NOW_MS` until the map waits for nothing (tiles in), then
+/// one more for egui; egui's clock moves a second each frame. Returns the last frame.
+fn settle(engine: &mut Engine, gpu: &Gpu, target: &Offscreen, egui_s: &mut f64) -> Image {
+    for _ in 0..1000 {
+        engine_frame(engine, gpu, target, egui_s, Vec::new());
+        if !engine.map.pending() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!engine.map.pending(), "still loading: {:?}", engine.map.pending_layers());
+    engine_frame(engine, gpu, target, egui_s, Vec::new())
+}
+
+/// One frame of `engine` onto `target`, as the window's `View::redraw` draws one.
+fn engine_frame(engine: &mut Engine, gpu: &Gpu, target: &Offscreen, egui_s: &mut f64, events: Vec<Event>) -> Image {
+    *egui_s += 1.0;
+    let raw = RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(SIZE[0] as f32, SIZE[1] as f32))),
+        time: Some(*egui_s),
+        events,
+        ..Default::default()
+    };
+    engine.frame(gpu, target.view(), SIZE, 1.0, raw, NOW_MS);
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    target.read(gpu).expect("read back")
+}
+
+/// The window's side, as `app.rs` wires it (`Engine` under `View`): a validation error shows the
+/// card through the engine's own UI pass and its Retry brings the map back; a lost device asks the
+/// window for a new one at once, once; `Engine::rebuild` on the new device (the map, egui's
+/// renderer and a fresh egui context) draws the same frame again, pixel for pixel.
+#[test]
+fn the_engine_shows_the_card_and_rebuilds_after_a_lost_device() {
+    let Some(shared) = gpu() else { return };
+    let first = own_device(&shared);
+    let startup = Startup { basemap: Some(Basemap::Dark), fixture: None, demo: false };
+    let state = AppState::new(startup, None, None, None, V3.view(), SIZE.map(f64::from));
+    let mut engine = Engine::new(&first, FORMAT, state);
+    let tiles = Arc::new(DirTiles::fixtures());
+    engine.map.set_tiles(tiles.clone(), None);
+    engine.map.catch_errors(&first, None);
+    let mut egui_s = 0.0;
+    let target = Offscreen::new(&first, SIZE);
+    let before = settle(&mut engine, &first, &target, &mut egui_s);
+    assert!(tiles.misses().is_empty(), "the fixtures lack {:?}", tiles.misses());
+    assert_eq!(engine.map.error(), None);
+    assert!(!engine.take_rebuild(), "no rebuild while the map draws");
+
+    // a validation error: the card over the stopped map, from the engine's UI pass
+    let _ = first.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("broken"),
+        size: 16,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::VERTEX,
+        mapped_at_creation: false,
+    });
+    assert!(engine.map.error().is_some_and(|e| !e.lost));
+    assert!(!engine.take_rebuild(), "an error that is not a loss needs no new device");
+    engine_frame(&mut engine, &first, &target, &mut egui_s, Vec::new());
+    let shown = engine_frame(&mut engine, &first, &target, &mut egui_s, Vec::new());
+    let changed = Image {
+        width: shown.width,
+        height: shown.height,
+        rgba: shown.rgba.chunks_exact(4).zip(before.rgba.chunks_exact(4)).flat_map(|(a, b)| if a == b { [0; 4] } else { [255; 4] }).collect(),
+    };
+    let card = bounds(&changed, Rect::new(0, 0, shown.width, shown.height), |p| p[0] == 255).expect("the card over the map");
+    assert!((i64::from(card.width()) - 454).abs() <= 1, "{card:?}");
+    let row = Rect::new(card.x0 + 1, card.y1 - 17 - 32 - 2, card.width() - 2, 36);
+    let mut buttons = components(&shown, row, |p| p[0] == p[1] && p[1] == p[2] && (75..=114).contains(&p[0]));
+    buttons.retain(|c| c.pixels > 100);
+    buttons.sort_by_key(|c| c.bounds.x0);
+    assert_eq!(buttons.len(), 2, "{buttons:?}");
+    engine_frame(&mut engine, &first, &target, &mut egui_s, click(buttons[1].bounds.centre()));
+    assert_eq!(engine.map.error(), None, "Retry cleared the error");
+    let again = engine_frame(&mut engine, &first, &target, &mut egui_s, Vec::new());
+    assert_eq!(differing_pixels(&again, &before), 0, "the map again, no card");
+
+    // the device lost: a new one at once, asked once
+    first.device.destroy();
+    let _ = first.device.poll(wgpu::PollType::wait_indefinitely());
+    assert!(engine.map.error().is_some_and(|e| e.lost));
+    assert!(engine.take_rebuild(), "a new device at once");
+    assert!(!engine.take_rebuild(), "asked once for this loss");
+    let second = own_device(&shared);
+    engine.rebuild(&second, FORMAT);
+    let target = Offscreen::new(&second, SIZE);
+    let after = settle(&mut engine, &second, &target, &mut egui_s);
+    save(&after, "b9-engine-after-the-rebuild.png");
+    assert_eq!(engine.map.error(), None);
+    assert!(!engine.take_rebuild());
+    let differing = differing_pixels(&after, &before);
+    assert_eq!(differing, 0, "the rebuilt engine draws the same frame ({differing} pixels differ)");
 }

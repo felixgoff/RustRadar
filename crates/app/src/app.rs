@@ -19,6 +19,7 @@ use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use rustradar_backend::{Backend, BackendEvent, Dirs, Wake};
+use rustradar_map::renderer::Retry;
 use rustradar_map::{Gpu, MapRenderer};
 use rustradar_scene::camera::ViewState;
 use tokio::runtime::Handle;
@@ -32,6 +33,7 @@ use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
+use crate::ui::map_error;
 use crate::{Options, platform, theme, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
@@ -97,6 +99,11 @@ pub struct Engine {
     egui_renderer: egui_wgpu::Renderer,
     /// The scale factor and basemap the last scene was built for.
     built_for: Option<(f64, rustradar_core::geo::Basemap)>,
+    /// The error card's Retry asked for a new device after a loss ([`Self::take_rebuild`], B9).
+    rebuild: bool,
+    /// A rebuild was already asked for the loss the map has now: a second loss in a row waits
+    /// for Retry with the card up (plan 2.2: the card shows only if the rebuilt map fails too).
+    rebuilt_for_loss: bool,
 }
 
 impl Engine {
@@ -115,7 +122,36 @@ impl Engine {
             egui_renderer: egui_wgpu::Renderer::new(&gpu.device, surface_format, egui_wgpu::RendererOptions::default()),
             egui,
             built_for: None,
+            rebuild: false,
+            rebuilt_for_loss: false,
         }
+    }
+
+    /// Whether the window must open a new device and call [`Self::rebuild`] before it draws
+    /// (B9), and takes the ask: at once when the map's device is lost (plan 2.2), once for that
+    /// loss; again when the error card's Retry asks for one. The window asks before each frame.
+    pub fn take_rebuild(&mut self) -> bool {
+        match self.map.error() {
+            Some(error) if error.lost && !self.rebuilt_for_loss => {
+                self.rebuilt_for_loss = true;
+                self.rebuild = true;
+            }
+            Some(_) => {}
+            None => self.rebuilt_for_loss = false,
+        }
+        std::mem::take(&mut self.rebuild)
+    }
+
+    /// Remakes everything of the engine that lived on the old device on `gpu` (B9): the map
+    /// ([`MapRenderer::rebuild`], which keeps its scene, camera and tiles) and egui's renderer, with
+    /// a fresh egui context, since a context sends its font atlas whole only once. The window
+    /// makes its `egui_winit::State` again on [`Self::egui`].
+    pub fn rebuild(&mut self, gpu: &Gpu, surface_format: wgpu::TextureFormat) {
+        self.map.rebuild(gpu, surface_format);
+        self.egui_renderer = egui_wgpu::Renderer::new(&gpu.device, surface_format, egui_wgpu::RendererOptions::default());
+        self.egui = egui::Context::default();
+        theme::apply(&self.egui);
+        self.pacer.force();
     }
 
     /// The map's share of a window event (after egui has seen it): the controller's gestures unless
@@ -185,9 +221,20 @@ impl Engine {
 
         // 5 ui
         let mut actions = Vec::new();
-        let output = self.egui.run_ui(raw_input, |ui| ui_pass(ui, &self.state, &mut actions));
+        let adapter = gpu.adapter.get_info();
+        let map = &mut self.map;
+        let mut retry = None;
+        let output = self.egui.run_ui(raw_input, |ui| {
+            ui_pass(ui, &self.state, &mut actions);
+            // over everything else: the card while an error stops the map (B9)
+            retry = map_error::ui(ui.ctx(), map, Some(&adapter));
+        });
         for action in actions {
             self.state.apply(action, local_ms);
+        }
+        // after a lost device the card's Retry asks the window for a new one (B9)
+        if retry == Some(Retry::Rebuild) {
+            self.rebuild = true;
         }
         // what may take the keys as of this pass (B8; no dialog closes the shortcuts yet), and
         // deck's cursor over the map (a pointing hand over anything pickable: A9)
@@ -216,7 +263,9 @@ impl Engine {
             // tiles and textures on their way: their answers wake the loop too, but look again soon
             at_ms = at_ms.min(local_ms + 50.0);
         }
-        let now = self.state.controller.in_transition() || self.state.controller.is_dragging() || repaint_delay.is_zero();
+        // Retry cleared the error: the map draws again in the next frame
+        let retried = retry == Some(Retry::Redraw);
+        let now = self.state.controller.in_transition() || self.state.controller.is_dragging() || repaint_delay.is_zero() || retried || self.rebuild;
         (platform_output, Next { now, at_ms })
     }
 
@@ -347,6 +396,8 @@ impl View {
         let mut engine = Engine::new(&gpu, config.format, state);
         // the map's tiles: the --fixture folder's, else the network through the backend's cache (T1)
         tile_fetcher::connect(&mut engine.map, &engine.state);
+        // wgpu's errors and a lost device stop the map with the error card, not the app (B9)
+        engine.map.catch_errors(&gpu, engine.state.requests.as_ref().map(|r| r.wake()));
         let egui_input = egui_winit::State::new(
             engine.egui.clone(),
             egui::ViewportId::ROOT,
@@ -374,6 +425,10 @@ impl View {
     /// Draws a frame and presents it. `None` when there was nothing to draw onto (suspended,
     /// occluded, a surface being remade).
     fn redraw(&mut self, local_ms: f64) -> Option<Next> {
+        // the map's device lost: a new one before drawing (B9)
+        if self.engine.take_rebuild() {
+            self.rebuild();
+        }
         let surface = self.surface.as_ref()?;
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -407,6 +462,33 @@ impl View {
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
         Some(next)
+    }
+
+    /// A new device for the map after the old one was lost (B9; plan 2.2): the adapter and device
+    /// opened again on the window's surface, the surface configured on them, the engine's GPU parts
+    /// and egui's window state made again. If no device opens, the map stays stopped with the card
+    /// (its Retry tries again).
+    fn rebuild(&mut self) {
+        let Some(surface) = &self.surface else { return };
+        match Gpu::for_surface(self.gpu.instance.clone(), surface) {
+            Ok(gpu) => {
+                surface.configure(&gpu.device, &self.config);
+                self.engine.rebuild(&gpu, self.config.format);
+                self.egui_input = egui_winit::State::new(
+                    self.engine.egui.clone(),
+                    egui::ViewportId::ROOT,
+                    &self.window,
+                    Some(self.window.scale_factor() as f32),
+                    self.window.theme(),
+                    Some(gpu.device.limits().max_texture_dimension_2d as usize),
+                );
+                log::info!("the map has a new device: {}", gpu.describe());
+                self.gpu = gpu;
+            }
+            // the lost device's error stays: the card's Retry asks again
+            Err(e) => log::error!("no new graphics device for the map: {e}"),
+        }
+        self.window.request_redraw();
     }
 }
 

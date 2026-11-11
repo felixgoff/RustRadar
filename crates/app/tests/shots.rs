@@ -17,7 +17,7 @@ mod common;
 use std::f64::consts::TAU;
 
 use common::shots::*;
-use common::{app_shot, options};
+use common::{app_shot_with, options};
 use rustradar_app::Options;
 use rustradar_core::geo::Basemap;
 use rustradar_map::frame::{FrameSlot, ViewFrame, model, power_of_two_scale};
@@ -25,7 +25,7 @@ use rustradar_map::headless::Image;
 use rustradar_map::layers::{DrawCx, Init, Layer, PrepareCx, earth};
 use rustradar_map::pipelines::{circle, fill, icon, mesh, path, shadow, text};
 use rustradar_map::state::DrawState;
-use rustradar_map::SceneInput;
+use rustradar_map::{Gpu, SceneInput};
 use rustradar_scene::camera::{GLOBE_EARTH_RADIUS_M, GLOBE_RADIUS, GlobeViewport, ViewState, lng_lat_to_world, world_to_lng_lat};
 use rustradar_scene::geom::path::{LocalMercator, Paint, PathBuilder};
 use rustradar_scene::text::{Face, FontSettings, GlyphAtlas, OVERPASS, TextLayout};
@@ -258,6 +258,15 @@ fn globe_options(view: ViewState, basemap: Basemap, size: [u32; 2], scale: f64) 
     Options { fixture: Some(empty), ..options(view, basemap, size, scale) }
 }
 
+/// An E5 shot of `options` (from [`globe_options`]) through the app's `--screenshot` path, with the
+/// *daylight* setting off: the night (B5) shades the globe wherever the sun is down at `NOW_MS`,
+/// over E5's earth and land, and has its own shots (`map::layers::night`, and through the app in
+/// `scene_builder::base`).
+#[track_caller]
+fn globe_shot(gpu: &Gpu, options: &Options) -> Image {
+    app_shot_with(gpu, options, |state| state.persisted.settings.daylight = false)
+}
+
 /// What a tile-less shot of `frame` (CSS pixels; `scale` device pixels each) shows on `basemap` at
 /// the device pixel centre `xy`, with how many levels it may be off: on the dark map the land
 /// rectangle, exactly `(50,50,50)`, where the pixel's ray meets the surface within ±85.06°; past
@@ -370,7 +379,7 @@ fn assert_disc_at_the_limb(image: &Image, frame: &ViewFrame, scale: f64, ratio: 
 fn v1_is_a_disc_of_land_on_ink_at_the_limb() {
     let Some(gpu) = gpu() else { return };
     for (size, scale) in [(SHOT_SIZE, 1.0), ([640, 400], 2.0)] {
-        let image = app_shot(&gpu, &globe_options(V1.view(), Basemap::Dark, size, scale));
+        let image = globe_shot(&gpu, &globe_options(V1.view(), Basemap::Dark, size, scale));
         save(&image, &format!("e18-v1-dark-{}x{}@{scale}.png", size[0], size[1]));
         let frame = ViewFrame::new(&V1.view(), [f64::from(size[0]), f64::from(size[1])], scale, 0.0);
         let edge = assert_disc_at_the_limb(&image, &frame, scale, 1.0, Basemap::Dark, &format!("V1 {size:?} at {scale}"));
@@ -394,7 +403,7 @@ fn v1_is_a_disc_of_land_on_ink_at_the_limb() {
 #[test]
 fn v1_on_satellite_is_the_earth_sphere_below_the_surface() {
     let Some(gpu) = gpu() else { return };
-    let image = app_shot(&gpu, &globe_options(V1.view(), Basemap::Satellite, SHOT_SIZE, 1.0));
+    let image = globe_shot(&gpu, &globe_options(V1.view(), Basemap::Satellite, SHOT_SIZE, 1.0));
     save(&image, "e18-v1-satellite.png");
     let frame = ViewFrame::new(&V1.view(), [1100.0, 720.0], 1.0, 0.0);
     let globe = frame.viewport.globe().expect("the globe");
@@ -418,7 +427,7 @@ fn latitude_60_shows_the_globe_twice_as_large_as_the_equator() {
     let mut disc_px = Vec::new();
     for latitude in [0.0, 60.0] {
         let v = ViewState { latitude, ..V1.view() };
-        let image = app_shot(&gpu, &globe_options(v, Basemap::Dark, SHOT_SIZE, 1.0));
+        let image = globe_shot(&gpu, &globe_options(v, Basemap::Dark, SHOT_SIZE, 1.0));
         save(&image, &format!("e18-latitude-{latitude}.png"));
         let frame = ViewFrame::new(&v, [1100.0, 720.0], 1.0, 0.0);
         let globe = frame.viewport.globe().expect("the globe");
@@ -445,7 +454,7 @@ fn latitude_60_shows_the_globe_twice_as_large_as_the_equator() {
 fn every_named_view_shows_land_where_e1_puts_the_globe() {
     let Some(gpu) = gpu() else { return };
     for named in VIEWS {
-        let image = app_shot(&gpu, &globe_options(named.view(), Basemap::Dark, SHOT_SIZE, 1.0));
+        let image = globe_shot(&gpu, &globe_options(named.view(), Basemap::Dark, SHOT_SIZE, 1.0));
         save(&image, &format!("e18-{}-dark.png", named.name.to_lowercase()));
         if named.is_flat() {
             assert_eq!(coverage(&image, Rect::whole(&image), LAND, 0), 1.0, "{} is land everywhere", named.name);

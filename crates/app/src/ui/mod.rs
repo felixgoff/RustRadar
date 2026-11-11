@@ -5,10 +5,14 @@
 //! dot's own face, truncation with an ellipsis) and [`anim`] (the `--ease-out` curve, the
 //! durations of doc 06 §27, reduced motion).
 //!
+//! Icons (U2): [`icons`] (the Lucide icons of doc 06 §26, rasterised with resvg per size, stroke
+//! and scale, cached as egui textures and tinted when drawn).
+//!
 //! Components: [`map_error`] (B9).
 
 pub mod anim;
 pub mod fonts;
+pub mod icons;
 pub mod map_error;
 pub mod text;
 pub mod theme;

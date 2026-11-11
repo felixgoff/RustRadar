@@ -5040,6 +5040,7 @@ dependencies = [
  "jni 0.22.4",
  "log",
  "png 0.18.1",
+ "resvg",
  "rustradar-backend",
  "rustradar-core",
  "rustradar-map",

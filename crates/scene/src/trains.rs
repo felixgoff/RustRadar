@@ -27,6 +27,21 @@
 //! sidebar's list highlighted [`ICON_HIGHLIGHT`]. The icons' cells are in
 //! [`crate::atlas::trains`].
 //!
+//! **Cars** (item T3; doc 02 §5.5–5.6, `drawnCars` and `carLayers`, G:1950-2029). Close in, after
+//! [`TrainBuilder::build`], [`TrainBuilder::car_layers`] lays each train in the flat viewport's
+//! bounds out as its cars ([`drawn_cars`]): as many as its operator says (else four), back from
+//! where it is drawn along its frames and then the track behind it (`core::train_cars`), each car
+//! the chord between its ends ([`car_places`]); a train with one of the operator models
+//! ([`TrainModels`], `static/trains`) has that model's cars at their own lengths, end to end, any
+//! other plain cars ([`car_mesh`] by its shape) of 25.4 m with 0.6 m between, and a train whose way
+//! is not known has them in a row back along its heading. Each car gets its level on the track
+//! (a tunnel or a bridge's height) and its colour: the train's, or white for a model's car (its
+//! livery is in its vertex colours), alpha [`TUNNEL_TRAIN_ALPHA`] in a tunnel. [`CarLayers`] holds
+//! them with the width and height every car is drawn at (never thinner than 3 px), and
+//! [`CarLayers::layers`] splits them into deck's layers: per mesh, in the order of its first car,
+//! the cars on the ground and on bridges, then those in tunnels. The map draws them
+//! (`map::layers::train_cars`).
+//!
 //! Clocks: the trains' frames are timed on this machine's clock, so everything here takes the
 //! local clock as whole Unix milliseconds (`Date.now()`), not the flight feed's.
 //!
@@ -38,12 +53,15 @@
 use std::collections::HashMap;
 
 use rustradar_core::geo::meters_per_pixel;
-use rustradar_core::model::{Train, f32_as_js};
-use rustradar_core::train_cars::CAR_M;
+use rustradar_core::model::{Train, TrainShape, f32_as_js};
+use rustradar_core::train_cars::{CAR_M, DEFAULT_CARS, GAP_M, car_lines_with};
 use rustradar_core::trains::{Frame, LatLon, heading_along, position_along, train_color_of, train_icon, train_icon_size};
 
+use crate::blocks::view_bounds;
 use crate::bridges::{GROUND, Level, level_at};
 use crate::camera::{FLAT_ABOVE_ZOOM, ViewState};
+use crate::geom::js_max;
+use crate::train_models::{CAR_HEIGHT_M, CAR_WIDTH_M, TrainModels, car_mesh, car_places};
 
 /// A train's alpha as drawn (G:1881).
 pub const TRAIN_ALPHA: u8 = 240;
@@ -344,6 +362,183 @@ pub fn icons(list: &[&Train], drawn: &Drawn, zoom: f64, hovered: Option<&str>) -
         .collect()
 }
 
+// --- Cars (item T3) --------------------------------------------------------------------------
+
+/// A car is never thinner on the screen than this, px, nor less than 1.3 times this tall
+/// (`MIN_CAR_WIDTH_PX`, G:1958).
+pub const MIN_CAR_WIDTH_PX: f64 = 3.0;
+/// The colour of an operator model's car: it wears its own livery in its vertex colours
+/// (`MODEL_WHITE`, G:1959).
+pub const MODEL_WHITE: [u8; 4] = [255, 255, 255, 255];
+/// The car under the pointer (`autoHighlight` with `highlightColor`, G:2022).
+pub const CAR_HIGHLIGHT: [u8; 4] = [55, 142, 240, 110];
+
+/// Which mesh a car is drawn with (`DrawnCar.mesh`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CarShape {
+    /// A plain car ([`car_mesh`]): the train's leading car, or one of its coaches, of its shape.
+    Plain { lead: bool, shape: TrainShape },
+    /// Car `index` of the operator model `model` ([`TrainModels::cars`]: 0 its leading car, 1 a
+    /// middle one, 2 its last).
+    Model { model: String, index: usize },
+}
+
+impl CarShape {
+    /// The mesh's key (`mesh.key`), which names its layers: `"<shape>-cab"` or
+    /// `"<coach shape>-coach"` for a plain car, `"<model>-<index>"` for a model's.
+    pub fn key(&self) -> String {
+        match self {
+            CarShape::Plain { lead, shape } => car_mesh(*lead, *shape).0.to_owned(),
+            CarShape::Model { model, index } => format!("{model}-{index}"),
+        }
+    }
+}
+
+/// A car on the map (`DrawnCar`): one of the cars of the train at `train` in the list, on the
+/// ground, up on a bridge or in a tunnel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawnCar {
+    /// Its middle, `[lon, lat]`: halfway between its ends.
+    pub at: [f64; 2],
+    /// The way it points, from its back to its front: degrees clockwise from north.
+    pub heading: f64,
+    /// How long it is drawn, metres: the chord between its ends.
+    pub length: f64,
+    /// The train it belongs to: its index in the list.
+    pub train: usize,
+    pub mesh: CarShape,
+    /// One of an operator model's cars (all of its train's are).
+    pub modelled: bool,
+    /// Where it is: its height (metres up on a bridge) and whether it is in a tunnel.
+    pub level: Level,
+    /// `getColor`: the train's colour at [`TRAIN_ALPHA`], or [`MODEL_WHITE`] for a model's car;
+    /// alpha [`TUNNEL_TRAIN_ALPHA`] in a tunnel.
+    pub color: [u8; 4],
+    /// Under the pointer: drawn with [`CAR_HIGHLIGHT`] (deck's `autoHighlight`). Nothing sets it
+    /// here; the map's picking does (item T8).
+    pub highlighted: bool,
+}
+
+/// The cars of `list`'s trains as `drawn`, at `now_ms` (`drawnCars`, G:1970-1995): each train in
+/// `bounds` (`[west, south, east, north]` padded by 0.01°; none without bounds, as on the globe)
+/// as many cars as its operator says, else [`DEFAULT_CARS`], back from where it is drawn along its
+/// frames and then its tail ([`car_lines_with`], [`car_places`]). A train with an operator model
+/// in `models` has that model's cars, each as long as the real one, end to end; any other has
+/// plain cars of 25.4 m with 0.6 m between. A train whose way does not give all its cars (no
+/// frames) has them in a row straight back along its heading.
+pub fn drawn_cars(list: &[&Train], drawn: &Drawn, bounds: Option<[f64; 4]>, models: Option<&TrainModels>, now_ms: i64) -> Vec<DrawnCar> {
+    let Some([west, south, east, north]) = bounds else {
+        return Vec::new();
+    };
+    let mut cars = Vec::new();
+    for (i, &train) in list.iter().enumerate().take(drawn.len()) {
+        let [lon, lat, _] = drawn.positions[i];
+        if lon < west - 0.01 || lon > east + 0.01 || lat < south - 0.01 || lat > north + 0.01 {
+            continue;
+        }
+        let count = train.cars.unwrap_or(DEFAULT_CARS).max(1) as usize;
+        // a train with a model of its own: its cars, each as long as the real one
+        let model = |k: usize| models.and_then(|m| m.model_car(train.model.as_deref(), k, count));
+        let modelled = model(0).is_some();
+        // (the TypeScript's `model(k)!.length`: every model has its three cars)
+        let length_of = |k: usize| if modelled { model(k).map_or(f64::NAN, |car| car.length) } else { CAR_M - GAP_M };
+        let gap = if modelled { 0.0 } else { GAP_M };
+        let mut places = car_places(&car_lines_with(&train.frames, &train.tail, count, now_ms, length_of, gap));
+        if places.len() != count {
+            let h = drawn.headings[i].unwrap_or(0.0) * std::f64::consts::PI / 180.0;
+            let k = (lat * std::f64::consts::PI / 180.0).cos();
+            let behind = (lat - h.cos() / 1000.0, lon - h.sin() / 1000.0 / if truthy(k) { k } else { 1e-6 });
+            places = car_places(&car_lines_with(&[(lat, lon, now_ms)], &[(lat, lon), behind], count, now_ms, length_of, gap));
+        }
+        for (k, place) in places.iter().enumerate() {
+            let mesh = match (model(k), models, &train.model) {
+                (Some(car), Some(models), Some(name)) => {
+                    let index = models.cars(name).and_then(|cars| cars.iter().position(|c| std::ptr::eq(c, car))).unwrap_or(0);
+                    CarShape::Model { model: name.clone(), index }
+                }
+                _ => CarShape::Plain { lead: k == 0, shape: train.shape.unwrap_or(TrainShape::Regional) },
+            };
+            let level = level_of(train, place.at, Some(place.heading));
+            let [r, g, b, a] = if modelled { MODEL_WHITE } else { drawn.colors[i] };
+            let color = [r, g, b, if level.tunnel { TUNNEL_TRAIN_ALPHA } else { a }];
+            cars.push(DrawnCar { at: place.at, heading: place.heading, length: place.length, train: i, mesh, modelled, level, color, highlighted: false });
+        }
+    }
+    cars
+}
+
+/// One of the cars' mesh layers (`train-car-meshes-<key>` and `train-car-meshes-<key>-tunnel`):
+/// the cars of one mesh, on the ground and on bridges or in tunnels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CarLayer {
+    /// deck's layer id.
+    pub id: String,
+    /// The mesh's key ([`CarShape::key`]).
+    pub key: String,
+    /// The mesh the layer draws (its first car's).
+    pub mesh: CarShape,
+    /// In tunnels: seen faintly through the ground (`THROUGH_GROUND`); else depth tested and
+    /// written (`NO_CULL`).
+    pub tunnel: bool,
+    /// Its cars, as indices into [`CarLayers::cars`], in their order.
+    pub cars: Vec<usize>,
+}
+
+/// Close in, the trains as their cars in 3D (`carLayers`, G:1998-2029).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CarLayers {
+    /// The cars of the trains in view, train by train, each train's front car first.
+    pub cars: Vec<DrawnCar>,
+    /// Every car's width as drawn, metres: [`CAR_WIDTH_M`], or [`MIN_CAR_WIDTH_PX`] px where that
+    /// is wider, so a train far off is still seen whole.
+    pub width: f64,
+    /// Every car's height as drawn, metres: [`CAR_HEIGHT_M`], or 1.3 × [`MIN_CAR_WIDTH_PX`] px.
+    pub height: f64,
+}
+
+impl CarLayers {
+    /// The cars of `drawn_cars` at `mpp` metres to a pixel.
+    pub fn new(cars: Vec<DrawnCar>, mpp: f64) -> Self {
+        // never thinner than a few pixels, so a train far off is still seen whole
+        let width = js_max(CAR_WIDTH_M, MIN_CAR_WIDTH_PX * mpp);
+        let height = js_max(CAR_HEIGHT_M, MIN_CAR_WIDTH_PX * 1.3 * mpp);
+        CarLayers { cars, width, height }
+    }
+
+    /// The mesh layers in draw order: for each mesh the cars take, in the order of its first car
+    /// (`new Map(cars.map((c) => [c.mesh.key, c]))`), its cars on the ground and up on bridges,
+    /// then its cars in tunnels; a layer without cars is left out (deck draws an empty layer as
+    /// nothing).
+    pub fn layers(&self) -> Vec<CarLayer> {
+        let mut keys: Vec<(String, &CarShape)> = Vec::new();
+        for car in &self.cars {
+            let key = car.mesh.key();
+            if !keys.iter().any(|(k, _)| *k == key) {
+                keys.push((key, &car.mesh));
+            }
+        }
+        let mut layers = Vec::new();
+        for (key, mesh) in keys {
+            for tunnel in [false, true] {
+                let cars: Vec<usize> = (0..self.cars.len()).filter(|&c| self.cars[c].mesh.key() == key && self.cars[c].level.tunnel == tunnel).collect();
+                if !cars.is_empty() {
+                    let id = format!("train-car-meshes-{key}{}", if tunnel { "-tunnel" } else { "" });
+                    layers.push(CarLayer { id, key: key.clone(), mesh: mesh.clone(), tunnel, cars });
+                }
+            }
+        }
+        layers
+    }
+}
+
+/// The cars of `list`'s trains as `drawn`, at `now_ms`, in `view` on a canvas of `size` CSS px
+/// (`carLayers`): those of the trains in the flat viewport's bounds ([`drawn_cars`]), sized at the
+/// view centre's metres per pixel.
+pub fn car_layers(list: &[&Train], drawn: &Drawn, view: &ViewState, size: [f64; 2], models: Option<&TrainModels>, now_ms: i64) -> CarLayers {
+    let mpp = meters_per_pixel(view.zoom, view.latitude);
+    CarLayers::new(drawn_cars(list, drawn, view_bounds(view, size), models, now_ms), mpp)
+}
+
 /// What the train layers draw at one scene refresh.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrainsScene {
@@ -351,6 +546,10 @@ pub struct TrainsScene {
     pub icons: Vec<TrainIcon>,
     /// Close in, the trains are drawn as their cars (item T3) and have no icon.
     pub cars: bool,
+    /// Close in ([`Self::cars`]): the cars. [`TrainBuilder::build`] leaves them empty;
+    /// [`TrainBuilder::car_layers`] makes them from where it drew the trains, since it needs the
+    /// canvas and the operator models.
+    pub car_layers: CarLayers,
 }
 
 /// The trains' part of the scene refresh: the motion kept between refreshes.
@@ -378,9 +577,17 @@ impl TrainBuilder {
         self.motion.step(list, now_ms);
         // close in, the cars; further out, a train is an icon lying on the ground along its way
         if cars_close_in(view.zoom, view.latitude) {
-            return TrainsScene { icons: Vec::new(), cars: true };
+            return TrainsScene { cars: true, ..TrainsScene::default() };
         }
-        TrainsScene { icons: icons(list, self.motion.drawn(), view.zoom, hovered), cars: false }
+        TrainsScene { icons: icons(list, self.motion.drawn(), view.zoom, hovered), ..TrainsScene::default() }
+    }
+
+    /// Close in (a [`TrainsScene::cars`] refresh), after [`Self::build`] of the same refresh: the
+    /// cars of `list`'s trains where they are drawn ([`car_layers`]), in `view` on a canvas of
+    /// `size` CSS px, at `now_ms`, with the operator models `models` where loaded (plain cars
+    /// without).
+    pub fn car_layers(&self, list: &[&Train], view: &ViewState, size: [f64; 2], models: Option<&TrainModels>, now_ms: i64) -> CarLayers {
+        car_layers(list, self.motion.drawn(), view, size, models, now_ms)
     }
 
     /// Where the trains are drawn (for the cars, the route and the ring).
@@ -692,7 +899,7 @@ mod tests {
         let mut builder = TrainBuilder::new();
         let view = ViewState { longitude: STOCKHOLM.1, latitude: STOCKHOLM.0, zoom: 14.0, bearing: 0.0, pitch: 0.0, position: None };
         let scene = builder.build(&list, true, &view, None, NOW + 5000);
-        assert_eq!(scene, TrainsScene { icons: Vec::new(), cars: true });
+        assert_eq!(scene, TrainsScene { cars: true, ..TrainsScene::default() });
         // they still move close in
         let pos = builder.drawn().positions[0];
         assert!((metres(ll(STOCKHOLM), LatLon { lat: pos[1], lon: pos[0] }) - 50.0).abs() < 1e-6);
@@ -723,6 +930,279 @@ mod tests {
         motion.step(&list, NOW + 2000);
         // the single frame is where it is drawn once the easing ends
         assert_eq!(motion.drawn().positions[0], [STOCKHOLM.1, STOCKHOLM.0 + 0.001, 0.0]);
+    }
+
+    // --- cars ---
+
+    /// Flat metres between two `[lon, lat]` points.
+    fn apart(a: [f64; 2], b: [f64; 2]) -> f64 {
+        metres(LatLon { lat: a[1], lon: a[0] }, LatLon { lat: b[1], lon: b[0] })
+    }
+
+    fn lonlat((lat, lon): (f64, f64)) -> [f64; 2] {
+        [lon, lat]
+    }
+
+    /// The front and back of `car`: half its length ahead of and behind its middle.
+    fn ends(car: &DrawnCar) -> ([f64; 2], [f64; 2]) {
+        let at = (car.at[1], car.at[0]);
+        (lonlat(ahead(at, car.heading, car.length / 2.0)), lonlat(ahead(at, car.heading, -car.length / 2.0)))
+    }
+
+    /// Wide bounds round Stockholm.
+    const AROUND: Option<[f64; 4]> = Some([17.9, 59.2, 18.2, 59.4]);
+
+    /// `list` taken in and stepped to `now`, and its cars there.
+    fn cars_of(list: &[&Train], models: Option<&TrainModels>, now: i64) -> Vec<DrawnCar> {
+        let mut motion = TrainMotion::new();
+        motion.set_list(list, NOW);
+        motion.step(list, now);
+        drawn_cars(list, motion.drawn(), AROUND, models, now)
+    }
+
+    /// The operator models of `static/trains`.
+    fn models() -> TrainModels {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../static/trains");
+        let read = |name: &str| std::fs::read(dir.join(name)).expect("static/trains");
+        TrainModels::parse(&read("index.json"), &read("meshes.bin")).expect("the models")
+    }
+
+    /// Running east at 10 m/s from Stockholm, its track known 200 m back, three cars.
+    fn eastward() -> Train {
+        let mut t = running("east", STOCKHOLM, 90.0, 10.0, NOW);
+        t.tail = [0.0, 100.0, 200.0].map(|m| ahead(STOCKHOLM, 90.0, -m)).to_vec();
+        t.cars = Some(3);
+        t
+    }
+
+    #[test]
+    fn cars_run_back_from_the_head_along_the_tail_front_car_first() {
+        let t = eastward();
+        let cars = cars_of(&[&t], None, NOW);
+        assert_eq!(cars.len(), 3);
+        // standing where its frames start: the front car's front there, each 25.4 m long and
+        // 0.6 m behind the one before, pointing east, back along the tail
+        for (k, car) in cars.iter().enumerate() {
+            let (front, back) = ends(car);
+            assert!((apart(front, lonlat(STOCKHOLM)) - 26.0 * k as f64).abs() < 1e-6, "car {k}: {car:?}");
+            assert!((apart(back, lonlat(STOCKHOLM)) - (26.0 * k as f64 + 25.4)).abs() < 1e-6, "car {k}");
+            assert!(back[0] < front[0] && back[0] < STOCKHOLM.1, "behind the head, to the west");
+            assert!((car.heading - 90.0).abs() < 1e-6 && (car.length - 25.4).abs() < 1e-6);
+            assert_eq!((car.train, car.modelled, car.level, car.color), (0, false, GROUND, [96, 212, 160, 240]));
+        }
+        // 5 s on, 50 m along its frames: the front car's front there
+        let cars = cars_of(&[&t], None, NOW + 5000);
+        let (front, _) = ends(&cars[0]);
+        assert!(apart(front, lonlat(ahead(STOCKHOLM, 90.0, 50.0))) < 1e-6);
+        // the last car's back 3 · 26 − 0.6 m behind it
+        let (_, back) = ends(&cars[2]);
+        assert!((apart(back, front) - (3.0 * 26.0 - 0.6)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cars_follow_a_bend_in_the_tail_as_chords() {
+        // the track behind runs 50 m west, then south
+        let corner = ahead(STOCKHOLM, 90.0, -50.0);
+        let mut t = eastward();
+        t.tail = vec![STOCKHOLM, corner, ahead(corner, 0.0, -100.0)];
+        let cars = cars_of(&[&t], None, NOW);
+        // the first along the straight; the second across the corner, shorter (its chord) and
+        // turned; the third along the run south, pointing north (to its front)
+        assert!((cars[0].heading - 90.0).abs() < 1e-6);
+        assert!(cars[1].length < 25.0 && cars[1].heading > 80.0 && cars[1].heading < 90.0, "{:?}", cars[1]);
+        assert!(cars[2].heading.min(360.0 - cars[2].heading) < 1e-6 && (cars[2].length - 25.4).abs() < 1e-6, "{:?}", cars[2]);
+        let (_, back) = ends(&cars[2]);
+        assert!(back[1] < corner.0, "south of the corner");
+    }
+
+    #[test]
+    fn as_many_cars_as_the_operator_says_else_four_at_least_one() {
+        let mut t = eastward();
+        for (cars, want) in [(Some(3), 3), (Some(12), 12), (None, 4), (Some(0), 1), (Some(1), 1)] {
+            t.cars = cars;
+            assert_eq!(cars_of(&[&t], None, NOW).len(), want, "{cars:?}");
+        }
+    }
+
+    #[test]
+    fn a_train_without_a_way_has_its_cars_in_a_row_back_along_its_heading() {
+        // no frames, no tail: straight back from where it stands
+        let mut t = train("still", STOCKHOLM, Some(90.0));
+        t.cars = Some(2);
+        let cars = cars_of(&[&t], None, NOW);
+        assert_eq!(cars.len(), 2);
+        let (front, _) = ends(&cars[0]);
+        assert!(apart(front, lonlat(STOCKHOLM)) < 1e-6);
+        for car in &cars {
+            assert!((car.heading - 90.0).abs() < 1e-6 && (car.length - 25.4).abs() < 1e-6 && car.at[0] < STOCKHOLM.1);
+        }
+        // without a heading: back to the south, pointing north
+        let mut t = train("box", STOCKHOLM, None);
+        t.cars = Some(2);
+        let cars = cars_of(&[&t], None, NOW);
+        assert!(cars.iter().all(|c| c.heading.min(360.0 - c.heading) < 1e-6 && c.at[1] < STOCKHOLM.0), "{cars:?}");
+        // a single frame elsewhere lays out no car (each would be a point there): the row too, from
+        // where it is drawn
+        let mut t = train("one", STOCKHOLM, Some(0.0));
+        t.frames = vec![(STOCKHOLM.0 + 0.01, STOCKHOLM.1, NOW)];
+        t.cars = Some(2);
+        let cars = cars_of(&[&t], None, NOW);
+        let (front, _) = ends(&cars[0]);
+        assert!(cars.len() == 2 && apart(front, lonlat(STOCKHOLM)) < 1e-6, "{cars:?}");
+    }
+
+    #[test]
+    fn only_the_trains_in_view_have_cars_and_none_without_bounds() {
+        let a = eastward();
+        let near = train("near", (59.405, 18.0), Some(0.0));
+        let far = train("far", (59.42, 18.0), Some(0.0));
+        let west = train("west", (59.3, 17.895), Some(0.0));
+        let list = [&a, &near, &far, &west];
+        let cars = cars_of(&list, None, NOW);
+        // inside the bounds padded by 0.01°
+        let trains: Vec<usize> = cars.iter().map(|c| c.train).collect();
+        assert_eq!(trains, [0, 0, 0, 1, 1, 1, 1, 3, 3, 3, 3]);
+        let mut motion = TrainMotion::new();
+        motion.set_list(&list, NOW);
+        assert!(drawn_cars(&list, motion.drawn(), None, None, NOW).is_empty(), "the globe");
+        // the bounds of the view: the flat viewport's, none on the globe
+        let view = ViewState { longitude: STOCKHOLM.1, latitude: STOCKHOLM.0, zoom: 16.0, bearing: 0.0, pitch: 0.0, position: None };
+        let layers = car_layers(&list, motion.drawn(), &view, [800.0, 600.0], None, NOW);
+        assert_eq!(layers.cars.iter().map(|c| c.train).collect::<Vec<_>>(), [0, 0, 0]);
+        let globe = ViewState { zoom: 12.0, ..view };
+        assert!(car_layers(&list, motion.drawn(), &globe, [800.0, 600.0], None, NOW).cars.is_empty());
+    }
+
+    #[test]
+    fn plain_cars_take_the_trains_shape_and_colour() {
+        let mut t = eastward();
+        t.cars = Some(3);
+        let keys = |t: &Train| cars_of(&[t], None, NOW).iter().map(|c| c.mesh.key()).collect::<Vec<_>>();
+        assert_eq!(keys(&t), ["regional-cab", "regional-coach", "regional-coach"], "regional without a shape");
+        for (shape, cab, coach) in [
+            (TrainShape::HighSpeed, "highSpeed-cab", "regional-coach"),
+            (TrainShape::DoubleDeck, "doubleDeck-cab", "doubleDeck-coach"),
+            (TrainShape::Loco, "loco-cab", "regional-coach"),
+            (TrainShape::Railcar, "railcar-cab", "regional-coach"),
+        ] {
+            t.shape = Some(shape);
+            assert_eq!(keys(&t), [cab, coach, coach]);
+        }
+        let cars = cars_of(&[&t], None, NOW);
+        assert_eq!(cars[0].mesh, CarShape::Plain { lead: true, shape: TrainShape::Railcar });
+        assert_eq!(cars[1].mesh, CarShape::Plain { lead: false, shape: TrainShape::Railcar });
+        // SJ's silver at the trains' alpha
+        t.operator = Some("SJ".into());
+        assert!(cars_of(&[&t], None, NOW).iter().all(|c| c.color == [232, 232, 236, 240]));
+    }
+
+    #[test]
+    fn a_trains_operator_model_gives_its_cars_their_own_lengths_end_to_end_in_white() {
+        let models = models();
+        let mut t = eastward();
+        t.tail = [0.0, 200.0].map(|m| ahead(STOCKHOLM, 90.0, -m)).to_vec();
+        t.model = Some("x2000".into());
+        t.cars = Some(5);
+        let cars = cars_of(&[&t], Some(&models), NOW);
+        let keys: Vec<String> = cars.iter().map(|c| c.mesh.key()).collect();
+        assert_eq!(keys, ["x2000-0", "x2000-1", "x2000-1", "x2000-1", "x2000-2"]);
+        assert_eq!(cars[4].mesh, CarShape::Model { model: "x2000".into(), index: 2 });
+        let lengths: Vec<f64> = cars.iter().map(|c| c.length).collect();
+        for (l, want) in lengths.iter().zip([17.7, 25.0, 25.0, 25.0, 22.7]) {
+            assert!((l - want).abs() < 1e-6, "{lengths:?}");
+        }
+        // no gap between them: each front where the car before ends
+        for pair in cars.windows(2) {
+            assert!(apart(ends(&pair[0]).1, ends(&pair[1]).0) < 1e-6);
+        }
+        assert!(cars.iter().all(|c| c.modelled && c.color == MODEL_WHITE));
+        // a one-car train with a model: its lead car
+        t.cars = Some(1);
+        assert_eq!(cars_of(&[&t], Some(&models), NOW)[0].mesh.key(), "x2000-0");
+        // models not loaded, or a model they lack: plain cars
+        t.cars = Some(2);
+        assert_eq!(cars_of(&[&t], None, NOW)[0].mesh.key(), "regional-cab");
+        t.model = Some("nothing".into());
+        let cars = cars_of(&[&t], Some(&models), NOW);
+        assert!(!cars[0].modelled && cars[0].color[3] == 240 && (cars[0].length - 25.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn each_car_has_its_own_level_faint_in_a_tunnel_raised_on_a_bridge() {
+        let line = |from: f64, to: f64| vec![lonlat(ahead(STOCKHOLM, 90.0, -from)), lonlat(ahead(STOCKHOLM, 90.0, -to))];
+        // a tunnel 30 to 60 m back: the second car (its middle 38.7 m back) is in it
+        let mut t = eastward();
+        t.structures = vec![Structure { tunnel: true, line: line(30.0, 60.0), joined: [false, false] }];
+        let cars = cars_of(&[&t], None, NOW);
+        assert_eq!(cars.iter().map(|c| c.level.tunnel).collect::<Vec<_>>(), [false, true, false]);
+        assert_eq!(cars.iter().map(|c| c.color[3]).collect::<Vec<_>>(), [240, 90, 240]);
+        // a bridge 30 to 130 m back: the second car on its ramp, the third on its deck
+        t.structures = vec![Structure { tunnel: false, line: line(30.0, 130.0), joined: [false, false] }];
+        let cars = cars_of(&[&t], None, NOW);
+        assert_eq!(cars[0].level, GROUND);
+        assert!(cars[1].level.height > 0.0 && cars[1].level.height < 6.0, "{:?}", cars[1].level);
+        assert_eq!(cars[2].level, Level { tunnel: false, height: 6.0 });
+        assert!(cars.iter().all(|c| c.color[3] == 240));
+        // a model's car in a tunnel: white, faint
+        let mut m = eastward();
+        m.model = Some("x40".into());
+        m.structures = vec![Structure { tunnel: true, line: line(0.0, 200.0), joined: [false, false] }];
+        assert!(cars_of(&[&m], Some(&models()), NOW).iter().all(|c| c.color == [255, 255, 255, 90]));
+    }
+
+    #[test]
+    fn cars_are_never_thinner_than_three_pixels() {
+        let close = CarLayers::new(Vec::new(), 0.6);
+        assert_eq!((close.width, close.height), (3.1, 4.1));
+        let far = CarLayers::new(Vec::new(), 2.0);
+        assert_eq!((far.width, far.height), (6.0, 3.0 * 1.3 * 2.0));
+        // at zoom 12.3 over Stockholm (8 m/px), a 3.1 m car would be 0.4 px wide
+        let mpp = meters_per_pixel(12.3, STOCKHOLM.0);
+        let layers = CarLayers::new(Vec::new(), mpp);
+        assert!((layers.width / mpp - 3.0).abs() < 1e-12 && (layers.height / mpp - 3.9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_layer_per_mesh_in_order_of_its_first_car_tunnels_after() {
+        let mut regional = eastward();
+        regional.cars = Some(4);
+        let mut fast = running("fast", ahead(STOCKHOLM, 0.0, 300.0), 90.0, 10.0, NOW);
+        fast.tail = [0.0, 200.0].map(|m| ahead(ahead(STOCKHOLM, 0.0, 300.0), 90.0, -m)).to_vec();
+        fast.shape = Some(TrainShape::HighSpeed);
+        fast.cars = Some(3);
+        let a = ahead(STOCKHOLM, 0.0, 300.0);
+        // its second car (38.7 m back) in a tunnel, its third (64.7 m back) out again
+        fast.structures = vec![Structure { tunnel: true, line: vec![lonlat(ahead(a, 90.0, -30.0)), lonlat(ahead(a, 90.0, -50.0))], joined: [false, false] }];
+        let layers = CarLayers::new(cars_of(&[&regional, &fast], None, NOW), 0.6);
+        let ids: Vec<(String, Vec<usize>)> = layers.layers().into_iter().map(|l| (l.id, l.cars)).collect();
+        assert_eq!(
+            ids,
+            [
+                ("train-car-meshes-regional-cab".to_string(), vec![0]),
+                ("train-car-meshes-regional-coach".to_string(), vec![1, 2, 3, 6]),
+                ("train-car-meshes-regional-coach-tunnel".to_string(), vec![5]),
+                ("train-car-meshes-highSpeed-cab".to_string(), vec![4]),
+            ]
+        );
+        let tunnel = &layers.layers()[2];
+        assert!(tunnel.tunnel && tunnel.key == "regional-coach" && tunnel.mesh == CarShape::Plain { lead: false, shape: TrainShape::Regional });
+        assert!(CarLayers::default().layers().is_empty());
+    }
+
+    #[test]
+    fn close_in_the_builder_lays_out_the_cars_where_it_drew_the_trains() {
+        let t = eastward();
+        let list = [&t];
+        let mut builder = TrainBuilder::new();
+        let view = ViewState { longitude: STOCKHOLM.1, latitude: STOCKHOLM.0, zoom: 16.0, bearing: 0.0, pitch: 0.0, position: None };
+        let scene = builder.build(&list, true, &view, None, NOW + 2000);
+        assert!(scene.cars && scene.car_layers.cars.is_empty());
+        let layers = builder.car_layers(&list, &view, [800.0, 600.0], None, NOW + 2000);
+        assert_eq!(layers.cars.len(), 3);
+        let (front, _) = ends(&layers.cars[0]);
+        let drawn = builder.drawn().positions[0];
+        assert!(apart(front, [drawn[0], drawn[1]]) < 1e-6, "the front car's front where the train is drawn");
+        assert_eq!((layers.width, layers.height), (3.1, 4.1));
     }
 
     #[test]

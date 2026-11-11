@@ -72,6 +72,8 @@ pub mod ships;
 pub mod sightings;
 pub mod sky;
 pub mod terrain;
+pub mod train_cars;
+pub mod train_route;
 pub mod trains;
 pub mod trees;
 pub mod vector_map;

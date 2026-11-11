@@ -44,6 +44,9 @@ pub struct Input {
     /// Dev builds: the reports each train is drawn from (item T9, [`super::sightings`]); empty
     /// in a release build.
     pub sightings: super::sightings::Input,
+    /// The selected train's route, halo and ring (item T6, [`super::train_route`]); the default
+    /// draws nothing.
+    pub route: super::train_route::Input,
 }
 
 /// `train-icons`' props: deck's IconLayer defaults lying on the ground (`billboard: false`,
@@ -114,17 +117,36 @@ impl Icons {
 /// Rows 13–17: train route, halo, trains, sightings, ring.
 pub struct Trains {
     icons: Icons,
+    /// Close in, the cars instead of the icons (item T3).
+    cars: super::train_cars::TrainCars,
     sightings: super::sightings::Sightings,
+    /// The selected train's route, halo and ring (item T6).
+    route: super::train_route::SelectedTrain,
 }
 
 impl Trains {
     pub fn new(init: &Init<'_>) -> Self {
-        Trains { icons: Icons::new(init), sightings: super::sightings::Sightings::new(init) }
+        Trains {
+            icons: Icons::new(init),
+            cars: super::train_cars::TrainCars::new(init),
+            sightings: super::sightings::Sightings::new(init),
+            route: super::train_route::SelectedTrain::new(init),
+        }
+    }
+
+    /// The selected train's route, halo and ring as drawn this frame (item T6).
+    pub fn route(&self) -> &super::train_route::SelectedTrain {
+        &self.route
     }
 
     /// How many train icons this frame draws.
     pub fn icons_drawn(&self) -> usize {
         self.icons.len()
+    }
+
+    /// This frame's car draws: deck's layer ids and how many cars each draws.
+    pub fn cars_drawn(&self) -> Vec<(String, u32)> {
+        self.cars.drawn()
     }
 }
 
@@ -136,17 +158,24 @@ impl Layer for Trains {
     fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
         let scene = &cx.scene.trains.scene;
         self.icons.prepare(cx, &scene.icons);
+        self.cars.prepare(cx, &scene.car_layers);
         self.sightings.prepare(cx);
+        self.route.prepare(cx);
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
         if cx.pass != Pass::Map {
             return;
         }
-        // the route and the halo go here (T6), under the trains
+        // the selected train's route and halo (T6), under the trains
+        self.route.draw_route(pass, cx);
+        self.route.draw_halo(pass);
         self.icons.draw(pass);
-        // the dev sightings (T9), then the ring (T6) goes here, over them
+        // close in, the cars instead (T3)
+        self.cars.draw(pass, cx);
+        // the dev sightings (T9), then the selected train's ring (T6), over them
         self.sightings.draw(pass, cx);
+        self.route.draw_ring(pass);
     }
 }
 

@@ -33,7 +33,7 @@ use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
-use crate::ui::{attribution, dev_panel, hover_card, keys_dialog, map_controls, map_error, modebar, shell, shortcuts, theme, toast, tooltip};
+use crate::ui::{attribution, dev_panel, export_menu, hover_card, keys_dialog, map_controls, map_error, modebar, shell, shortcuts, theme, toast, tooltip};
 use crate::{Options, images, platform, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
@@ -371,6 +371,8 @@ fn ui_pass(ui: &mut egui::Ui, state: &AppState, local_ms: f64, actions: &mut Vec
     modebar::ui(ui.ctx(), state, actions);
     // Escape closes the map controls' menu before the page's keys see it (U16)
     map_controls::escape(ui.ctx(), state, actions);
+    // and the altitude chart's export menu, before the page's Escape closes the panel (U12)
+    export_menu::escape(ui.ctx());
     shell::ui(ui.ctx(), state, local_ms, actions);
     // the map controls and their menu, after the panels (U16)
     map_controls::ui(ui.ctx(), state, actions);

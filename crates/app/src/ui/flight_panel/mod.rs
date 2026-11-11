@@ -164,7 +164,7 @@ pub struct Parts {
 
 impl Parts {
     /// The app's parts: each item puts its function here.
-    pub const APP: Parts = Parts { route: Some(route::show), aircraft: Some(aircraft::show), history: Some(history::show), chart: None };
+    pub const APP: Parts = Parts { route: Some(route::show), aircraft: Some(aircraft::show), history: Some(history::show), chart: Some(super::chart::show) };
 
     fn tab(&self, tab: Tab) -> Option<Slot> {
         match tab {

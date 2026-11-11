@@ -44,6 +44,8 @@ png = "0.18"
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 winit = "0.30.13"
+# The keys dialog's Import… (ui::keys_dialog): the system's file dialog, desktop only (plan 1.3).
+rfd = { workspace = true }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 egui-winit = { version = "0.37", default-features = false, features = ["links"] }

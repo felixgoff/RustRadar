@@ -246,6 +246,10 @@ pub enum Action {
     RetryShipCard,
     /// A choice of the map controls' menus that no key makes (U16): [`AppState::set_setting`].
     Set(Setting),
+    /// The keys dialog signed in to Flightradar24 or out (U17): the session it answered, then
+    /// `refreshSoon()` and the selected flight's stream asked for again (`handleSignIn`,
+    /// `handleSignOut`).
+    Session(rustradar_core::model::SessionInfo),
 }
 
 /// A setting the layers and settings menus choose and no key toggles (U16).
@@ -563,6 +567,12 @@ impl AppState {
                 open
             }
             Action::Set(setting) => self.set_setting(setting),
+            Action::Session(session) => {
+                self.aircraft.set_session(session);
+                self.aircraft.refresh_soon();
+                self.restart_follow(local_ms);
+                true
+            }
         }
     }
 

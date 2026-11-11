@@ -12,16 +12,19 @@
 //! airports, T8), [`shell`] and [`sidebar`] (the desktop shell, the page's keys: U6), [`modebar`]
 //! and [`attribution`] (the mode bar, the credits and the dev readout: U7), [`search`] (the search
 //! box and its dropdown: U8), [`lists`] and [`filters`] (the sidebar's lists and filter panels:
-//! U9 for the aircraft).
+//! U9 for the aircraft), [`panel`] (the detail panels' shared anatomy: U10) and [`flight_panel`]
+//! (U10, U11).
 
 pub mod anim;
 pub mod attribution;
 pub mod filters;
+pub mod flight_panel;
 pub mod fonts;
 pub mod icons;
 pub mod lists;
 pub mod map_error;
 pub mod modebar;
+pub mod panel;
 pub mod search;
 pub mod shell;
 pub mod sidebar;

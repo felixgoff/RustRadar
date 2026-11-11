@@ -110,7 +110,7 @@ impl Slots {
         train_list: None,
         ship_list: None,
         airport_panel: None,
-        flight_panel: None,
+        flight_panel: Some(super::flight_panel::show),
         ship_panel: None,
         train_panel: None,
     };

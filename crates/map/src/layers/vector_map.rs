@@ -666,6 +666,7 @@ mod tests {
     }
 
     /// The layer draws only on the dark map with its input on, and asks for no tile otherwise.
+    /// (Only OpenFreeMap's tiles are the vector map's: on satellite the imagery layer asks Esri.)
     #[test]
     fn nothing_is_asked_for_off_the_dark_map() {
         let Some(gpu) = gpu() else { return };
@@ -676,7 +677,8 @@ mod tests {
             scene.basemap = basemap;
             scene.vector_map.shown = shown;
             render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered");
-            assert!(fixtures.asked().is_empty(), "{basemap:?}, shown {shown}: asked {:?}", fixtures.asked());
+            let asked: Vec<_> = fixtures.asked().into_iter().filter(|(source, _)| source == io::OPENFREEMAP).collect();
+            assert!(asked.is_empty(), "{basemap:?}, shown {shown}: asked {asked:?}");
             assert!(!renderer.pending());
         }
     }

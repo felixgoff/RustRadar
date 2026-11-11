@@ -198,6 +198,8 @@ pub enum Action {
     SetMenu(Option<shortcuts::Menu>),
     /// "Retry now" under the aircraft feed's error (`refresh()`).
     RetryFeed,
+    /// The search box's typing, picks and clearing ([`AppState::search_ask`]).
+    Search(search::Ask),
 }
 
 /// The app's state: the camera, the clocks' sync, settings, and one part per feed.
@@ -387,6 +389,7 @@ impl AppState {
                 self.aircraft.retry();
                 true
             }
+            Action::Search(ask) => self.search_ask(ask, local_ms),
         }
     }
 }

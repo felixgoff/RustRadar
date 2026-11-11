@@ -275,8 +275,8 @@ impl AppState {
     /// `closeTop()` at local time `now_ms` (Escape, Android's back gesture): closes the first of
     /// the keys dialog, the shortcuts help, the map controls' menu, the place marker, the selected
     /// flight, ship and train, the airport board and the filter panel that is open. Returns
-    /// whether anything was (on Android the app leaves when nothing was). The phone sheet's
-    /// lowering to its peek detent comes last, with item U19.
+    /// whether anything was (on Android the app leaves when nothing was). Last, on a phone, a
+    /// raised bottom sheet goes down to its peek detent (U19).
     pub fn close_top(&mut self, now_ms: f64) -> bool {
         if self.shortcuts.keys_open {
             self.set_open(Open::Keys, false);
@@ -296,6 +296,8 @@ impl AppState {
             self.airport.close();
         } else if self.shortcuts.filters_open {
             self.shortcuts.filters_open = false;
+        } else if crate::ui::phone::sheet_raised(self) {
+            self.sheet.lower();
         } else {
             return false;
         }
@@ -315,6 +317,7 @@ impl AppState {
             || self.trains.selected_id().is_some()
             || self.airport.code().is_some()
             || s.filters_open
+            || crate::ui::phone::sheet_raised(self)
     }
 
     /// Opens or closes `what`; closing the keys dialog asks the Trafikverket key again

@@ -250,6 +250,8 @@ pub enum Action {
     /// `refreshSoon()` and the selected flight's stream asked for again (`handleSignIn`,
     /// `handleSignOut`).
     Session(rustradar_core::model::SessionInfo),
+    /// The phone's bottom sheet dragged, tapped or keyed to a detent (U19): [`AppState::sheet`].
+    Sheet(crate::ui::sheet::Detent),
 }
 
 /// A setting the layers and settings menus choose and no key toggles (U16).
@@ -310,6 +312,8 @@ pub struct AppState {
     /// The MMSI of the ship hovered in the ships list (`hoveredShipMmsi`; U15): the ships' scene
     /// builder draws it highlighted while ships are the focus.
     pub hovered_ship: Option<u32>,
+    /// The phone's bottom sheet: how far up it is (`sheetDetent`, U19).
+    pub sheet: crate::ui::sheet::Sheet,
 }
 
 impl AppState {
@@ -358,6 +362,7 @@ impl AppState {
             hovered_train: None,
             ship_filters_handed: Cell::new(None),
             hovered_ship: None,
+            sheet: Default::default(),
         }
     }
 
@@ -416,6 +421,9 @@ impl AppState {
         self.search.poll(&mut cx);
         self.pick.poll(&mut cx);
         self.shortcuts.poll(&mut cx);
+        // the phone's sheet lowers as a detail opens and rises again as the details close (U19)
+        let board_alone = self.airport.code().is_some() && self.flight.selected().is_none();
+        self.sheet.follow(crate::ui::shell::detail_open(self), board_alone);
         wants
     }
 
@@ -573,6 +581,7 @@ impl AppState {
                 self.restart_follow(local_ms);
                 true
             }
+            Action::Sheet(detent) => self.sheet.set(detent),
         }
     }
 

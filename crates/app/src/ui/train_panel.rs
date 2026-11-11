@@ -71,7 +71,9 @@
 //! - The photo and the logo load through egui's image loaders ([`super::panel::remote`]): until
 //!   item U18's loader for `https:` lands they read as failed and are left out, as today when they
 //!   do not load.
-//! - The phone order (photo and footer last, the source button hidden) is item U19's.
+//! - In the phone's bottom sheet ([`super::sheet::in_sheet`], U19): the strip, the journey and the
+//!   footer are marked for its peek detent, the photo follows the body, the source's button is
+//!   left out of the footer (doc 06 §8.1).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -474,6 +476,8 @@ struct View<'a> {
     stops_failed: bool,
     media: Option<TrainMedia>,
     clocks: Clocks,
+    /// Drawn in the phone's sheet (U19).
+    phone: bool,
 }
 
 /// The panel in the detail panel slot (the shell's [`Slot`](super::shell::Slot)).
@@ -499,8 +503,11 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
         stops_failed,
         media,
         clocks: Clocks::default(),
+        phone: super::sheet::in_sheet(&ctx),
     };
     let footer_height = footer_height(&ctx, &view);
+    // in the phone's sheet the footer is part of the summary (U19)
+    super::sheet::peek_part(&ctx, footer_height);
     let id = Id::unique("rustradar::train_panel");
     panel::body(ui, id, footer_height, |ui, part| match part {
         Part::Content => content(ui, &view, pass.actions),
@@ -510,13 +517,22 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
 
 /// Everything above the footer.
 fn content(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
-    strip(ui, view, actions);
-    photo(ui, view);
-    journey(ui, view);
+    use super::sheet::{in_sheet, peek};
+    // in the phone's sheet: strip and journey (marked for the peek detent), stops, body, then the
+    // photo (doc 06 §8.1, U19)
+    let phone = in_sheet(ui.ctx());
+    peek(ui, |ui| strip(ui, view, actions));
+    if !phone {
+        photo(ui, view);
+    }
+    peek(ui, |ui| journey(ui, view));
     if timetabled(view.train) {
         stops(ui, view);
     }
     body(ui, view);
+    if phone {
+        photo(ui, view);
+    }
 }
 
 /// The strip: the name and kind, the speed and direction, the close button.
@@ -940,6 +956,10 @@ fn status(view: &View<'_>) -> (Status, String) {
 fn buttons(view: &View<'_>) -> Vec<Button> {
     let credit = train_credit(view.train.source);
     let source = Button::new().text(train_source_name(view.train.source)).icon(Icon::ExternalLink.at(14.0, icons::STROKE_THIN)).tooltip(credit.url);
+    // on a phone the source is credited in the facts and along the bottom of the map (U19)
+    if view.phone {
+        return vec![panel::follow_button(view.following, false)];
+    }
     vec![panel::follow_button(view.following, false), source]
 }
 

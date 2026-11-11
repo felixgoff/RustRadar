@@ -36,7 +36,8 @@
 //!   stand-ins in the slots, and through the window's engine with the shell on.
 //! - The keys of one frame are read against the state before any of them took effect (today each
 //!   key sees the one before it): `?` and then `f` within one frame both act.
-//! - The phone layout (top bar, bottom sheet) is item U19's; the shell draws the desktop layout.
+//! - A phone-sized window is laid out by [`super::phone`] (U19: the top bar, the bottom sheet, the
+//!   rail), which takes the page's keys through [`keys`]; the shell draws the desktop layout.
 
 use egui::{Align2, Area, Context, Event, Id, Key, Order, Rect, Ui, Vec2};
 use rustradar_core::settings::Mode;
@@ -265,8 +266,8 @@ pub fn press(key: Key, physical: Option<Key>, modifiers: egui::Modifiers) -> Pre
     Press { key: typed, key_d: physical == Some(Key::D), modifiers }
 }
 
-/// The frame's keys (see the module documentation).
-fn keys(ctx: &Context, state: &AppState, actions: &mut Vec<Action>) {
+/// The frame's keys (see the module documentation); the phone layout takes them too (U19).
+pub fn keys(ctx: &Context, state: &AppState, actions: &mut Vec<Action>) {
     let typing = ctx.text_edit_focused();
     let events = ctx.input(|i| i.events.clone());
     let mut taken = vec![false; events.len()];

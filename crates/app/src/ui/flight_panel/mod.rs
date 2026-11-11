@@ -60,7 +60,9 @@
 //! - Digits are Overpass's own proportional figures (`font-variant-numeric: tabular-nums` on the
 //!   distances needs OpenType features egui does not have; U6's note).
 //! - The tooltips are the app's own (`ui::widgets::tooltip`), not the system's.
-//! - The phone order (doc 06 §7.6) is item U19's.
+//! - In the phone's bottom sheet ([`super::sheet::in_sheet`], U19) the back row, the strip and the
+//!   route come first and with the footer are marked for its peek detent; the photo and the
+//!   airline follow the route (doc 06 §7.6).
 
 pub mod aircraft;
 pub mod footer;
@@ -480,6 +482,8 @@ pub fn show_with(ui: &mut Ui, pass: &mut Pass<'_>, parts: &Parts) {
     kept.pass = now_pass;
     let footer = footer::footer(&ctx, &view);
     let footer_h = footer.height(&ctx, ui.available_width());
+    // in the phone's sheet the footer is part of the summary (U19)
+    super::sheet::peek_part(&ctx, footer_h);
     let mut footer = Some(footer);
     let scrolled = panel::body(ui, id, footer_h, |ui, part| match part {
         Part::Content => content(ui, id, &view, pass, parts, &mut kept),
@@ -495,18 +499,30 @@ pub fn show_with(ui: &mut Ui, pass: &mut Pass<'_>, parts: &Parts) {
 }
 
 fn content(ui: &mut Ui, id: Id, view: &View<'_>, pass: &mut Pass<'_>, parts: &Parts, kept: &mut Kept) {
+    use super::sheet::{in_sheet, peek};
+    // in the phone's sheet the summary comes first (back row, strip, route), marked for its peek
+    // detent, the photo and the airline after it (doc 06 §7.6, U19)
+    let phone = in_sheet(ui.ctx());
     if let Some(label) = &view.back
-        && back_row(ui, id, label)
+        && peek(ui, |ui| back_row(ui, id, label))
     {
         pass.actions.push(Action::CloseFlight);
     }
-    if strip(ui, view).clicked() {
+    if peek(ui, |ui| strip(ui, view)).clicked() {
         pass.actions.push(Action::CloseFlight);
+    }
+    let mut route_part = |ui: &mut Ui| {
+        if let Some(destination) = peek(ui, |ui| route(ui, id, view)) {
+            pass.actions.push(Action::OpenAirportOf { destination });
+        }
+    };
+    if phone {
+        route_part(ui);
     }
     photo(ui, id, view, kept);
     airline(ui, view);
-    if let Some(destination) = route(ui, id, view) {
-        pass.actions.push(Action::OpenAirportOf { destination });
+    if !phone {
+        route_part(ui);
     }
     Tabs::new("rustradar::flight_panel::tabs", &TABS).show(ui, &mut kept.tab);
     let width = ui.available_width();

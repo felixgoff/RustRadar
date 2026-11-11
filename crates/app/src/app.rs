@@ -33,7 +33,7 @@ use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
-use crate::ui::{attribution, dev_panel, export_menu, hover_card, keys_dialog, map_controls, map_error, modebar, shell, shortcuts, theme, toast, tooltip};
+use crate::ui::{attribution, dev_panel, export_menu, hover_card, keys_dialog, map_controls, map_error, modebar, phone, shell, shortcuts, theme, toast, tooltip};
 use crate::{Options, images, platform, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
@@ -367,17 +367,27 @@ impl Engine {
 /// The UI pass: what egui draws over the map (the shell and the page's keys, U6) at local time
 /// `local_ms`, and the actions it asks for.
 fn ui_pass(ui: &mut egui::Ui, state: &AppState, local_ms: f64, actions: &mut Vec<Action>) {
+    // a phone-sized window: the top bar, the bottom sheet and the rail instead (U19)
+    let phone = phone::Layout::of(ui.ctx()).is_some();
     // the mode bar, before the sidebar in the page (and in the tab order: U7)
-    modebar::ui(ui.ctx(), state, actions);
+    if !phone {
+        modebar::ui(ui.ctx(), state, actions);
+    }
     // Escape closes the map controls' menu before the page's keys see it (U16)
     map_controls::escape(ui.ctx(), state, actions);
     // and the altitude chart's export menu, before the page's Escape closes the panel (U12)
     export_menu::escape(ui.ctx());
-    shell::ui(ui.ctx(), state, local_ms, actions);
-    // the map controls and their menu, after the panels (U16)
-    map_controls::ui(ui.ctx(), state, actions);
-    // the credits along the bottom, and the view's readout in debug builds (U7)
-    attribution::ui(ui.ctx(), state, local_ms);
+    if phone {
+        // the page's keys, the top bar, the sheet with the list or the details, the rail, the
+        // credits on the sheet (U19)
+        phone::ui(ui.ctx(), state, local_ms, actions);
+    } else {
+        shell::ui(ui.ctx(), state, local_ms, actions);
+        // the map controls and their menu, after the panels (U16)
+        map_controls::ui(ui.ctx(), state, actions);
+        // the credits along the bottom, and the view's readout in debug builds (U7)
+        attribution::ui(ui.ctx(), state, local_ms);
+    }
     // the update offer at the bottom left, over the panels (U20)
     toast::ui(ui.ctx(), state);
     // the modal dialogs over everything: the shortcuts' help and the keys (U17)

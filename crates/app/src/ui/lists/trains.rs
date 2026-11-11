@@ -276,7 +276,10 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
     let rows = listed(state, &query, pass.now_ms);
     let trains = &state.trains;
     let hint = (trains.loaded() && !trains.trains().is_empty()).then(|| group_thousands(rows.len() as f64));
-    header(ui, hint.as_deref());
+    // on a phone the sheet's head already says how many are in view (U19)
+    if !crate::ui::sheet::in_sheet(ui.ctx()) {
+        header(ui, hint.as_deref());
+    }
     let mut filters = state.persisted.train_filters.clone();
     sort(ui, &mut filters.sort);
     let mut hovered = None;

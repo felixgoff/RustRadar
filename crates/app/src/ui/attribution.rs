@@ -11,7 +11,8 @@
 //! under the pointer, a click opens the page in the system's browser); then, in the page's order,
 //! each credit whose condition holds ([`credits`], the 18 rows of doc 06 §2.6), all joined by
 //! `" · "`. On phones ([`Place`]) it sits on the bottom sheet across the window at 7 px with square
-//! corners, or (landscape) at the bottom right clear of 360 px; item U19 places it there.
+//! corners, or (landscape) at the bottom right clear of 360 px, measured in the whole window
+//! (`viewport-fit=cover`); item U19 places it there.
 //!
 //! **The dev readout** ([`dev_readout`], debug builds only: `import.meta.env.DEV`): a `<pre>` at
 //! top 8, right 8, `4px 6px` of padding, radius 4, on `oklch(0.15 0 0 / 0.75)`, 10 px monospace at
@@ -340,7 +341,9 @@ fn strip_rect(screen: Rect, place: Place, text_w: f32, line: f32) -> Rect {
 /// Draws the strip for `line` at `place`: answers its rectangle. A click on a train credit opens
 /// its page.
 pub fn show(ctx: &Context, line: &Attribution, place: Place) -> Rect {
-    let screen = ctx.content_rect();
+    // a phone's strip is placed in the whole window (`bottom: 0`, `bottom: var(--sheet-h)` with
+    // `viewport-fit=cover`), not in egui's safe area (U19)
+    let screen = if place == Place::Desktop { ctx.content_rect() } else { ctx.viewport_rect() };
     let size = place.size();
     let id = Id::unique("rustradar::attribution");
     let (natural, links) = job(line, size, None);
@@ -356,7 +359,7 @@ pub fn show(ctx: &Context, line: &Attribution, place: Place) -> Rect {
     let mut galley = lay(None);
     let radius = if place == Place::Desktop { CornerRadius { nw: theme::RADIUS_SM, ..CornerRadius::ZERO } } else { CornerRadius::ZERO };
     let full = line.text();
-    Area::new(id).order(Order::Middle).fixed_pos(rect.min).fade_in(false).constrain(false).show(ctx, |ui: &mut Ui| {
+    Area::new(id).order(Order::Middle).fixed_pos(rect.min).fade_in(false).constrain_to(screen).constrain(false).show(ctx, |ui: &mut Ui| {
         let (rect, strip) = ui.allocate_exact_size(rect.size(), Sense::hover());
         // the line box sits 1 px down; the galley's rows are on whole pixels
         let origin = Pos2::new(rect.left() + PADDING.x, rect.center().y - galley.size().y / 2.0);

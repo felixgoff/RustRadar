@@ -29,16 +29,16 @@
 //! and icon on the same pixels) and Chromium's layout of today's component with its menus open
 //! (`tests/map_controls.rs`).
 //!
-//! Left to item U19: the phone layout (right `max(8, safe-right)`, bottom the sheet's height + 24
-//! eased over 220 ms; no zoom, keys or help buttons, the compass hidden while it is off; the menus
-//! as sheets of their own, [`super::menus::settings`] with its keys entry).
+//! On a phone the controls are [`super::phone`]'s rail (U19: right `max(8, safe-right)`, bottom the
+//! sheet's height + 24 eased over 220 ms; no zoom, keys or help buttons, the compass hidden while
+//! it is off; the menus as sheets of their own, [`super::menus::settings`] with its keys entry).
+//! [`escape`] serves both.
 //!
 //! The popover's box is a whole number of pixels tall (Chromium lays it out at fractional heights
 //! and paints its edges on whole pixels): its bottom on the column's, its top edge up to a pixel
 //! above Chromium's, the content where Chromium puts it.
 //!
-//! Deviations: a disabled button shows its tooltip as an enabled one does (U3's icon button); the
-//! phone layout is not drawn yet (above).
+//! Deviations: a disabled button shows its tooltip as an enabled one does (U3's icon button).
 
 use egui::{Align2, Area, Context, Event, Id, Key, Order, Rect, ScrollArea, Ui, Vec2};
 

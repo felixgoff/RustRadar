@@ -53,8 +53,9 @@
 //!
 //! Deviations: the name's tooltip covers its whole strip cell (today the name's line alone, as
 //! [`panel::strip`] gives cells their tooltip); the board's scroll bar floats over its right edge
-//! (Chromium's overlay bar in the reference pictures, as the other panels); the phone's bottom
-//! sheet and its peek parts are item U19's; the panel's `aria-label` is not set (egui's panels
+//! (Chromium's overlay bar in the reference pictures, as the other panels); in the phone's bottom
+//! sheet (U19) the strip, the tabs and the footer are marked for its peek detent and the board
+//! fills the rest; the panel's `aria-label` is not set (egui's panels
 //! carry no landmark).
 
 use egui::text::{LayoutJob, TextWrapping};
@@ -351,13 +352,16 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
         ])
         .tooltip(Some(clock_tooltip(code, zone))),
     ];
-    if panel::strip(ui, cells, CLOSE_LABEL).clicked() {
+    // in the phone's sheet the strip, the tabs and the footer are its summary, and the board
+    // fills the rest (U19)
+    let phone = super::sheet::in_sheet(&ctx);
+    if super::sheet::peek(ui, |ui| panel::strip(ui, cells, CLOSE_LABEL)).clicked() {
         pass.actions.push(Action::Board(Ask::Close));
     }
 
     // the tabs
     let mut mode = state.airport.mode();
-    if Tabs::new("rustradar::airport_panel::tabs", &TABS).show(ui, &mut mode).changed() {
+    if super::sheet::peek(ui, |ui| Tabs::new("rustradar::airport_panel::tabs", &TABS).show(ui, &mut mode)).changed() {
         pass.actions.push(Action::Board(Ask::Mode(mode)));
     }
 
@@ -369,12 +373,13 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
         buttons: vec![Button::new().icon(button::icon(Icon::LocateFixed)).text(SHOW_ON_MAP).enabled(airport.is_some())],
     };
     let footer_h = footer.height(&ctx, width);
+    super::sheet::peek_part(&ctx, footer_h);
     let board_max = (max_height - (ui.cursor().top() - top) - footer_h).max(0.0);
     ui.scope(|ui| {
         let scroll = &mut ui.spacing_mut().scroll;
         scroll.floating = true;
         scroll.fade.strength = 0.0;
-        ScrollArea::vertical().id_salt(id.with("board")).auto_shrink([false, true]).max_height(board_max).show(ui, |ui| {
+        ScrollArea::vertical().id_salt(id.with("board")).auto_shrink([false, !phone]).max_height(board_max).show(ui, |ui| {
             ui.set_width(width);
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             let busy = anim::toggle(&ctx, id.with("busy"), state.airport.busy(), anim::HOVER);

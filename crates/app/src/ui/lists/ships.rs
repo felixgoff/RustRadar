@@ -294,7 +294,10 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
     let rows = listed(state, &query);
     let ships = &state.ships;
     let hint = (ships.loaded() && !ships.ships().is_empty()).then(|| group_thousands(rows.len() as f64));
-    header(ui, hint.as_deref());
+    // on a phone the sheet's head already says how many are in view (U19)
+    if !crate::ui::sheet::in_sheet(ui.ctx()) {
+        header(ui, hint.as_deref());
+    }
     let mut filters = state.persisted.ship_filters.clone();
     sort(ui, &mut filters.sort);
     let mut hovered = None;

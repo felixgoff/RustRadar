@@ -66,7 +66,8 @@
 //!   loader for `https:` lands it reads as failed and is left out, as today when it does not load.
 //! - Closed and opened again, the panel keeps how far its body was scrolled (egui keeps a scroll
 //!   area's state by its id); today's component mounts afresh at the top.
-//! - The phone order (photo and body after the voyage, then the footer) is item U19's.
+//! - In the phone's bottom sheet ([`super::sheet::in_sheet`], U19): the strip, the voyage and the
+//!   footer are marked for its peek detent, the photo follows the voyage (doc 06 §8.2).
 
 use egui::text::LayoutJob;
 use egui::{Color32, Context, CornerRadius, Id, Pos2, Rect, Response, Sense, Ui, Vec2};
@@ -380,6 +381,8 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
     };
     let width = ui.available_width();
     let footer_height = footer_height(&ctx, &view, width);
+    // in the phone's sheet the footer is part of the summary (U19)
+    super::sheet::peek_part(&ctx, footer_height);
     let id = Id::unique("rustradar::ship_panel");
     panel::body(ui, id, footer_height, |ui, part| match part {
         Part::Content => content(ui, &view, pass.actions),
@@ -389,11 +392,20 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
 
 /// Everything above the footer.
 fn content(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
-    if strip(ui, view).clicked() {
+    use super::sheet::{in_sheet, peek};
+    // in the phone's sheet: strip and voyage (marked for the peek detent), then the photo and the
+    // body (doc 06 §8.2, U19)
+    let phone = in_sheet(ui.ctx());
+    if peek(ui, |ui| strip(ui, view)).clicked() {
         actions.push(Action::CloseShip);
     }
-    photo(ui, view);
-    voyage(ui, view);
+    if !phone {
+        photo(ui, view);
+    }
+    peek(ui, |ui| voyage(ui, view));
+    if phone {
+        photo(ui, view);
+    }
     if body(ui, view) {
         actions.push(Action::RetryShipCard);
     }

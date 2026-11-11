@@ -15,8 +15,8 @@
 //! `AirportPanel.svelte` given the same board (server-rendered with Svelte, its state set to the
 //! fixture's, laid out with app.css at 1440 × 900); the checks hold the places Chromium gives.
 //! The interaction tests drive the panel through egui: a live row selects its flight from the
-//! board, a row that is not live does nothing, the tabs, Show more, Show on map and the close
-//! button ask what the module documentation says.
+//! board, a row that is not live does nothing, the tabs (a click, and Left and Right on the focused
+//! tab), Show more, Show on map and the close button ask what the module documentation says.
 //!
 //! The GPU tests need a wgpu adapter (SwiftShader or lavapipe through `VK_ICD_FILENAMES`); without
 //! one they print `skipped: …` and pass.
@@ -431,6 +431,38 @@ fn a_live_row_selects_its_flight_and_the_buttons_ask() {
     assert_eq!(s.flight.selected_id(), Some(DEPARTED));
     assert!(s.flight.from_board());
     assert_eq!(s.airport.code(), Some("ARN"));
+}
+
+/// The tabs' keys through the shell: the chosen tab focused, Right asks for the other tab and Left
+/// back (`tabKeys`), and the shell's own shortcuts do not take the arrows from the focused tab.
+#[test]
+fn left_and_right_toggle_the_tabs() {
+    let ctx = context();
+    let departures = board(BoardMode::Departures);
+    let placed = settle(&ctx, &departures);
+    let (_, panel) = placed.panel.expect("the panel");
+    let key = |key: egui::Key| Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+    // a click on the chosen tab asks nothing; Tab brings the focus to it (the close button first)
+    let departures_tab = Pos2::new(panel.left() + 1.0 + 12.0 + 50.0, panel.top() + 1.0 + 68.0 + 20.0);
+    assert!(click(&ctx, &departures, departures_tab, 4.0).is_empty(), "already shown");
+    let on_tab = |ctx: &egui::Context| ctx.memory(|m| m.focused()).and_then(|id| ctx.read_response(id)).is_some_and(|r| r.rect.contains(departures_tab));
+    let mut time = 4.1;
+    for _ in 0..8 {
+        if on_tab(&ctx) {
+            break;
+        }
+        time += 0.02;
+        assert!(actions(&ctx, time, &departures, vec![key(egui::Key::Tab)]).is_empty());
+    }
+    assert!(on_tab(&ctx), "the chosen tab in the tab order");
+    assert_eq!(actions(&ctx, time + 0.02, &departures, vec![key(egui::Key::ArrowRight)]), [Action::Board(Ask::Mode(BoardMode::Arrivals))]);
+    // the arrivals shown, the focus moved with them: Left asks for the departures
+    let mut arrivals = board(BoardMode::Departures);
+    assert!(arrivals.apply(Action::Board(Ask::Mode(BoardMode::Arrivals)), NOW_MS));
+    actions(&ctx, time + 0.04, &arrivals, Vec::new());
+    assert_eq!(actions(&ctx, time + 0.06, &arrivals, vec![key(egui::Key::ArrowLeft)]), [Action::Board(Ask::Mode(BoardMode::Departures))]);
+    // Up and Down are not the tabs' keys
+    assert!(actions(&ctx, time + 0.08, &arrivals, vec![key(egui::Key::ArrowDown)]).is_empty());
 }
 
 /// A board taller than the window: the panel stops 16 px from the top (`max-height: calc(100% -

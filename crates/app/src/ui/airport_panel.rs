@@ -44,7 +44,12 @@
 //!    (`LocateFixed`; disabled until the airport is known) flying there at zoom 11.
 //!
 //! Positions follow Chromium's layout of today's markup with the app's CSS (checked against a
-//! headless Chromium render of the component with the test's fixture, `tests/airport_panel.rs`).
+//! headless Chromium render of the component with the test's fixture, `tests/airport_panel.rs`):
+//! the panel's box, the strip, the tabs, every row's rectangle (within 0.15 px), the footer and
+//! the buttons land on Chromium's pixels, and each line of text within 1 px across and down. A
+//! line can sit 1 px (once 2 px) lower or higher than Chromium's where its line box's top falls
+//! at another fraction of a pixel: egui rounds a galley's top to the pixel grid, Chromium the
+//! baseline. Overpass Mono at 11 px rasterises 1 px shorter than Chromium's hinted glyphs.
 //!
 //! Deviations: the name's tooltip covers its whole strip cell (today the name's line alone, as
 //! [`panel::strip`] gives cells their tooltip); the board's scroll bar floats over its right edge

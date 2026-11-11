@@ -1,7 +1,7 @@
 //! Ships on the map (item H2; doc 02 §4.1–4.5; `shipLayers`, G:1826-1876): at each scene refresh,
 //! the ships the ship state puts on the map, drawn where they are expected now, as icons, and close
-//! in as models ([`rustradar_scene::ships::ShipBuilder`]); the models' meshes (H3) and the selected
-//! ship's halo and ring (H4) are other items'.
+//! in as models ([`rustradar_scene::ships::ShipBuilder`]; the models' meshes are item H3's); the
+//! selected ship's halo and ring (item H4).
 //!
 //! What it reads of the state, as `buildLayers()` reads the globe's `ships` prop:
 //! - the list: [`state::ships::Ships::on_map`](crate::state::ships::Ships::on_map) (`shipsOnMap`:
@@ -15,10 +15,19 @@
 //! - the camera's view and the canvas's size: icons or models, the icons' sizes and angles.
 //!
 //! The ship hovered in the sidebar's list (`hoveredShipMmsi`) is drawn highlighted; the list comes
-//! with stage 7 (its hover sets [`Ships::hovered`]), so until then no ship is.
+//! with stage 7 (its hover sets [`Ships::hovered`]), so until then no ship is. Close in, the model
+//! under the pointer ([`state::pick::Pick::hovered_ship_model`](crate::state::pick::Pick::hovered_ship_model),
+//! item H4) is highlighted as deck's `autoHighlight` does, unless a ship is hovered in the list
+//! ([`ShipsScene::highlight`]).
+//!
+//! The selected ship ([`state::ships::Ships::selected`](crate::state::ships::Ships::selected),
+//! `selectedShip`; item H4, `shipSelectionLayers`, G:2726): its halo and ring
+//! ([`ring_of`]) round its **reported** position (not where it is drawn), sized at this refresh's
+//! zoom, none while it is round the back of the globe; the map draws the halo under the ships and
+//! the ring over them.
 
 use rustradar_map::SceneInput;
-use rustradar_scene::ships::{ShipBuilder, ShipsScene};
+use rustradar_scene::ships::{ShipBuilder, ShipsScene, ring_of};
 
 use crate::state::AppState;
 
@@ -42,7 +51,13 @@ impl Ships {
         let new_list = self.list_key != Some(key);
         self.list_key = Some(key);
         self.latest = self.builder.build(state.ships.on_map(), new_list, &scene.view, scene.size, self.hovered, now_ms);
+        // the model under the pointer (H4: deck's `autoHighlight`)
+        if let Some(model) = state.pick.hovered_ship_model() {
+            self.latest.highlight(model);
+        }
         scene.ships.scene = self.latest.clone();
+        // the selected ship's halo and ring (H4), at its report
+        scene.ships.ring = state.ships.selected().and_then(|ship| ring_of(ship, &scene.view));
     }
 
     /// Where the ships are drawn (for the models, the ring and the camera's lock).
@@ -146,5 +161,64 @@ mod tests {
         state.poll(NOW_MS);
         let scene = build(&mut state, &mut SceneBuilder::default(), NOW_MS);
         assert_eq!(scene.ships.scene, ShipsScene::default());
+    }
+
+    /// Item H4: the selected ship's halo and ring stand at its report, sized for its icon at the
+    /// refresh's zoom; none without a selection.
+    #[test]
+    fn the_selected_ships_ring_is_at_its_report() {
+        let mut state = state_with(V6, &harbour(), "ring");
+        let mut builder = SceneBuilder::default();
+        assert_eq!(build(&mut state, &mut builder, NOW_MS).ships.ring, None, "nothing selected");
+        let tug = state.ships.on_map()[0].clone();
+        state.select_ship(Some(tug.clone()), NOW_MS);
+        // 30 s on the tug is drawn along its frames; the ring stays at its report
+        let scene = build(&mut state, &mut builder, NOW_MS + 30_000.0);
+        let ring = scene.ships.ring.expect("a ring");
+        assert_eq!(ring.at, [tug.lon, tug.lat]);
+        let drawn = scene.ships.scene.icons[0].position;
+        assert!((drawn[1] - tug.lat).abs() > 1e-4, "the tug has moved on: {drawn:?}");
+        // a small tug's 15 px icon at zoom 13, no dimensions: 7.5 + 5
+        assert_eq!(ring.radius_px, 15.0 / 2.0 + 5.0);
+        // the tanker close in: its 150 m bow at zoom 16 sets the radius
+        let tanker = state.ships.on_map()[1].clone();
+        state.select_ship(Some(tanker.clone()), NOW_MS);
+        state.controller.set_view(ViewState { zoom: 16.0, ..V6 });
+        let ring = build(&mut state, &mut builder, NOW_MS).ships.ring.expect("a ring");
+        let mpp = rustradar_core::geo::meters_per_pixel(16.0, V6.latitude);
+        assert_eq!((ring.at, ring.radius_px), ([tanker.lon, tanker.lat], 150.0 / mpp + 6.0));
+        state.select_ship(None, NOW_MS);
+        assert_eq!(build(&mut state, &mut builder, NOW_MS).ships.ring, None);
+    }
+
+    /// Item H4: the model under the pointer is highlighted at the next refresh, as deck's
+    /// `autoHighlight` does, and not once the pointer leaves it.
+    #[test]
+    fn the_model_under_the_pointer_is_highlighted() {
+        let mut state = state_with(V6, &harbour(), "hover");
+        let mut builder = SceneBuilder::default();
+        let scene = build(&mut state, &mut builder, NOW_MS);
+        let model = scene.ships.scene.models[0].models[0];
+        assert!(!model.highlighted);
+        // the tanker's hull: 55 m west of its report (bow 150 m, stern 40 m, heading west)
+        let viewport = rustradar_scene::camera::viewport_for(&V6, [1440.0, 900.0]);
+        let west = 55.0 / (111_320.0 * model.position[1].to_radians().cos());
+        let [x, y, _] = viewport.project([model.position[0] - west, model.position[1], 0.0]);
+        let wants = state.pick_frame(&scene, Some([x, y]), false, &[], NOW_MS);
+        assert!(wants.scene, "a new highlight refreshes the scene at once");
+        assert!(state.pick.hovering(), "the pointing hand");
+        let scene = build(&mut state, &mut builder, NOW_MS);
+        assert!(scene.ships.scene.models[0].models[0].highlighted);
+        let tip = state.pick.tooltip().expect("the tanker's tooltip");
+        assert_eq!(tip.tip.rows[0].text, "SHIP 265000002");
+        assert_eq!(tip.tip.rows[1].text, "Tanker · 190 m");
+        // a ship hovered in the sidebar's list takes over
+        builder.ships.hovered = Some(265_000_001);
+        assert!(!build(&mut state, &mut builder, NOW_MS).ships.scene.models[0].models[0].highlighted);
+        builder.ships.hovered = None;
+        // off the hull
+        let wants = state.pick_frame(&scene, Some([x, y + 200.0]), false, &[], NOW_MS);
+        assert!(wants.scene);
+        assert!(!build(&mut state, &mut builder, NOW_MS).ships.scene.models[0].models[0].highlighted);
     }
 }

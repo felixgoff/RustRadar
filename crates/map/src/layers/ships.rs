@@ -23,16 +23,31 @@
 //! from the frame's centre, plan 1.4.2) and written to the GPU only when they change.
 //!
 //! Close in, the models are drawn before the icons ([`super::ship_models`], item H3, from
-//! [`ShipsScene::models`]). The halo under the ships and the ring over them are item H4's.
+//! [`ShipsScene::models`]).
+//!
+//! The selected ship's halo and ring (item H4; doc 02 §4.8, `shipSelectionLayers`, G:3291-3321),
+//! from [`Input::ring`] ([`rustradar_scene::ships::ring_of`]: the ship's reported position, a
+//! radius clearing its icon and its hull), as deck's ScatterplotLayers with
+//! [`crate::pipelines::circle`], both billboards with their radius in pixels, in
+//! [`SELECTION_STATE`] (`{ ...NO_CULL, depthWriteEnabled: false, depthCompare: "always" }`: over
+//! whatever was drawn before them, the globe included):
+//!
+//! | Layer | Drawn | Style |
+//! |---|---|---|
+//! | `ship-selection-halo` | before the models and the icons | a disc of the ring's radius, [`HALO_COLOR`] |
+//! | `ship-selection-ring` | after them | a ring, [`RING_COLOR`], [`RING_WIDTH`] px |
+//!
+//! The circles are placed at each frame for that frame's camera. Neither is pickable.
 //!
 //! Stage 2 stub (E4): keep `new(&Init) -> Self` and the row in `layers::ordered`.
 
 use rustradar_scene::atlas::ships as atlas;
-use rustradar_scene::ships::{ICON_HIGHLIGHT, ShipIcon, ShipsScene};
+use rustradar_scene::ships::{ICON_HIGHLIGHT, ShipIcon, ShipRing, ShipsScene};
 
 use super::{DrawCx, Init, Layer, Pass, PrepareCx};
 use crate::frame::ViewFrame;
 use crate::pipelines::bitmap::upload_rgba8;
+use crate::pipelines::circle::{self, Circle, CircleStyle};
 use crate::pipelines::icon::{Batch, IconDef, IconPipeline, IconStyle, Instance};
 use crate::state::DrawState;
 
@@ -42,6 +57,9 @@ pub struct Input {
     /// This scene refresh's ships (item H2): their icons, and close in the ships drawn as models;
     /// empty without ships.
     pub scene: ShipsScene,
+    /// `ship-selection-halo` and `ship-selection-ring` (item H4): while a ship is selected and not
+    /// round the back of the globe.
+    pub ring: Option<ShipRing>,
 }
 
 /// `ship-icons`' props: deck's IconLayer defaults (`billboard: true`, `sizeUnits: "pixels"`).
@@ -49,6 +67,18 @@ pub const STYLE: IconStyle = IconStyle::DEFAULT;
 
 /// `ship-icons`' draw state (`SHIP_PARAMETERS`).
 pub const STATE: DrawState = DrawState::SHIP;
+
+/// `ship-selection-halo`'s fill (G:3310).
+pub const HALO_COLOR: [u8; 4] = [55, 142, 240, 56];
+/// `ship-selection-ring`'s line (G:3316) and its width, px.
+pub const RING_COLOR: [u8; 4] = [55, 142, 240, 235];
+pub const RING_WIDTH: f64 = 2.0;
+/// The halo's and the ring's parameters (G:3306): no cull, no depth write, depth always.
+pub const SELECTION_STATE: DrawState = DrawState::LABEL;
+/// `ship-selection-halo`'s props: a filled billboard disc, radius in pixels.
+pub const HALO_STYLE: CircleStyle = CircleStyle { billboard: true, filled: true, stroked: false, ..CircleStyle::PIXELS };
+/// `ship-selection-ring`'s props: a stroked billboard ring, radius and line width in pixels.
+pub const RING_STYLE: CircleStyle = CircleStyle { billboard: true, filled: false, stroked: true, ..CircleStyle::PIXELS };
 
 /// The atlas cell of the icon `name`, as the icon pipeline takes it (`mask: false`); none for a
 /// name the atlas lacks (deck's `MISSING_ICON` draws nothing).
@@ -108,8 +138,42 @@ impl Icons {
     }
 }
 
+/// Rows 9 and 11: the selected ship's halo and ring (item H4).
+struct Selection {
+    circles: Circle,
+    halo_style: circle::Style,
+    ring_style: circle::Style,
+    halo: circle::Instances,
+    ring: circle::Instances,
+}
+
+impl Selection {
+    fn new(init: &Init<'_>) -> Self {
+        let device = &init.gpu.device;
+        let circles = Circle::new(init, "ship selection", SELECTION_STATE);
+        Selection {
+            halo_style: circles.style(device, &HALO_STYLE),
+            ring_style: circles.style(device, &RING_STYLE),
+            circles,
+            halo: circle::Instances::new(device, "ship-selection-halo"),
+            ring: circle::Instances::new(device, "ship-selection-ring"),
+        }
+    }
+
+    /// The halo and the ring of `ring`, placed for this frame's camera.
+    fn prepare(&mut self, cx: &PrepareCx<'_>, ring: Option<&ShipRing>) {
+        let (device, queue) = (&cx.gpu.device, &cx.gpu.queue);
+        let at = |r: &ShipRing| circle::Instance::at(cx.view, r.at, 0.0).radius(r.radius_px);
+        let halo: Vec<circle::Instance> = ring.iter().map(|r| at(r).fill(HALO_COLOR)).collect();
+        self.halo.write(device, queue, &halo);
+        let ring: Vec<circle::Instance> = ring.iter().map(|r| at(r).line(RING_COLOR, RING_WIDTH)).collect();
+        self.ring.write(device, queue, &ring);
+    }
+}
+
 /// Rows 9–11: ship halo, ships, ship ring.
 pub struct Ships {
+    selection: Selection,
     /// Close in, the ships drawn as models (item H3).
     models: super::ship_models::ShipModels,
     icons: Icons,
@@ -117,7 +181,12 @@ pub struct Ships {
 
 impl Ships {
     pub fn new(init: &Init<'_>) -> Self {
-        Ships { models: super::ship_models::ShipModels::new(init), icons: Icons::new(init) }
+        Ships { selection: Selection::new(init), models: super::ship_models::ShipModels::new(init), icons: Icons::new(init) }
+    }
+
+    /// How many halos and rings this frame draws (one each while a ship is selected).
+    pub fn rings_drawn(&self) -> [u32; 2] {
+        [self.selection.halo.count(), self.selection.ring.count()]
     }
 
     /// How many ship icons this frame draws.
@@ -138,6 +207,7 @@ impl Layer for Ships {
 
     fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
         let scene = &cx.scene.ships.scene;
+        self.selection.prepare(cx, cx.scene.ships.ring.as_ref());
         self.models.prepare(cx, &scene.models);
         self.icons.prepare(cx, &scene.icons);
     }
@@ -146,15 +216,20 @@ impl Layer for Ships {
         if cx.pass != Pass::Map {
             return;
         }
-        // the selection halo (H4) goes here, under the models
+        let selection = &self.selection;
+        // the selection halo under the models and the icons, the ring over them
+        selection.circles.draw(pass, &selection.halo_style, &selection.halo);
         self.models.draw(pass, cx);
         self.icons.draw(pass);
-        // the selection ring (H4) goes here, over them
+        selection.circles.draw(pass, &selection.ring_style, &selection.ring);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use rustradar_core::geo::Basemap;
     use rustradar_core::model::Ship;
     use rustradar_scene::camera::{ViewState, viewport_for};
@@ -387,6 +462,85 @@ mod tests {
         let green = over([116, 188, 112], 235, ground);
         let wide_at = |y: u32| (b[0]..=b[2]).filter(|&x| close(image.pixel(x, y), green, 6)).count();
         assert!(wide_at(b[1] + 4) < wide_at(b[3] - 4), "bow up the screen");
+    }
+
+    /// A second ships layer that prepares as the map's own does and draws nothing: how many halos
+    /// and rings the map's draws.
+    struct Probe {
+        ships: Ships,
+        rings: Rc<Cell<[u32; 2]>>,
+    }
+
+    impl Layer for Probe {
+        fn name(&self) -> &'static str {
+            "h4 probe"
+        }
+
+        fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
+            self.ships.prepare(cx);
+            self.rings.set(self.ships.rings_drawn());
+        }
+
+        fn draw(&self, _pass: &mut wgpu::RenderPass<'_>, _cx: &DrawCx<'_>) {}
+    }
+
+    /// The selected ship (item H4): the halo under its icon, the ring over the icons, the ring's
+    /// radius clearing the icon by 5 px, both round its report.
+    #[test]
+    fn the_selected_ship_has_a_halo_under_the_icons_and_a_ring_over_them() {
+        let Some(gpu) = gpu() else { return };
+        // the selected large cargo ship in the middle; a tug east of it under the ring's edge
+        let ships = vec![ship(1, 4, 2, Some(0.0), [200.0, 100.0], &VIEW), ship(2, 2, 2, Some(0.0), [216.0, 100.0], &VIEW)];
+        let ring = rustradar_scene::ships::ring_of(&ships[0], &VIEW).expect("on the near side");
+        assert_eq!(ring.radius_px, 22.0 / 2.0 + 5.0);
+        let mut scene = SceneInput::new(VIEW, SIZE, SCALE, Basemap::Dark);
+        scene.local_now_ms = NOW as f64;
+        scene.feed_now_ms = NOW as f64;
+        scene.ships.scene = ships_scene(&VIEW, &ships, None);
+        scene.ships.ring = Some(ring);
+        let mut renderer = MapRenderer::new(&gpu, FORMAT);
+        let rings = Rc::new(Cell::new([u32::MAX; 2]));
+        let probe = Probe { ships: Ships::new(&renderer.init(&gpu)), rings: rings.clone() };
+        renderer.add_layer(Box::new(probe));
+        let image = render_with(&gpu, &mut renderer, &scene, SCALE).expect("rendered");
+        save(&image, "h4-ship-selection.png");
+        let ground = image.pixel(4, 4);
+        let halo = over([55, 142, 240], 56, ground);
+        let haloed = [halo[0], halo[1], halo[2], 255];
+        // inside the halo, off the icon (13 px below the place; the hull reaches 10.3)
+        let p = image.pixel((200.0 * SCALE) as u32, (113.0 * SCALE) as u32);
+        assert!(close(p, halo, 3), "{p:?} vs the halo {halo:?}");
+        // the selected hull over the halo
+        let p = image.pixel((200.0 * SCALE) as u32, (100.0 * SCALE) as u32);
+        let want = over([116, 188, 112], 235, haloed);
+        assert!(close(p, want, 4), "{p:?} vs the hull over the halo {want:?}");
+        // the ring's stroke along the row west of the place: its coverage, read off the blue
+        // channel over the halo inside the radius and the ground outside it, adds up to 2 px round
+        // the radius
+        let y = (100.0 * SCALE) as u32 + 1;
+        let (mut width, mut moment) = (0.0, 0.0);
+        for x in ((180.0 * SCALE) as u32)..((190.0 * SCALE) as u32) {
+            let d = 200.0 - (f64::from(x) + 0.5) / SCALE;
+            let under = f64::from(if d < 16.0 { halo[2] } else { ground[2] });
+            let full = 240.0 * 235.0 / 255.0 + under * 20.0 / 255.0;
+            let cover = ((f64::from(image.pixel(x, y)[2]) - under) / (full - under)).clamp(0.0, 1.0) / SCALE;
+            width += cover;
+            moment += cover * d;
+        }
+        assert!((width - RING_WIDTH).abs() < 0.25, "the ring is {width} px wide");
+        assert!((moment / width - 16.0).abs() < 0.25, "the ring's middle {} px from the place", moment / width);
+        // over the tug's hull under its edge: the ring's blue, not the tug's teal over it
+        let p = image.pixel((216.0 * SCALE) as u32, (100.0 * SCALE) as u32 + 1);
+        let tug = over([72, 198, 194], 235, ground);
+        let want = over([55, 142, 240], 235, [tug[0], tug[1], tug[2], 255]);
+        assert!(close(p, want, 12), "{p:?} vs the ring over the tug {want:?}");
+        assert_eq!(rings.get(), [1, 1]);
+        // no ship selected: no halo, no ring
+        scene.ships.ring = None;
+        let image = render_with(&gpu, &mut renderer, &scene, SCALE).expect("rendered");
+        assert_eq!(rings.get(), [0, 0]);
+        let p = image.pixel((200.0 * SCALE) as u32, (113.0 * SCALE) as u32);
+        assert!(close(p, [ground[0], ground[1], ground[2]], 3), "{p:?}");
     }
 
     /// Draws the atlas itself into `target/shots` to look at beside the canvas's, as a check of the

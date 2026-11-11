@@ -10,9 +10,10 @@
 //! doc 03 §3, depth `always`), each aircraft group's airframes (row 26) and the icons (row 28)
 //! ([`rustradar_scene::aircraft::AircraftScene::picks`]); before them the signals (row 12, depth
 //! `always`, [`rustradar_scene::blocks::BlocksScene::picks`]) and the trains' icons or cars (row
-//! 15, [`rustradar_scene::trains::TrainsScene::picks`]), item T8. The ships (rows 9–11) join first
-//! with item H4; nothing else is pickable (gear, shadows, outlines, aircraft labels, trail, route,
-//! markers, rings, the blocks' lines, the trains' route and ring). The scene's world positions are projected with the frame's
+//! 15, [`rustradar_scene::trains::TrainsScene::picks`]), item T8; before those the ships' models
+//! and icons (rows 9–11, [`rustradar_scene::ships::ShipsScene::picks`]), item H4. Nothing else is
+//! pickable (gear, shadows, outlines, aircraft labels, trail, route, markers, rings, the ships'
+//! halo and ring, the blocks' lines, the trains' route and ring). The scene's world positions are projected with the frame's
 //! camera, as deck picks the layers last drawn under the current viewport; the pixel ratio is the
 //! map's scale (`useDevicePixels`).
 //!
@@ -31,12 +32,15 @@
 //!   stays until the pointer moves with no button held;
 //! - the train cars' `autoHighlight` (item T8): the car picked ([`Pick::hovered_car`], which the
 //!   trains' scene builder highlights), none when the pointer is off every car; a change refreshes
-//!   the scene at once, as deck redraws the highlight at once;
+//!   the scene at once, as deck redraws the highlight at once; the same for the ship models' (item
+//!   H4, [`Pick::hovered_ship_model`]; the ships' scene builder leaves it off while a ship is
+//!   hovered in the sidebar's list);
 //! - deck's tooltip (item T8, [`crate::ui::tooltip`]): `getTooltip` of what was picked, at the
-//!   pointer ([`Pick::tooltip`]): a train's ([`AppState::picked_train`]: its row of the list the map
-//!   draws), a signal's (the block layers' words for it), an airport code's (its feature's name),
-//!   none for anything else; after the hover pick, a camera that moved since the last frame hides
-//!   it until the next hover pick (`TooltipWidget.onViewportChange`).
+//!   pointer ([`Pick::tooltip`]): a ship's ([`AppState::picked_ship`], item H4), a train's
+//!   ([`AppState::picked_train`]: its row of the list the map draws), a signal's (the block
+//!   layers' words for it), an airport code's (its feature's name), none for anything else;
+//!   after the hover pick, a camera that moved since the last frame hides it until the next hover
+//!   pick (`TooltipWidget.onViewportChange`).
 //!
 //! **Click** (`onClick`). deck hands a click the object picked where the press went down
 //! (`_onPointerDown` keeps `_lastPointerDownInfo`; `_onEvent` passes it with the click's own `x, y`),
@@ -45,14 +49,15 @@
 //! press (tests) picks at its own position. Then, in order:
 //! 1. an aircraft → `onselect(flight)`: the searched place cleared, then `select(id)` (a click
 //!    does not fly; the same flight again asks a stream that ended again);
-//! 2. a ship: with item H4;
+//! 2. a ship → `onshipselect(ship)` (item H4): the place cleared, then `selectShip(ship)` (its row
+//!    of the list the map draws, [`AppState::picked_ship`]);
 //! 3. a train → `ontrainselect(train)`: the place cleared, then `selectTrain(train)` (its row of the
 //!    list the map draws);
 //! 4. a label: an airport with a code → `onairport(code)` (`openAirport`: the board's code, here
 //!    the flight state's focused airport until item U13 has the board, and the selected flight let
 //!    go); a place: nothing (no deselect);
-//! 5. nothing at all → `onselect(null)`: the place cleared, the train and the flight let go (the
-//!    ship too with H4).
+//! 5. nothing at all → `onselect(null)`: the place cleared, the ship, the train and the flight let
+//!    go.
 //!
 //! A click on a signal (pickable, so the cursor points) does nothing.
 //! Both clicks of a double click reach `onClick` (deck's `dblclick` handler is `onClick` too).
@@ -69,9 +74,10 @@
 //! [`AppState::pick_frame`] each frame after the click timers and the camera step and before the
 //! scene refresh (its [`Wants`] force the refresh and wake the loop when the card's dwell is up),
 //! [`Pick::hovering`] into `MapInput::set_cursor`; the aircraft scene builder reads
-//! [`Pick::hovered_id`], the trains' [`Pick::hovered_car`]; the UI pass draws [`Pick::tooltip`]
-//! (`ui::tooltip::ui`). The card (U18) takes [`AppState::hover_card`] before the egui pass: reading
-//! the loader's cache refreshes its recency, as `info` and `status` do in `hover-details.ts`, so it
+//! [`Pick::hovered_id`], the trains' [`Pick::hovered_car`], the ships'
+//! [`Pick::hovered_ship_model`]; the UI pass draws [`Pick::tooltip`] (`ui::tooltip::ui`). The card
+//! (U18) takes [`AppState::hover_card`] before the egui pass: reading the loader's cache refreshes
+//! its recency, as `info` and `status` do in `hover-details.ts`, so it
 //! needs the state mutably.
 //!
 //! Deviations from today's app:
@@ -88,10 +94,11 @@ use std::path::PathBuf;
 
 use rustradar_backend::{Backend, convert};
 use rustradar_core::hover::{HoverInfo, HoverLoader, HoverStatus, hover_info, route_progress};
-use rustradar_core::model::{FlightDetails, LiveFlight, Train, f32_as_js};
+use rustradar_core::model::{FlightDetails, LiveFlight, Ship, Train, f32_as_js};
 use rustradar_map::SceneInput;
 use rustradar_scene::camera::{ViewState, Viewport, viewport_for};
 use rustradar_scene::pick::PickList;
+use rustradar_scene::ships::{ModelPick, ShipPick};
 use rustradar_scene::trains::{CarPick, TrainPick};
 
 use super::aircraft::{Answer, NO_BACKEND};
@@ -108,18 +115,20 @@ pub enum Target {
     Aircraft(u32),
     /// A place name or an airport code (`labels`): the airport's code, `None` for a place.
     Label(Option<String>),
+    /// A ship's icon or model (`ship-icons`, `ship-mesh-*`, item H4).
+    Ship(ShipPick),
     /// A train's icon or one of its cars (`train-icons`, `train-car-meshes-*`, item T8).
     Train(TrainPick),
     /// A signal (`train-signals`, item T8): its place in the block set's signals. A tooltip only.
     Signal(usize),
 }
 
-/// The pickable things of `scene` laid out in `viewport`, in deck's draw order: the signals (row
-/// 12), the trains' icons or cars (row 15), the labels as the labels layer last drew them (row
-/// 18), then the aircraft's airframes and icons (rows 26, 28). (The ships, rows 9–11, go first:
-/// item H4.)
+/// The pickable things of `scene` laid out in `viewport`, in deck's draw order: the ships' models
+/// and icons (rows 9–11), the signals (row 12), the trains' icons or cars (row 15), the labels as
+/// the labels layer last drew them (row 18), then the aircraft's airframes and icons (rows 26, 28).
 pub fn picks(scene: &SceneInput, viewport: &Viewport) -> PickList<Target> {
-    let mut list: PickList<Target> = scene.blocks.scene.picks(viewport).into_iter().map(|item| item.map_key(Target::Signal)).collect();
+    let mut list: PickList<Target> = scene.ships.scene.picks(viewport).into_iter().map(|item| item.map_key(Target::Ship)).collect();
+    list.extend(scene.blocks.scene.picks(viewport).into_iter().map(|item| item.map_key(Target::Signal)));
     let models = rustradar_map::layers::train_cars::models();
     list.extend(scene.trains.scene.picks(viewport, models).into_iter().map(|item| item.map_key(Target::Train)));
     list.extend(scene.labels.drawn.picks().into_iter().map(|item| item.map_key(Target::Label)));
@@ -234,6 +243,8 @@ pub struct Pick {
     last_view: Option<(ViewState, [f64; 2])>,
     /// The car under the pointer, highlighted (deck's `autoHighlight` on the car layers).
     hovered_car: Option<CarPick>,
+    /// The ship model under the pointer, highlighted (deck's `autoHighlight` on the model layers).
+    hovered_ship_model: Option<ModelPick>,
 }
 
 impl Default for Pick {
@@ -271,6 +282,7 @@ impl Pick {
             tooltip: None,
             last_view: None,
             hovered_car: None,
+            hovered_ship_model: None,
         }
     }
 
@@ -283,6 +295,12 @@ impl Pick {
     /// highlights.
     pub fn hovered_car(&self) -> Option<&CarPick> {
         self.hovered_car.as_ref()
+    }
+
+    /// The ship model under the pointer (deck's `autoHighlight`), which the ships' scene builder
+    /// highlights (item H4).
+    pub fn hovered_ship_model(&self) -> Option<&ModelPick> {
+        self.hovered_ship_model.as_ref()
     }
 
     /// The hover card's details from `feed` instead of the fixture folder or the backend; `None`:
@@ -462,6 +480,13 @@ impl AppState {
         };
         let car_changed = car != self.pick.hovered_car;
         self.pick.hovered_car = car;
+        // the same for a ship model's (H4)
+        let model = match &target {
+            Some(Target::Ship(pick)) => pick.model,
+            _ => None,
+        };
+        let model_changed = model != self.pick.hovered_ship_model;
+        self.pick.hovered_ship_model = model;
         let flight = match target {
             Some(Target::Aircraft(id)) => self.picked_flight(id),
             _ => None,
@@ -472,7 +497,18 @@ impl AppState {
             self.pick.hovered_id = id;
             return true;
         }
-        car_changed
+        car_changed || model_changed
+    }
+
+    /// The ship a pick of the ship layers stands for (`pickedShip`, item H4): its row of the list
+    /// the map draws, found by its place there and checked by its MMSI (else found by its MMSI,
+    /// the list having changed since the scene was drawn).
+    pub fn picked_ship(&self, pick: &ShipPick) -> Option<Ship> {
+        let on_map = self.ships.on_map();
+        match on_map.get(pick.ship) {
+            Some(ship) if ship.mmsi == pick.mmsi => Some(ship.clone()),
+            _ => on_map.iter().find(|s| s.mmsi == pick.mmsi).cloned(),
+        }
     }
 
     /// The train a pick of the train layers stands for (`pickedTrain`): its row of the list the
@@ -487,10 +523,12 @@ impl AppState {
     }
 
     /// `getTooltip(info)` (G:3381-3422) for a pick of `target` in `scene` at local time `local_ms`:
-    /// a train's, a signal's or an airport code's tooltip ([`Tip`]); none for an aircraft (it has
-    /// the hover card) or a place's name. (A ship's, [`Tip::ship`], with item H4.)
+    /// a ship's, a train's, a signal's or an airport code's tooltip ([`Tip`]); none for an aircraft
+    /// (it has the hover card) or a place's name.
     fn tooltip_of(&self, target: &Target, scene: &SceneInput, local_ms: f64) -> Option<Tip> {
         match target {
+            // icons and models alike (H4)
+            Target::Ship(pick) => self.picked_ship(pick).map(|ship| Tip::ship(&ship)),
             // `trainPositionAge(train.positionUnix, Date.now())`
             Target::Train(pick) => self.picked_train(pick).map(|train| Tip::train(&train, local_ms.floor() as i64)),
             Target::Signal(index) => scene.blocks.scene.signal_tip(*index).map(|tip| Tip::signal(&tip)),
@@ -503,7 +541,7 @@ impl AppState {
     /// `onClick` with what the press picked (`None`: nothing pickable). Returns whether the
     /// selection or the marks on the map changed.
     pub fn click_map(&mut self, target: Option<Target>, local_ms: f64) -> bool {
-        let before = (self.flight.selected_id(), self.flight.focus_airport().map(str::to_owned), self.flight.place().is_some(), self.trains.selected_id().map(str::to_owned));
+        let before = (self.flight.selected_id(), self.flight.focus_airport().map(str::to_owned), self.flight.place().is_some(), self.trains.selected_id().map(str::to_owned), self.ships.selected_mmsi());
         match target {
             // onselect(flight): `place = null; select(f.id)`
             Some(Target::Aircraft(id)) => {
@@ -519,6 +557,13 @@ impl AppState {
             }
             // a place's name: nothing, not even a deselect
             Some(Target::Label(_)) => {}
+            // onshipselect(ship): `place = null; selectShip(s)` (H4)
+            Some(Target::Ship(pick)) => {
+                if let Some(ship) = self.picked_ship(&pick) {
+                    self.flight.set_place(None);
+                    self.select_ship(Some(ship), local_ms);
+                }
+            }
             // ontrainselect(train): `place = null; selectTrain(t)` (T8)
             Some(Target::Train(pick)) => {
                 if let Some(train) = self.picked_train(&pick) {
@@ -528,14 +573,15 @@ impl AppState {
             }
             // a signal: pickable, but a click does nothing
             Some(Target::Signal(_)) => {}
-            // onselect(null): the place and the train let go too (the ship with H4)
+            // onselect(null): `place = null; selectShip(null); selectTrain(null); select(null)`
             None => {
                 self.flight.set_place(None);
+                self.select_ship(None, local_ms);
                 self.select_train(None, local_ms);
                 self.select_flight(None, SelectOptions::default(), local_ms);
             }
         }
-        before != (self.flight.selected_id(), self.flight.focus_airport().map(str::to_owned), self.flight.place().is_some(), self.trains.selected_id().map(str::to_owned))
+        before != (self.flight.selected_id(), self.flight.focus_airport().map(str::to_owned), self.flight.place().is_some(), self.trains.selected_id().map(str::to_owned), self.ships.selected_mmsi())
     }
 
     /// The hover card's data now (`hoverCard`), or `None` when no flight is hovered.

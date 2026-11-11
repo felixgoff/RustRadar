@@ -36,8 +36,8 @@
 //! As in deck, an old ship at alpha 120 is drawn triangle by triangle in its mesh's order, each
 //! blending over the triangles drawn before it that it passes the depth test against.
 //!
-//! Deviations: none intended. The models are pickable and highlighted under the pointer once the
-//! pick records mark them ([`ShipsScene::hover_model`], item H4).
+//! Deviations: none intended. The models are pickable and highlighted under the pointer: the pick
+//! records mark the one picked ([`ShipsScene::highlight`], item H4).
 
 use glam::DVec3;
 use rustradar_scene::ship_models::{SHIP_CLASSES, ShipClass, ship_meshes};

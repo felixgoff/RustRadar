@@ -42,8 +42,22 @@
 //! the cars on the ground and on bridges, then those in tunnels. The map draws them
 //! (`map::layers::train_cars`).
 //!
+//! **Pick records** (item T8; doc 02 §11, doc 03 §10.1; `pickedTrain`, G:3356-3362).
+//! [`TrainsScene::picks`] lists what deck's picking pass would draw of row 15, in draw order, each
+//! keyed by a [`TrainPick`] (the train's place in the list drawn and its id, [`TrainsScene::ids`];
+//! for a car, its layer and its place there, [`CarPick`]): close in every car as the box its mesh
+//! fills ([`car_matrix`]), depth tested and written, or drawn over everything in a tunnel; further
+//! out every icon as the rectangle its glyph covers on the ground ([`icon_box`]), depth tested
+//! only. The car the pointer's pick lands on is highlighted [`CAR_HIGHLIGHT`]
+//! ([`CarLayers::highlight`], deck's `autoHighlight`); the icons are not (no `autoHighlight` on
+//! `train-icons`: only the sidebar's hover highlights one).
+//!
 //! Clocks: the trains' frames are timed on this machine's clock, so everything here takes the
 //! local clock as whole Unix milliseconds (`Date.now()`), not the flight feed's.
+//!
+//! Deviations in the pick records (as for the aircraft, [`crate::pick`]): an icon is picked over
+//! its glyph's rectangle and a car over its mesh's bounding box, where deck picks the texels that
+//! pass the alpha cutoff and the mesh's triangles.
 //!
 //! Deviation (plan section 6, item 1): an icon's angle is `−heading` in the true east/north frame
 //! at every zoom. deck lays ground-plane icons along its globe frame, which is turned half a turn
@@ -52,16 +66,19 @@
 
 use std::collections::HashMap;
 
+use glam::{DMat4, DVec3};
 use rustradar_core::geo::meters_per_pixel;
 use rustradar_core::model::{Train, TrainShape, f32_as_js};
 use rustradar_core::train_cars::{CAR_M, DEFAULT_CARS, GAP_M, car_lines_with};
 use rustradar_core::trains::{Frame, LatLon, heading_along, position_along, train_color_of, train_icon, train_icon_size};
 
+use crate::aircraft::{instance_matrix, local_frame};
 use crate::blocks::view_bounds;
 use crate::bridges::{GROUND, Level, level_at};
-use crate::camera::{FLAT_ABOVE_ZOOM, ViewState};
+use crate::camera::{FLAT_ABOVE_ZOOM, ViewState, Viewport};
 use crate::geom::js_max;
-use crate::train_models::{CAR_HEIGHT_M, CAR_WIDTH_M, TrainModels, car_mesh, car_places};
+use crate::pick::{DepthTest, OrientedBox, PickList};
+use crate::train_models::{CAR_HEIGHT_M, CAR_WIDTH_M, CarMesh, TrainModels, car_mesh, car_places};
 
 /// A train's alpha as drawn (G:1881).
 pub const TRAIN_ALPHA: u8 = 240;
@@ -414,8 +431,8 @@ pub struct DrawnCar {
     /// `getColor`: the train's colour at [`TRAIN_ALPHA`], or [`MODEL_WHITE`] for a model's car;
     /// alpha [`TUNNEL_TRAIN_ALPHA`] in a tunnel.
     pub color: [u8; 4],
-    /// Under the pointer: drawn with [`CAR_HIGHLIGHT`] (deck's `autoHighlight`). Nothing sets it
-    /// here; the map's picking does (item T8).
+    /// Under the pointer: drawn with [`CAR_HIGHLIGHT`] (deck's `autoHighlight`). Laid out unset;
+    /// [`CarLayers::highlight`] sets it for the car the pointer's pick landed on (item T8).
     pub highlighted: bool,
 }
 
@@ -551,6 +568,9 @@ pub struct TrainsScene {
     /// [`TrainBuilder::car_layers`] makes them from where it drew the trains, since it needs the
     /// canvas and the operator models.
     pub car_layers: CarLayers,
+    /// The ids of the trains drawn, in the list's order (item T8): a pick names the train it
+    /// lands on by its place in this list and its id ([`TrainPick`]).
+    pub ids: Vec<String>,
 }
 
 /// The trains' part of the scene refresh: the motion kept between refreshes.
@@ -576,11 +596,12 @@ impl TrainBuilder {
             return TrainsScene::default();
         }
         self.motion.step(list, now_ms);
+        let ids = list.iter().map(|t| t.id.clone()).collect();
         // close in, the cars; further out, a train is an icon lying on the ground along its way
         if cars_close_in(view.zoom, view.latitude) {
-            return TrainsScene { cars: true, ..TrainsScene::default() };
+            return TrainsScene { cars: true, ids, ..TrainsScene::default() };
         }
-        TrainsScene { icons: icons(list, self.motion.drawn(), view.zoom, hovered), ..TrainsScene::default() }
+        TrainsScene { icons: icons(list, self.motion.drawn(), view.zoom, hovered), ids, ..TrainsScene::default() }
     }
 
     /// Close in (a [`TrainsScene::cars`] refresh), after [`Self::build`] of the same refresh: the
@@ -595,6 +616,127 @@ impl TrainBuilder {
     pub fn drawn(&self) -> &Drawn {
         self.motion.drawn()
     }
+}
+
+// --- Pick records (item T8) ----------------------------------------------------------------
+
+/// The ink of a carriage icon round its cell's middle, cell texels: half its width and half its
+/// length, the outer half of its border included ([`crate::atlas::trains`]: 26 × 56 inside a
+/// 5 px border, so 31 × 61).
+pub const CAR_ICON_HALF: [f64; 2] = [15.5, 30.5];
+/// The same for the rounded square of a train without a heading (36 inside a 6 px border, so 42).
+pub const BOX_ICON_HALF: [f64; 2] = [21.0, 21.0];
+
+/// A car under the pointer as deck's `autoHighlight` keeps it (the picked layer's
+/// `highlightedObjectIndex`): its layer's id ([`CarLayer::id`]) and its place among that layer's
+/// cars.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CarPick {
+    pub layer: String,
+    pub index: usize,
+}
+
+/// What a pick of the train layers lands on (`pickedTrain`, G:3356-3362): the train's place in
+/// the list drawn (`train-icons`' object, or the picked car's [`DrawnCar::train`]) with its id
+/// ([`TrainsScene::ids`]), and for a car, which one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TrainPick {
+    pub train: usize,
+    pub id: String,
+    pub car: Option<CarPick>,
+}
+
+impl TrainsScene {
+    /// The trains' pick records in `viewport`, in draw order (row 15; every train layer is
+    /// `pickable`):
+    /// - close in, each car layer's cars ([`CarLayers::layers`], in that order) as the boxes their
+    ///   meshes fill under the instances the map draws ([`car_matrix`]): depth tested and written
+    ///   on the ground and on bridges (`NO_CULL`), over everything in a tunnel (`THROUGH_GROUND`);
+    ///   `models` are the operator models the cars were laid out with, and a car whose mesh is not
+    ///   among them is not drawn, so not picked;
+    /// - further out each icon with a cell, as the rectangle its glyph covers lying on the ground
+    ///   ([`icon_box`]), depth tested and not written (`TRAIN_PARAMETERS`).
+    pub fn picks(&self, viewport: &Viewport, models: Option<&TrainModels>) -> PickList<TrainPick> {
+        let mut list = PickList::new();
+        let id = |i: usize| self.ids.get(i).cloned().unwrap_or_default();
+        if self.cars {
+            let layers = &self.car_layers;
+            let mut bounds: HashMap<String, Option<[DVec3; 2]>> = HashMap::new();
+            for layer in layers.layers() {
+                let found = bounds.entry(layer.key.clone()).or_insert_with(|| car_mesh_of(&layer.mesh, models).and_then(mesh_bounds));
+                let Some([min, max]) = *found else { continue };
+                let depth_test = if layer.tunnel { DepthTest::Always } else { DepthTest::LessEqualWrite };
+                for (index, &c) in layer.cars.iter().enumerate() {
+                    let car = &layers.cars[c];
+                    let model = car_matrix(viewport, car, layers.width, layers.height);
+                    let key = TrainPick { train: car.train, id: id(car.train), car: Some(CarPick { layer: layer.id.clone(), index }) };
+                    list.oriented_box(key, OrientedBox::from_matrix(&model, min, max), depth_test);
+                }
+            }
+        } else {
+            // an icon for every train of the list, in its order
+            for (i, icon) in self.icons.iter().enumerate() {
+                if let Some(footprint) = icon_box(viewport, icon) {
+                    list.oriented_box(TrainPick { train: i, id: id(i), car: None }, footprint, DepthTest::LessEqual);
+                }
+            }
+        }
+        list
+    }
+}
+
+impl CarLayers {
+    /// Marks the car `pick` names as under the pointer, as deck's `autoHighlight` does: the car at
+    /// that place of that layer's cars in this refresh; nothing when there is no such layer or car.
+    pub fn highlight(&mut self, pick: &CarPick) {
+        if let Some(layer) = self.layers().into_iter().find(|l| l.id == pick.layer)
+            && let Some(&c) = layer.cars.get(pick.index)
+        {
+            self.cars[c].highlighted = true;
+        }
+    }
+}
+
+/// A car's model matrix in `viewport`'s common space, as the map draws the car
+/// (`map::layers::train_cars::instance`): the unit box at its middle raised to its level's height,
+/// turned to its heading (`getOrientation: [0, −heading, 0]`) and stretched to
+/// `[width, length, height]` metres (`getScale`).
+pub fn car_matrix(viewport: &Viewport, car: &DrawnCar, width: f64, height: f64) -> DMat4 {
+    instance_matrix(viewport, [car.at[0], car.at[1], car.level.height], [0.0, -car.heading, 0.0], [width, car.length, height])
+}
+
+/// The rectangle a train icon's glyph covers, lying on the ground in `viewport`'s common space as
+/// the icon pipeline lays it (`billboard: false`): its cell scaled so the cell is
+/// [`TrainIcon::size_px`] tall at the view centre's scale (deck's `project_pixel_size`, pixels
+/// over `scale`), in the plane of east and north at the train, turned anticlockwise from north by
+/// its angle; of the cell, the glyph's ink ([`CAR_ICON_HALF`], [`BOX_ICON_HALF`]). `None` for an
+/// icon the atlas has no cell for (deck draws nothing for it).
+pub fn icon_box(viewport: &Viewport, icon: &TrainIcon) -> Option<OrientedBox> {
+    let cell = crate::atlas::trains::cell(&icon.name)?;
+    let half = if icon.name.starts_with("car-") { CAR_ICON_HALF } else { BOX_ICON_HALF };
+    // common units per texel: the size over the cell's height (deck's `sizeBasis`), over `scale`
+    let k = js_max(icon.size_px, 0.0) / f64::from(cell.height) / viewport.scale;
+    // the anchor as the map places it (the world copy nearest the view centre on the flat map)
+    let center = instance_matrix(viewport, icon.position, [0.0; 3], [1.0; 3]).w_axis.truncate();
+    let enu = local_frame(viewport, [icon.position[0], icon.position[1]]);
+    let (east, north, up) = (enu.x_axis.normalize(), enu.y_axis.normalize(), enu.z_axis.normalize());
+    let (sin, cos) = icon.angle.to_radians().sin_cos();
+    Some(OrientedBox { center, axes: [east * cos + north * sin, north * cos - east * sin, up], half: [half[0] * k, half[1] * k, 0.0] })
+}
+
+/// The triangles of a car's mesh: a plain car's, or a model's from `models` (none without it).
+fn car_mesh_of<'m>(shape: &CarShape, models: Option<&'m TrainModels>) -> Option<&'m CarMesh> {
+    match shape {
+        CarShape::Plain { lead, shape } => Some(car_mesh(*lead, *shape).1),
+        CarShape::Model { model, index } => Some(&models?.cars(model)?.get(*index)?.mesh),
+    }
+}
+
+/// A mesh's bounds in model space, `[min, max]`; none for a mesh without vertices.
+fn mesh_bounds(mesh: &CarMesh) -> Option<[DVec3; 2]> {
+    let mut points = mesh.positions.chunks_exact(3).map(|p| DVec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2])));
+    let first = points.next()?;
+    Some(points.fold([first, first], |[lo, hi], p| [lo.min(p), hi.max(p)]))
 }
 
 #[cfg(test)]
@@ -900,7 +1042,7 @@ mod tests {
         let mut builder = TrainBuilder::new();
         let view = ViewState { longitude: STOCKHOLM.1, latitude: STOCKHOLM.0, zoom: 14.0, bearing: 0.0, pitch: 0.0, position: None };
         let scene = builder.build(&list, true, &view, None, NOW + 5000);
-        assert_eq!(scene, TrainsScene { cars: true, ..TrainsScene::default() });
+        assert_eq!(scene, TrainsScene { cars: true, ids: vec!["a".to_owned()], ..TrainsScene::default() });
         // they still move close in
         let pos = builder.drawn().positions[0];
         assert!((metres(ll(STOCKHOLM), LatLon { lat: pos[1], lon: pos[0] }) - 50.0).abs() < 1e-6);
@@ -1212,5 +1354,240 @@ mod tests {
         let mut motion = TrainMotion::new();
         motion.set_list(&[&t], NOW);
         assert_eq!(motion.drawn().headings[0], Some(12.3), "not 12.300000190734863");
+    }
+
+    // --- Pick records (T8) ---
+
+    use crate::camera::viewport_for;
+
+    const CANVAS: [f64; 2] = [800.0, 600.0];
+
+    fn view_at((lat, lon): (f64, f64), zoom: f64, pitch: f64, bearing: f64) -> ViewState {
+        ViewState { longitude: lon, latitude: lat, zoom, bearing, pitch, position: None }
+    }
+
+    /// What the scene of `list` picks at `at` (CSS px) in `view`: the train and the distance.
+    fn picked(scene: &TrainsScene, view: &ViewState, at: [f64; 2]) -> Option<(usize, f64)> {
+        let viewport = viewport_for(view, CANVAS);
+        scene.picks(&viewport, None).pick(&viewport, at, 1.0).map(|hit| (hit.key.train, hit.distance_px))
+    }
+
+    #[test]
+    fn the_icon_footprints_are_the_glyphs_ink() {
+        let atlas = crate::atlas::trains::draw();
+        for (name, half) in [("car-regional", CAR_ICON_HALF), ("box-regional", BOX_ICON_HALF), ("car-op3", CAR_ICON_HALF), ("box-op15", BOX_ICON_HALF)] {
+            let c = crate::atlas::trains::cell(name).expect("a cell");
+            // the texels deck keeps: alpha at least the cutoff, 0.05
+            let (mut lo, mut hi) = ([u32::MAX; 2], [0u32; 2]);
+            for y in c.y..c.y + c.height {
+                for x in c.x..c.x + c.width {
+                    if f64::from(atlas.texel(x, y)[3]) >= 0.05 * 255.0 {
+                        lo = [lo[0].min(x - c.x), lo[1].min(y - c.y)];
+                        hi = [hi[0].max(x - c.x + 1), hi[1].max(y - c.y + 1)];
+                    }
+                }
+            }
+            let middle = f64::from(c.width) / 2.0;
+            for axis in 0..2 {
+                // the ink spans the footprint to within a texel of anti-aliasing either side
+                let (from, to) = (f64::from(lo[axis]), f64::from(hi[axis]));
+                assert!((from - (middle - half[axis])).abs() <= 1.0 && (to - (middle + half[axis])).abs() <= 1.0, "{name} axis {axis}: ink {from}–{to}, footprint ±{}", half[axis]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_train_icon_is_picked_over_its_glyph_lying_on_the_ground_turned_to_its_heading() {
+        // going east: the carriage lies along the screen's x straight down, along y with the map
+        // turned a quarter (bearing 90: east up)
+        let t = train("e", STOCKHOLM, Some(90.0));
+        let list = [&t];
+        for (zoom, bearing) in [(9.0, 0.0), (12.1, 0.0), (9.0, 90.0), (11.0, 0.0)] {
+            let view = view_at(STOCKHOLM, zoom, 0.0, bearing);
+            let scene = TrainBuilder::new().build(&list, true, &view, None, NOW);
+            let viewport = viewport_for(&view, CANVAS);
+            let picks = scene.picks(&viewport, None);
+            assert_eq!(picks.len(), 1);
+            assert_eq!(picks.items()[0].key, TrainPick { train: 0, id: "e".into(), car: None });
+            assert_eq!(picks.items()[0].depth_test, DepthTest::LessEqual, "TRAIN_PARAMETERS: tested, not written");
+            let size = scene.icons[0].size_px;
+            let (long, across) = (CAR_ICON_HALF[1] / 64.0 * size, CAR_ICON_HALF[0] / 64.0 * size);
+            let [x, y, _] = viewport.project([STOCKHOLM.1, STOCKHOLM.0, 0.0]);
+            let along = |d: f64| if bearing == 0.0 { [x + d, y] } else { [x, y - d] };
+            let side = |d: f64| if bearing == 0.0 { [x, y + d] } else { [x + d, y] };
+            let about = format!("zoom {zoom}, bearing {bearing}, {size} px");
+            assert_eq!(picked(&scene, &view, [x, y]), Some((0, 0.0)), "{about}: on the anchor");
+            for d in [long - 0.6, -(long - 0.6)] {
+                assert_eq!(picked(&scene, &view, along(d)), Some((0, 0.0)), "{about}: {d} px along");
+            }
+            for d in [across - 0.6, -(across - 0.6)] {
+                assert_eq!(picked(&scene, &view, side(d)), Some((0, 0.0)), "{about}: {d} px across");
+            }
+            // 6 px of reach past the glyph, no more
+            let near = picked(&scene, &view, along(long + 4.0)).expect("4 px past its nose");
+            assert!(near.1 > 2.5 && near.1 <= 5.0, "{about}: {near:?}");
+            assert_eq!(picked(&scene, &view, along(long + 7.5)), None, "{about}");
+            assert_eq!(picked(&scene, &view, side(across + 7.5)), None, "{about}");
+            assert_eq!(picked(&scene, &view, side(-(across + 7.5))), None, "{about}");
+        }
+        // pitched: the glyph lies on the ground, so it is shorter across (north–south) on the screen
+        let view = view_at(STOCKHOLM, 11.0, 60.0, 0.0);
+        let scene = TrainBuilder::new().build(&list, true, &view, None, NOW);
+        let [x, y, _] = viewport_for(&view, CANVAS).project([STOCKHOLM.1, STOCKHOLM.0, 0.0]);
+        let across = CAR_ICON_HALF[0] / 64.0 * scene.icons[0].size_px;
+        assert_eq!(picked(&scene, &view, [x, y]), Some((0, 0.0)));
+        let off = picked(&scene, &view, [x, y - (across - 0.6)]).expect("within reach");
+        assert!(off.1 > 0.5, "foreshortened: {off:?}");
+        // a train without a heading: its square, the same each way
+        let still = train("s", STOCKHOLM, None);
+        let view = view_at(STOCKHOLM, 9.0, 0.0, 0.0);
+        let scene = TrainBuilder::new().build(&[&still], true, &view, None, NOW);
+        let half = BOX_ICON_HALF[0] / 64.0 * scene.icons[0].size_px;
+        let [x, y, _] = viewport_for(&view, CANVAS).project([STOCKHOLM.1, STOCKHOLM.0, 0.0]);
+        for at in [[x + half - 0.6, y], [x, y - half + 0.6], [x - half + 0.6, y + half - 0.6]] {
+            assert_eq!(picked(&scene, &view, at), Some((0, 0.0)), "{at:?}");
+        }
+        assert_eq!(picked(&scene, &view, [x + half + 7.5, y]), None);
+    }
+
+    #[test]
+    fn an_icon_the_atlas_lacks_is_not_drawn_so_not_picked() {
+        let t = train("e", STOCKHOLM, Some(90.0));
+        let view = view_at(STOCKHOLM, 9.0, 0.0, 0.0);
+        let mut scene = TrainBuilder::new().build(&[&t], true, &view, None, NOW);
+        scene.icons[0].name = "car-nothing".into();
+        assert!(scene.picks(&viewport_for(&view, CANVAS), None).is_empty());
+    }
+
+    #[test]
+    fn a_later_train_wins_where_two_icons_overlap_and_each_is_picked_off_the_other() {
+        // two trains going east, the second half a carriage's width north of the first and drawn
+        // over it
+        let size = train_icon_size(TrainKind::Regional, Some(90.0), 9.0);
+        let across = CAR_ICON_HALF[0] / 64.0 * size;
+        let a = train("a", STOCKHOLM, Some(90.0));
+        let b = train("b", ahead(STOCKHOLM, 0.0, across / 2.0 * meters_per_pixel(9.0, STOCKHOLM.0)), Some(90.0));
+        let view = view_at(STOCKHOLM, 9.0, 0.0, 0.0);
+        let scene = TrainBuilder::new().build(&[&a, &b], true, &view, None, NOW);
+        assert_eq!(scene.ids, ["a", "b"]);
+        assert_eq!(scene.icons[0].size_px, size);
+        let [x, y, _] = viewport_for(&view, CANVAS).project([STOCKHOLM.1, STOCKHOLM.0, 0.0]);
+        assert_eq!(picked(&scene, &view, [x, y]), Some((1, 0.0)), "the later one on top");
+        assert_eq!(picked(&scene, &view, [x, y + 0.75 * across]), Some((0, 0.0)), "the first one's south side");
+        assert_eq!(picked(&scene, &view, [x, y - 1.25 * across]), Some((1, 0.0)), "the second one's north side");
+    }
+
+    /// The pick order of rows 10 and 15: a ship's icon (a billboard disc, `SHIP_PARAMETERS`: depth
+    /// tested, not written) is drawn before the trains, so where a train lies over a ship the train
+    /// is picked, and off the train the ship is (the nearest pixel wins first).
+    #[test]
+    fn a_ship_drawn_before_a_train_is_picked_only_off_the_train() {
+        #[derive(Debug, Clone, PartialEq)]
+        enum Hit {
+            Ship,
+            Train(usize),
+        }
+        let t = train("t", STOCKHOLM, Some(90.0));
+        let view = view_at(STOCKHOLM, 9.0, 0.0, 0.0);
+        let scene = TrainBuilder::new().build(&[&t], true, &view, None, NOW);
+        let viewport = viewport_for(&view, CANVAS);
+        let [x, y, depth] = viewport.project([STOCKHOLM.1, STOCKHOLM.0, 0.0]);
+        let across = CAR_ICON_HALF[0] / 64.0 * scene.icons[0].size_px;
+        // the ship's disc (12 px across) reaching 3 px over the carriage's north side
+        let mut list: PickList<Hit> = PickList::new();
+        list.point(Hit::Ship, [x, y - across - 3.0, depth], 6.0, DepthTest::LessEqual);
+        list.extend(scene.picks(&viewport, None).into_iter().map(|item| item.map_key(|k| Hit::Train(k.train))));
+        let hit = |at: [f64; 2]| list.pick(&viewport, at, 1.0).map(|h| h.key.clone());
+        assert_eq!(hit([x, y - across + 1.0]), Some(Hit::Train(0)), "the overlap: the train, drawn over the ship");
+        assert_eq!(hit([x, y - across - 6.0]), Some(Hit::Ship), "the ship alone, though the train is within 6 px");
+        assert_eq!(hit([x, y]), Some(Hit::Train(0)));
+        // drawn the other way round, the ship would win the overlap
+        let mut reversed: PickList<Hit> = scene.picks(&viewport, None).into_iter().map(|item| item.map_key(|k| Hit::Train(k.train))).collect();
+        reversed.point(Hit::Ship, [x, y - across - 3.0, depth], 6.0, DepthTest::LessEqual);
+        assert_eq!(reversed.pick(&viewport, [x, y - across + 1.0], 1.0).map(|h| h.key.clone()), Some(Hit::Ship));
+    }
+
+    #[test]
+    fn close_in_each_car_is_picked_as_the_box_its_mesh_fills_named_by_its_layer_and_place() {
+        let mut t = eastward();
+        // its third car (64.7 m back) in a tunnel
+        t.structures = vec![Structure { tunnel: true, line: vec![lonlat(ahead(STOCKHOLM, 90.0, -55.0)), lonlat(ahead(STOCKHOLM, 90.0, -80.0))], joined: [false, false] }];
+        let list = [&t];
+        let view = view_at(STOCKHOLM, 17.0, 0.0, 0.0);
+        let mut builder = TrainBuilder::new();
+        let mut scene = builder.build(&list, true, &view, None, NOW);
+        scene.car_layers = builder.car_layers(&list, &view, CANVAS, None, NOW);
+        assert_eq!(scene.car_layers.cars.len(), 3);
+        let viewport = viewport_for(&view, CANVAS);
+        let picks = scene.picks(&viewport, None);
+        let keys: Vec<(Option<CarPick>, DepthTest)> = picks.items().iter().map(|i| (i.key.car.clone(), i.depth_test)).collect();
+        let car = |layer: &str, index| Some(CarPick { layer: layer.into(), index });
+        assert_eq!(
+            keys,
+            [
+                (car("train-car-meshes-regional-cab", 0), DepthTest::LessEqualWrite),
+                (car("train-car-meshes-regional-coach", 0), DepthTest::LessEqualWrite),
+                (car("train-car-meshes-regional-coach-tunnel", 0), DepthTest::Always),
+            ]
+        );
+        assert!(picks.items().iter().all(|i| i.key.train == 0 && i.key.id == "east"));
+        // each car under its middle; between two cars (the 0.6 m gap is 0.25 px), one or the other
+        let px = |at: [f64; 2], h: f64| {
+            let [x, y, _] = viewport.project([at[0], at[1], h]);
+            [x, y]
+        };
+        for (k, c) in scene.car_layers.cars.iter().enumerate() {
+            let hit = picks.pick(&viewport, px(c.at, 0.0), 1.0).expect("under its middle");
+            assert_eq!((hit.index, hit.distance_px), (k, 0.0), "car {k}");
+            // its side: 1.55 m off its middle is on it, 3 m (plus the reach) is not
+            let mpp = viewport.meters_per_pixel();
+            let beside = |m: f64| {
+                let (lat, lon) = ahead((c.at[1], c.at[0]), c.heading + 90.0, m);
+                px([lon, lat], 0.0)
+            };
+            assert_eq!(picks.pick(&viewport, beside(1.4), 1.0).map(|h| h.index), Some(k));
+            assert_eq!(picks.pick(&viewport, beside(1.55 + 6.5 * mpp), 1.0).map(|h| h.index), None);
+        }
+        // its roof, 4.1 m up, is on it too
+        let c = &scene.car_layers.cars[0];
+        assert_eq!(picks.pick(&viewport, px(c.at, 4.0), 1.0).map(|h| h.index), Some(0));
+        // further out: the icon, no cars
+        let far = view_at(STOCKHOLM, 11.0, 0.0, 0.0);
+        let scene = TrainBuilder::new().build(&list, true, &far, None, NOW);
+        assert!(scene.picks(&viewport_for(&far, CANVAS), None).items().iter().all(|i| i.key.car.is_none()));
+    }
+
+    #[test]
+    fn a_models_car_is_picked_over_its_own_mesh_and_not_without_the_models() {
+        let mut t = eastward();
+        t.model = Some("x40".into());
+        let list = [&t];
+        let view = view_at(STOCKHOLM, 17.0, 0.0, 0.0);
+        let models = models();
+        let mut builder = TrainBuilder::new();
+        let mut scene = builder.build(&list, true, &view, None, NOW);
+        scene.car_layers = builder.car_layers(&list, &view, CANVAS, Some(&models), NOW);
+        let viewport = viewport_for(&view, CANVAS);
+        let picks = scene.picks(&viewport, Some(&models));
+        assert_eq!(picks.len(), 3);
+        assert_eq!(picks.items()[0].key.car, Some(CarPick { layer: "train-car-meshes-x40-0".into(), index: 0 }));
+        let [x, y, _] = viewport.project([scene.car_layers.cars[1].at[0], scene.car_layers.cars[1].at[1], 0.0]);
+        assert_eq!(picks.pick(&viewport, [x, y], 1.0).map(|h| h.index), Some(1));
+        // laid out with the models but asked without them: their meshes are not drawn
+        assert!(scene.picks(&viewport, None).is_empty());
+    }
+
+    #[test]
+    fn the_car_picked_is_the_one_highlighted() {
+        let mut regional = eastward();
+        regional.cars = Some(4);
+        let mut layers = CarLayers::new(cars_of(&[&regional], None, NOW), 0.6);
+        layers.highlight(&CarPick { layer: "train-car-meshes-regional-coach".into(), index: 1 });
+        assert_eq!(layers.cars.iter().map(|c| c.highlighted).collect::<Vec<_>>(), [false, false, true, false]);
+        // a layer this refresh has not, or a place past its cars: nothing
+        let mut layers = CarLayers::new(cars_of(&[&regional], None, NOW), 0.6);
+        layers.highlight(&CarPick { layer: "train-car-meshes-regional-coach-tunnel".into(), index: 0 });
+        layers.highlight(&CarPick { layer: "train-car-meshes-regional-cab".into(), index: 1 });
+        assert!(layers.cars.iter().all(|c| !c.highlighted));
     }
 }

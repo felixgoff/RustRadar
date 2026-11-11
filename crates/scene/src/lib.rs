@@ -5,6 +5,7 @@
 
 pub mod aircraft;
 pub mod aircraft_assets;
+pub mod aircraft_labels;
 pub mod aircraft_models;
 pub mod atlas;
 pub mod blocks;

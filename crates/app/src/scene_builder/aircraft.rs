@@ -28,6 +28,7 @@ use rustradar_core::settings::shown_kinds;
 use rustradar_map::SceneInput;
 use rustradar_map::layers::aircraft::assets;
 use rustradar_scene::aircraft::{AircraftBuilder, AircraftScene, Inputs};
+use rustradar_scene::aircraft_labels::Labeller;
 
 use crate::state::AppState;
 
@@ -37,6 +38,8 @@ pub struct Aircraft {
     builder: AircraftBuilder,
     /// The aircraft of the latest scene refresh.
     pub latest: AircraftScene,
+    /// The aircraft labels' set across refreshes (item A7).
+    labels: Labeller,
 }
 
 impl Aircraft {
@@ -59,6 +62,7 @@ impl Aircraft {
     /// Fills its layers' inputs in `scene` from `state` (see [`super::SceneBuilder::build`]).
     pub fn build(&mut self, state: &mut AppState, scene: &mut SceneInput) {
         let inputs = Self::inputs(state, scene);
+        let label_scale = state.persisted.settings.label_size;
         let (feed_now, local_now) = (scene.feed_now_ms, scene.local_now_ms);
         let AppState { aircraft, motion, liveries, taxiways, .. } = state;
         let reference = aircraft.reference().map(|r| &**r);
@@ -74,6 +78,9 @@ impl Aircraft {
         taxiways.taxiways_for(&self.latest.taxi_wanted, motion, local_now);
         // what the aircraft layers draw until the next refresh
         scene.aircraft.scene = self.latest.clone();
+        // their labels (A7), laid out again only when the feed, the height line or the aircraft
+        // labelled change
+        scene.aircraft.labels = self.labels.build(&self.latest, inputs.labelling, aircraft.generation(), |row| shown.get(row), label_scale);
     }
 }
 

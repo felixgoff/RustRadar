@@ -9,6 +9,7 @@
 
 pub mod assets;
 pub mod icons;
+pub mod labels;
 pub mod shadows;
 
 use rustradar_scene::aircraft::AircraftScene;
@@ -21,6 +22,9 @@ pub struct Input {
     /// This scene refresh's aircraft (`AircraftBuilder::build`): mesh groups with their gear,
     /// icons, label candidates. Empty when no aircraft are drawn.
     pub scene: AircraftScene,
+    /// This scene refresh's aircraft labels (`aircraft_labels::Labeller::build`, item A7): empty
+    /// when none are drawn.
+    pub labels: labels::Input,
 }
 
 /// Rows 25–29: shadows, gear and models, icon outlines, icons, aircraft labels.
@@ -30,11 +34,23 @@ pub struct Aircraft {
     shadows: shadows::Shadows,
     /// Rows 27 and 28: icon outlines, icons.
     icons: icons::Icons,
+    /// Row 29: aircraft labels.
+    labels: labels::Labels,
 }
 
 impl Aircraft {
     pub fn new(init: &Init<'_>) -> Self {
-        Aircraft { assets: assets::AircraftAssets::new(init), shadows: shadows::Shadows::new(init), icons: icons::Icons::new(init) }
+        Aircraft {
+            assets: assets::AircraftAssets::new(init),
+            shadows: shadows::Shadows::new(init),
+            icons: icons::Icons::new(init),
+            labels: labels::Labels::new(init),
+        }
+    }
+
+    /// The aircraft labels drawn this frame.
+    pub fn labels(&self) -> &[labels::Shown] {
+        self.labels.shown()
     }
 
     /// The meshes and atlases every part draws with.
@@ -53,11 +69,13 @@ impl Layer for Aircraft {
         let scene = &cx.scene.aircraft.scene;
         self.shadows.prepare(cx, &self.assets, scene);
         self.icons.prepare(cx, &self.assets, scene);
+        self.labels.prepare(cx, &cx.scene.aircraft.labels);
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
         self.shadows.draw(pass, cx, &self.assets);
         self.icons.draw(pass, cx);
+        self.labels.draw(pass, cx);
     }
 
     fn pending(&self) -> bool {

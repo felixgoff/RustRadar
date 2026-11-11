@@ -9,12 +9,14 @@
 //! and scale, cached as egui textures and tinted when drawn).
 //!
 //! Components: [`map_error`] (B9), [`tooltip`] (the map's tooltip over ships, trains, signals and
-//! airports, T8).
+//! airports, T8), [`shell`] and [`sidebar`] (the desktop shell, the page's keys: U6).
 
 pub mod anim;
 pub mod fonts;
 pub mod icons;
 pub mod map_error;
+pub mod shell;
+pub mod sidebar;
 pub mod text;
 pub mod theme;
 pub mod tooltip;

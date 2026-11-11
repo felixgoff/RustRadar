@@ -33,7 +33,7 @@ use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
-use crate::ui::{map_error, theme, tooltip};
+use crate::ui::{map_error, shell, theme, tooltip};
 use crate::{Options, platform, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
@@ -110,6 +110,11 @@ pub struct Engine {
     /// map, so the layers take their tiles in as a drawn frame does, without the map pass that
     /// costs seconds on a software rasteriser.
     pub draw: bool,
+    /// Whether the UI pass draws the shell and takes the page's keys (`ui::shell`, U6). The window
+    /// turns it on; it is off by default, so the headless shots and the tests of the map draw the
+    /// map alone, as they were written to (the error card and the map's tooltip are drawn either
+    /// way).
+    pub shell: bool,
 }
 
 impl Engine {
@@ -131,6 +136,7 @@ impl Engine {
             rebuild: false,
             rebuilt_for_loss: false,
             draw: true,
+            shell: false,
         }
     }
 
@@ -231,24 +237,34 @@ impl Engine {
         let adapter = gpu.adapter.get_info();
         let map = &mut self.map;
         let mut retry = None;
+        let draw_shell = self.shell;
         let output = self.egui.run_ui(raw_input, |ui| {
-            ui_pass(ui, &self.state, &mut actions);
+            if draw_shell {
+                ui_pass(ui, &self.state, local_ms, &mut actions);
+            }
             // deck's tooltip at the pointer, over the map and under the panels (T8)
             tooltip::ui(ui.ctx(), self.state.pick.tooltip());
             // over everything else: the card while an error stops the map (B9)
             retry = map_error::ui(ui.ctx(), map, Some(&adapter));
         });
+        let mut applied = false;
         for action in actions {
-            self.state.apply(action, local_ms);
+            applied |= self.state.apply(action, local_ms);
+        }
+        // what an action changed is drawn by the next frame, at once (U6)
+        if applied {
+            self.pacer.force();
         }
         // after a lost device the card's Retry asks the window for a new one (B9)
         if retry == Some(Retry::Rebuild) {
             self.rebuild = true;
         }
-        // what may take the keys as of this pass (B8; no dialog closes the shortcuts yet), and
-        // deck's cursor over the map (a pointing hand over anything pickable: A9)
+        // what may take the keys as of this pass (B8; the keys dialog and the help turn the map's
+        // shortcuts off: U6), and deck's cursor over the map (a pointing hand over anything
+        // pickable: A9)
         let typing = self.egui.text_edit_focused();
-        self.input.set_key_gate(KeyGate { typing, ui_focused: self.egui.egui_wants_keyboard_input(), shortcuts_off: false });
+        let shortcuts_off = self.state.shortcuts.shortcuts_off();
+        self.input.set_key_gate(KeyGate { typing, ui_focused: self.egui.egui_wants_keyboard_input(), shortcuts_off });
         let mut platform_output = output.platform_output;
         self.input.set_cursor(&self.egui, &mut platform_output, &self.state.controller, self.state.pick.hovering());
 
@@ -342,9 +358,11 @@ impl Engine {
     }
 }
 
-/// The UI pass: what egui draws over the map, and the actions it asks for. Empty until stage 7
-/// (the shell of U6 draws from here).
-fn ui_pass(_ui: &mut egui::Ui, _state: &AppState, _actions: &mut Vec<Action>) {}
+/// The UI pass: what egui draws over the map (the shell and the page's keys, U6) at local time
+/// `local_ms`, and the actions it asks for.
+fn ui_pass(ui: &mut egui::Ui, state: &AppState, local_ms: f64, actions: &mut Vec<Action>) {
+    shell::ui(ui.ctx(), state, local_ms, actions);
+}
 
 /// Opens the window and runs until it is closed.
 pub fn run(options: Options) -> Result<(), Error> {
@@ -418,6 +436,8 @@ impl View {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&gpu.device, &config);
         let mut engine = Engine::new(&gpu, config.format, state);
+        // the window draws the UI over the map (U6)
+        engine.shell = true;
         // the map's tiles: the --fixture folder's, else the network through the backend's cache (T1)
         tile_fetcher::connect(&mut engine.map, &engine.state);
         // wgpu's errors and a lost device stop the map with the error card, not the app (B9)

@@ -182,6 +182,22 @@ pub enum Action {
     /// Another kind also on the map or not (the mode bar's eye, `Shift+P I S`):
     /// [`AppState::toggle_shown`].
     ToggleShown(Mode),
+    /// The camera follows the selected flight, train or ship, or lets go (key `c`, the panels'
+    /// Follow): [`AppState::toggle_following`].
+    ToggleFollow,
+    /// Shows a basemap (keys `1 2 3`, the layers menu): [`AppState::set_basemap`].
+    SetBasemap(Basemap),
+    /// A setting on or off (keys `l b k d w r e`, the menus): [`AppState::toggle_setting`].
+    Toggle(shortcuts::Toggle),
+    /// Opens or closes the filter panel, the shortcuts help, the keys dialog or the dev panel
+    /// ([`AppState::set_open`]).
+    Open(shortcuts::Open, bool),
+    /// The same, the other way from how it is (key `f`, the Filters button, key `?`).
+    ToggleOpen(shortcuts::Open),
+    /// The map controls' menu open, or none ([`AppState::set_menu`]).
+    SetMenu(Option<shortcuts::Menu>),
+    /// "Retry now" under the aircraft feed's error (`refresh()`).
+    RetryFeed,
 }
 
 /// The app's state: the camera, the clocks' sync, settings, and one part per feed.
@@ -342,8 +358,7 @@ impl AppState {
     /// leaves only when nothing was).
     pub fn apply(&mut self, action: Action, local_ms: f64) -> bool {
         match action {
-            // nothing can be open yet: the panels and dialogs come with stage 7 (U6 `close_top`)
-            Action::CloseTop => false,
+            Action::CloseTop => self.close_top(local_ms),
             Action::ZoomBy(delta) => {
                 self.controller.zoom_by(delta, local_ms);
                 true
@@ -362,6 +377,16 @@ impl AppState {
             }
             Action::SetMode(mode) => self.set_mode(mode),
             Action::ToggleShown(kind) => self.toggle_shown(kind),
+            Action::ToggleFollow => self.toggle_following(local_ms),
+            Action::SetBasemap(basemap) => self.set_basemap(basemap, local_ms),
+            Action::Toggle(what) => self.toggle_setting(what),
+            Action::Open(what, open) => self.set_open(what, open),
+            Action::ToggleOpen(what) => self.set_open(what, !self.shortcuts.is_open(what)),
+            Action::SetMenu(menu) => self.set_menu(menu),
+            Action::RetryFeed => {
+                self.aircraft.retry();
+                true
+            }
         }
     }
 }

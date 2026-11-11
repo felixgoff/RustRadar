@@ -1582,7 +1582,7 @@ B4–B7, B9 and A4–A9 not delivered; all of them have landed since, and this s
 | `cargo check -p rustradar` (shim) | passes |
 | `bun run check` | 0 errors, 0 warnings (5589 files) |
 | `bun test src` | 394 pass |
-| CI "Build" on `rust-port` | runs 140–152 (`c8d74c2`–`7135c58`) red or cancelled: the required "Rust tests" step failed on `vector_map::tests::nothing_is_asked_for_off_the_dark_map` (fix 1), in 141–142 also on A4's V2 shot (fixed by A4, `f57b607`). Windows, macOS, iOS, Android checks and clippy green throughout. Run 153 (`c765649`, with fix 1) was running at the time of writing |
+| CI "Build" on `rust-port` | run 153 (`c765649`, this review's fixes): the required "Rust tests" step on SwiftShader **passed**, and the adapter check; Windows, macOS, iOS and Android checks green (its lavapipe step and clippy were still running at the time of writing). Before it, runs 138–152 were red or cancelled: every finished one failed the required step on `vector_map::tests::nothing_is_asked_for_off_the_dark_map` (fix 1), 140–142 also on A4's V2 shot (fixed by A4, `f57b607`) |
 
 Before this review's fixes the workspace run failed 2 tests:
 - `map::layers::vector_map::tests::nothing_is_asked_for_off_the_dark_map` (B2's test, red in CI since B6): on

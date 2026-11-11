@@ -42,12 +42,23 @@
 //! report, sign-in, adsb.lol's measurements while recent, the camera's lock. What it asks goes
 //! back as [`Action`]s; links open through egui (`OpenUrl`).
 //!
-//! **Checked** against Chromium's layout of today's component, rendered with the same props
-//! (the loading, live and ended states of `tests/flight_panel.rs`): every part's box lands on
-//! Chromium's within a pixel (text up to a pixel lower, egui's baseline, as everywhere in the UI).
+//! **Checked** against Chromium's layout of today's component, server-rendered by Svelte with the
+//! same props and laid out with app.css at 1440 × 900 (the loading, live, ended, diverted and
+//! from-board states of `tests/flight_panel.rs`): every part's box, rule, badge, button and icon
+//! lands on Chromium's pixels, or within one; text sits up to a pixel lower (egui's baseline, as
+//! everywhere in the UI).
+//!
+//! **For other items**: [`Parts`] is where U11 puts the Route, Aircraft and History tabs and U12
+//! the altitude chart with its export menu (each a [`Slot`] drawn from the [`View`] in the tab
+//! panel's width); [`super::panel`] holds the anatomy the train, ship and airport panels share.
+//! The photo and the airline logo load through egui's image loaders ([`super::panel::remote`]):
+//! item U18 installs the loader for `https:` URIs; until then the photo shows its
+//! `--surface-raised` block and the logo is left out, as when they fail today.
 //!
 //! Deviations:
 //! - Times without a zone are in UTC: the app has no viewer time zone yet (U6's note).
+//! - Digits are Overpass's own proportional figures (`font-variant-numeric: tabular-nums` on the
+//!   distances needs OpenType features egui does not have; U6's note).
 //! - The tooltips are the app's own (`ui::widgets::tooltip`), not the system's.
 //! - The phone order (doc 06 §7.6) is item U19's.
 

@@ -541,12 +541,15 @@ fn results(ctx: &Context, anchor: Rect, model: &Model<'_>, items: &[Item<'_>], m
                         .max_height(height)
                         .min_scrolled_height(height)
                         .auto_shrink([false, false])
-                        .scroll_bar_visibility(bar);
+                        .scroll_bar_visibility(bar)
+                        // `scrollIntoView` jumps
+                        .animated(false);
                     if fresh {
                         scroll = scroll.vertical_scroll_offset(0.0);
                     }
                     scroll.show(ui, |ui| {
-                        ui.set_width(inner);
+                        // a scroll bar takes its room from the rows, not the box
+                        ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
                         let mut n = 0;
                         let mut row = |ui: &mut Ui, item: &Item<'_>, n: usize| {
@@ -1027,6 +1030,38 @@ mod tests {
         assert_eq!(h.state.search.query(Mode::Ships), "", "cleared");
         let shown = h.frame(Vec::new()).unwrap();
         assert!(!shown.focused && shown.dropdown.is_none());
+    }
+
+    /// Twenty flights run past the dropdown's 440 px: Down past the last row in sight scrolls the
+    /// highlight into view, so the row the pointer then enters at the bottom is that one.
+    #[test]
+    fn the_highlight_scrolls_into_view() {
+        let mut h = Harness::new();
+        let found = (0..20).map(|n| live(&format!("3a4b{n:03x}"), &format!("SK{n}"))).collect();
+        h.state.search = Search::with_feeds(Box::new(Canned { found, places: Vec::new() }));
+        h.frame(Vec::new());
+        h.frame(vec![Event::Key { key: Key::Slash, physical_key: Some(Key::Slash), pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
+        h.typed("sk");
+        let dropdown = h.settle().unwrap().dropdown.expect("open");
+        // 440 of rows (snapped as Chromium snaps), the border and the padding; as wide as the field,
+        // the scroll bar inside
+        assert!((dropdown.height() - (DROPDOWN_MAX + 10.0)).abs() <= 1.0, "{dropdown:?}");
+        let field = h.frame(Vec::new()).unwrap().field;
+        assert_eq!(dropdown.width(), field.width(), "{dropdown:?} under {field:?}");
+        for _ in 0..12 {
+            h.key(Key::ArrowDown);
+        }
+        let mem: Memory = h.ctx.data(|d| d.get_temp(memory_id())).unwrap();
+        assert_eq!(mem.active.as_deref(), Some("f:live:3a4b00c"), "twelve rows down");
+        h.frame(Vec::new());
+        // the pointer enters the bottom row in sight
+        let at = Pos2::new(dropdown.center().x, dropdown.bottom() - 1.0 - 4.0 - 10.0);
+        h.frame(vec![Event::PointerMoved(at)]);
+        h.frame(Vec::new());
+        let mem: Memory = h.ctx.data(|d| d.get_temp(memory_id())).unwrap();
+        assert_eq!(mem.active.as_deref(), Some("f:live:3a4b00c"), "row 12 was scrolled to the bottom");
+        h.key(Key::Enter);
+        assert_eq!(h.state.flight.selected_id(), Some(0x3a4b00c));
     }
 
     /// The heights CSS gives: a heading 8 + 16.8 + 4, a message 8 + 18.2 per line + 12, a row

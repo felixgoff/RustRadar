@@ -31,7 +31,8 @@
 //! **Click** (`onClick`). deck hands a click the object picked where the press went down
 //! (`_onPointerDown` keeps `_lastPointerDownInfo`; `_onEvent` passes it with the click's own `x, y`),
 //! not what is under the release 300 ms later: the app calls [`AppState::pick_press`] for each press
-//! the map takes. A click with no press before it picks at its own position. Then, in order:
+//! the map takes. Every click the window recognises follows such a press; one handed in without a
+//! press (tests) picks at its own position. Then, in order:
 //! 1. an aircraft → `onselect(flight)`: the searched place cleared, then `select(id)` (a click
 //!    does not fly; the same flight again asks a stream that ended again);
 //! 2. a ship, 3. a train: with items H1 and T1;
@@ -53,8 +54,11 @@
 //!
 //! **What the app wires** (`app.rs`): [`AppState::pick_press`] for each press the map takes,
 //! [`AppState::pick_frame`] each frame after the click timers and the camera step and before the
-//! scene refresh (its [`Wants`] force the refresh), [`Pick::hovering`] into `MapInput::set_cursor`;
-//! the aircraft scene builder reads [`Pick::hovered_id`].
+//! scene refresh (its [`Wants`] force the refresh and wake the loop when the card's dwell is up),
+//! [`Pick::hovering`] into `MapInput::set_cursor`; the aircraft scene builder reads
+//! [`Pick::hovered_id`]. The card (U18) takes [`AppState::hover_card`] before the egui pass: reading
+//! the loader's cache refreshes its recency, as `info` and `status` do in `hover-details.ts`, so it
+//! needs the state mutably.
 //!
 //! Deviations from today's app:
 //! - A hover pick runs on the frame after the pointer moved, with the pointer where it is then
@@ -382,6 +386,10 @@ impl AppState {
                 wants.scene |= self.hover(target, pointer.unwrap_or([-1.0, -1.0]), local_ms);
             }
         }
+        // a dwell timer the hover just set: the frame that asks for the details comes on time
+        if let Some(due) = self.pick.loader.deadline() {
+            wants.wake_at(due as f64);
+        }
         wants
     }
 
@@ -704,6 +712,7 @@ mod tests {
 
         let wants = state.pick_frame(&scene, Some([x, y]), false, &[], NOW);
         assert!(wants.scene, "the highlight refreshes the scene now");
+        assert_eq!(wants.wake_at, Some(NOW + 300.0), "back when the card's dwell is up");
         assert_eq!(state.pick.hovered_id(), Some(id));
         assert!(state.pick.hovering());
         assert_eq!(state.pick.hover_flight().map(|f| f.id), Some(id));
@@ -712,7 +721,7 @@ mod tests {
         let icons = &highlighted.aircraft.scene.icons;
         assert_eq!(highlighted.aircraft.scene.hovered_icon.map(|i| icons[i].id), Some(id));
         // the same place again: no pick, no refresh
-        assert_eq!(state.pick_frame(&highlighted, Some([x, y]), false, &[], NOW), Wants::default());
+        assert!(!state.pick_frame(&highlighted, Some([x, y]), false, &[], NOW).scene);
         // moving over it moves the card only
         let wants = state.pick_frame(&highlighted, Some([x + 1.0, y]), false, &[], NOW);
         assert!(!wants.scene);

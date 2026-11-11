@@ -10,7 +10,7 @@
 //!   above the footer as today;
 //! - `route-filed` (`u11-route-filed.png`): Flightradar24's flight plan: `Filed flight plan`, the
 //!   route string on its `--ink` box cut by the panel's edge, waypoints, alternates, the note, the
-//!   solid line;
+//!   solid line; `route-filed-long` a route string past the box's 132 px, scrolling in its box;
 //! - `aircraft` (`u11-aircraft.png`): the eight facts;
 //! - `history` (`u11-history.png`): four flights, the one shown on `--amber-soft`, statuses in
 //!   their tones; `history-loading` and `history-failed` the tab's other states.
@@ -55,6 +55,9 @@ const SIZE: [u32; 2] = [1440, 900];
 /// The flight (SAS1417, Stockholm to Copenhagen) and its aircraft's address.
 const ID: u32 = 0x3a8f_21c4;
 const HEX: u32 = 0x4a_ca8f;
+
+/// A transatlantic flight plan's route string: more than 132 px of the box's text.
+const LONG_ROUTE: &str = "N0485F350 BEDEK1G BEDEK DCT KORPI DCT RAPAP DCT LARMA UL975 TUSBA UN866 GOTIS DCT SUM DCT 62N010W 63N020W 63N030W 62N040W 60N050W DCT PIDSO DCT TEFFI N1153C YAY DCT LOMSI DCT YJT J523 YSJ J572 BOS DCT ROBUC3 M0840F370 DCT HTO J174 ORF J121 CHS IGARY Q85 LPERD DCT ZFP ZQA DCT URSUS UG426 SEKAL UA315 ARUBA DCT";
 
 /// The pixels `x0..x1` × `y0..y1`.
 const fn area(x0: u32, y0: u32, x1: u32, y1: u32) -> Rect {
@@ -102,7 +105,7 @@ fn row(seen_ms: f64) -> LiveFlight {
 }
 
 /// The stream's details (no pictures, no logo), its report at `seen_ms`.
-fn details(seen_ms: f64, plan: bool) -> FlightDetails {
+fn details(seen_ms: f64, plan: bool, long_route: bool) -> FlightDetails {
     let trail = (0..60)
         .map(|i| TrailPoint { timestamp: 1_782_034_980 + i * 52, latitude: 59.45 - i as f32 * 0.03, longitude: 17.70 - i as f32 * 0.037, altitude: (i as i32 * 1400).min(36_000), ground_speed: 448, track: 214, ..Default::default() })
         .collect();
@@ -155,7 +158,7 @@ fn details(seen_ms: f64, plan: bool) -> FlightDetails {
         flight_plan: plan.then(|| FlightPlan {
             departure: "ESSA".into(),
             destination: "EKCH".into(),
-            route: "N0450F360 HAPZI2C HAPZI DCT ARS DCT NEGIL M852 KOGAX DCT NOSLI NOSLI1E".into(),
+            route: if long_route { LONG_ROUTE.into() } else { "N0450F360 HAPZI2C HAPZI DCT ARS DCT NEGIL M852 KOGAX DCT NOSLI NOSLI1E".into() },
             length: 520.0,
             waypoints: vec![[5_965_190, 1_791_860], [5_890_000, 1_700_000], [5_760_000, 1_530_000], [5_650_000, 1_330_000], [5_561_790, 1_265_600]],
             alternates: vec!["ESMS".into(), "EKBI".into()],
@@ -238,6 +241,8 @@ struct Setup {
     authenticated: bool,
     plan: bool,
     runways: bool,
+    /// The flight plan's route string runs past the box's 132 px.
+    long_route: bool,
 }
 
 /// The state at [`NOW_MS`]: the flight selected 10 s before, its details streamed, polled and
@@ -253,7 +258,7 @@ fn fixture(setup: Setup) -> AppState {
         s.poll(t);
     }
     s.select_flight(Some(ID), SelectOptions::default(), t0);
-    sender.lock().unwrap().as_ref().expect("the stream started").send(FollowEvent::Details(Box::new(details(seen, setup.plan)))).unwrap();
+    sender.lock().unwrap().as_ref().expect("the stream started").send(FollowEvent::Details(Box::new(details(seen, setup.plan, setup.long_route)))).unwrap();
     let mut t = t0;
     while t <= NOW_MS {
         s.poll(t);
@@ -339,13 +344,15 @@ const fn scenario(name: &'static str, setup: Setup, tab: Tab) -> Scenario {
 }
 
 fn scenarios() -> Vec<Scenario> {
-    let runways = Setup { authenticated: true, runways: true, plan: false };
+    let runways = Setup { authenticated: true, runways: true, ..Setup::default() };
     vec![
         scenario("route-estimated", Setup::default(), Tab::Route),
         scenario("route-runways", runways, Tab::Route),
         // a window 700 px high: the panel scrolls, the credit rises above the footer
         Scenario { scroll: 120.0, height: 700, ..scenario("route-runways-scrolled", runways, Tab::Route) },
-        scenario("route-filed", Setup { authenticated: true, plan: true, runways: false }, Tab::Route),
+        scenario("route-filed", Setup { authenticated: true, plan: true, ..Setup::default() }, Tab::Route),
+        // the route string scrolls in its box past 132 px
+        scenario("route-filed-long", Setup { authenticated: true, plan: true, long_route: true, ..Setup::default() }, Tab::Route),
         scenario("aircraft", Setup::default(), Tab::Aircraft),
         scenario("history", Setup::default(), Tab::History),
         Scenario { answered: Answered::Never, ..scenario("history-loading", Setup::default(), Tab::History) },
@@ -646,6 +653,14 @@ fn the_route_tab() {
             // scrolled, the runways' credit (11 px --text-3, right 8) rises above the footer
             let footer = b.y1 - 1 - 57;
             assert!(count(&image, area(1330, footer - 34, 1416, footer), theme::TEXT_3) > 20, "the runways' credit above the footer");
+        }
+        if sc.name.starts_with("route-filed") {
+            // the route's --ink box: 24 px wider than the column, cut by the panel's edge; the
+            // long route's 132 px of text and its padding
+            let ink = bounds(&image, area(1063, b.y0 + 1, 1423, b.y1 - 1), |p| close(p, theme::INK, 2)).expect("the route's box");
+            assert_eq!((ink.x0, ink.x1), (1079, 1423), "{}: {ink:?}", sc.name);
+            let want = if sc.name == "route-filed-long" { 148 } else { 52 };
+            assert_eq!(ink.height(), want, "{}: {ink:?}", sc.name);
         }
     }
 }

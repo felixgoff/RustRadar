@@ -1,7 +1,9 @@
 //! Trains on the map (item T2; doc 02 §5.1–5.5; `trainLayers`, G:2031-2071): at each scene refresh,
 //! the trains the train state puts on the map, drawn where they are expected now, as icons further
-//! out ([`rustradar_scene::trains::TrainBuilder`]); cars close in (T3) and the selected train's
-//! route and ring (T6) are other items'.
+//! out ([`rustradar_scene::trains::TrainBuilder`]); close in, as their cars (item T3,
+//! [`TrainBuilder::car_layers`] with the operator models of
+//! [`rustradar_map::layers::train_cars::models`]); the selected train's route and ring (T6) are
+//! another item's.
 //!
 //! What it reads of the state, as `buildLayers()` reads the globe's `trains` prop:
 //! - the list: [`state::trains::Trains::on_map`](crate::state::trains::Trains::on_map)
@@ -47,6 +49,11 @@ impl Trains {
         let new_list = self.list_key != Some(key);
         self.list_key = Some(key);
         self.latest = self.builder.build(&list, new_list, &scene.view, self.hovered.as_deref(), now_ms);
+        // close in, each train's cars where it is drawn (T3)
+        if self.latest.cars {
+            let models = rustradar_map::layers::train_cars::models();
+            self.latest.car_layers = self.builder.car_layers(&list, &scene.view, scene.size, models, now_ms);
+        }
         scene.trains.scene = self.latest.clone();
     }
 

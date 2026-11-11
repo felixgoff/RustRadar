@@ -445,8 +445,9 @@ pub fn drawn_cars(list: &[&Train], drawn: &Drawn, bounds: Option<[f64; 4]>, mode
         let gap = if modelled { 0.0 } else { GAP_M };
         let mut places = car_places(&car_lines_with(&train.frames, &train.tail, count, now_ms, length_of, gap));
         if places.len() != count {
-            let h = drawn.headings[i].unwrap_or(0.0) * std::f64::consts::PI / 180.0;
-            let k = (lat * std::f64::consts::PI / 180.0).cos();
+            // (`x * DEGREES`, G:3069: by π / 180 worked out once, as JavaScript does)
+            let h = drawn.headings[i].unwrap_or(0.0) * (std::f64::consts::PI / 180.0);
+            let k = (lat * (std::f64::consts::PI / 180.0)).cos();
             let behind = (lat - h.cos() / 1000.0, lon - h.sin() / 1000.0 / if truthy(k) { k } else { 1e-6 });
             places = car_places(&car_lines_with(&[(lat, lon, now_ms)], &[(lat, lon), behind], count, now_ms, length_of, gap));
         }

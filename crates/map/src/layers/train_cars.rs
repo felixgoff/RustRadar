@@ -33,9 +33,15 @@
 //! Instances are rebuilt in each `prepare` from the scene and this frame's view and written to the
 //! GPU only when they change.
 //!
+//! As in deck, a car at alpha 240 is drawn face by face in its mesh's order, each face blending
+//! over the faces drawn before it that it passes the depth test against (less-equal): straight
+//! down, a plain car's roof shows a little of the body's top under it; in a tunnel
+//! (`THROUGH_GROUND`, nothing written to depth) every face of the car shows through the next.
+//!
 //! Deviations: none intended. The meshes are on the GPU from the first car that takes them (today
 //! the models arrive by `fetch` after start-up and plain cars stand in meanwhile; here they are
-//! embedded).
+//! embedded). The car under the pointer is highlighted once picking marks it
+//! ([`DrawnCar::highlighted`], item T8).
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -195,7 +201,7 @@ mod tests {
     use std::rc::Rc;
 
     use glam::DMat3;
-    use rustradar_core::geo::Basemap;
+    use rustradar_core::geo::{Basemap, meters_per_pixel};
     use rustradar_core::model::{Train, TrainKind, TrainShape, TrainSource};
     use rustradar_scene::bridges::{GROUND, Level};
     use rustradar_scene::camera::{ViewState, viewport_for};
@@ -380,10 +386,39 @@ mod tests {
         assert_eq!(instance(&view, &DrawnCar { highlighted: true, ..car }, 3.1, 4.1).highlight, CAR_HIGHLIGHT);
     }
 
+    /// How long what is drawn along row `y` through pixel `x0` is, px: the run of pixels that
+    /// differ from the ground, each end pixel counted by how much of the drawn colour it shows
+    /// (against the strongest of the three pixels inside it), as its share of the pixel covered.
+    fn extent(image: &Image, x0: u32, y: u32) -> f64 {
+        let ground = image.pixel(2, 2).map(f64::from);
+        let off = |x: u32| {
+            let p = image.pixel(x, y).map(f64::from);
+            [p[0] - ground[0], p[1] - ground[1], p[2] - ground[2]]
+        };
+        let size = |v: [f64; 3]| v.iter().map(|c| c * c).sum::<f64>().sqrt();
+        let on = |x: u32| size(off(x)) > 6.0;
+        let (mut a, mut b) = (x0, x0);
+        while a > 0 && on(a - 1) {
+            a -= 1;
+        }
+        while b + 1 < image.width && on(b + 1) {
+            b += 1;
+        }
+        let share = |end: u32, inside: [u32; 3]| {
+            let q = inside.map(off).into_iter().max_by(|u, v| size(*u).total_cmp(&size(*v))).unwrap();
+            let p = off(end);
+            ((p[0] * q[0] + p[1] * q[1] + p[2] * q[2]) / (size(q) * size(q))).clamp(0.0, 1.0)
+        };
+        f64::from(b - a - 1) + share(a, [a + 1, a + 2, a + 3]) + share(b, [b - 1, b - 2, b - 3])
+    }
+
     /// Straight down at zoom 16: a train of six plain cars running east, every other car recoloured
-    /// so each can be told from the next. Along the train's middle each car covers its own length
-    /// on the map within a pixel, the front car's front where the train stands, the cars running
-    /// back from there.
+    /// so each can be told from the next. Along the train's middle the front car's front is where
+    /// the train stands and the cars run back (west) from there, front car first, one every 26 m.
+    /// Then each car drawn alone with the view centred on it (the camera's perspective pushes
+    /// whatever stands 4 m up a few pixels outward away from the screen's middle, so a car
+    /// off-centre is lengthened at one end and hidden under its neighbour's roof at the other)
+    /// covers its own length on the map within a pixel.
     #[test]
     fn each_car_is_as_long_on_the_screen_as_on_the_map() {
         let Some(gpu) = gpu() else { return };
@@ -397,52 +432,64 @@ mod tests {
         let image = shoot(&gpu, VIEW, 1.0, cars.clone());
         save(&image, "t3-cars-lengths.png");
         assert_eq!(draws(&gpu, VIEW, cars.clone()), [("train-car-meshes-regional-cab".to_string(), 1), ("train-car-meshes-regional-coach".to_string(), 5)]);
-        // along the row through the train's middle: each car's extent, its colour's first to last
-        // pixel between its neighbours'
+        // along the row through the train's middle, from the east: runs of red and green
         let y = head[1] as u32;
-        let red = |p: [u8; 4]| p[0] > 2 * p[1] && p[0] > 20;
-        let green = |p: [u8; 4]| p[1] > 2 * p[0] && p[1] > 20;
-        let mut extents: Vec<(f64, f64)> = Vec::new();
-        let mut x = image.width;
-        for (k, car) in cars.cars.iter().enumerate() {
-            let is = |p| if k % 2 == 0 { red(p) } else { green(p) };
-            // from the east, the first pixel of this car's colour, then on to its last
-            let start = (0..x).rev().find(|&px| is(image.pixel(px, y))).unwrap_or_else(|| panic!("car {k} drawn"));
-            let other = |p| if k % 2 == 0 { green(p) } else { red(p) };
-            let end = (0..=start).rev().take_while(|&px| !other(image.pixel(px, y))).filter(|&px| is(image.pixel(px, y))).last().unwrap();
-            extents.push((f64::from(end), f64::from(start) + 1.0));
-            x = end;
-            let (front, back) = ends(car);
-            let want = screen(&VIEW, front, 0.0)[0] - screen(&VIEW, back, 0.0)[0];
-            let got = f64::from(start + 1 - end);
-            assert!((got - want).abs() <= 1.0, "car {k}: {got} px against {want:.2}");
+        let red = |p: [u8; 4]| u16::from(p[0]) > 2 * u16::from(p[1]) && p[0] > 60;
+        let green = |p: [u8; 4]| u16::from(p[1]) > 2 * u16::from(p[0]) && p[1] > 60;
+        let mut runs: Vec<(bool, u32)> = Vec::new();
+        for x in (0..image.width).rev() {
+            let p = image.pixel(x, y);
+            let colour = if red(p) { Some(true) } else if green(p) { Some(false) } else { None };
+            if let Some(is_red) = colour
+                && runs.last().is_none_or(|(r, _)| *r != is_red)
+            {
+                // a run's first pixel from the east: the car's front as it shows
+                runs.push((is_red, x));
+            }
         }
-        // 25.4 m at 0.61 m/px; the front where the train stands; each car 26 m behind the last
-        assert!((extents[0].1 - head[0]).abs() <= 1.0, "{extents:?}");
-        for pair in extents.windows(2) {
-            let step = pair[0].1 - pair[1].1;
-            assert!((step - 26.0 / 0.6094).abs() <= 1.5, "{extents:?}");
+        assert_eq!(runs.iter().map(|r| r.0).collect::<Vec<_>>(), [true, false, true, false, true, false], "{runs:?}");
+        assert!((f64::from(runs[0].1) + 1.0 - head[0]).abs() <= 1.0, "the front car's front at the train: {runs:?}");
+        // (the coaches' fronts stand 3.6 m up, the cab's nose comes down to 0.8 m: with the
+        // perspective, the steps are measured between the coaches)
+        for pair in runs[1..].windows(2) {
+            let step = f64::from(pair[0].1 - pair[1].1);
+            assert!((step - 26.0 / meters_per_pixel(VIEW.zoom, VIEW.latitude)).abs() <= 1.5, "{runs:?}");
+        }
+        // each car alone with the view centred on it
+        let mpp = meters_per_pixel(VIEW.zoom, VIEW.latitude);
+        for (k, car) in cars.cars.iter().enumerate() {
+            let view = ViewState { longitude: car.at[0], latitude: car.at[1], ..VIEW };
+            let image = shoot(&gpu, view, 1.0, CarLayers { cars: vec![car.clone()], ..cars.clone() });
+            if k < 2 {
+                save(&image, &format!("t3-car-{k}-centred.png"));
+            }
+            let got = extent(&image, (SIZE[0] / 2.0) as u32, (SIZE[1] / 2.0) as u32);
+            let want = car.length / mpp;
+            eprintln!("car {k}: {got:.2} px drawn, {want:.2} px long");
+            assert!((got - want).abs() <= 1.0, "car {k}: {got:.2} px against {want:.2}");
         }
         // nothing north or south of the train but its width (3.1 m, 5 px)
-        let across = (0..image.height).filter(|&py| red(image.pixel(extents[0].0 as u32 + 10, py))).count();
+        let across = (0..image.height).filter(|&py| red(image.pixel(runs[0].1 - 10, py))).count();
         assert!((4..=6).contains(&across), "{across} px across");
     }
 
-    /// A coach straight down at the canvas centre: its roof (shade 0.75) lit by today's rig and
-    /// `CAR_MESH_MATERIAL` as the CPU twin of the shader works it out, then tilted 60° to see its
-    /// side (shade 1): each as lit, the side lit otherwise than the roof (its own normal, no key
-    /// light on a north-lit face).
+    /// A coach straight down at the canvas centre, then tilted 60° to see its south side, lit by
+    /// today's rig and `CAR_MESH_MATERIAL` as the CPU twin of the shader works it out. Drawn
+    /// opaque, its roof (shade 0.75, facing up) and its side (shade 1, facing south, away from the
+    /// key light) are each as lit, and not in their shades' ratio as flat colours would be. Drawn
+    /// at the trains' alpha 240, each face blends over the faces drawn before it, as in deck (the
+    /// mesh's triangles in order, depth tested less-equal and written): straight down, the roof is
+    /// its lit colour at 240 over the body's top (shade 0.9) just under it.
     #[test]
     fn roof_and_side_are_lit_as_deck_lights_them() {
         let Some(gpu) = gpu() else { return };
         let rgb = [96.0, 212.0, 160.0];
-        let alpha = 240.0 / 255.0;
-        let mut checks = Vec::new();
+        let mut checks: Vec<([u8; 4], [f64; 3], String)> = Vec::new();
         for (pitch, name) in [(0.0, "t3-car-lit-top.png"), (60.0, "t3-car-lit-side.png")] {
             let view = ViewState { pitch, zoom: 18.0, ..VIEW };
             let centre = [SIZE[0] / 2.0, SIZE[1] / 2.0];
             let [lon, lat] = viewport_for(&view, SIZE).unproject(centre, 0.0);
-            let car = DrawnCar {
+            let car = |alpha: u8| DrawnCar {
                 at: [lon, lat],
                 heading: 90.0,
                 length: 25.4,
@@ -450,46 +497,58 @@ mod tests {
                 mesh: CarShape::Plain { lead: false, shape: TrainShape::Regional },
                 modelled: false,
                 level: GROUND,
-                color: [96, 212, 160, 240],
+                color: [96, 212, 160, alpha],
                 highlighted: false,
             };
             let scale = 2.0;
-            let image = shoot(&gpu, view, scale, CarLayers::new(vec![car], 0.15));
-            save(&image, name);
+            let mpp = meters_per_pixel(view.zoom, view.latitude);
+            let opaque = shoot(&gpu, view, scale, CarLayers::new(vec![car(255)], mpp));
+            let drawn = shoot(&gpu, view, scale, CarLayers::new(vec![car(240)], mpp));
+            save(&drawn, name);
             let rig = SceneInput::new(view, SIZE, scale, Basemap::Dark).lights;
             let key = DVec3::from_array(rig.key_direction);
-            let ground = image.pixel(2, 2);
-            // the way to the camera: up, or 30° above the south at pitch 60
-            let to_camera = DVec3::new(0.0, -pitch.to_radians().sin(), pitch.to_radians().cos());
-            let expect = |shade: f64, normal: DVec3| {
-                let lit = rig.shade(&MATERIAL, rgb.map(|c| c / 255.0 * shade), normal, to_camera, key);
-                [0, 1, 2].map(|c| (lit[c].min(1.0) * 255.0 * alpha + f64::from(ground[c]) * (1.0 - alpha)).round())
+            // the way from a point to deck's camera, in common space
+            let frame = ViewFrame::new(&view, SIZE, scale, 0.0);
+            let camera = glam::Vec3::from(frame.globals.camera_common).as_dvec3();
+            let lit = |shade: f64, normal: DVec3, at: [f64; 2], h: f64| {
+                let to_camera = camera - frame.common_offset(at, h).as_dvec3();
+                rig.shade(&MATERIAL, rgb.map(|c| c / 255.0 * shade), normal, to_camera, key).map(|c| c.min(1.0) * 255.0)
             };
-            let at = |p: [f64; 2]| image.pixel((p[0] * scale) as u32, (p[1] * scale) as u32);
-            // the roof's middle (4.1 m up), and, tilted, the lower body band's middle on the
-            // south side (1.55 m south of the middle, 1.43 m up)
-            let roof = at(screen(&view, car.at, 4.1));
-            checks.push((roof, expect(0.75, DVec3::Z), format!("roof at pitch {pitch}")));
-            if pitch > 0.0 {
+            let pixel = |image: &Image, at: [f64; 2], h: f64| {
+                let [x, y] = screen(&view, at, h);
+                image.pixel((x * scale) as u32, (y * scale) as u32)
+            };
+            // the roof's middle, 4.1 m up
+            checks.push((pixel(&opaque, [lon, lat], 4.1), lit(0.75, DVec3::Z, [lon, lat], 4.1), format!("roof at pitch {pitch}")));
+            if pitch == 0.0 {
+                let a = 240.0 / 255.0;
+                let (roof, body) = (lit(0.75, DVec3::Z, [lon, lat], 4.1), lit(0.9, DVec3::Z, [lon, lat], 0.88 * 4.1));
+                let want = [0, 1, 2].map(|c| roof[c] * a + body[c] * (1.0 - a));
+                checks.push((pixel(&drawn, [lon, lat], 4.1), want, "roof at 240 over the body's top".into()));
+            } else {
+                // the lower body band's middle on the south side: 1.55 m south of the middle,
+                // 1.43 m up
                 let (slat, slon) = ahead((lat, lon), 180.0, 1.55);
-                let side = at(screen(&view, [slon, slat], 0.35 * 4.1));
-                checks.push((side, expect(1.0, -DVec3::Y), "side".into()));
+                let h = 0.35 * 4.1;
+                checks.push((pixel(&opaque, [slon, slat], h), lit(1.0, -DVec3::Y, [slon, slat], h), "side".into()));
             }
         }
         for (got, want, what) in &checks {
             for c in 0..3 {
-                assert!((f64::from(got[c]) - want[c]).abs() <= 4.0, "{what}: {got:?} against {want:?}");
+                assert!((f64::from(got[c]) - want[c]).abs() <= 3.0, "{what}: {got:?} against {want:?}");
             }
         }
         // lit, the side and the roof are not in their shades' ratio (1 : 0.75) as flat colours would be
-        let (roof, side) = (checks[1].0, checks[2].0);
+        let (roof, side) = (checks[2].0, checks[3].0);
         let ratio = f64::from(side[1]) / f64::from(roof[1]);
         assert!((ratio - 1.0 / 0.75).abs() > 0.1, "side {side:?}, roof {roof:?}");
     }
 
-    /// A car up on a bridge (6 m) and, below it, one in a tunnel: the tunnel's car is drawn after,
-    /// through the bridge's car (depth always), at alpha 90; with the ordinary state it would be
-    /// hidden under it.
+    /// A car up on a bridge (6 m) and, below it, one in a tunnel. The tunnel's layer comes after
+    /// and tests no depth, so its car is drawn over the bridge's: straight down through its middle
+    /// its ten flat faces (the five boxes' tops and bottoms), each at alpha 90 over what was drawn
+    /// before, over the bridge's car as over the bare ground. As an ordinary car it would be hidden
+    /// under the bridge's car.
     #[test]
     fn a_car_in_a_tunnel_is_seen_faintly_through_what_stands_over_it() {
         let Some(gpu) = gpu() else { return };
@@ -506,30 +565,32 @@ mod tests {
             color,
             highlighted: false,
         };
+        let mpp = meters_per_pixel(VIEW.zoom, VIEW.latitude);
         let bridge = car(Level { tunnel: false, height: 6.0 }, [232, 232, 236, 240]);
         let tunnel = car(Level { tunnel: true, height: 0.0 }, [226, 92, 196, 90]);
-        let both = CarLayers::new(vec![bridge.clone(), tunnel.clone()], 0.6);
+        let both = CarLayers::new(vec![bridge.clone(), tunnel.clone()], mpp);
         let over = shoot(&gpu, VIEW, 1.0, both.clone());
         save(&over, "t3-car-tunnel.png");
         assert_eq!(draws(&gpu, VIEW, both), [("train-car-meshes-regional-coach".to_string(), 1), ("train-car-meshes-regional-coach-tunnel".to_string(), 1)]);
-        let alone = shoot(&gpu, VIEW, 1.0, CarLayers::new(vec![bridge], 0.6));
-        let faint = shoot(&gpu, VIEW, 1.0, CarLayers::new(vec![tunnel.clone()], 0.6));
-        let opaque = shoot(&gpu, VIEW, 1.0, CarLayers::new(vec![DrawnCar { color: [226, 92, 196, 255], ..tunnel }], 0.6));
+        let alone = shoot(&gpu, VIEW, 1.0, CarLayers::new(vec![bridge.clone()], mpp));
+        let faint = shoot(&gpu, VIEW, 1.0, CarLayers::new(vec![tunnel.clone()], mpp));
+        let hidden = shoot(&gpu, VIEW, 1.0, CarLayers::new(vec![bridge, DrawnCar { level: GROUND, ..tunnel }], mpp));
         let p = |image: &Image| image.pixel(centre[0] as u32, centre[1] as u32 + 4);
         let ground = over.pixel(2, 2);
-        let a = 90.0 / 255.0;
-        for c in 0..3 {
-            // alone, a tunnel's car is its lit colour at 90 over the ground
-            let want = f64::from(p(&opaque)[c]) * a + f64::from(ground[c]) * (1.0 - a);
-            assert!((f64::from(p(&faint)[c]) - want).abs() <= 3.0, "{:?} against {want}", p(&faint));
-            // and over the bridge's car, the same over that car
-            let want = f64::from(p(&opaque)[c]) * a + f64::from(p(&alone)[c]) * (1.0 - a);
+        // what shows of the background through ten faces at 90
+        let behind = (1.0 - 90.0 / 255.0_f64).powi(10);
+        for (c, &g) in ground.iter().enumerate().take(3) {
+            let want = f64::from(p(&faint)[c]) + behind * (f64::from(p(&alone)[c]) - f64::from(g));
             assert!((f64::from(p(&over)[c]) - want).abs() <= 3.0, "{:?} against {want} over {:?}", p(&over), p(&alone));
+            assert!(p(&hidden)[c].abs_diff(p(&alone)[c]) <= 1, "hidden: {:?} against {:?}", p(&hidden), p(&alone));
         }
+        // the tunnel's pink over the bridge car's white, and over the ground
+        assert!(p(&alone)[1] > p(&over)[1] + 40, "{:?} over {:?}", p(&over), p(&alone));
+        assert!(p(&faint)[0] > p(&faint)[1] + 20 && p(&faint)[0] > ground[0] + 20, "{:?}", p(&faint));
     }
 
     /// An X 2000 of five cars: its own cars at their lengths end to end (17.7, 25 × 3, 22.7 m), in
-    /// its livery, the train's colour not taken.
+    /// its livery (greys and a dark teal from straight above), the train's colour not taken.
     #[test]
     fn a_models_cars_wear_its_livery_at_their_lengths() {
         let Some(gpu) = gpu() else { return };
@@ -555,15 +616,18 @@ mod tests {
         let want = screen(&VIEW, front, 0.0)[0] - screen(&VIEW, back, 0.0)[0];
         let got = f64::from(drawn_x[drawn_x.len() - 1] - drawn_x[0] + 1);
         assert!((got - want).abs() <= 1.5, "{got} px against {want:.2} (115.4 m)");
-        // several colours of its own, none of them the regional mint it would otherwise be tinted
-        let mut colours: Vec<[u8; 4]> = Vec::new();
+        // its own colours, light and dark, none tinted the regional mint (96, 212, 160) the plain
+        // cars would take
+        let mut shades: Vec<[u8; 4]> = Vec::new();
         for x in drawn_x {
+            let p = image.pixel(x, y).map(i32::from);
+            assert!(!(p[1] > p[0] + 40 && p[1] > p[2] + 25), "{p:?} at {x}");
             let p = image.pixel(x, y);
-            if colours.iter().all(|c| (0..3).any(|i| c[i].abs_diff(p[i]) > 40)) {
-                colours.push(p);
+            if shades.iter().all(|c| (0..3).any(|i| c[i].abs_diff(p[i]) > 40)) {
+                shades.push(p);
             }
         }
-        assert!(colours.len() >= 3, "{colours:?}");
+        assert!(shades.len() >= 2, "{shades:?}");
     }
 
     /// The car under the pointer is blended toward the selection blue.

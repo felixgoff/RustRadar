@@ -10,7 +10,9 @@
 //! - **Rasterising**: [`mask`] substitutes the file's one `stroke-width="2"` with the use's width
 //!   and draws the SVG with resvg (tiny-skia, a Skia port, as Chrome's rasteriser) at
 //!   `size × pixels_per_point` pixels, scaled from the viewBox as the browser does, into a coverage
-//!   mask (`currentColor` comes out as alpha only).
+//!   mask (`currentColor` comes out as alpha only). It draws [`SUPERSAMPLE`] times finer and
+//!   averages, so each pixel is covered by the shape's area (Skia's analytic antialiasing) and not
+//!   on tiny-skia's quarter-pixel edges.
 //! - **Cache**: each mask becomes a white egui texture (premultiplied `(a, a, a, a)`), kept per
 //!   egui context by (icon, size, stroke, scale) and the whole degrees of a baked rotation
 //!   ([`Key`]). A context's textures go with it (B9's rebuild makes a new one). Entries not drawn
@@ -27,10 +29,17 @@
 //!   of a degree turns the textured quad. A continuous spin (the 900 ms spinner) fills at most 360
 //!   textures per spec and then only reuses them.
 //!
+//! Against today's pictures (`docs/port/reference`, `tests/icon_sheet.rs`): the shell's icons land
+//! on the same pixels. Their ink is within 8 % of today's, mostly 2–5 % more: those pictures were
+//! drawn by Chromium's GPU raster on SwiftShader, which covers stroke edges in quarters (4× MSAA),
+//! and covers about a third of each of Lucide's dots (zero-length `h.01` segments with round
+//! caps, a disc one stroke wide here, as Skia's CPU raster and WebKit draw it).
+//!
 //! Deviation: SVG content past the viewBox is not clipped when the raster is rotated (no Lucide
 //! icon in use draws there, so nothing changes).
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use egui::epaint::{Mesh, TextureHandle};
 use egui::emath::Rot2;
@@ -342,7 +351,8 @@ struct Cache {
 }
 
 fn cache_id() -> Id {
-    Id::unique("rustradar::ui::icons")
+    static ID: LazyLock<Id> = LazyLock::new(|| Id::unique("rustradar::ui::icons"));
+    *ID
 }
 
 /// How many icon textures `ctx` holds.

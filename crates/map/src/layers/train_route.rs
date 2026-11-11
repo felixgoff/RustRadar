@@ -25,7 +25,9 @@
 //!
 //! The plan's T6 row asks for "a dashed route ahead in `[55,142,240,210]`": that is the selected
 //! flight's route ahead (doc 02 §1.4 lists it with the other blues); today's train route is the
-//! black dashes of `TRAIN_ROUTE_DASH` (G:2078), and so is this one.
+//! black dashes of `TRAIN_ROUTE_DASH` (G:2078), and so is this one. The row's "stop … names" are
+//! not drawn on the map today either (the stations are discs only; their names are the train
+//! panel's), so there are none here.
 //!
 //! What the scene builder hands over ([`Input`]) it works out with [`route_lines`] (the CPU part of
 //! `trainRouteLayers`, with `train_route.ts`'s `routeAhead` and `wayToStop` from

@@ -88,6 +88,8 @@ pub struct SceneBuilder {
     pub ships: ships::Ships,
     pub radar: radar::Radar,
     pub realistic: realistic::Realistic,
+    /// The ship hovered in the ships list as last handed to [`ships::Ships::hovered`] (U15).
+    ship_list_hover: Option<u32>,
 }
 
 impl SceneBuilder {
@@ -108,9 +110,21 @@ impl SceneBuilder {
         let settings = &state.persisted.settings;
         scene.rail = rail::Input { shown: settings.rail_map, speeds: rustradar_scene::rail::rail_speeds(settings.rail_map, settings.rail_shows) };
         self.radar.build(state, &mut scene);
+        // the ship hovered in the ships list while ships are the focus (U15), handed over when it
+        // changes
+        let list_hover = state.hovered_ship.filter(|_| state.persisted.settings.mode == rustradar_core::settings::Mode::Ships);
+        if list_hover != self.ship_list_hover {
+            self.ship_list_hover = list_hover;
+            self.ships.hovered = list_hover;
+        }
         self.ships.build(state, &mut scene);
-        // the train hovered in the trains list, while trains are the focus (U14)
-        self.trains.hovered = state.hovered_train.clone().filter(|_| state.persisted.settings.mode == rustradar_core::settings::Mode::Trains);
+        // the train hovered in the trains list while trains are the focus, none once they are not
+        // (U14)
+        if state.persisted.settings.mode == rustradar_core::settings::Mode::Trains {
+            self.trains.hovered = state.hovered_train.clone();
+        } else if state.hovered_train.is_some() {
+            self.trains.hovered = None;
+        }
         self.trains.build(state, &mut scene);
         // the signal blocks (T5) see this refresh's trains as drawn (G:2733-2735)
         let on_map: Vec<&rustradar_core::model::Train> = state.trains.on_map().iter().collect();

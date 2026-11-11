@@ -1009,11 +1009,14 @@ mod tests {
     const T0: f64 = 1_782_036_000_000.0;
     const V3: ViewState = ViewState { longitude: 18.07, latitude: 59.33, zoom: 9.0, bearing: 0.0, pitch: 0.0, position: None };
 
+    /// Where the test sends a stops ask's answer.
+    type StopsSender = Sender<Result<Vec<TrainStop>, String>>;
+
     /// Feeds that log what is asked and answer the stops when the test sends.
     #[derive(Clone, Default)]
     struct Fake {
         asked: Arc<Mutex<Vec<String>>>,
-        stops: Arc<Mutex<Vec<Sender<Result<Vec<TrainStop>, String>>>>>,
+        stops: Arc<Mutex<Vec<StopsSender>>>,
     }
 
     impl Fake {

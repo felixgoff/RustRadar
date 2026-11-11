@@ -12,7 +12,9 @@
 //!   running), an unknown operator;
 //! - `u14-panel.png`, `u14-panel-long.png`, `u14-panel-bare.png`: the panel with its stops
 //!   (passed, the next with a note, cancelled and early, the last), a long name and destination
-//!   with a stale report and the stops loading, a standing train with no timetable.
+//!   with a stale report and the stops loading, a standing train with no timetable;
+//! - `u14-window-v3.png`: `--demo` at V3 through the window's engine over the map, a row under the
+//!   pointer highlighting its train.
 //!
 //! The Chromium layouts were made from `TrainList.svelte`, `TrainFilterPanel.svelte` and
 //! `TrainPanel.svelte` server-rendered by Svelte with the same props, laid out with app.css and the
@@ -23,9 +25,12 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use common::NOW_MS;
 use common::shots::{Rect, bounds, gpu, pixel, save};
 use egui::{Color32, Pos2, RawInput, Vec2};
+use rustradar_app::app::Engine;
 use rustradar_app::dev::demo_trains;
 use rustradar_app::state::shortcuts::Open;
 use rustradar_app::state::aircraft::Answer;
@@ -39,6 +44,7 @@ use rustradar_core::model::{StopTime, TrafikverketKeyStatus as KeyStatus, Train,
 use rustradar_core::settings::Mode;
 use rustradar_map::Gpu;
 use rustradar_map::headless::{FORMAT, Image, Offscreen};
+use rustradar_map::io::DirTiles;
 use rustradar_scene::camera::ViewState;
 
 /// The desktop reference pictures' canvas, CSS px, at scale 1.
@@ -611,4 +617,82 @@ fn the_filter_panel() {
     near(switch.x0 as f32 - card.left(), 269.0, 1.0, "the switch's left");
     // (Chromium's own pixels of it: rows 347–366 under the card's top, the middle at 357)
     near((switch.y0 + switch.y1) as f32 / 2.0 - top, 357.0, 1.0, "the switch's middle");
+}
+
+// ------------------------------------------------------------------------------------------------
+// through the window
+
+/// The window's engine with the shell on, drawing into an offscreen target.
+struct Window {
+    engine: Engine,
+    target: Offscreen,
+    egui_s: f64,
+}
+
+impl Window {
+    fn frame(&mut self, gpu: &Gpu, events: Vec<egui::Event>, now: f64) {
+        let mut input = RawInput {
+            time: Some(self.egui_s),
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(SIZE[0] as f32, SIZE[1] as f32))),
+            events,
+            ..Default::default()
+        };
+        input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(1.0);
+        self.egui_s += 0.25;
+        self.engine.frame(gpu, self.target.view(), SIZE, 1.0, input, now);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+}
+
+/// `--demo` at V3 with trains the focus, through the window's engine over the map: the list of the
+/// demo trains, a train's panel, and a row under the pointer highlighting its train on the map.
+#[test]
+fn the_demo_trains_through_the_window() {
+    let Some(gpu) = gpu() else { return };
+    let mut state = AppState::new(Startup { basemap: Some(Basemap::Dark), demo: true, ..Default::default() }, None, None, None, V3, SIZE.map(f64::from));
+    state.persisted.settings.mode = Mode::Trains;
+    state.poll(NOW_MS);
+    assert_eq!(state.trains.trains().len(), 6, "the demo trains");
+    let sj = state.trains.trains().iter().find(|t| t.id == "trafikverket:demo:1").cloned().unwrap();
+    state.select_train(Some(sj), NOW_MS);
+    let mut engine = Engine::new(&gpu, FORMAT, state);
+    engine.map.set_tiles(Arc::new(DirTiles::fixtures()), None);
+    engine.shell = true;
+    engine.draw = false;
+    let mut w = Window { engine, target: Offscreen::new(&gpu, SIZE), egui_s: 0.0 };
+    let started = std::time::Instant::now();
+    loop {
+        w.frame(&gpu, Vec::new(), NOW_MS);
+        if !w.engine.map.pending() || started.elapsed() > rustradar_map::headless::MAX_WAIT {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    for _ in 0..3 {
+        w.frame(&gpu, Vec::new(), NOW_MS);
+    }
+    // the pointer on Öresundståg's row: its train highlighted on the map at the next scene
+    let id = "trafikverket:demo:2";
+    let at = w.engine.egui.read_response(egui::Id::unique(("rustradar::lists::trains::row", id))).expect("the row").rect.center();
+    w.frame(&gpu, vec![egui::Event::PointerMoved(at)], NOW_MS + 16.0);
+    assert_eq!(w.engine.state.hovered_train.as_deref(), Some(id));
+    w.engine.draw = true;
+    w.frame(&gpu, Vec::new(), NOW_MS + 32.0);
+    let latest = &w.engine.scene.trains.latest;
+    let lit: Vec<&str> = latest.icons.iter().zip(&latest.ids).filter(|(i, _)| i.highlighted).map(|(_, id)| id.as_str()).collect();
+    assert_eq!(lit, [id], "the hovered train on the map");
+    let image = w.target.read(&gpu).expect("read back");
+    save(&image, "u14-window-v3.png");
+    // the list card's left border and the panel's right one over the map, the map between them
+    let border = |x: u32, y: std::ops::Range<u32>| y.clone().filter(|&y| pixel(&image, x, y) == rgb(theme::LINE)).count() == y.len();
+    assert!(border(16, 200..600), "the list card's left edge at x 16");
+    assert!(border(1423, 500..860), "the panel's right edge at right 16");
+    // (the dark map's land is --surface's grey: its water and roads tell it from a card)
+    let map = Rect::new(400, 100, 600, 700);
+    let other = map.pixels().filter(|&(x, y)| pixel(&image, x, y) != rgb(theme::SURFACE)).count();
+    assert!(other * 5 > map.len(), "the map between them: {other} of {}", map.len());
+    // the list's rows: the selected train on --amber-soft, the hovered one on --surface-hover
+    let row = |id: &str| rect(w.engine.egui.read_response(egui::Id::unique(("rustradar::lists::trains::row", id))).expect("the row").rect);
+    assert!(painted(&image, row("trafikverket:demo:1"), Color32::from_rgb(51, 67, 84)).is_some(), "the selected row");
+    assert!(painted(&image, row(id), theme::SURFACE_HOVER).is_some(), "the hovered row");
 }

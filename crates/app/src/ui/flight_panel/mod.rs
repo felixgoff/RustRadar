@@ -62,8 +62,11 @@
 //! - The tooltips are the app's own (`ui::widgets::tooltip`), not the system's.
 //! - The phone order (doc 06 §7.6) is item U19's.
 
+pub mod aircraft;
 pub mod footer;
+pub mod history;
 pub mod overview;
+pub mod route;
 
 use egui::text::LayoutJob;
 use egui::{Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, Sense, Ui, Vec2};
@@ -161,7 +164,7 @@ pub struct Parts {
 
 impl Parts {
     /// The app's parts: each item puts its function here.
-    pub const APP: Parts = Parts { route: None, aircraft: None, history: None, chart: None };
+    pub const APP: Parts = Parts { route: Some(route::show), aircraft: Some(aircraft::show), history: Some(history::show), chart: None };
 
     fn tab(&self, tab: Tab) -> Option<Slot> {
         match tab {
@@ -438,6 +441,16 @@ pub fn tab(ctx: &egui::Context) -> Tab {
     ctx.data(|d| d.get_temp::<Kept>(kept_id())).map_or(Tab::Overview, |k| k.tab)
 }
 
+fn mounted_id() -> Id {
+    Id::unique("rustradar::flight_panel::mounted")
+}
+
+/// The egui pass `ctx`'s flight panel was last mounted in (drawn after a pass without it), for the
+/// parts that keep component state of their own (U11's history).
+pub fn mounted_pass(ctx: &egui::Context) -> u64 {
+    ctx.data(|d| d.get_temp::<u64>(mounted_id())).unwrap_or(0)
+}
+
 /// How far `ctx`'s flight panel was scrolled at its last pass, px.
 pub fn scroll_offset(ctx: &egui::Context) -> f32 {
     ctx.data(|d| d.get_temp::<Kept>(kept_id())).map_or(0.0, |k| k.offset)
@@ -459,6 +472,7 @@ pub fn show_with(ui: &mut Ui, pass: &mut Pass<'_>, parts: &Parts) {
     // mounted again after a pass without the panel: the component's state starts afresh
     if kept.pass + 1 < now_pass {
         kept = Kept::default();
+        ctx.data_mut(|d| d.insert_temp(mounted_id(), now_pass));
     }
     if kept.photo.0 != view.flight.id {
         kept.photo = (view.flight.id, 0);

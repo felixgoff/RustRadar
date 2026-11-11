@@ -5,11 +5,12 @@
 //! layer owns the one [`assets::AircraftAssets`] (item A2) every part draws with: made in `new`,
 //! polled in `prepare` (an atlas uploads once it is transcoded), and pending while an atlas the
 //! scene's icons need still transcodes (a scene without icons does not wait for them). Its parts draw in the order of doc 03 §3, rows 25–29: shadows ([`shadows`], A6), gear and
-//! models (A5), icon outlines and icons ([`icons`], A4), labels (A7).
+//! models ([`meshes`], A5), icon outlines and icons ([`icons`], A4), labels (A7).
 
 pub mod assets;
 pub mod icons;
 pub mod labels;
+pub mod meshes;
 pub mod shadows;
 
 use rustradar_scene::aircraft::AircraftScene;
@@ -32,6 +33,8 @@ pub struct Aircraft {
     assets: assets::AircraftAssets,
     /// Row 25: every group's shadows, before any aircraft.
     shadows: shadows::Shadows,
+    /// Row 26: every group's gear and airframes.
+    meshes: meshes::Meshes,
     /// Rows 27 and 28: icon outlines, icons.
     icons: icons::Icons,
     /// Row 29: aircraft labels.
@@ -43,6 +46,7 @@ impl Aircraft {
         Aircraft {
             assets: assets::AircraftAssets::new(init),
             shadows: shadows::Shadows::new(init),
+            meshes: meshes::Meshes::new(init),
             icons: icons::Icons::new(init),
             labels: labels::Labels::new(init),
         }
@@ -51,6 +55,11 @@ impl Aircraft {
     /// The aircraft labels drawn this frame.
     pub fn labels(&self) -> &[labels::Shown] {
         self.labels.shown()
+    }
+
+    /// The gear and airframes drawn this frame.
+    pub fn meshes(&self) -> &meshes::Meshes {
+        &self.meshes
     }
 
     /// The meshes and atlases every part draws with.
@@ -68,12 +77,14 @@ impl Layer for Aircraft {
         self.assets.poll(cx.gpu);
         let scene = &cx.scene.aircraft.scene;
         self.shadows.prepare(cx, &self.assets, scene);
+        self.meshes.prepare(cx, &self.assets, scene);
         self.icons.prepare(cx, &self.assets, scene);
         self.labels.prepare(cx, &cx.scene.aircraft.labels);
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
         self.shadows.draw(pass, cx, &self.assets);
+        self.meshes.draw(pass, cx, &self.assets);
         self.icons.draw(pass, cx);
         self.labels.draw(pass, cx);
     }

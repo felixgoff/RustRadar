@@ -23,6 +23,10 @@
 //! on and 2.4 px off. Despite its name [`TRAIN_ROUTE_CASING`] is only the stations' fill: no
 //! casing is drawn under the dashes (doc 02 §7).
 //!
+//! The plan's T6 row asks for "a dashed route ahead in `[55,142,240,210]`": that is the selected
+//! flight's route ahead (doc 02 §1.4 lists it with the other blues); today's train route is the
+//! black dashes of `TRAIN_ROUTE_DASH` (G:2078), and so is this one.
+//!
 //! What the scene builder hands over ([`Input`]) it works out with [`route_lines`] (the CPU part of
 //! `trainRouteLayers`, with `train_route.ts`'s `routeAhead` and `wayToStop` from
 //! [`rustradar_core::train_route`]) and [`ring_of`] (`trainSelectionLayers`). As deck does:
@@ -425,12 +429,6 @@ mod tests {
         [18.07 + m / (111_320.0 * (59.33f64).to_radians().cos()), 59.33 + n / 111_320.0]
     }
 
-    /// Where `[lon, lat]` is on the canvas of `view`, CSS px.
-    fn screen(view: &ViewState, [lon, lat]: LonLat) -> [f64; 2] {
-        let p = viewport_for(view, SIZE).project([lon, lat, 0.0]);
-        [p[0], p[1]]
-    }
-
     /// `[lon, lat]` at `xy` on the canvas of `view`.
     fn ground(view: &ViewState, xy: [f64; 2]) -> LonLat {
         viewport_for(view, SIZE).unproject(xy, 0.0)
@@ -641,7 +639,8 @@ mod tests {
         for k in 0..60 {
             let x = 30.0 + f64::from(k) * 0.5;
             widths.push(down(&image, x, [50.0, 70.0], black));
-            assert_eq!(down(&image, x, [50.0, 70.0], |c| !black(c) && !near(c, land, 3) && !near(c, [0, 0, 0, 255], 40)) <= 2, true, "{x}");
+            let other = down(&image, x, [50.0, 70.0], |c| !black(c) && !near(c, land, 3) && !near(c, [0, 0, 0, 255], 40));
+            assert!(other <= 2, "{other} px neither the dash nor the land at {x}");
         }
         let widest = *widths.iter().max().unwrap();
         assert!((5..=7).contains(&widest), "{widths:?}");

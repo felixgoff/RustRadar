@@ -478,7 +478,7 @@ pub fn transition_color(ctx: &Context, id: Id, target: Color32, seconds: f32) ->
 mod tests {
     use super::*;
     use egui::epaint::{RectShape, Shape};
-    use egui::{Event, PointerButton, RawInput};
+    use egui::{Event, Key, PointerButton, RawInput};
 
     /// A themed context that has run once (its fonts are loaded from the first pass).
     fn ctx() -> Context {
@@ -589,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn a_click_or_the_keyboard_presses_it() {
+    fn a_click_presses_it_but_not_while_disabled() {
         let ctx = ctx();
         frame(&ctx, input(0.0, None), |ui| Button::text_only("Retry now").show(ui)); // sizing pass
         let (r, _) = frame(&ctx, input(0.0, None), |ui| Button::text_only("Retry now").show(ui));
@@ -609,6 +609,27 @@ mod tests {
         raw.events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
         let (r, _) = frame(&ctx, raw, |ui| Button::text_only("Retry now").enabled(false).show(ui));
         assert!(!r.clicked() && r.hovered());
+    }
+
+    #[test]
+    fn tab_focuses_it_with_the_ring_and_enter_presses_it() {
+        let ctx = ctx();
+        let draw = |ui: &mut Ui| Button::text_only("Retry now").show(ui);
+        frame(&ctx, input(0.0, None), draw); // sizing pass
+        frame(&ctx, input(0.0, None), draw);
+        let key = |key: Key, time: f64| {
+            let mut raw = input(time, None);
+            raw.events.push(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+            raw
+        };
+        let (r, rects) = frame(&ctx, input(0.1, None), draw);
+        assert!(!r.has_focus() && !rects.iter().any(|s| s.stroke.color == theme::AMBER), "no ring before");
+        frame(&ctx, key(Key::Tab, 0.2), draw);
+        let (r, rects) = frame(&ctx, input(0.3, None), draw);
+        assert!(r.has_focus());
+        assert!(rects.iter().any(|s| s.stroke.color == theme::AMBER && s.stroke.width == 2.0 && s.rect == r.rect.expand(3.0)), "the focus ring");
+        let (r, _) = frame(&ctx, key(Key::Enter, 0.4), draw);
+        assert!(r.clicked(), "Enter presses the focused button");
     }
 
     #[test]

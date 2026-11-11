@@ -6,10 +6,15 @@
 //! - `u9-list-rows.png`, `u9-list-failed.png`: rows from a fixture (a selected one, one with no
 //!   route, one with no callsign, a long type cut short) and the failure with Try again, sized as
 //!   Chromium lays out today's markup (52.98 px rows, a 29.48 px header, the message 78.19 px);
-//! - `u9-filters.png`, `u9-filters-set.png`: the panel with today's defaults and with filters set
-//!   (chips in the three token inputs, categories off, a range, one box off), each part where
-//!   Chromium puts it in today's markup (header 49, the field at 36.8 below the body's top, the
-//!   categories' legend at 88.8, …).
+//! - `u9-filters.png`: the panel open in today's window, giving way to the list's least height and
+//!   scrolling its body;
+//! - `u9-filters-whole.png`, `u9-filters-set.png`: on a canvas tall enough for all of it, with
+//!   today's defaults and with filters set (chips in the three token inputs, categories off, a
+//!   range, one box off): the natural heights (722.75 and 714.75) and each part where Chromium
+//!   puts it (the header's rule at 49, the text field at 86.8, the first chip at 167.59, the
+//!   thumbs, the boxes, the token fields), within a pixel;
+//! - `u9-filters-suggestions.png`: the airlines' suggestions after a click in the field and an
+//!   `a` typed, 4 px under the field, rows 30.19 high.
 //!
 //! The Chromium layouts were made from `TopFlights.svelte`, `FilterPanel.svelte` and
 //! `TokenInput.svelte`'s markup and CSS with app.css and the Overpass fonts (Playwright's
@@ -65,9 +70,15 @@ impl Canvas {
 
     /// A frame of the shell with the app's slots for `state` at egui time `time`.
     fn frame(&mut self, gpu: &Gpu, time: f64, state: &AppState) -> (Placed, Vec<Action>) {
+        self.frame_with(gpu, time, state, Vec::new())
+    }
+
+    /// A frame with `events` as its input.
+    fn frame_with(&mut self, gpu: &Gpu, time: f64, state: &AppState, events: Vec<egui::Event>) -> (Placed, Vec<Action>) {
         let raw = RawInput {
             screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(self.size[0] as f32, self.size[1] as f32))),
             time: Some(time),
+            events,
             ..Default::default()
         };
         let mut placed = Placed::default();
@@ -437,6 +448,31 @@ fn the_filter_panel_is_today_s() {
     near(ground.left() - air.right(), 16.0, 0.01, "between the boxes");
     // Reset is off: no --amber in it
     assert!(bounds(&image, rect(reset), |p| p[2] > 180 && p[0] < 120).is_none(), "Reset disabled");
+
+    // the airlines' suggestions: a click in the field, an "a" typed (Chromium's layout of the
+    // list: 4 under the field, rows 30.19 high, 4 + 1 round them)
+    let field_top = panel.top() + DEFAULT_TOPS.tokens[0];
+    let at = Pos2::new(panel.left() + 150.0, field_top + 21.0);
+    let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+    let mut time = 4.0;
+    for events in [vec![egui::Event::PointerMoved(at)], vec![button(true)], vec![button(false)], vec![egui::Event::Text("a".into())], vec![], vec![]] {
+        let (_, actions) = canvas.frame_with(&gpu, time, &state, events);
+        assert!(actions.is_empty(), "typing a query changes no filter: {actions:?}");
+        time += 0.5;
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let image = canvas.target.read(&gpu).expect("read back");
+    save(&image, "u9-filters-suggestions.png");
+    // the list on --surface-raised, its top border 4 under the field's 42
+    let list_x = (panel.left() + 200.0) as u32;
+    let list = first_row(&image, list_x, field_top, (40.0, 60.0), theme::LINE, 3).expect("the suggestions' border");
+    near(list, 46.0, 1.0, "the list's top under the field's");
+    // three suggestions: Scandinavian Airlines (5 live), then Air France and Lufthansa by name
+    let rows = (field_top + list + 5.0) as u32;
+    let first = bounds(&image, Rect::new(list_x, rows, 2, 30), |p| (0..3).all(|i| p[i].abs_diff(rgb(theme::SURFACE_HOVER)[i]) <= 2)).expect("the first row, active");
+    near(first.height() as f32, 30.19, 1.0, "a row's height");
+    let below = rows as f32 + 3.0 * 30.19 + 5.0;
+    assert_eq!(first_row(&image, list_x, 0.0, (below - 2.0, below + 2.0), theme::LINE, 3).map(|y| y.round()), Some(below.floor()), "the list's bottom border after three rows");
 
     // set filters: chips in the token inputs, categories off, a range, one box off
     state.persisted.filters = Filters {

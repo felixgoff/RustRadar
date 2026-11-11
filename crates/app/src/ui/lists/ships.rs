@@ -416,7 +416,8 @@ fn no_match(ui: &mut Ui) -> bool {
     message(ui, |ui, width| {
         paragraph(ui, NO_MATCH, &message_style(), width);
         ui.add_space(MESSAGE_GAP);
-        clicked = Button::text_only(SHOW_ALL).show(ui).clicked();
+        // a button takes the message's colour (`button { color: inherit }`)
+        clicked = Button::text_only(SHOW_ALL).color(theme::TEXT_2).show(ui).clicked();
     });
     clicked
 }

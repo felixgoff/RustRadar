@@ -12,9 +12,12 @@
 //!   VesselFinder unreachable, none matching with Show all;
 //! - `u15-filters.png`, `u15-filters-out.png`: the filter panel with a type, a size, the movement
 //!   and old positions set; zoomed out with the sizes disabled under their hint;
-//! - `u15-panel.png`, `u15-panel-free.png`, `u15-panel-loading.png`, `u15-panel-error.png`: the
-//!   panel with its card and photo, followed; a free-text destination, an ETA passed, an alarming
-//!   status, SAR, satellite AIS and a stale report; loading; the card failed, the position old.
+//! - `u15-panel.png`, `u15-panel-free.png`, `u15-panel-loading.png`, `u15-panel-error.png`,
+//!   `u15-panel-unnamed.png`: the panel with its card and photo, followed; a free-text
+//!   destination, an ETA passed, an alarming status, SAR, satellite AIS and a stale report;
+//!   loading; the card failed, the position old; an unnamed ship of an unknown type loading;
+//! - `u15-window-v6.png`: the fixture at V6 on the satellite map through the window's engine, a
+//!   ship's panel open and a row under the pointer highlighting its ship on the map.
 //!
 //! The Chromium layouts were made from `ShipList.svelte`, `ShipFilterPanel.svelte` and
 //! `ShipPanel.svelte` server-rendered by Svelte with the same props, laid out with app.css and the
@@ -39,6 +42,7 @@ use common::NOW_MS;
 use common::shots::{Rect, bounds, gpu, pixel, save};
 use egui::load::{ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint};
 use egui::{Color32, ColorImage, Event, PointerButton, Pos2, RawInput, Vec2};
+use rustradar_app::app::Engine;
 use rustradar_app::scene_builder::SceneBuilder;
 use rustradar_app::state::aircraft::Answer;
 use rustradar_app::state::search::Ask;
@@ -53,6 +57,7 @@ use rustradar_core::settings::Mode;
 use rustradar_core::ship_list::{DEFAULT_SHIP_FILTERS, ShipFilters, ShipMotion, ShipSort};
 use rustradar_map::Gpu;
 use rustradar_map::headless::{FORMAT, Image, Offscreen};
+use rustradar_map::io::DirTiles;
 use rustradar_scene::camera::ViewState;
 
 /// The desktop reference pictures' canvas, CSS px, at scale 1.
@@ -541,6 +546,9 @@ fn the_list_loading_failed_and_matching_none() {
     near(button.x1, 142.55, 1.0, "Show all's right");
     near(button.y0, top as f32 + 120.97, 1.0, "Show all's top");
     near(button.y1, top as f32 + 152.97, 1.0, "Show all's bottom");
+    // its words in the message's --text-2 (a button's colour is inherited)
+    let brightest = (button.x0 + 2..button.x1 - 2).flat_map(|x| (button.y0 + 2..button.y1 - 2).map(move |y| (x, y))).map(|(x, y)| lum(pixel(&image, x, y))).fold(0.0, f64::max);
+    assert!((180.0..=200.0).contains(&brightest), "Show all's words at {brightest}, --text-2 is 196");
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -781,4 +789,163 @@ fn the_sort_and_show_all_through_actions() {
     }
     assert_eq!(s.persisted.ship_filters, ShipFilters { sort: ShipSort::Distance, ..DEFAULT_SHIP_FILTERS });
     assert_eq!(s.search.list_query(Mode::Ships), "");
+}
+
+/// The point `y` px under the filter card's top border, `x` across.
+fn in_filters(placed: &Placed, x: f32, y: f32) -> Pos2 {
+    Pos2::new(x, placed.sidebar.filters.expect("the filter card").min.y + y)
+}
+
+#[test]
+fn the_filter_panel_s_chips_movement_reset_and_close() {
+    let ctx = context();
+    let mut s = state();
+    assert!(s.apply(Action::Open(Open::Filters, true), NOW_MS));
+    // Fishing (126.67–208.26 across, 124.8–150.8 in): left out
+    let (actions, _) = click_at(&ctx, TALL, &s, |p| in_filters(p, 167.0, 137.8));
+    assert_eq!(actions, [Action::SetShipFilters]);
+    assert!(s.apply(Action::SetShipFilters, NOW_MS));
+    assert_eq!(s.persisted.ship_filters.hidden_kinds, [5]);
+    assert_eq!(s.ships.filtered_len(), 10, "the map's list is filtered again at the next poll");
+    s.poll(NOW_MS + 20.0);
+    assert_eq!(s.ships.filtered_len(), 9);
+    // Moored (224–316 across, 284.59–312.78 in)
+    let (actions, _) = click_at(&ctx, TALL, &s, |p| in_filters(p, 270.0, 298.0));
+    assert_eq!(actions, [Action::SetShipFilters]);
+    assert!(s.apply(Action::SetShipFilters, NOW_MS));
+    assert_eq!(s.persisted.ship_filters.motion, ShipMotion::Moored);
+    // Reset: the defaults, the sort kept
+    s.persisted.ship_filters.sort = ShipSort::Name;
+    let (actions, _) = click_at(&ctx, TALL, &s, |p| in_filters(p, 267.0, 25.0));
+    assert_eq!(actions, [Action::SetShipFilters]);
+    assert!(s.apply(Action::SetShipFilters, NOW_MS));
+    assert_eq!(s.persisted.ship_filters, ShipFilters { sort: ShipSort::Name, ..DEFAULT_SHIP_FILTERS });
+    // nothing to reset: the button is off
+    let (actions, _) = click_at(&ctx, TALL, &s, |p| in_filters(p, 267.0, 25.0));
+    assert!(actions.is_empty(), "{actions:?}");
+    // the close button
+    let (actions, _) = click_at(&ctx, TALL, &s, |p| in_filters(p, 311.0, 25.0));
+    assert_eq!(actions, [Action::Open(Open::Filters, false)]);
+    assert!(s.apply(Action::Open(Open::Filters, false), NOW_MS));
+    assert!(!s.shortcuts.filters_open());
+}
+
+/// The point at `x` across and `y` under the panel's top border.
+fn in_panel(placed: &Placed, x: f32, y: f32) -> Pos2 {
+    let (_, rect) = placed.panel.expect("the panel");
+    Pos2::new(x, rect.min.y + y)
+}
+
+#[test]
+fn the_panel_s_close_follow_links_and_try_again() {
+    let ctx = context();
+    let mut s = select(state(), KATTEGAT);
+    // Follow (1189.53–1275.11, 824.81–856.81): the camera follows the ship, as with the key C
+    let (actions, _) = click_at(&ctx, SIZE, &s, |_| Pos2::new(1232.0, 840.0));
+    assert_eq!(actions, [Action::ToggleFollow]);
+    assert!(s.apply(Action::ToggleFollow, NOW_MS));
+    assert!(s.ships.following());
+    // the photo and VesselFinder open the ship's page
+    let page = rustradar_core::model::ship_page_url(KATTEGAT);
+    let (actions, opened) = click_at(&ctx, SIZE, &s, |p| in_panel(p, 1240.0, 66.0 + 90.0));
+    assert!(actions.is_empty(), "{actions:?}");
+    assert_eq!(opened, std::slice::from_ref(&page));
+    let (_, opened) = click_at(&ctx, SIZE, &s, |_| Pos2::new(1345.0, 840.0));
+    assert_eq!(opened, [page]);
+    // the close button: the strip's last column, centred
+    let (actions, _) = click_at(&ctx, SIZE, &s, |p| in_panel(p, 1424.0 - 1.0 - 20.0, 1.0 + 33.0));
+    assert_eq!(actions, [Action::CloseShip]);
+    assert!(s.apply(Action::CloseShip, NOW_MS));
+    assert_eq!(s.ships.selected_mmsi(), None);
+    assert!(!s.apply(Action::CloseShip, NOW_MS), "nothing more to close");
+
+    // the card failed: Try again (1079–1182.03, 668.03–700.03) asks for it again, the skeletons
+    // back until it answers
+    let feeds = canned();
+    let asked = feeds.asked.clone();
+    let mut s = select(state_on(V6, Some(feeds), true), VINGA);
+    assert_eq!(s.ships.card_error(), Some(FAILURE));
+    let (actions, _) = click_at(&ctx, SIZE, &s, |_| Pos2::new(1130.0, 684.0));
+    assert_eq!(actions, [Action::RetryShipCard]);
+    assert!(s.apply(Action::RetryShipCard, NOW_MS + 20.0));
+    assert_eq!(asked.lock().unwrap().iter().filter(|m| **m == VINGA).count(), 2);
+    assert_eq!(s.ships.card_error(), None, "loading again");
+    s.poll(NOW_MS + 30.0);
+    assert_eq!(s.ships.card_error(), Some(FAILURE));
+}
+
+// ------------------------------------------------------------------------------------------------
+// through the window
+
+/// The window's engine with the shell on, drawing into an offscreen target.
+struct Window {
+    engine: Engine,
+    target: Offscreen,
+    egui_s: f64,
+}
+
+impl Window {
+    fn frame(&mut self, gpu: &Gpu, events: Vec<Event>, now: f64) {
+        let mut input = RawInput {
+            time: Some(self.egui_s),
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(SIZE[0] as f32, SIZE[1] as f32))),
+            events,
+            ..Default::default()
+        };
+        input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(1.0);
+        self.egui_s += 0.25;
+        self.engine.frame(gpu, self.target.view(), SIZE, 1.0, input, now);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+}
+
+/// The fixture at V6 on the satellite map with ships the focus, through the window's engine: the
+/// list, a ship's panel, and a row under the pointer highlighting its ship on the map.
+#[test]
+fn the_ships_through_the_window() {
+    let Some(gpu) = gpu() else { return };
+    let mut state = state_on(V6, Some(canned()), true);
+    state.set_basemap(Basemap::Satellite, NOW_MS);
+    let tern = state.ships.ships().iter().find(|x| x.mmsi == TERN).cloned().unwrap();
+    state.select_ship(Some(tern), NOW_MS);
+    let mut engine = Engine::new(&gpu, FORMAT, state);
+    engine.map.set_tiles(Arc::new(DirTiles::fixtures()), None);
+    engine.shell = true;
+    engine.draw = false;
+    let mut w = Window { engine, target: Offscreen::new(&gpu, SIZE), egui_s: 0.0 };
+    let started = std::time::Instant::now();
+    loop {
+        w.frame(&gpu, Vec::new(), NOW_MS);
+        if !w.engine.map.pending() || started.elapsed() > rustradar_map::headless::MAX_WAIT {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    for _ in 0..6 {
+        w.frame(&gpu, Vec::new(), NOW_MS);
+    }
+    assert_eq!(w.engine.state.ships.card_details().map(|d| d.mmsi), Some(TERN), "the tanker's card");
+    // the pointer on NORDIC TRADER's row: its ship highlighted on the map at the next scene
+    let egui = w.engine.egui.clone();
+    let row = |mmsi: u32| egui.read_response(egui::Id::unique(("rustradar::lists::ships::row", mmsi))).expect("the row").rect;
+    let at = row(TRADER).center();
+    w.frame(&gpu, vec![Event::PointerMoved(at)], NOW_MS + 16.0);
+    assert_eq!(w.engine.state.hovered_ship, Some(TRADER));
+    w.engine.draw = true;
+    w.frame(&gpu, Vec::new(), NOW_MS + 32.0);
+    let latest = &w.engine.scene.ships.latest;
+    assert_eq!(latest.hovered.map(|i| latest.mmsis[i]), Some(TRADER), "the hovered ship on the map");
+    let image = w.target.read(&gpu).expect("read back");
+    save(&image, "u15-window-v6.png");
+    // the list card's left border and the panel's right one over the map
+    let border = |x: u32, y: std::ops::Range<u32>| y.clone().filter(|&y| close(pixel(&image, x, y), theme::LINE, 1)).count() == y.len();
+    assert!(border(16, 200..600), "the list card's left edge at x 16");
+    assert!(border(1423, 500..860), "the panel's right edge at right 16");
+    // the selected row on --amber-soft, the hovered one on --surface-hover
+    let r = row(TERN);
+    let rect = area(r.min.x as u32 + 2, r.min.y as u32 + 2, r.max.x as u32 - 2, r.max.y as u32 - 2);
+    assert!(painted(&image, rect, over(theme::AMBER_SOFT, theme::SURFACE), 3).is_some(), "the selected row");
+    let r = row(TRADER);
+    let rect = area(r.min.x as u32 + 2, r.min.y as u32 + 2, r.max.x as u32 - 2, r.max.y as u32 - 2);
+    assert!(painted(&image, rect, theme::SURFACE_HOVER, 3).is_some(), "the hovered row");
 }

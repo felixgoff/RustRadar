@@ -64,6 +64,8 @@
 //! - Digits are Overpass's own (no `tabular-nums` in egui).
 //! - The photo loads through egui's image loaders ([`super::panel::remote`]): until item U18's
 //!   loader for `https:` lands it reads as failed and is left out, as today when it does not load.
+//! - Closed and opened again, the panel keeps how far its body was scrolled (egui keeps a scroll
+//!   area's state by its id); today's component mounts afresh at the top.
 //! - The phone order (photo and body after the voyage, then the footer) is item U19's.
 
 use egui::text::LayoutJob;

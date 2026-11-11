@@ -47,7 +47,7 @@ use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Id, Pos2, Rect, Se
 use rustradar_map::MapRenderer;
 use rustradar_map::renderer::{MapError, Retry};
 
-use crate::theme;
+use crate::ui::theme;
 
 /// The card's title.
 pub const TITLE: &str = "The map couldn't draw";

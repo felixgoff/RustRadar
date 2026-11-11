@@ -33,8 +33,8 @@ use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
-use crate::ui::map_error;
-use crate::{Options, platform, theme, tile_fetcher};
+use crate::ui::{map_error, theme};
+use crate::{Options, platform, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
 

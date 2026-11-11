@@ -46,9 +46,13 @@
 //! Checked against today's pictures (`docs/port/reference/satellite-*.png`, tests below): V2 and
 //! V7 on the globe and V6 on the flat map match colour for colour where no label, building or UI
 //! covers them (means within 1 level), V6 to the pixel and the globe's views within 1–2 px. (So
-//! the imagery does not show the 4.5 px offset T1 measured on the dark map's vector tiles.) Far
-//! north, as at V7, deck's selection on the globe leaves the top row of tiles out and the earth
-//! sphere shows there, in today's picture as here.
+//! the imagery does not show the 4.5 px offset T1 measured on the dark map's vector tiles.) V7 on
+//! a phone (390 × 844) too. Far north, as at V7, deck's selection on the globe leaves the top row
+//! of tiles out and the earth sphere shows there, in today's picture as here. At V1 (no satellite
+//! picture of today's app exists for it) the tiles are the 32 deck selects, and deck leaves tile
+//! 3/1/2 out at the limb: the sphere shows as a dark crescent at the globe's upper left, between
+//! the picture and the limb. That is deck's frustum test, not a missing tile; beyond ±85.05° the
+//! sphere shows as a dark cap over the pole.
 //!
 //! Deviations, invisible or nearly:
 //! - The picture's colours come from the `image` crate's JPEG decoder, not the browser's: the two
@@ -360,7 +364,11 @@ mod tests {
     /// channel, at the best shift within 6 px (T1: today's pictures stand about 4.5 px higher), the
     /// shift, and the mean colours of the two (shot shifted).
     fn agreement(ours: &Image, today: &Image, tolerance: u8) -> (f64, [i32; 2], [f64; 3], [f64; 3]) {
-        let [x0, y0, x1, y1] = MAP;
+        agreement_in(ours, today, MAP, tolerance)
+    }
+
+    /// [`agreement`] in `[x0, y0, x1, y1]` of today's picture instead of [`MAP`].
+    fn agreement_in(ours: &Image, today: &Image, [x0, y0, x1, y1]: [u32; 4], tolerance: u8) -> (f64, [i32; 2], [f64; 3], [f64; 3]) {
         let mut best = (-1.0, [0, 0]);
         for dy in -6..=6 {
             for dx in -6..=6 {
@@ -599,6 +607,75 @@ mod tests {
         render_with(&gpu, &mut renderer, &dark, 1.0).expect("rendered");
         render_with(&gpu, &mut renderer, &satellite(v3(), size), 1.0).expect("rendered");
         assert_eq!(fetcher.asked().len(), 2 * asked.len());
+    }
+
+    /// V1 (the whole globe, zoom 1.9, z3 tiles): the imagery asks for the 32 tiles deck 9.4's
+    /// `Tileset2D.getTileIndices` selects for this view at 1440 × 900 (run under bun with the
+    /// app's limits), and no other. deck leaves tile 3/1/2 (Hudson Bay to the Rockies) out at the
+    /// limb, as it leaves V7's top row out: there the earth sphere shows between the picture and
+    /// the limb, a dark crescent at the globe's upper left, here as in today's app; next to it,
+    /// in tile 3/2/2, the picture is drawn.
+    #[test]
+    fn v1_draws_the_tiles_deck_selects_and_the_sphere_where_it_leaves_one_out() {
+        let Some(gpu) = gpu() else { return };
+        // deck's list, [x, y] at z3, in its traversal order
+        const DECK: [[u32; 2]; 32] = [
+            [0, 0], [0, 1], [1, 0], [1, 1], [2, 0], [2, 1], [3, 0], [3, 1], [2, 2], [2, 3], [3, 2], [3, 3], [2, 4], [3, 4], [3, 5], [4, 0],
+            [4, 1], [5, 0], [5, 1], [4, 2], [4, 3], [5, 2], [5, 3], [6, 0], [6, 1], [7, 0], [7, 1], [6, 2], [6, 3], [4, 4], [4, 5], [5, 4],
+        ];
+        let v1 = view(35.0, 10.0, 1.9, 0.0, 0.0);
+        let size = [1440.0, 900.0];
+        let fixtures = Noted::new(DirTiles::fixtures());
+        let mut renderer = renderer(&gpu, fixtures.clone());
+        let image = render_with(&gpu, &mut renderer, &satellite(v1, size), 1.0).expect("rendered");
+        image.save_png(&shots_dir().join("b6-satellite-v1-1440x900.png")).expect("the shot written");
+        assert!(fixtures.tiles.misses().is_empty(), "the fixtures lack {:?}", fixtures.tiles.misses());
+        let mut asked: Vec<[u32; 3]> = fixtures.asked().iter().map(|(_, t)| [t.x, t.y, t.z]).collect();
+        let mut deck: Vec<[u32; 3]> = DECK.iter().map(|&[x, y]| [x, y, 3]).collect();
+        asked.sort_unstable();
+        deck.sort_unstable();
+        assert_eq!(asked, deck);
+        // the earth sphere alone, for the colour it shows
+        let mut bare = MapRenderer::new(&gpu, FORMAT);
+        bare.set_tiles(io::offline(), None);
+        let sphere = render_with(&gpu, &mut bare, &satellite(v1, size), 1.0).expect("rendered");
+        // along the line from the centre up and to the left (120° from east): the picture to
+        // about 289 px out, then the sphere where 3/1/2 is missing, then the ink
+        let at = |r: f64| {
+            let a = 120f64.to_radians();
+            [720.0 + r * a.cos(), 450.0 - r * a.sin()]
+        };
+        let tile_of = |[x, y]: [f64; 2]| {
+            let [lon, lat] = renderer.view().viewport.unproject([x, y], 0.0);
+            let [wx, wy] = lng_lat_to_world([lon, lat]);
+            [(wx / WORLD_SIZE * 8.0).floor() as u32, ((WORLD_SIZE - wy) / WORLD_SIZE * 8.0).floor() as u32]
+        };
+        let pixel = |picture: &Image, [x, y]: [f64; 2]| rgb(picture.pixel(x as u32, y as u32));
+        let (inside, gap) = (at(280.0), at(292.0));
+        assert_eq!((tile_of(inside), tile_of(gap)), ([2, 2], [1, 2]));
+        eprintln!("V1: {:?} at {inside:?} (sphere {:?}); {:?} at {gap:?} (sphere {:?})", pixel(&image, inside), pixel(&sphere, inside), pixel(&image, gap), pixel(&sphere, gap));
+        assert!(diff(pixel(&image, inside), pixel(&sphere, inside)) > 20, "no picture in 3/2/2");
+        assert_ne!(pixel(&sphere, gap), [30, 30, 30], "the sphere's limb is further in");
+        assert!(diff(pixel(&image, gap), pixel(&sphere, gap)) <= 1, "3/1/2 drawn");
+    }
+
+    /// V7 on a phone (390 × 844) against today's picture, below its alert card and above its
+    /// sheet, left of its map buttons: deck's tiles for a narrow canvas, at the same place.
+    #[test]
+    fn v7_on_a_phone_looks_like_today_s_picture() {
+        let Some(gpu) = gpu() else { return };
+        let fixtures = Noted::new(DirTiles::fixtures());
+        let mut renderer = renderer(&gpu, fixtures.clone());
+        let image = render_with(&gpu, &mut renderer, &satellite(v7(), [390.0, 844.0]), 1.0).expect("rendered");
+        image.save_png(&shots_dir().join("b6-satellite-v7-390x844.png")).expect("the shot written");
+        assert!(!renderer.pending() && fixtures.tiles.misses().is_empty(), "the fixtures lack {:?}", fixtures.tiles.misses());
+        let today = reference("satellite-v7-390x844.png");
+        let (share, shift, ours, theirs) = agreement_in(&image, &today, [10, 160, 340, 740], 8);
+        eprintln!("V7 phone: {share:.4} of today's pixels within 8 levels at {shift:?}; means {ours:.2?} against {theirs:.2?}");
+        // (0.699 measured: the snow and rock's fine edges a pixel apart; at 1440 × 900, 0.738)
+        assert!(share > 0.65, "{share}");
+        assert!(shift[0].abs() <= 1 && shift[1].abs() <= 2, "{shift:?}");
+        assert!(within(ours, theirs, 2.0), "{ours:?} against today's {theirs:?}");
     }
 
     /// One tile set serves both projections, as deck's one `imagery` layer keeps its cache, and

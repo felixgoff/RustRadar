@@ -15,6 +15,7 @@
 //! U9 for the aircraft), [`panel`] (the detail panels' shared anatomy: U10) and [`flight_panel`]
 //! (U10, U11).
 
+pub mod airport_panel;
 pub mod anim;
 pub mod attribution;
 pub mod filters;

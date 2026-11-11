@@ -2,3 +2,4 @@
 //! ([`super::shell::Slots::aircraft_list`], `train_list`, `ship_list`).
 
 pub mod flights;
+pub mod trains;

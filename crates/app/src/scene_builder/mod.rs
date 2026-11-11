@@ -109,6 +109,8 @@ impl SceneBuilder {
         scene.rail = rail::Input { shown: settings.rail_map, speeds: rustradar_scene::rail::rail_speeds(settings.rail_map, settings.rail_shows) };
         self.radar.build(state, &mut scene);
         self.ships.build(state, &mut scene);
+        // the train hovered in the trains list, while trains are the focus (U14)
+        self.trains.hovered = state.hovered_train.clone().filter(|_| state.persisted.settings.mode == rustradar_core::settings::Mode::Trains);
         self.trains.build(state, &mut scene);
         // the signal blocks (T5) see this refresh's trains as drawn (G:2733-2735)
         let on_map: Vec<&rustradar_core::model::Train> = state.trains.on_map().iter().collect();

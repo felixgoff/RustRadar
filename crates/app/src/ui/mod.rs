@@ -32,4 +32,5 @@ pub mod sidebar;
 pub mod text;
 pub mod theme;
 pub mod tooltip;
+pub mod train_panel;
 pub mod widgets;

@@ -104,15 +104,15 @@ impl Slots {
     pub const APP: Slots = Slots {
         search: Some(super::search::show),
         aircraft_filters: Some(super::filters::aircraft::show),
-        train_filters: None,
+        train_filters: Some(super::filters::trains::show),
         ship_filters: None,
         aircraft_list: Some(super::lists::flights::show),
-        train_list: None,
+        train_list: Some(super::lists::trains::show),
         ship_list: None,
         airport_panel: Some(super::airport_panel::show),
         flight_panel: Some(super::flight_panel::show),
         ship_panel: None,
-        train_panel: None,
+        train_panel: Some(super::train_panel::show),
     };
 
     /// The focus's filter panel.

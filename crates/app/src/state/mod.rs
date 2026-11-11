@@ -53,6 +53,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustradar_backend::{Backend, BackendEvent};
 use rustradar_core::filters::Filters;
+use rustradar_core::train_list::TrainFilters;
 use rustradar_core::geo::Basemap;
 use rustradar_core::motion::aircraft::Motion;
 use rustradar_core::settings::{Mode, Persisted};
@@ -217,6 +218,18 @@ pub enum Action {
     /// The airport board's tabs, Show more, Try again, rows and close ([`AppState::board_ask`],
     /// U13).
     Board(airport::Ask),
+    /// The trains list's sort and Show all, the train filter panel's chips, Delayed only and Reset:
+    /// the filters handed over in [`AppState::train_filters_handed`] replace
+    /// `persisted.train_filters` (U14).
+    SetTrainFilters,
+    /// A row of the trains list: `pickTrain(train)` with the train at this index of
+    /// [`trains::Trains::trains`] (U14).
+    PickTrain(usize),
+    /// The pointer or the keyboard on a row of the trains list, or off the rows (`hoveredTrainId`):
+    /// the train at this index of [`trains::Trains::trains`] is drawn highlighted (U14).
+    HoverTrain(Option<usize>),
+    /// The train panel's close button: `selectTrain(null)` (U14).
+    CloseTrain,
 }
 
 /// The app's state: the camera, the clocks' sync, settings, and one part per feed.
@@ -249,6 +262,12 @@ pub struct AppState {
     /// The aircraft filter panel's new filters, for the [`Action::SetFilters`] it pushes with
     /// them (the action is `Copy`).
     pub filters_handed: Cell<Option<Filters>>,
+    /// The train filters the trains list or the train filter panel handed over, for the
+    /// [`Action::SetTrainFilters`] pushed with them (U14).
+    pub train_filters_handed: Cell<Option<TrainFilters>>,
+    /// The id of the train hovered in the trains list (`hoveredTrainId`; U14): the trains' scene
+    /// builder draws it highlighted while trains are the focus.
+    pub hovered_train: Option<String>,
 }
 
 impl AppState {
@@ -293,6 +312,8 @@ impl AppState {
             radar: Default::default(),
             search: Default::default(),
             filters_handed: Cell::new(None),
+            train_filters_handed: Cell::new(None),
+            hovered_train: None,
         }
     }
 
@@ -447,6 +468,31 @@ impl AppState {
                 true
             }
             Action::Board(ask) => self.board_ask(ask, local_ms),
+            Action::SetTrainFilters => match self.train_filters_handed.take() {
+                Some(filters) if filters != self.persisted.train_filters => {
+                    self.persisted.train_filters = filters;
+                    true
+                }
+                _ => false,
+            },
+            Action::PickTrain(index) => match self.trains.trains().get(index).cloned() {
+                Some(train) => {
+                    self.pick_train(train, local_ms);
+                    true
+                }
+                None => false,
+            },
+            Action::HoverTrain(index) => {
+                let id = index.and_then(|i| self.trains.trains().get(i)).map(|t| t.id.clone());
+                let changed = id != self.hovered_train;
+                self.hovered_train = id;
+                changed
+            }
+            Action::CloseTrain => {
+                let open = self.trains.selected_id().is_some();
+                self.select_train(None, local_ms);
+                open
+            }
         }
     }
 }

@@ -15,10 +15,14 @@
 //!   aircraft takes `SELECTED_LABEL_PRIORITY` (1000).
 //! - **The label set** ([`Labeller`], `updateLabelSet`, G:845-871). The texts, heights,
 //!   priorities and sizes are worked out once per set and kept while the feed is the same
-//!   (`flights`' identity: here the caller's feed key, [`Labeller::build`]), the height line is the
-//!   same and the same aircraft are labelled; then only the positions move, put back in the set's
-//!   own order. Otherwise a new set is made (its version one more) in this refresh's order. With
-//!   the label setting off, a non-empty set is let go of (G:3031-3035).
+//!   (`flights`' identity), the height line is the same and the same aircraft are labelled; then
+//!   only the positions move, put back in the set's own order. Otherwise a new set is made (its
+//!   version one more) in this refresh's order. With the label setting off, a non-empty set is let
+//!   go of (G:3031-3035). The globe's `flights` is the page's `shown`, a new array whenever the
+//!   filtered feed or the `selected` row is a new object; [`Labeller::build`] reads that as the
+//!   caller's feed key (the filtered feed's generation) and the selected aircraft's row, so a newer
+//!   report from the follow stream lays the set out again and the selected aircraft's height line
+//!   follows it, as today.
 //! - **Layout** ([`layout`], [`AircraftLabels`], `aircraftLabelLayers`, G:873-969): both lines
 //!   anchored at the aircraft, text anchor `start`, baseline `center`, Overpass 600 from the SDF
 //!   atlas (64 px, buffer 6) with the 3-pixel halo in `[6,12,19,220]`, billboards, `sizeScale` the
@@ -160,6 +164,10 @@ pub struct Labeller {
     set: Arc<LabelSet>,
     /// Where each label's aircraft is drawn this refresh, by the set's index.
     positions: Vec<Option<[f64; 3]>>,
+    /// The feed key and the selected aircraft's row [`Self::build`] last saw (`shown`'s identity),
+    /// and the key it handed [`Self::update`] for them, one more each time either changed.
+    shown: Option<(u64, Option<LiveFlight>)>,
+    shown_key: u64,
 }
 
 impl Labeller {
@@ -244,14 +252,26 @@ impl Labeller {
     /// The tail of `buildLayers()` (G:3027-3035) for one refresh's `scene`: with `labelling` (the
     /// label setting, the font ready) the set is updated from the scene's labelled aircraft
     /// (`flight(row)` is the flight at `row` of the flights handed to the scene builder, `feed`
-    /// names them) and the labels returned; else the set is let go of and nothing is labelled.
+    /// names the filtered feed they come from) and the labels returned; else the set is let go of
+    /// and nothing is labelled.
+    ///
+    /// Today the flights are the page's `shown`, a new array whenever the filtered feed or the
+    /// selected row is a new object, and a new array is a new set. So the set is also made again
+    /// when the selected aircraft's row differs from the one last seen (the follow stream's newer
+    /// report: its height line follows it). Only a labelled selected aircraft's row is looked at:
+    /// a new set for the same feed is otherwise the same set, so nothing else would show it.
     pub fn build<'a>(&mut self, scene: &AircraftScene, labelling: bool, feed: u64, flight: impl Fn(usize) -> Option<&'a LiveFlight>, scale: f64) -> AircraftLabels {
         if !labelling {
             self.clear();
             return AircraftLabels { scale, ..AircraftLabels::default() };
         }
+        let selected_row = scene.selected.and_then(|id| scene.labelled.iter().find(|l| l.id == id)).and_then(|l| flight(l.row));
+        if self.shown.as_ref().is_none_or(|(f, row)| *f != feed || row.as_ref() != selected_row) {
+            self.shown = Some((feed, selected_row.cloned()));
+            self.shown_key += 1;
+        }
         let drawn = scene.labelled.iter().filter_map(|l| flight(l.row).map(|f| (f, l.position, l.size_m)));
-        self.update(feed, drawn, with_height(scene.frame.zoom));
+        self.update(self.shown_key, drawn, with_height(scene.frame.zoom));
         self.labels(&scene.frame, scene.selected, scale)
     }
 }
@@ -664,6 +684,50 @@ mod tests {
         let labels = labeller.build(&scene, false, 1, |row| flights.get(row), 1.0);
         assert!(labels.is_empty());
         assert_eq!(labeller.set().version, 2);
+    }
+
+    /// Today's `shown` is a new array whenever the selected row is a new object (the follow
+    /// stream's newer report), and a new array is a new set: the selected aircraft's height line
+    /// follows its row, the others' wait for the next feed.
+    #[test]
+    fn a_newer_row_for_the_selected_aircraft_lays_the_set_out_again() {
+        let frame = frame_at(9.0);
+        let scene = |selected: Option<u32>| AircraftScene {
+            frame,
+            selected,
+            labelled: vec![
+                Labelled { id: 1, row: 0, position: [1.0, 59.0, 914.4], size_m: 38.0 },
+                Labelled { id: 2, row: 1, position: [2.0, 59.0, 2743.2], size_m: 38.0 },
+            ],
+            ..Default::default()
+        };
+        let feed = [flight(1, "SAS1", 3_000, false), flight(2, "SAS2", 9_000, false)];
+        let mut labeller = Labeller::new();
+        let labels = labeller.build(&scene(Some(2)), true, 7, |row| feed.get(row), 1.0);
+        assert_eq!((labels.set.version, labels.set.heights.clone()), (1, vec!["3,000 ft".to_owned(), "9,000 ft".to_owned()]));
+        // the same rows again: kept
+        assert_eq!(labeller.build(&scene(Some(2)), true, 7, |row| feed.get(row), 1.0).set.version, 1);
+
+        // the stream's report for the selected one, newer than the feed's
+        let newer = [feed[0].clone(), LiveFlight { alt: 9_500, lat: 59.1, ..feed[1].clone() }];
+        let labels = labeller.build(&scene(Some(2)), true, 7, |row| newer.get(row), 1.0);
+        assert_eq!(labels.set.version, 2);
+        assert_eq!(labels.set.heights, ["3,000 ft", "9,500 ft"]);
+        assert_eq!(labeller.build(&scene(Some(2)), true, 7, |row| newer.get(row), 1.0).set.version, 2, "the same report: kept");
+
+        // another aircraft's row on its own is not looked at before the next feed
+        let other = [LiveFlight { alt: 3_300, ..feed[0].clone() }, newer[1].clone()];
+        let labels = labeller.build(&scene(Some(2)), true, 7, |row| other.get(row), 1.0);
+        assert_eq!((labels.set.version, labels.set.heights[0].as_str()), (2, "3,000 ft"));
+        let labels = labeller.build(&scene(Some(2)), true, 8, |row| other.get(row), 1.0);
+        assert_eq!((labels.set.version, labels.set.heights[0].as_str()), (3, "3,300 ft"), "a new feed");
+
+        // selecting another aircraft or none is a new `shown` too
+        assert_eq!(labeller.build(&scene(Some(1)), true, 8, |row| other.get(row), 1.0).set.version, 4);
+        assert_eq!(labeller.build(&scene(None), true, 8, |row| other.get(row), 1.0).set.version, 5);
+        assert_eq!(labeller.build(&scene(None), true, 8, |row| other.get(row), 1.0).set.version, 5);
+        // a selected aircraft without a label changes nothing anyone sees: the set is kept
+        assert_eq!(labeller.build(&scene(Some(9)), true, 8, |row| other.get(row), 1.0).set.version, 5);
     }
 
     /// A text laid out as the atlas would: glyphs 40 × 76 atlas px every 32 px from x = 20, the

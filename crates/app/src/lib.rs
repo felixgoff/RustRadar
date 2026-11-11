@@ -34,7 +34,7 @@ use crate::state::Startup;
 /// The command line (plan section 8).
 pub const USAGE: &str = "usage: rustradar-app [--view LAT,LON,ZOOM[,PITCH[,BEARING]]] [--basemap dark|satellite|realistic]
                      [--size WIDTHxHEIGHT] [--now UNIX_MS] [--fixture DIR] [--demo]
-                     [--screenshot FILE.png [--scale FACTOR]]
+                     [--screenshot FILE.png [--scale FACTOR] [--wait SECONDS]]
 
   --view        open the map there (degrees; zoom as deck.gl's; pitch and bearing default to 0)
   --basemap     the basemap to show instead of the saved one
@@ -43,7 +43,9 @@ pub const USAGE: &str = "usage: rustradar-app [--view LAT,LON,ZOOM[,PITCH[,BEARI
   --fixture     canned feeds from this folder instead of the network
   --demo        the demo trains
   --screenshot  draw one frame without a window into this PNG, and exit
-  --scale       the shot's device pixels per CSS pixel (default 1)";
+  --scale       the shot's device pixels per CSS pixel (default 1)
+  --wait        how long a shot waits for the map's tiles before it is taken anyway (default
+                $RUSTRADAR_SHOT_WAIT, else 30 s in a release build, 60 s in a debug build)";
 
 /// The canvas of a shot without `--size`, CSS pixels.
 pub const SHOT_SIZE: [u32; 2] = [1100, 720];
@@ -67,6 +69,8 @@ pub struct Options {
     pub demo: bool,
     /// `--screenshot`: the PNG to write.
     pub screenshot: Option<PathBuf>,
+    /// `--wait`: how long a shot waits for loading layers (`headless::max_wait` without it).
+    pub wait: Option<std::time::Duration>,
 }
 
 /// Why the command line was not taken.
@@ -144,12 +148,24 @@ impl Options {
                 }
                 "--demo" => options.demo = true,
                 "--screenshot" => options.screenshot = Some(PathBuf::from(value()?)),
+                "--wait" => {
+                    let v = value()?;
+                    let wait = v
+                        .parse()
+                        .ok()
+                        .and_then(|s: f64| std::time::Duration::try_from_secs_f64(s).ok())
+                        .ok_or_else(|| bad(format!("--wait wants seconds, e.g. 30, not {v:?}")))?;
+                    options.wait = Some(wait);
+                }
                 "-h" | "--help" => return Err(ArgsError::Help),
                 _ => return Err(bad(format!("unknown argument {flag:?}"))),
             }
         }
         if options.scale.is_some() && options.screenshot.is_none() {
             return Err(bad("--scale is for --screenshot; the window takes the display's scale".into()));
+        }
+        if options.wait.is_some() && options.screenshot.is_none() {
+            return Err(bad("--wait is for --screenshot".into()));
         }
         Ok(options)
     }
@@ -268,6 +284,19 @@ mod tests {
         assert!(bad(&["--scale", "2"]).contains("--screenshot"));
         assert_eq!(parse(&["--help"]), Err(ArgsError::Help));
         assert_eq!(parse(&["-h"]), Err(ArgsError::Help));
+    }
+
+    /// `--wait` (P1): a shot's wait for loading layers, in seconds, only with `--screenshot`.
+    #[test]
+    fn a_shot_s_wait_is_in_seconds() {
+        use std::time::Duration;
+        assert_eq!(parse(&["--screenshot", "a.png", "--wait", "12.5"]).expect("parsed").wait, Some(Duration::from_millis(12_500)));
+        assert_eq!(parse(&["--screenshot", "a.png", "--wait", "0"]).expect("parsed").wait, Some(Duration::ZERO));
+        assert_eq!(parse(&["--screenshot", "a.png"]).expect("parsed").wait, None);
+        for wrong in ["-1", "soon", "inf", "NaN"] {
+            assert!(bad(&["--screenshot", "a.png", "--wait", wrong]).contains("--wait wants seconds"), "{wrong:?}");
+        }
+        assert!(bad(&["--wait", "10"]).contains("--screenshot"));
     }
 
     #[test]

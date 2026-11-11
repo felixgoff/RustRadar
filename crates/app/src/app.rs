@@ -104,6 +104,12 @@ pub struct Engine {
     /// A rebuild was already asked for the loss the map has now: a second loss in a row waits
     /// for Retry with the card up (plan 2.2: the card shows only if the rebuilt map fails too).
     rebuilt_for_loss: bool,
+    /// Whether [`Self::frame`] draws and submits its picture (the default). The headless path
+    /// turns it off for the frames whose picture nobody reads while the map's work comes in (P1):
+    /// such a frame still polls, builds the scene, runs egui (its textures kept) and prepares the
+    /// map, so the layers take their tiles in as a drawn frame does, without the map pass that
+    /// costs seconds on a software rasteriser.
+    pub draw: bool,
 }
 
 impl Engine {
@@ -124,6 +130,7 @@ impl Engine {
             built_for: None,
             rebuild: false,
             rebuilt_for_loss: false,
+            draw: true,
         }
     }
 
@@ -282,6 +289,21 @@ impl Engine {
         local_ms: f64,
     ) {
         let (device, queue) = (&gpu.device, &gpu.queue);
+        if !self.draw {
+            // an undrawn frame (headless, P1): egui's textures and the map's uploads only, the
+            // uploads sent at once rather than piling up for the next drawn frame
+            for (id, deltas) in textures.set.drain() {
+                for delta in &deltas {
+                    self.egui_renderer.update_texture(device, queue, id, delta);
+                }
+            }
+            self.map.prepare(gpu, local_ms);
+            queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
+            for id in textures.free.drain() {
+                self.egui_renderer.free_texture(&id);
+            }
+            return;
+        }
         let primitives = self.egui.tessellate(shapes, pixels_per_point);
         let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: surface_size, pixels_per_point };
         // TexturesDelta asserts on drop that both lists were drained

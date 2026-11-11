@@ -36,13 +36,49 @@ pub fn f32_as_js(value: f32) -> f64 {
     if !value.is_finite() {
         return value as f64;
     }
-    // `Display` writes the shortest decimal that reads back as the same `f32`, as serde_json does
-    value.to_string().parse().unwrap_or(value as f64)
+    // `Display` writes the shortest decimal that reads back as the same `f32`, as serde_json does;
+    // written on the stack (the scene builders ask this for every aircraft every frame, P1): the
+    // longest, a subnormal's `-0.000…1`, is 48 bytes
+    let mut text = StackText { bytes: [0; 48], len: 0 };
+    match std::fmt::write(&mut text, format_args!("{value}")) {
+        Ok(()) => std::str::from_utf8(&text.bytes[..text.len]).ok().and_then(|t| t.parse().ok()).unwrap_or(value as f64),
+        Err(_) => value.to_string().parse().unwrap_or(value as f64),
+    }
+}
+
+/// A short text written on the stack ([`f32_as_js`]); writing past its end fails.
+struct StackText {
+    bytes: [u8; 48],
+    len: usize,
+}
+
+impl std::fmt::Write for StackText {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let end = self.len + s.len();
+        self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stack text (P1) reads every `f32` as its `to_string()` does: the extremes, subnormals,
+    /// signed zeros, and a sweep of bit patterns.
+    #[test]
+    fn f32_as_js_reads_as_the_heap_text_does() {
+        let heap = |v: f32| -> f64 { if v.is_finite() { v.to_string().parse().unwrap() } else { v as f64 } };
+        let mut values = vec![0.0, -0.0, f32::MIN_POSITIVE, -f32::MIN_POSITIVE, f32::MAX, f32::MIN, f32::EPSILON, 1e-45, -1e-45, 1.0e38, 59.6519, 17.9186, -179.99];
+        values.extend((0..200_000u32).map(|i| f32::from_bits(i.wrapping_mul(0x9E37_79B9) ^ (i << 7))));
+        for v in values {
+            let (ours, theirs) = (f32_as_js(v), heap(v));
+            assert!(ours.to_bits() == theirs.to_bits() || (ours.is_nan() && theirs.is_nan()), "{v:e}: {ours} against {theirs}");
+        }
+        assert!(f32_as_js(f32::NAN).is_nan());
+        assert_eq!(f32_as_js(f32::NEG_INFINITY), f64::NEG_INFINITY);
+    }
 
     #[test]
     fn f32_as_js_reads_the_shortest_decimal() {

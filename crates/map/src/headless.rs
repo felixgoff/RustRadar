@@ -14,8 +14,25 @@ use crate::renderer::{MapRenderer, SceneInput};
 /// The offscreen surface's format: gamma-space RGBA, bytes straight to PNG.
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// How long [`render_with`] waits for layers that are still loading.
-pub const MAX_WAIT: Duration = Duration::from_secs(60);
+/// How long a shot ([`render_with`], the app's `--screenshot`) waits for layers that are still
+/// loading, unless [`WAIT_VAR`] says otherwise ([`max_wait`]). Release builds settle every named
+/// view within seconds (P1), so their 30 s only bounds a shot whose work never comes; debug
+/// builds decode and tessellate tiles many times slower and keep the 60 s they had.
+pub const MAX_WAIT: Duration = if cfg!(debug_assertions) { Duration::from_secs(60) } else { Duration::from_secs(30) };
+
+/// The environment variable that sets the wait of [`max_wait`], in seconds (a number ≥ 0).
+pub const WAIT_VAR: &str = "RUSTRADAR_SHOT_WAIT";
+
+/// The wait for loading layers: [`WAIT_VAR`] seconds when set, else [`MAX_WAIT`].
+pub fn max_wait() -> Duration {
+    wait_from(std::env::var(WAIT_VAR).ok().as_deref())
+}
+
+/// The wait `value` (seconds, as [`WAIT_VAR`] holds it) asks for: [`MAX_WAIT`] when there is none
+/// or it is not a number ≥ 0.
+pub fn wait_from(value: Option<&str>) -> Duration {
+    value.and_then(|v| v.trim().parse::<f64>().ok()).and_then(|s| Duration::try_from_secs_f64(s).ok()).unwrap_or(MAX_WAIT)
+}
 
 /// A picture read back from the GPU.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,21 +143,32 @@ pub fn render(scene: &SceneInput, scale_factor: f64) -> Result<Image, GpuError> 
     render_with(&gpu, &mut renderer, scene, scale_factor)
 }
 
-/// Renders `scene` with `renderer`: frames until no layer is pending (at most [`MAX_WAIT`]), then
-/// one more, read back.
+/// Renders `scene` with `renderer`: prepares frames until no layer is pending (at most
+/// [`max_wait`]), then draws two, read back.
+///
+/// The frames before are prepared (the layers take their tiles and textures in, within the
+/// frame's upload budget) but not drawn: nobody sees them, and on a software rasteriser a map
+/// pass can take seconds (P1: five at V2's dark map on SwiftShader).
 pub fn render_with(gpu: &Gpu, renderer: &mut MapRenderer, scene: &SceneInput, scale_factor: f64) -> Result<Image, GpuError> {
     let target = Offscreen::new(gpu, surface_size(scene, scale_factor));
     renderer.update(scene.clone());
     let started = Instant::now();
+    let wait = max_wait();
+    let poll = || gpu.device.poll(wgpu::PollType::wait_indefinitely()).map(|_| ()).map_err(|e| GpuError::Device(e.to_string()));
     loop {
-        renderer.render(gpu, target.view(), target.size(), scene.local_now_ms);
-        gpu.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| GpuError::Device(e.to_string()))?;
-        if !renderer.pending() || started.elapsed() > MAX_WAIT {
+        renderer.prepare(gpu, scene.local_now_ms);
+        // the uploads the frame staged go to the GPU now
+        gpu.queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
+        poll()?;
+        if !renderer.pending() || started.elapsed() > wait {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    renderer.render(gpu, target.view(), target.size(), scene.local_now_ms);
+    for _ in 0..2 {
+        renderer.render(gpu, target.view(), target.size(), scene.local_now_ms);
+        poll()?;
+    }
     target.read(gpu)
 }
 
@@ -164,6 +192,19 @@ mod tests {
         let expected = [rgb[0], rgb[1], rgb[2], 255];
         let wrong = image.rgba.chunks_exact(4).filter(|p| *p != expected).count();
         assert_eq!(wrong, 0, "{wrong} of {} pixels are not {expected:?}, e.g. {:?}", image.width * image.height, image.pixel(0, 0));
+    }
+
+    /// The shot's wait (P1): `RUSTRADAR_SHOT_WAIT` seconds when it is a number ≥ 0, else
+    /// [`MAX_WAIT`] (30 s in a release build, 60 s in a debug one).
+    #[test]
+    fn the_wait_is_read_in_seconds() {
+        assert_eq!(MAX_WAIT, Duration::from_secs(if cfg!(debug_assertions) { 60 } else { 30 }));
+        assert_eq!(wait_from(None), MAX_WAIT);
+        assert_eq!(wait_from(Some("12.5")), Duration::from_millis(12_500));
+        assert_eq!(wait_from(Some(" 0 ")), Duration::ZERO);
+        for wrong in ["", "-1", "soon", "inf", "NaN"] {
+            assert_eq!(wait_from(Some(wrong)), MAX_WAIT, "{wrong:?}");
+        }
     }
 
     /// E4's acceptance: with every layer still empty, the headless frame is exactly `(30,30,30)`

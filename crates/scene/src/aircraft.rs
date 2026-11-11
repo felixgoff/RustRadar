@@ -582,6 +582,10 @@ enum Airframe {
 pub struct AircraftBuilder {
     lowest: HashMap<StandsOn, f64>,
     bounds: HashMap<Airframe, [[f64; 3]; 2]>,
+    /// Each flight's reported `[lon, lat]` as JavaScript reads it (`f32_as_js`), by flight id with
+    /// the report's bits, kept from the last refresh while the report is the same (P1: the
+    /// shortest-decimal round trip formats and parses text, for every flight every frame).
+    reported: HashMap<u32, ([u32; 2], [f64; 2])>,
 }
 
 impl AircraftBuilder {
@@ -651,8 +655,15 @@ impl AircraftBuilder {
         let mut label_at: Vec<Option<(usize, usize)>> = Vec::new();
 
         if inputs.show_aircraft {
+            let mut reported = HashMap::with_capacity(self.reported.len());
             for (row, f) in flights.into_iter().enumerate() {
-                let facing = cos_angle(f32_as_js(f.lon), f32_as_js(f.lat), c_lon, c_lat);
+                let bits = [f.lon.to_bits(), f.lat.to_bits()];
+                let [lon, lat] = match self.reported.get(&f.id) {
+                    Some(&(was, lng_lat)) if was == bits => lng_lat,
+                    _ => [f32_as_js(f.lon), f32_as_js(f.lat)],
+                };
+                reported.insert(f.id, (bits, [lon, lat]));
+                let facing = cos_angle(lon, lat, c_lon, c_lat);
                 if Some(f.id) != locked_on && facing <= frame.min_cos {
                     continue;
                 }
@@ -749,6 +760,7 @@ impl AircraftBuilder {
                     parts,
                 });
             }
+            self.reported = reported;
         }
 
         // Models are centred on their bounding box, so an aircraft placed by its origin at height 0

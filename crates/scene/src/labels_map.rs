@@ -510,16 +510,20 @@ impl CollisionMap {
             // texels, rows from the bottom; a texel is covered when its centre is in the quad
             let (tx0, tx1) = (x0.min(x1) * sx, x0.max(x1) * sx);
             let (ty0, ty1) = ((self.canvas[1] - y0.max(y1)) * sy, (self.canvas[1] - y0.min(y1)) * sy);
-            let first = |t: f64, lo: usize| ((t - 0.5).ceil().max(lo as f64)) as usize;
-            let end = |t: f64, hi: usize| ((t - 0.5).ceil().clamp(0.0, hi as f64)) as usize;
+            let first = |t: f64, lo: usize| (ceil(t - 0.5).max(lo as f64)) as usize;
+            let end = |t: f64, hi: usize| (ceil(t - 0.5).clamp(0.0, hi as f64)) as usize;
             let (i0, i1) = (first(tx0, 1), end(tx1, w - 1));
             let (r0, r1) = (first(ty0, 1), end(ty1, h - 1));
+            if i1 <= i0 {
+                continue;
+            }
+            // (each row's span as slices: no index checks in the texel loop, P1)
             for r in r0..r1 {
-                let base = r * w;
-                for k in base + i0..base + i1.max(i0) {
-                    if depth <= self.depth[k] {
-                        self.depth[k] = depth;
-                        self.label[k] = id;
+                let span = r * w + i0..r * w + i1;
+                for (d, l) in self.depth[span.clone()].iter_mut().zip(&mut self.label[span]) {
+                    if depth <= *d {
+                        *d = depth;
+                        *l = id;
                     }
                 }
             }
@@ -539,16 +543,33 @@ impl CollisionMap {
         let v = 1.0 - anchor[1] / self.canvas[1];
         let (step_u, step_v) = (1.0 / self.canvas[0], 1.0 / self.canvas[1]);
         let texel = |t: f64, n: usize| ((t * n as f64).floor().max(0.0) as usize).min(n - 1);
+        // the patch's columns once, not once per row (P1)
+        let mut columns = [0usize; (2 * COLLISION_PATCH_N + 1) as usize];
+        for (c, i) in columns.iter_mut().zip(-COLLISION_PATCH_N..=COLLISION_PATCH_N) {
+            *c = texel(u + f64::from(i) * step_u, w);
+        }
         let mut matches = 0u32;
         for j in -COLLISION_PATCH_N..=COLLISION_PATCH_N {
-            let r = texel(v + f64::from(j) * step_v, h);
-            for i in -COLLISION_PATCH_N..=COLLISION_PATCH_N {
-                let c = texel(u + f64::from(i) * step_u, w);
-                matches += u32::from(self.label[r * w + c] == id);
+            let row = &self.label[texel(v + f64::from(j) * step_v, h) * w..][..w];
+            for &c in &columns {
+                matches += u32::from(row[c] == id);
             }
         }
         let side = f64::from(2 * COLLISION_PATCH_N + 1);
         (f64::from(matches) / (side * side)).powf(COLLISION_FADE_POWER)
+    }
+}
+
+/// `x.ceil()` as a texel bound: without a call into libm (baseline x86-64 has no rounding
+/// instruction, and the collision pass asks four for every glyph quad, P1). Below 2^52 in
+/// magnitude a whole number is exact as an `i64`; it differs from `ceil` only in the sign of a
+/// zero, which the bounds' casts to `usize` do not see.
+fn ceil(x: f64) -> f64 {
+    if x.abs() < 4_503_599_627_370_496.0 {
+        let t = x as i64 as f64;
+        if t < x { t + 1.0 } else { t }
+    } else {
+        x.ceil()
     }
 }
 
@@ -610,6 +631,113 @@ mod tests {
         LabelProps { layer_name: AERODROME_LABEL.into(), class: s("international"), name: s("Arlanda"), iata, ..Default::default() }
     }
 
+    /// The collision pass's loops (P1: each row's span as slices, the patch's columns once, the
+    /// texel bounds' `ceil`) make the very map and fades of the plain per-texel loops they
+    /// replaced, here kept as written for B4.
+    #[test]
+    fn the_collision_loops_match_the_plain_ones() {
+        fn draw_plain(map: &mut CollisionMap, row: usize, priority: f64, quads: &[[f64; 4]]) {
+            let Some(depth) = CollisionMap::depth_of(priority) else { return };
+            let [w, h] = map.size;
+            if w < 3 || h < 3 {
+                return;
+            }
+            let id = row as u32 + 1;
+            let (sx, sy) = (w as f64 / map.canvas[0], h as f64 / map.canvas[1]);
+            for &[x0, y0, x1, y1] in quads {
+                if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) {
+                    continue;
+                }
+                let (tx0, tx1) = (x0.min(x1) * sx, x0.max(x1) * sx);
+                let (ty0, ty1) = ((map.canvas[1] - y0.max(y1)) * sy, (map.canvas[1] - y0.min(y1)) * sy);
+                let first = |t: f64, lo: usize| ((t - 0.5).ceil().max(lo as f64)) as usize;
+                let end = |t: f64, hi: usize| ((t - 0.5).ceil().clamp(0.0, hi as f64)) as usize;
+                let (i0, i1) = (first(tx0, 1), end(tx1, w - 1));
+                let (r0, r1) = (first(ty0, 1), end(ty1, h - 1));
+                for r in r0..r1 {
+                    let base = r * w;
+                    for k in base + i0..base + i1.max(i0) {
+                        if depth <= map.depth[k] {
+                            map.depth[k] = depth;
+                            map.label[k] = id;
+                        }
+                    }
+                }
+            }
+        }
+        fn fade_plain(map: &CollisionMap, row: usize, anchor: [f64; 2]) -> f64 {
+            let [w, h] = map.size;
+            if w == 0 || h == 0 || ![anchor[0], anchor[1]].iter().all(|v| v.is_finite()) {
+                return 0.0;
+            }
+            let id = row as u32 + 1;
+            let u = anchor[0] / map.canvas[0];
+            let v = 1.0 - anchor[1] / map.canvas[1];
+            let (step_u, step_v) = (1.0 / map.canvas[0], 1.0 / map.canvas[1]);
+            let texel = |t: f64, n: usize| ((t * n as f64).floor().max(0.0) as usize).min(n - 1);
+            let mut matches = 0u32;
+            for j in -COLLISION_PATCH_N..=COLLISION_PATCH_N {
+                let r = texel(v + f64::from(j) * step_v, h);
+                for i in -COLLISION_PATCH_N..=COLLISION_PATCH_N {
+                    let c = texel(u + f64::from(i) * step_u, w);
+                    matches += u32::from(map.label[r * w + c] == id);
+                }
+            }
+            let side = f64::from(2 * COLLISION_PATCH_N + 1);
+            (f64::from(matches) / (side * side)).powf(COLLISION_FADE_POWER)
+        }
+        // xorshift: the same quads every run
+        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for canvas in [[300.0, 200.0], [301.0, 199.0], [1440.0, 900.0], [7.0, 5.0]] {
+            let (mut ours, mut plain) = (CollisionMap::new(), CollisionMap::new());
+            ours.begin(canvas);
+            plain.begin(canvas);
+            // the whole canvas and beyond, a NaN, and a quad turned inside out
+            let odd = [[-1e300, -1e300, 1e300, 1e300], [f64::NAN, 0.0, 10.0, 10.0], [40.0, 30.0, 10.0, 5.0]];
+            ours.draw(0, 0.0, odd);
+            draw_plain(&mut plain, 0, 0.0, &odd);
+            let mut anchors = vec![[canvas[0] / 2.0, canvas[1] / 2.0]];
+            for row in 1..600 {
+                // some priorities fall outside clip space
+                let priority = (next() - 0.5) * 2400.0;
+                let n = 1 + (next() * 8.0) as usize;
+                let quads: Vec<[f64; 4]> = (0..n)
+                    .map(|_| {
+                        let (x, y) = (next() * canvas[0] * 1.4 - canvas[0] * 0.2, next() * canvas[1] * 1.4 - canvas[1] * 0.2);
+                        let (w, h) = ((next() - 0.3) * 80.0, (next() - 0.3) * 30.0);
+                        [x, y, x + w, y + h]
+                    })
+                    .collect();
+                ours.draw(row, priority, quads.iter().copied());
+                draw_plain(&mut plain, row, priority, &quads);
+                anchors.push([next() * canvas[0] * 1.2 - canvas[0] * 0.1, next() * canvas[1] * 1.2 - canvas[1] * 0.1]);
+            }
+            assert!(ours.depth == plain.depth && ours.label == plain.label, "the maps differ on {canvas:?}");
+            for (row, &anchor) in anchors.iter().enumerate() {
+                assert_eq!(ours.fade(row, anchor).to_bits(), fade_plain(&plain, row, anchor).to_bits(), "row {row} on {canvas:?}");
+            }
+            assert!(ours.label.iter().any(|&l| l != 0) || ours.size[1] < 3, "something was drawn on {canvas:?}");
+        }
+    }
+
+    /// The texel bounds' `ceil` (P1) is `f64::ceil` but for the sign of a zero.
+    #[test]
+    fn the_texel_ceil_is_f64_s() {
+        let mut values = vec![0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0 - f64::EPSILON, 4_503_599_627_370_495.5, -4_503_599_627_370_495.5, 1e300, -1e300, f64::MAX, f64::MIN_POSITIVE];
+        values.extend((0..20_000).map(|i| f64::from(i) * 0.37 - 3700.3));
+        for x in values {
+            assert_eq!(ceil(x), x.ceil(), "{x}");
+        }
+        assert!(ceil(f64::NAN).is_nan());
+        assert_eq!(ceil(f64::INFINITY), f64::INFINITY);
+    }
+
     /// Plan B4: the priority formula of doc 01 §5.9 (G:653-658).
     #[test]
     fn the_priority_formula() {
@@ -643,6 +771,17 @@ mod tests {
             place("village", "Vega", n(8.0)),
         ];
         assert!(order.windows(2).all(|w| label_priority(&w[0]) > label_priority(&w[1])));
+    }
+
+    /// An airport's label keeps its feature's name for its tooltip (item T8): `nameOf`, the
+    /// English name first.
+    #[test]
+    fn a_label_keeps_its_features_name() {
+        let label = MapLabel::new([17.92, 59.65], &airport(s("ARN")));
+        assert_eq!((label.text.as_str(), label.name.as_str(), label.iata.as_deref()), ("ARN", "Arlanda", Some("ARN")));
+        let english = LabelProps { name_en: s("Stockholm Arlanda Airport"), ..airport(s("ARN")) };
+        assert_eq!(MapLabel::new([17.92, 59.65], &english).name, "Stockholm Arlanda Airport");
+        assert_eq!(MapLabel::new([18.07, 59.33], &place("city", "Stockholm", n(1.0))).name, "Stockholm");
     }
 
     #[test]

@@ -6,9 +6,12 @@
 //! cache and config folders, removed afterwards, so no saved keys and no cached tiles take part.
 //! Its map tiles never come from the network: from the `--fixture` folder, else the committed
 //! fixtures ([`tile_fetcher::shot_tiles`]); a tile the folder lacks is not drawn (and logged).
-//! It draws frames until no layer waits for work, its tiles above all (at most [`MAX_WAIT`]), then
-//! two more with egui's clock a second apart (an egui area is invisible on its first frame, spike
-//! pitfall 9).
+//! It runs frames until no layer waits for work, its tiles above all (at most `--wait` seconds,
+//! else [`max_wait`]: `RUSTRADAR_SHOT_WAIT`, else [`MAX_WAIT`]), then two more with egui's clock a
+//! second apart (an egui area is invisible on its first frame, spike pitfall 9). Only the last
+//! frame is drawn ([`Engine::draw`]): the others poll, build the scene, run egui and prepare the
+//! map as a drawn frame does, but nobody sees their picture, and on SwiftShader a map pass can
+//! take seconds (P1: V2's dark map, about five).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use rustradar_backend::Dirs;
 use rustradar_map::Gpu;
-pub use rustradar_map::headless::{FORMAT, Image, MAX_WAIT, Offscreen};
+pub use rustradar_map::headless::{FORMAT, Image, MAX_WAIT, Offscreen, max_wait};
 use rustradar_map::io::{self, TileFetcher};
 use rustradar_scene::camera::ViewState;
 
@@ -140,16 +143,22 @@ pub fn render_on_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppS
     let poll = |gpu: &Gpu| gpu.device.poll(wgpu::PollType::wait_indefinitely()).map(|_| ()).map_err(|e| e.to_string());
 
     let started = Instant::now();
+    let wait = options.wait.unwrap_or_else(max_wait);
+    // the frames before the last are not drawn: nobody sees them
+    engine.draw = false;
+    let mut frames = 0;
     loop {
         engine.frame(gpu, target.view(), surface, scale, input(0.0), clock.now_ms());
         poll(gpu)?;
+        frames += 1;
         if !engine.map.pending() {
+            log::info!("the map settled after {} ms ({frames} frames)", started.elapsed().as_millis());
             break;
         }
-        if started.elapsed() > MAX_WAIT {
+        if started.elapsed() > wait {
             log::warn!(
-                "still loading after {} s ({}); the shot shows what had arrived",
-                MAX_WAIT.as_secs(),
+                "still loading after {:.1} s ({}); the shot shows what had arrived",
+                wait.as_secs_f64(),
                 engine.map.pending_layers().join(", ")
             );
             break;
@@ -157,6 +166,7 @@ pub fn render_on_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppS
         std::thread::sleep(Duration::from_millis(5));
     }
     for egui_time in [1.0, 2.0] {
+        engine.draw = egui_time == 2.0;
         engine.frame(gpu, target.view(), surface, scale, input(egui_time), clock.now_ms());
         poll(gpu)?;
     }

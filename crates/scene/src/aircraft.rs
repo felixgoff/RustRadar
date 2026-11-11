@@ -21,6 +21,20 @@
 //! - [`AircraftScene::taxi_wanted`]: the flights whose airport's taxiways the motion model may want
 //!   (zoom ≥ 12: `taxiwaysFor(id, phase)`, item A11).
 //!
+//! **Pick records** (item A9; doc 03 §10.1, plan 1.4.11): [`AircraftScene::picks`] lays the
+//! aircraft out for [`crate::pick::PickList`] in the order deck draws its pickable aircraft layers
+//! (`aircraft-{groupId}-{detail}[-{part}]` per group, then `aircraft-icons`; gear, shadows,
+//! outlines and labels are not pickable), each keyed by its flight's id and tested as deck's
+//! default depth test (`less-equal`, depth written; `NO_CULL`):
+//! - a mesh as the box its airframe fills ([`Group::bounds`] through [`instance_matrix`], the
+//!   map's instance transform in `f64`), against each pixel's ray, at every zoom (the box stands in
+//!   for the triangles; far out it is the flattened silhouette's box, drawn at the size floor);
+//! - an icon as a disc round its anchor, of the silhouette's half size ([`icon_pick_radius`]: the
+//!   silhouette spans [`Frame::screen_px`], the cell [`ICON_FILL`] times that, and deck picks only
+//!   where the texture's alpha passes its cutoff).
+//!
+//! The 6 px of deck's `pickingRadius` come on top of either footprint ([`crate::pick`]).
+//!
 //! Formulas, constants and the order of the loop are the TypeScript's; `Math.round` is
 //! [`js_round`], `clamp01` [`clamp01`], a colour stored in deck's `unorm8` attribute is
 //! [`clamp_u8`] (a `Uint8ClampedArray` store).
@@ -34,6 +48,7 @@
 
 use std::collections::HashMap;
 
+use glam::{DMat3, DMat4, DVec3};
 use indexmap::IndexMap;
 use rustradar_core::geo::{AIRCRAFT_COLOR, Rgb, SELECTED_COLOR, cos_angle, effective_exaggeration, elevation, meters_per_pixel, visible_radius};
 use rustradar_core::labels::aircraft_label;
@@ -44,7 +59,8 @@ use rustradar_core::num::{clamp_u8, clamp01, js_round};
 
 use crate::aircraft_assets::{AircraftModel, AircraftModels};
 use crate::aircraft_models::{self, ModelKind, model_for, model_size, size_of};
-use crate::camera::{FLAT_ABOVE_ZOOM, GlobeViewport, ViewState};
+use crate::camera::{FLAT_ABOVE_ZOOM, GlobeViewport, ViewState, Viewport};
+use crate::pick::{DepthTest, OrientedBox, PickList};
 use crate::screen::screen_angle;
 
 /// The size floor on the whole globe, px (`MIN_PX_GLOBE`).
@@ -167,6 +183,79 @@ pub fn unorm8([r, g, b]: [f64; 3]) -> [u8; 4] {
 /// An opaque byte colour.
 pub fn opaque([r, g, b]: Rgb) -> [u8; 4] {
     [r, g, b, 255]
+}
+
+/// The bounds of a mesh, `[min, max]` in model metres; `positions` is `x, y, z` per vertex. All
+/// zeros for an empty mesh.
+pub fn bounds_of(positions: &[f32]) -> [[f64; 3]; 2] {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for v in positions.chunks_exact(3) {
+        for k in 0..3 {
+            min[k] = min[k].min(f64::from(v[k]));
+            max[k] = max[k].max(f64::from(v[k]));
+        }
+    }
+    if min[0] > max[0] { [[0.0; 3]; 2] } else { [min, max] }
+}
+
+/// deck's instance rotation and scale (`calculateTransformMatrix`, `@deck.gl/mesh-layers`
+/// `utils/matrix.ts`; doc 03 §5.1), the map's `pipelines::mesh::orientation_matrix`:
+/// `orientation` is what deck calls `[pitch, yaw, roll]` in degrees ([`orientation_of`]), `scale`
+/// per model axis; `R = Rz(o[1]) · Ry(o[0]) · Rx(o[2])`, then `diag(scale)`. Model metres to metres
+/// east, north and up.
+pub fn instance_rotation(orientation: [f64; 3], [scx, scy, scz]: [f64; 3]) -> DMat3 {
+    let [pitch, yaw, roll] = orientation.map(f64::to_radians);
+    let (sr, cr) = roll.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+    let (sw, cw) = yaw.sin_cos();
+    DMat3::from_cols(
+        DVec3::new(scx * cw * cp, scx * sw * cp, scx * -sp),
+        DVec3::new(scy * (-sw * cr + cw * sp * sr), scy * (cw * cr + sw * sp * sr), scy * cp * sr),
+        DVec3::new(scz * (sw * sr + cw * sp * cr), scz * (-cw * sr + sw * sp * cr), scz * cp * cr),
+    )
+}
+
+/// East, north and up at `[lon, lat]` in `viewport`'s common space, each one common unit per metre
+/// long (the map's `pipelines::mesh::local_frame`): deck's `project_size` scale, the globe's
+/// constant on the globe and the view centre's units per metre on the flat map, for every
+/// instance.
+pub fn local_frame(viewport: &Viewport, [lon, lat]: [f64; 2]) -> DMat3 {
+    let units_per_metre = viewport.distance_scales.units_per_meter[2];
+    let enu = if viewport.is_globe() {
+        let (sin_lon, cos_lon) = lon.to_radians().sin_cos();
+        let (sin_lat, cos_lat) = lat.to_radians().sin_cos();
+        // common space: x = sin λ cos φ, y = −cos λ cos φ, z = sin φ
+        DMat3::from_cols(
+            DVec3::new(cos_lon, sin_lon, 0.0),
+            DVec3::new(-sin_lat * sin_lon, sin_lat * cos_lon, cos_lat),
+            DVec3::new(cos_lat * sin_lon, -cos_lat * cos_lon, sin_lat),
+        )
+    } else {
+        DMat3::IDENTITY
+    };
+    enu * units_per_metre
+}
+
+/// A mesh instance's model matrix in `viewport`'s common space, in `f64`: model metres turned and
+/// scaled ([`instance_rotation`]), into the [`local_frame`] at `position` (`[lon, lat, metres]`),
+/// moved to the position's common point. On the flat map the world copy nearest the view centre,
+/// as the map draws it.
+pub fn instance_matrix(viewport: &Viewport, position: [f64; 3], orientation: [f64; 3], scale: [f64; 3]) -> DMat4 {
+    let linear = local_frame(viewport, [position[0], position[1]]) * instance_rotation(orientation, scale);
+    let mut origin = viewport.project_position(position);
+    if !viewport.is_globe() {
+        // the 512-unit world: the copy within half a world of the centre
+        let dx = origin.x - viewport.center.x;
+        origin.x -= 512.0 * ((dx + 256.0) / 512.0).floor();
+    }
+    DMat4::from_cols(linear.x_axis.extend(0.0), linear.y_axis.extend(0.0), linear.z_axis.extend(0.0), origin.extend(1.0))
+}
+
+/// How far round its anchor an icon is picked, CSS pixels: half the silhouette's span
+/// ([`Frame::screen_px`], the icon's size over [`ICON_FILL`]).
+pub fn icon_pick_radius(icon: &Icon) -> f64 {
+    icon.size_px / ICON_FILL / 2.0
 }
 
 /// The preamble of `buildLayers()` (G:2520-2581), worked out once per refresh from the view.
@@ -347,6 +436,9 @@ pub struct Group {
     /// The gear of the aircraft with it down, when the model has gear and depth is at least
     /// [`GEAR_DEPTH`] (layer `gear-{id}`, drawn before the airframes).
     pub gear: Vec<GearInstance>,
+    /// The airframe's bounds in model metres, `[min, max]` (of the level of detail drawn, or the
+    /// built-in model): what a pick tests ([`AircraftScene::picks`]).
+    pub bounds: [[f64; 3]; 2],
 }
 
 impl Group {
@@ -433,6 +525,25 @@ impl AircraftScene {
     pub fn gear_count(&self) -> usize {
         self.groups.iter().map(|g| g.gear.len()).sum()
     }
+
+    /// The aircraft as deck's picking pass draws them in `viewport` (see the module's
+    /// documentation), each keyed by its flight's id, in draw order: every group's airframes (its
+    /// part layers draw the same instances, so once each), then the icons. Gear, shadows,
+    /// outlines and labels are not pickable.
+    pub fn picks(&self, viewport: &Viewport) -> PickList<u32> {
+        let mut list = PickList::new();
+        for group in &self.groups {
+            let [min, max] = group.bounds.map(DVec3::from_array);
+            for m in &group.instances {
+                let model = instance_matrix(viewport, m.position, m.orientation, m.scale);
+                list.oriented_box(m.id, OrientedBox::from_matrix(&model, min, max), DepthTest::LessEqualWrite);
+            }
+        }
+        for icon in &self.icons {
+            list.point(icon.id, viewport.project(icon.position), icon_pick_radius(icon), DepthTest::LessEqualWrite);
+        }
+        list
+    }
 }
 
 /// Which mesh an aircraft of a group stands on (the cache key of `lowestZ`).
@@ -457,11 +568,20 @@ struct Filling<'m> {
     group: Group,
 }
 
+/// Which airframe a group draws (the cache key of its bounds).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Airframe {
+    /// A published model's level of detail (by the models' address, the name and the level).
+    Lod(usize, String, usize),
+    BuiltIn(ModelKind),
+}
+
 /// The aircraft's scene builder: keeps the meshes' lowest points between refreshes (`lowestZ`'s
-/// cache).
+/// cache), and the airframes' bounds.
 #[derive(Debug, Default)]
 pub struct AircraftBuilder {
     lowest: HashMap<StandsOn, f64>,
+    bounds: HashMap<Airframe, [[f64; 3]; 2]>,
 }
 
 impl AircraftBuilder {
@@ -485,6 +605,20 @@ impl AircraftBuilder {
         };
         let z = *self.lowest.entry(key).or_insert_with(|| positions.map_or(0.0, lowest_z));
         -z
+    }
+
+    /// The bounds of the airframe a group draws: `real.lods[min(detail, …)].combined`, or the
+    /// built-in model's.
+    fn airframe(&mut self, models: Option<&AircraftModels>, real: Option<&AircraftModel>, kind: ModelKind, detail: usize) -> [[f64; 3]; 2] {
+        let at = models.map_or(0, |m| m as *const AircraftModels as usize);
+        let (key, positions): (Airframe, Option<&[f32]>) = match real {
+            Some(real) => {
+                let lod = detail.min(real.lods.len().saturating_sub(1));
+                (Airframe::Lod(at, real.name.clone(), lod), real.lods.get(lod).map(|l| l.mesh.positions.as_slice()))
+            }
+            None => (Airframe::BuiltIn(kind), Some(aircraft_models::model(kind).combined.positions.as_slice())),
+        };
+        *self.bounds.entry(key).or_insert_with(|| positions.map_or([[0.0; 3]; 2], bounds_of))
     }
 
     /// The aircraft of one scene refresh (G:2520-2636 and the CPU parts of G:2870-3025).
@@ -585,6 +719,8 @@ impl AircraftBuilder {
                         instances: Vec::new(),
                         highlighted: None,
                         gear: Vec::new(),
+                        // set below, once per group
+                        bounds: [[0.0; 3]; 2],
                     },
                 });
                 let group = &mut filling.group;
@@ -619,6 +755,7 @@ impl AircraftBuilder {
         // would stand with its wheels below the map: raise each by how far its wheels hang below
         // the origin at the size it is drawn, so one on the ground stands on them.
         for filling in groups.values_mut() {
+            filling.group.bounds = self.airframe(models, filling.real, filling.group.kind, frame.detail);
             let wheels = self.wheels(models, filling.real, filling.group.kind, frame.detail);
             let flat = frame.flatten();
             for instance in &mut filling.group.instances {
@@ -1161,5 +1298,203 @@ mod tests {
         assert_eq!(scene.hovered_icon, None);
         assert_eq!(scene.groups.iter().map(|g| g.highlighted).collect::<Vec<_>>(), [None, Some(0)]);
         assert_eq!(scene.taxi_wanted, [(1, Phase::Parked), (2, Phase::Parked)]);
+    }
+
+    use crate::camera::viewport_for;
+    use crate::pick::Shape;
+
+    /// The flight picked at `pointer` (CSS pixels) at `ratio` device pixels per CSS pixel.
+    fn picked(scene: &AircraftScene, viewport: &Viewport, pointer: [f64; 2], ratio: f64) -> Option<u32> {
+        scene.picks(viewport).pick(viewport, pointer, ratio).map(|hit| *hit.key)
+    }
+
+    /// Eight ways out from a point.
+    fn compass() -> [[f64; 2]; 8] {
+        let d = std::f64::consts::FRAC_1_SQRT_2;
+        [[1.0, 0.0], [d, d], [0.0, 1.0], [-d, d], [-1.0, 0.0], [-d, -d], [0.0, -1.0], [d, -d]]
+    }
+
+    /// The acceptance line of A9: a click 5 px from an icon picks it, 8 px does not, whichever way
+    /// and at either pixel ratio (deck's `pickingRadius` 6 past the silhouette).
+    #[test]
+    fn a_click_5_px_from_an_icon_picks_it_8_px_does_not() {
+        let models = shipped();
+        let v = view(59.33, 18.07, 9.0, 0.0);
+        let scene = build(&inputs(v), Some(&models), &[flight(1, 59.33, 18.1, 11_000, "A320", "A320")]);
+        assert_eq!((scene.icons.len(), scene.groups.len()), (1, 0));
+        let icon = &scene.icons[0];
+        let viewport = viewport_for(&v, [1100.0, 720.0]);
+        let [x, y, _] = viewport.project(icon.position);
+        let r = icon_pick_radius(icon);
+        assert_close!(r, scene.frame.screen_px(icon.size_m) / 2.0, 12);
+        assert!(r > 10.0, "{r}");
+        for ratio in [1.0, 2.0] {
+            assert_eq!(picked(&scene, &viewport, [x, y], ratio), Some(1), "on it");
+            for (k, [dx, dy]) in compass().into_iter().enumerate() {
+                let at = |d: f64| [x + dx * (r + d), y + dy * (r + d)];
+                assert_eq!(picked(&scene, &viewport, at(8.0), ratio), None, "8 px out along {dx},{dy} at {ratio}");
+                // at pixel ratio 2 luma.gl reads the pointer as the device pixel 0.75 px right of
+                // it and 0.25 px below, and deck's 12-pixel circle has gaps between its lattice
+                // points on the diagonals: 5 px out down and to the right is 5.7 px from where
+                // deck looks, and its nearest lattice point falls 0.1 device pixel short of the
+                // disc, as it would in today's app
+                if ratio == 1.0 || k % 2 == 0 {
+                    assert_eq!(picked(&scene, &viewport, at(5.0), ratio), Some(1), "5 px out along {dx},{dy} at {ratio}");
+                }
+            }
+        }
+    }
+
+    /// The same for a mesh, looking straight down on the flat map: its box's outline on the screen
+    /// is the footprint.
+    #[test]
+    fn a_click_5_px_from_a_mesh_picks_it_8_px_does_not() {
+        let models = shipped();
+        let v = view(59.65, 17.92, 14.0, 0.0);
+        let mut f = flight(1, 59.65, 17.92, 0, "A320", "A320");
+        f.track = 90;
+        let scene = build(&inputs(v), Some(&models), &[f]);
+        assert_eq!(scene.mesh_count(), 1);
+        let viewport = viewport_for(&v, [1100.0, 720.0]);
+        let picks = scene.picks(&viewport);
+        let Shape::Box(b) = picks.items()[0].shape else { panic!("a mesh is a box") };
+        let corners = b.corners().map(|c| viewport.world_to_pixels(c));
+        let [x0, y0, x1, y1] = corners.iter().fold([f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY], |[a, b, c, d], p| {
+            [a.min(p[0]), b.min(p[1]), c.max(p[0]), d.max(p[1])]
+        });
+        // heading east: longer across than down, an A320 of 37.6 m at zoom 14's 4.8 m a pixel
+        assert!(x1 - x0 > y1 - y0 && x1 - x0 > 6.0, "{x0} {y0} {x1} {y1}");
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        for ratio in [1.0, 2.0] {
+            assert_eq!(picked(&scene, &viewport, [cx, cy], ratio), Some(1));
+            for (at5, at8) in [
+                ([x1 + 5.0, cy], [x1 + 8.0, cy]),
+                ([x0 - 5.0, cy], [x0 - 8.0, cy]),
+                ([cx, y1 + 5.0], [cx, y1 + 8.0]),
+                ([cx, y0 - 5.0], [cx, y0 - 8.0]),
+            ] {
+                assert_eq!(picked(&scene, &viewport, at5, ratio), Some(1), "{at5:?} at {ratio}");
+                assert_eq!(picked(&scene, &viewport, at8, ratio), None, "{at8:?} at {ratio}");
+            }
+        }
+    }
+
+    /// With two aircraft drawn on top of each other at the same depth, the later drawn wins (feed
+    /// order within a layer, icons over meshes); a nearer one wins wherever it was drawn.
+    #[test]
+    fn of_two_overlapping_the_later_drawn_wins() {
+        let models = shipped();
+        // icons at zoom 9 straight down, meshes at zoom 14 pitched
+        for (v, alt, icons) in [(view(59.33, 18.07, 9.0, 0.0), 9_000, true), (view(59.33, 18.07, 14.0, 30.0), 0, false)] {
+            let viewport = viewport_for(&v, [1100.0, 720.0]);
+            let a = flight(1, 59.33, 18.07, alt, "A320", "A320");
+            let b = flight(2, 59.33, 18.07, alt, "A320", "A320");
+            let scene = build(&inputs(v), Some(&models), &[a.clone(), b.clone()]);
+            let position = if icons {
+                assert_eq!((scene.icons.len(), scene.mesh_count()), (2, 0));
+                scene.icons[0].position
+            } else {
+                assert_eq!((scene.icons.len(), scene.mesh_count()), (0, 2));
+                scene.groups[0].instances[0].position
+            };
+            let [x, y, _] = viewport.project(position);
+            assert_eq!(picked(&scene, &viewport, [x, y], 1.0), Some(2), "icons {icons}: the second drawn");
+            let scene = build(&inputs(v), Some(&models), &[b, a]);
+            assert_eq!(picked(&scene, &viewport, [x, y], 1.0), Some(1), "icons {icons}: the second drawn");
+        }
+        // icons at different heights, straight down: the higher is nearer the camera
+        let v = view(59.33, 18.07, 9.0, 0.0);
+        let viewport = viewport_for(&v, [1100.0, 720.0]);
+        let low = flight(1, 59.33, 18.07, 2_000, "A320", "A320");
+        let high = flight(2, 59.33, 18.07, 30_000, "A320", "A320");
+        let scene = build(&inputs(v), Some(&models), &[high, low]);
+        let [x, y, _] = viewport.project(scene.icons[1].position);
+        let [hx, hy, _] = viewport.project(scene.icons[0].position);
+        assert!((x - hx).hypot(y - hy) < 1.0, "one over the other");
+        assert_eq!(picked(&scene, &viewport, [x, y], 1.0), Some(2), "the nearer, though drawn first");
+    }
+
+    /// The pick list holds the aircraft in draw order: each group's airframes, then the icons; a
+    /// far built-in mesh is a flat box at its drawn size.
+    #[test]
+    fn picks_are_in_draw_order() {
+        let models = shipped();
+        let v = view(59.33, 18.07, 9.0, 0.0);
+        let flights = [
+            flight(1, 59.33, 18.0, 10_000, "A320", "A320"),
+            flight(2, 59.34, 18.1, 10_000, "", "BALL"),
+            flight(3, 59.3, 18.2, 10_000, "B738", "B738"),
+            flight(4, 59.35, 18.12, 5_000, "", "GRND"),
+            flight(5, 59.36, 18.13, 5_000, "", "BALL"),
+        ];
+        let scene = build(&inputs(v), Some(&models), &flights);
+        let viewport = viewport_for(&v, [1100.0, 720.0]);
+        let picks = scene.picks(&viewport);
+        assert_eq!(picks.items().iter().map(|item| item.key).collect::<Vec<_>>(), [2, 5, 4, 1, 3]);
+        assert!(picks.items().iter().all(|item| item.depth_test == DepthTest::LessEqualWrite));
+        // a balloon at zoom 9: depth 1, its whole height
+        let Shape::Box(b) = picks.items()[0].shape else { panic!("a mesh is a box") };
+        let [lo, hi] = scene.groups[0].bounds;
+        assert!(hi[2] - lo[2] > 5.0, "a balloon is tall: {lo:?} {hi:?}");
+        let up = b.axes.iter().zip(b.half).map(|(a, h)| a.z.abs() * h).fold(0.0, f64::max);
+        assert!(up > 0.0);
+        // and every one is picked at its own centre
+        for item in picks.items() {
+            let at = match item.shape {
+                Shape::Box(b) => viewport.world_to_pixels(b.center),
+                Shape::Point { at, .. } => at,
+                Shape::Rect { .. } => unreachable!(),
+            };
+            assert_eq!(picks.pick(&viewport, [at[0], at[1]], 1.0).map(|hit| *hit.key), Some(item.key));
+        }
+        // zoomed out the meshes are flattened: the box is a twenty-fifth as tall
+        let far = view(59.33, 18.07, 4.0, 0.0);
+        let scene = build(&inputs(far), Some(&models), &flights[1..2]);
+        let viewport = viewport_for(&far, [1100.0, 720.0]);
+        let Shape::Box(b) = scene.picks(&viewport).items()[0].shape else { panic!("a box") };
+        let s = scene.groups[0].instances[0].scale;
+        assert_close!(s[2] / s[0], MIN_FLATTEN, 12);
+        let up = local_frame(&viewport, [18.1, 59.34]).z_axis.normalize();
+        let thin: f64 = (0..3).map(|i| b.half[i] * b.axes[i].dot(up).abs()).sum();
+        let wide = b.half.iter().copied().fold(0.0, f64::max);
+        assert!(thin < wide * 0.1, "flat: {thin} against {wide}");
+    }
+
+    /// The instance matrix places the model's origin at the aircraft and its nose along the
+    /// heading, one common unit per metre times the scale; on the flat map on the world copy by
+    /// the view.
+    #[test]
+    fn the_instance_matrix_is_east_north_up_at_the_aircraft() {
+        let mut f = flight(1, 59.66, 17.93, 0, "A320", "A320");
+        f.track = 90;
+        let pose = pose(&f);
+        for v in [view(59.65, 17.92, 14.0, 30.0), view(59.65, 17.92, 9.0, 30.0)] {
+            let viewport = viewport_for(&v, [1100.0, 720.0]);
+            let position = [17.93, 59.66, 120.0];
+            let m = instance_matrix(&viewport, position, orientation_of(&pose), [2.0, 2.0, 2.0]);
+            let origin = m.transform_point3(DVec3::ZERO);
+            assert!((origin - viewport.project_position(position)).length() < 1e-9, "{origin}");
+            let upm = viewport.distance_scales.units_per_meter[2];
+            // the nose (+y) east, the right wing (+x) south, up up, each a unit vector there
+            let frame = local_frame(&viewport, [17.93, 59.66]) / upm;
+            let (east, north, up) = (frame.x_axis, frame.y_axis, frame.z_axis);
+            for (axis, want) in [(DVec3::Y, east), (DVec3::X, -north), (DVec3::Z, up)] {
+                let got = m.transform_vector3(axis) / (2.0 * upm);
+                assert!((got - want).length() < 1e-12, "{axis}: {got} against {want}");
+                assert!((want.length() - 1.0).abs() < 1e-12);
+            }
+        }
+        // across the antimeridian on the flat map: the copy next to the centre
+        let v = view(0.0, 179.99, 14.0, 0.0);
+        let viewport = viewport_for(&v, [1100.0, 720.0]);
+        let m = instance_matrix(&viewport, [-179.99, 0.0, 0.0], [0.0; 3], [1.0; 3]);
+        let x = m.transform_point3(DVec3::ZERO).x;
+        assert!((x - viewport.center.x).abs() < 1.0, "{x} by {}", viewport.center.x);
+    }
+
+    #[test]
+    fn bounds_of_a_mesh() {
+        assert_eq!(bounds_of(&[]), [[0.0; 3]; 2]);
+        assert_eq!(bounds_of(&[1.0, -2.0, 3.0, -1.0, 4.0, 0.5]), [[-1.0, -2.0, 0.5], [1.0, 4.0, 3.0]]);
     }
 }

@@ -115,4 +115,67 @@ mod tests {
         assert!(sea > 0.2 && land > 0.3, "sea {sea}, land {land}");
         assert!(roads > 0.001, "roads {roads}");
     }
+
+    /// A picture of `docs/port/reference/`, as an RGBA image.
+    fn reference(name: &str) -> Image {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/port/reference").join(name);
+        let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder.read_info().expect("a PNG");
+        let mut buf = vec![0; reader.output_buffer_size().expect("its size")];
+        let info = reader.next_frame(&mut buf).expect("its pixels");
+        let rgba = match info.color_type {
+            png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
+            png::ColorType::Rgb => buf[..info.buffer_size()].chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+            other => panic!("{name}: {other:?}"),
+        };
+        Image { width: info.width, height: info.height, rgba }
+    }
+
+    /// `--screenshot --view 59.6519,17.9186,13.5,45,30 --basemap dark --size 1440x900` (V4) through
+    /// the whole app with the default settings (*buildings* on): the plain buildings (B7) stand
+    /// where today's picture has them, and the hangar roof is lit as today's, by the key light this
+    /// builder aims at the sun (G:2723-2724).
+    #[test]
+    fn a_dark_shot_at_v4_draws_the_buildings_lit_as_today() {
+        let gpu = match Gpu::headless() {
+            Ok(gpu) => gpu,
+            Err(GpuError::NoAdapter(e)) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let v4 = ViewState { latitude: 59.6519, longitude: 17.9186, zoom: 13.5, pitch: 45.0, bearing: 30.0, position: None };
+        let options = Options {
+            view: Some(v4),
+            basemap: Some(Basemap::Dark),
+            size: Some([1440, 900]),
+            scale: Some(1.0),
+            now_ms: Some(1_782_036_000_000.0),
+            ..Default::default()
+        };
+        let shot = headless::render_on(&gpu, &options).expect("the shot");
+        assert!(shot.missing_tiles.is_empty(), "the fixtures lack {:?}", shot.missing_tiles);
+        let today = reference("dark-v4-1440x900.png");
+        // a building's pixel is bluish, as the building colour lit any way is; no ground of the
+        // dark map nor a shadow on it is
+        let is_building = |p: [u8; 4]| i32::from(p[2]) - i32::from(p[0]) >= 9;
+        // the map in today's picture, away from its sidebar, map controls and mode bar
+        let (mut theirs, mut ours, mut both) = (0usize, 0usize, 0usize);
+        for y in 80..880 {
+            for x in 360..1370 {
+                let (t, o) = (is_building(today.pixel(x, y)), is_building(shot.image.pixel(x, y)));
+                theirs += usize::from(t);
+                ours += usize::from(o);
+                both += usize::from(t && o);
+            }
+        }
+        let (kept, back) = (both as f64 / theirs.max(1) as f64, both as f64 / ours.max(1) as f64);
+        eprintln!("V4 through the app: today's buildings {theirs} px, ours {ours} px, {both} in both ({kept:.3}, {back:.3})");
+        assert!(theirs > 10_000 && kept > 0.95 && back > 0.95, "{theirs}, {kept}, {back}");
+        let (theirs, mine) = (today.pixel(1060, 760), shot.image.pixel(1060, 760));
+        assert!((0..3).all(|i| theirs[i].abs_diff(mine[i]) <= 1), "the hangar roof: {theirs:?} today, {mine:?} here");
+    }
 }

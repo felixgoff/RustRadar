@@ -1,7 +1,7 @@
 //! The rail map (item T4; doc 02 §8.1–8.4; row 4 of doc 03 §3): `railLayers` (rail-layer.ts:518-542)
 //! as today's app draws it over the map, under the weather, ships, trains and aircraft (G:2679), on
-//! every basemap while the *rail map* setting is on. Bridges and tunnels (doc 02 §9) are item T7's
-//! part of this file.
+//! every basemap while the *rail map* setting is on. Its bridges on the flat map (doc 02 §9.2) are
+//! item T7's part of this file (below).
 //!
 //! What today's app does, and so this layer, in drawing order ([`rustradar_scene::rail::rail_layers`]
 //! decides which, from the frame's zoom and projection):
@@ -43,7 +43,37 @@
 //!
 //! The speed legend and the credit are the UI's (stage 7): `rustradar_scene::rail::speed_legend`,
 //! `speed_legend_shown`, `next_shown_zoom`, `rail_attribution`.
+//!
+//! **Bridges** (item T7; doc 02 §8.1, §8.2, §9.2). On the flat map today's app draws each tile of
+//! the network or the speed map that has bridges as two sublayers (`renderNetworkTile`,
+//! `renderSpeedTile`, rail-layer.ts:134-143, 413-424): the tile's lines without its bridges, as
+//! above, then `-bridges`, its bridges cut into pieces of at most 6 m that rise to their 6 m
+//! decks over 40 m from each end, in the same style but `RAISED_NO_CULL` (no cull, no depth
+//! written, depth test always), then the tile's speed labels; on the globe every line is drawn as
+//! it is. **As high as today:** the TypeScript writes the heights in deck's common units where
+//! deck reads a `CARTESIAN` tile's `z` as metres, so today's bridges stand
+//! [`rustradar_scene::bridges::rail_map_lift`] of their decks up (0.15 mm), on the ground to the
+//! eye (today's app at Söderström, pitched 55°: the main line's bridge where its ground is, no
+//! ramp at the tunnel's mouth). What shows of the split is the order: a tile's bridges over its
+//! other lines whatever the tile's order. The tiles from z12
+//! ([`rustradar_scene::bridges::FLAT_MIN_Z`], the flat map's) are decoded the flat map's way once
+//! more on the pool ([`rustradar_scene::bridges::network_bridges`], `speed_bridges`), next to the
+//! lines both projections draw: a tile with bridges keeps both, and the flat map draws its
+//! [`RaisedRail`] in place of its lines. The ground lines go through the tile's stencil square as
+//! the other lines do; the bridges are cut at the tile's square by the scene, where they stand
+//! (deck's `ClipExtension`, by fragment: a raised line would show off its stencil square), and
+//! draw without the stencil. Tunnels are the network's and the speed map's own style (faint,
+//! dashed) on the ground, as today. The trains and the signal blocks on the track take their
+//! levels from the backend's structures (`rustradar_scene::bridges::level_at`, `on_structures`;
+//! `layers::trains`, `layers::blocks`): those stand 6 m up on a bridge, today too.
+//! Deviations: from doc 02 §9.2 and plan row T7 ("raised tile lines", "drawn over the water"
+//! 6 m up), which describe what the TypeScript means rather than what it draws: the port draws
+//! what today's app draws (post-parity, raising them for real is dropping `rail_map_lift`; the cut
+//! at the square already holds for a raised line). None visible: a z12 tile with bridges draws
+//! the flat map's tessellation on the flat map (as deck), one without the globe's (T4's, a
+//! fraction of a pixel off).
 
+use rustradar_scene::bridges::{self, RaisedRail};
 use rustradar_scene::geom::path::PathSegment;
 use rustradar_scene::rail::{
     self as rails, OVERVIEW_COLORS, RAIL_MIN_ZOOM, RailLayer, RailOptions, RailTile, SPEED_LABEL_PADDING, SPEED_LABEL_SIZE_PX, SPEED_LABEL_TEXT, SPEED_LABEL_WEIGHT,
@@ -84,9 +114,25 @@ pub struct Input {
     pub speeds: bool,
 }
 
-impl ByteSize for RailTile {
+/// A tile of the network or of the speed map as the pool decodes it: its lines as the globe (and
+/// the flat map, without bridges) draws them, and from z12 the flat map's lines with the tile's
+/// bridges split off and raised as today's app raises them, when it has any (T7).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Decoded {
+    pub tile: RailTile,
+    pub bridges: Option<RaisedRail>,
+}
+
+impl Decoded {
+    /// The bytes it holds (for the tile cache's budget).
+    pub fn byte_size(&self) -> usize {
+        self.tile.byte_size() + self.bridges.as_ref().map_or(0, RaisedRail::byte_size)
+    }
+}
+
+impl ByteSize for Decoded {
     fn byte_size(&self) -> usize {
-        RailTile::byte_size(self)
+        Decoded::byte_size(self)
     }
 }
 
@@ -94,24 +140,39 @@ impl ByteSize for RailTile {
 pub struct TileLines {
     pub lines: path::Mesh,
     pub labels: Vec<SpeedLabel>,
+    /// The flat map's lines of a tile with bridges (T7).
+    pub bridges: Option<RaisedMeshes>,
+}
+
+/// [`RaisedRail`] on the GPU: the ground's lines and the bridges'.
+pub struct RaisedMeshes {
+    pub ground: path::Mesh,
+    pub raised: path::Mesh,
+}
+
+/// A tile's decoded lines and its flat bridges, `None` for a tile that draws nothing.
+fn decoded(
+    tile: TileIndex,
+    lines: Result<RailTile, rails::Cancelled>,
+    flat: impl FnOnce() -> Result<Option<RaisedRail>, rails::Cancelled>,
+) -> Result<Option<Decoded>, String> {
+    let cancelled = |_| String::from("cancelled");
+    let lines = lines.map_err(cancelled)?;
+    // only the flat map's tiles are raised (z12 on: the globe draws up to z12, the flat map from it)
+    let bridges = if tile.z >= bridges::FLAT_MIN_Z { flat().map_err(cancelled)? } else { None };
+    Ok((!lines.is_empty() || bridges.is_some()).then_some(Decoded { tile: lines, bridges }))
 }
 
 /// The decode step of the network, on the worker pool (`None` for a tile with no rail).
-pub fn decode_network(tile: TileIndex, bytes: &[u8], cancel: &crate::jobs::Cancel) -> Result<Option<RailTile>, String> {
-    match rails::network_tile(tile, bytes, &|| cancel.is_cancelled()) {
-        Ok(t) if t.is_empty() => Ok(None),
-        Ok(t) => Ok(Some(t)),
-        Err(rails::Cancelled) => Err("cancelled".into()),
-    }
+pub fn decode_network(tile: TileIndex, bytes: &[u8], cancel: &crate::jobs::Cancel) -> Result<Option<Decoded>, String> {
+    let cancelled = || cancel.is_cancelled();
+    decoded(tile, rails::network_tile(tile, bytes, &cancelled), || bridges::network_bridges(tile, bytes, &cancelled))
 }
 
 /// The decode step of the speed map, on the worker pool.
-pub fn decode_speeds(tile: TileIndex, bytes: &[u8], cancel: &crate::jobs::Cancel) -> Result<Option<RailTile>, String> {
-    match rails::speed_tile(tile, bytes, &|| cancel.is_cancelled()) {
-        Ok(t) if t.is_empty() => Ok(None),
-        Ok(t) => Ok(Some(t)),
-        Err(rails::Cancelled) => Err("cancelled".into()),
-    }
+pub fn decode_speeds(tile: TileIndex, bytes: &[u8], cancel: &crate::jobs::Cancel) -> Result<Option<Decoded>, String> {
+    let cancelled = || cancel.is_cancelled();
+    decoded(tile, rails::speed_tile(tile, bytes, &cancelled), || bridges::speed_bridges(tile, bytes, &cancelled))
 }
 
 /// The decode step of the stations, on the worker pool.
@@ -124,8 +185,16 @@ pub fn decode_stations(tile: TileIndex, bytes: &[u8], cancel: &crate::jobs::Canc
 }
 
 /// The upload step of a tile of lines, on the main thread.
-fn upload(device: &wgpu::Device, decoded: RailTile) -> TileLines {
-    TileLines { lines: path::Mesh::new(device, "rail lines", &decoded.lines), labels: decoded.labels }
+fn upload(device: &wgpu::Device, decoded: Decoded) -> TileLines {
+    let Decoded { tile, bridges } = decoded;
+    TileLines {
+        lines: path::Mesh::new(device, "rail lines", &tile.lines),
+        labels: tile.labels,
+        bridges: bridges.map(|b| RaisedMeshes {
+            ground: path::Mesh::new(device, "rail lines without bridges", &b.ground),
+            raised: path::Mesh::new(device, "rail bridges", &b.raised),
+        }),
+    }
 }
 
 /// The overview, loaded on first need.
@@ -165,8 +234,8 @@ pub const STATION_STYLE: CircleStyle = CircleStyle { filled: true, stroked: true
 
 /// Row 4: the rail map (`railMap`).
 pub struct Rail {
-    network: TileSet<RailTile, TileLines>,
-    speed: TileSet<RailTile, TileLines>,
+    network: TileSet<Decoded, TileLines>,
+    speed: TileSet<Decoded, TileLines>,
     stations: TileSet<Vec<Station>>,
     overview: Overview,
     /// The globe's lines (`SURFACE_NO_CULL`) and the overview.
@@ -177,6 +246,9 @@ pub struct Rail {
     clipped: Path,
     clipped_lines: path::Style,
     clip: Clip,
+    /// The flat map's bridges, raised (`RAISED_NO_CULL`, T7).
+    raised: Path,
+    raised_lines: path::Style,
     circles: Circle,
     circle_style: circle::Style,
     station_instances: circle::Instances,
@@ -215,6 +287,8 @@ impl Rail {
         let globe_lines = globe.style(device, &line_style(8.0));
         let overview_style = globe.style(device, &OVERVIEW_STYLE);
         let clipped_lines = clipped.style(device, &line_style(8.0));
+        let raised = Path::new(init, "rail map bridges", DrawState::RAISED_NO_CULL);
+        let raised_lines = raised.style(device, &line_style(8.0));
         let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]].map(|[u, v]| fill::Vertex { position: [u, v, 0.0], color: [0; 4] });
         let mark = Fill::new(init, "rail map clip", CLIP_MARK);
         let reset = Fill::new(init, "rail map clip reset", CLIP_RESET);
@@ -241,6 +315,8 @@ impl Rail {
             clipped,
             clipped_lines,
             clip,
+            raised,
+            raised_lines,
             circles,
             circle_style,
             station_instances: circle::Instances::new(device, "rail stations"),
@@ -264,12 +340,12 @@ impl Rail {
     }
 
     /// The network's tiles (for tests).
-    pub fn network(&self) -> &TileSet<RailTile, TileLines> {
+    pub fn network(&self) -> &TileSet<Decoded, TileLines> {
         &self.network
     }
 
     /// The speed map's tiles (for tests).
-    pub fn speeds(&self) -> &TileSet<RailTile, TileLines> {
+    pub fn speeds(&self) -> &TileSet<Decoded, TileLines> {
         &self.speed
     }
 
@@ -392,6 +468,7 @@ impl Rail {
         let style = line_style(zoom);
         self.globe_lines.set(&cx.gpu.queue, &style);
         self.clipped_lines.set(&cx.gpu.queue, &style);
+        self.raised_lines.set(&cx.gpu.queue, &style);
         if network || speed {
             let set = if speed { &mut self.speed } else { &mut self.network };
             cx.update_tiles(set, |gpu, _tile, decoded| upload(&gpu.device, decoded));
@@ -439,15 +516,20 @@ impl Layer for Rail {
         let set = if self.speeds_drawn { &self.speed } else { &self.network };
         for (k, &(slot, tile)) in self.drawn.iter().enumerate() {
             let Some(t) = set.get(tile) else { continue };
-            if !t.lines.is_empty() {
-                if self.flat {
+            if self.flat {
+                // a tile with bridges: its lines on the ground, then `-bridges` raised (T7)
+                let ground = t.bridges.as_ref().map_or(&t.lines, |b| &b.ground);
+                if !ground.is_empty() {
                     let c = &self.clip;
                     c.mark.draw(pass, cx, slot, &c.mark_style, &c.square);
-                    self.clipped.draw(pass, cx, slot, &self.clipped_lines, &t.lines);
+                    self.clipped.draw(pass, cx, slot, &self.clipped_lines, ground);
                     c.reset.draw(pass, cx, slot, &c.reset_style, &c.square);
-                } else {
-                    self.globe.draw(pass, cx, slot, &self.globe_lines, &t.lines);
                 }
+                if let Some(b) = &t.bridges {
+                    self.raised.draw(pass, cx, slot, &self.raised_lines, &b.raised);
+                }
+            } else if !t.lines.is_empty() {
+                self.globe.draw(pass, cx, slot, &self.globe_lines, &t.lines);
             }
             // the tile's speed labels, after its lines and before the next tile's
             if self.labels_drawn
@@ -483,7 +565,8 @@ mod tests {
     use rustradar_core::geo::Basemap;
     use rustradar_scene::camera::{ViewState, viewport_for};
     use rustradar_scene::rail::{RAIL_MAIN, RAIL_MINOR, RAIL_TRANSIT, Rgba, SPEED_BANDS, tunnel_of};
-    use rustradar_scene::tess::vector::LAND;
+    use rustradar_scene::bridges::RAIL_DECK_M;
+    use rustradar_scene::tess::vector::{LAND, WATER};
 
     use super::*;
     use crate::gpu::testing::gpu;
@@ -880,6 +963,157 @@ mod tests {
         assert!(decode_stations(central, &bytes, &cancel).is_err());
         // the overview file is the scene's parser's
         assert!(parse_rail_overview(RAILROADS).is_ok());
+        // T7: a globe tile is not raised; the flat map's tile of Söderström's bridges is, and
+        // keeps the lines both projections draw
+        assert!(decoded.bridges.is_none());
+        let bytes = DirTiles::fixtures().read(io::OPENFREEMAP, SODERSTROM).expect("read").expect("a z14 tile");
+        let decoded = decode_network(SODERSTROM, &bytes, &crate::jobs::Cancel::new()).expect("decoded").expect("rail in it");
+        let bridges = decoded.bridges.as_ref().expect("bridges");
+        assert!(!decoded.tile.lines.is_empty() && !bridges.ground.is_empty() && !bridges.raised.is_empty());
+        assert!(bridges.ground.len() < decoded.tile.lines.len());
+        assert_eq!(decoded.byte_size(), decoded.tile.byte_size() + bridges.byte_size());
+        assert!(decode_network(SODERSTROM, &bytes, &cancel).is_err());
+    }
+
+    /// The z14 tile of Söderström, between Gamla stan and Södermalm: the main line's bridge
+    /// (Järnvägsbron) and the subway's over the water, the rail and subway tunnels into Söder.
+    const SODERSTROM: TileIndex = TileIndex::new(9014, 4818, 14);
+
+    /// The centre of the rows of `colour` (within `tolerance`) in column `x` between `y0` and
+    /// `y1`, or `None`.
+    fn line_centre(image: &Image, x: f64, [y0, y1]: [f64; 2], colour: [f64; 3], tolerance: f64) -> Option<f64> {
+        let x = x.floor() as u32;
+        let rows: Vec<u32> = (y0.floor() as u32..y1.ceil() as u32).filter(|&y| near(image.pixel(x, y), colour, tolerance)).collect();
+        (!rows.is_empty()).then(|| rows.iter().map(|&y| f64::from(y) + 0.5).sum::<f64>() / rows.len() as f64)
+    }
+
+    /// T7, today's look: on the flat map a tile's bridges are drawn after its other lines (over a
+    /// track the tile has after them), where their ground is (6 m decks 0.15 mm up), not 6 m up.
+    /// A made-up speed tile: a 160 km/h track east-west through the tile's middle, a 40 km/h track
+    /// north-south after it, crossing it there; seen pitched 60° close in, where 6 m are 17 px up
+    /// the screen.
+    #[test]
+    fn a_tiles_bridges_draw_over_its_other_lines_where_their_ground_is() {
+        let Some(gpu) = gpu() else { return };
+        let tile = |bridge: bool| {
+            let mut east = vec![("feature", V::S("rail")), ("maxspeed", V::U(160))];
+            if bridge {
+                east.push(("bridge", V::B(true)));
+            }
+            let north: &[(&str, V)] = &[("feature", V::S("rail")), ("maxspeed", V::U(40))];
+            // (their limits are written halfway along, well off the canvas)
+            lines_tile(SPEED_TILE_LAYER_NAME, &[(&east, &[(1024, 2048), (4096, 2048)]), (north, &[(2048, 4096), (2048, 1024)])])
+        };
+        let size = [800.0, 600.0];
+        let view = ViewState { pitch: 60.0, ..tile_middle(17.0) };
+        let viewport = viewport_for(&view, size);
+        let lat = rustradar_scene::rail::tile_lng_lat(SPEED_TILE, [0.5, 0.5])[1];
+        let tile_metres = rustradar_core::geo::EARTH_CIRCUMFERENCE_M * lat.to_radians().cos() / 4096.0;
+        // `d` metres east of the crossing, `h` up, on the screen
+        let at = |d: f64, h: f64| viewport.project([rustradar_scene::rail::tile_lng_lat(SPEED_TILE, [0.5 + d / tile_metres, 0.5])[0], lat, h]);
+        assert!(at(100.0, 0.0)[1] - at(100.0, RAIL_DECK_M)[1] > 15.0, "6 m show well clear of the ground here");
+        let yellow = over(SPEED_BANDS[3].color, land());
+        let blue = |p: [u8; 4]| p[2] > 200 && p[0] < 150;
+        let mut seen = Vec::new();
+        for bridge in [true, false] {
+            let bytes = tile(bridge);
+            let tiles = Tiles::new(move |t| (t == SPEED_TILE).then(|| bytes.clone()));
+            let mut renderer = renderer(&gpu, tiles);
+            let image = render_with(&gpu, &mut renderer, &dark(view, size, false, SPEEDS), 1.0).expect("rendered");
+            if bridge {
+                save(&image, "t7-rail-bridge-pitched-800x600.png");
+            }
+            // the east-west track's rows 100 m east and 100 m west of the crossing
+            let rows = [100.0, -100.0].map(|d| {
+                let (ground, deck) = (at(d, 0.0), at(d, RAIL_DECK_M));
+                (line_centre(&image, ground[0], [deck[1] - 12.0, ground[1] + 12.0], yellow, 10.0), ground[1])
+            });
+            // the crossing, at the canvas's middle: whose colour is on top
+            let crossing = [image.pixel(399, 299), image.pixel(400, 300)];
+            seen.push((rows, crossing));
+        }
+        eprintln!("(rows, crossing) with the bridge, without: {seen:?}");
+        for (k, (rows, crossing)) in seen.iter().enumerate() {
+            // where its ground is, bridge or not
+            for (centre, ground) in rows {
+                let y = centre.expect("the track");
+                assert!((y - ground).abs() <= 1.0, "{y} for its ground {ground}");
+            }
+            // the bridge over the track that comes after it in the tile; without it, in the
+            // tile's order: the later track on top
+            let on_top = crossing.iter().all(|&p| if k == 0 { near(p, yellow, 12.0) } else { blue(p) });
+            assert!(on_top, "{}: {crossing:?}", if k == 0 { "bridge" } else { "no bridge" });
+        }
+    }
+
+    /// T7's acceptance shot: Söderström looking east-north-east, pitched 55°, the network (as
+    /// while the rail map shows the blocks: the speed map's tiles are not among the fixtures). The
+    /// main line crosses the water on Järnvägsbron as today's app draws it: over the water where
+    /// its ground is (its 6 m decks 0.15 mm up: the TypeScript's common units read as metres), not
+    /// 6 m up, and straight on into the tunnel on Söder (no ramp down to it); the tunnel draws
+    /// faint and dashed. Today's app at this view (a scratch capture with the rail map on): the
+    /// main line's two tracks at the same rows over the water and into the tunnel's mouth.
+    #[test]
+    fn the_main_line_crosses_soderstrom_on_its_bridge_as_today() {
+        let Some(gpu) = gpu() else { return };
+        let tiles = Tiles::new(|_| None);
+        let mut renderer = renderer(&gpu, tiles.clone());
+        let size = [1100.0, 720.0];
+        let view = ViewState { latitude: 59.3214, longitude: 18.0680, zoom: 17.0, pitch: 55.0, bearing: 73.0, position: None };
+        let image = render_with(&gpu, &mut renderer, &dark(view, size, true, NETWORK), 1.0).expect("rendered");
+        save(&image, "t7-soderstrom-z17-1100x720.png");
+        assert!(tiles.dir.misses().iter().all(|(source, _)| source != io::OPENFREEMAP), "{:?}", tiles.dir.misses());
+        let off = render_with(&gpu, &mut renderer, &dark(view, size, true, OFF), 1.0).expect("rendered");
+        // where the main line's bridges are on their decks and its tunnels run, from the two
+        // tiles the bridge spans (as the layer decoded them)
+        let viewport = viewport_for(&view, size);
+        let on_screen = |p: [f64; 3]| (2.0..size[0] - 2.0).contains(&p[0]) && (2.0..size[1] - 2.0).contains(&p[1]);
+        let (mut decks, mut tunnels) = (Vec::new(), Vec::new());
+        for tile in [SODERSTROM, TileIndex::new(9014, 4819, 14)] {
+            let bytes = DirTiles::fixtures().read(io::OPENFREEMAP, tile).expect("read").expect("a z14 tile");
+            let parts = bridges::network_bridges(tile, &bytes, &|| false).expect("decoded").expect("bridges");
+            let top = (RAIL_DECK_M * bridges::rail_map_lift(tile)) as f32;
+            let lng_lat = |p: [f32; 3]| rustradar_scene::rail::tile_lng_lat(tile, [f64::from(p[0]), f64::from(p[1])]);
+            decks.extend(parts.raised.iter().filter(|s| s.color == RAIL_MAIN && s.start[2] == top).map(|s| lng_lat(s.start)));
+            for s in parts.ground.iter().filter(|s| s.color == tunnel_of(RAIL_MAIN)) {
+                tunnels.extend((0..200).map(|k| {
+                    let t = f64::from(k) / 200.0;
+                    lng_lat([0, 1, 2].map(|i| s.start[i] + (s.end[i] - s.start[i]) * t as f32))
+                }));
+            }
+        }
+        let pixel = |image: &Image, p: [f64; 3]| image.pixel(p[0] as u32, p[1] as u32);
+        let coral = |p: [u8; 4]| p[0] > 120 && i32::from(p[0]) - i32::from(p[1]) > 60 && i32::from(p[0]) - i32::from(p[2]) > 70;
+        let water = |p: [u8; 4]| near(p, [f64::from(WATER[0]); 3], 3.0);
+        let decks: Vec<([f64; 3], [f64; 3])> = decks
+            .iter()
+            .map(|&[lon, lat]| (viewport.project([lon, lat, 0.0]), viewport.project([lon, lat, RAIL_DECK_M])))
+            .filter(|&(ground, up)| on_screen(ground) && on_screen(up))
+            .collect();
+        let share = |hits: usize| hits as f64 / decks.len() as f64;
+        let ground = share(decks.iter().filter(|(p, _)| coral(pixel(&image, *p))).count());
+        let up = share(decks.iter().filter(|(_, p)| coral(pixel(&image, *p))).count());
+        let over_water = share(decks.iter().filter(|(p, _)| water(pixel(&off, *p))).count());
+        let lift = decks.iter().map(|(p, q)| p[1] - q[1]).fold(f64::INFINITY, f64::min);
+        eprintln!("{} deck samples: {ground:.3} drawn on their ground, {up:.3} 6 m up, {over_water:.3} over water; 6 m would be {lift:.1} px up", decks.len());
+        assert!(decks.len() >= 40, "{}", decks.len());
+        assert!(lift > 10.0, "{lift}");
+        assert!(ground >= 0.95, "{ground}");
+        assert!(up <= 0.05, "{up}");
+        assert!(over_water >= 0.6, "{over_water}");
+        // the tunnel: dashed, in the tunnel's faint colour, hardly ever the line's own (the
+        // bridge's line meets it at the tunnel's mouth)
+        let tunnel: Vec<[u8; 4]> = tunnels.iter().map(|&[lon, lat]| viewport.project([lon, lat, 0.0])).filter(|&p| on_screen(p)).map(|p| pixel(&image, p)).collect();
+        let faint = |p: [u8; 4]| (110..190).contains(&p[0]) && i32::from(p[0]) - i32::from(p[1]) > 45;
+        let dashed: Vec<bool> = tunnel.iter().map(|&p| faint(p)).collect();
+        let dashes = dashed.windows(2).filter(|w| w[0] && !w[1]).count();
+        let lit = dashed.iter().filter(|&&on| on).count() as f64 / dashed.len().max(1) as f64;
+        let full = tunnel.iter().filter(|&&p| p[0] >= 200).count() as f64 / tunnel.len().max(1) as f64;
+        eprintln!("{} tunnel samples: {lit:.3} in its colour, {full:.3} in the line's own, {dashes} dashes", tunnel.len());
+        assert!(tunnel.len() >= 200, "{}", tunnel.len());
+        assert!(full <= 0.05, "{full}");
+        assert!((0.25..0.9).contains(&lit), "{lit}");
+        assert!(dashes >= 10, "{dashes}");
     }
 
     #[test]

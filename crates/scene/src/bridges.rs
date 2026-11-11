@@ -22,15 +22,57 @@
 //! - a feature whose coordinates do not match its geometry type is left on the ground.
 //!
 //! `Math.min`/`Math.max`/`Math.hypot` are the geometry kernel's NaN-propagating versions.
+//!
+//! **Draw lists** (item T7; doc 02 §8.1, §8.2, §9.2): the rail map's bridges on the flat map, what
+//! the map's rail layer (`rustradar_map`'s `layers::rail`) draws in place of a tile's lines there
+//! when the tile has bridges. Today's app splits them off only where deck's tiles are the flat
+//! map's (`renderNetworkTile` on loaders.gl's binary tiles, `renderSpeedTile` when the tile is in
+//! local coordinates, rail-layer.ts:134-143, 413-424); on the globe every line is drawn as it is
+//! (`crate::rail`'s tiles). Each tile then draws as two sublayers:
+//! - the lines on the ground: the tile's lines without its bridges, in their order, styled as
+//!   `crate::rail` styles them ([`RaisedRail::ground`]);
+//! - `-bridges` (`RAISED_NO_CULL`: depth test always, so over the tile's other lines whatever
+//!   their order): the bridges ([`RaisedRail::raised`]), OpenFreeMap's network with [`omt_deck`]
+//!   through [`bridge_parts`] ([`network_bridges`]), the speed map's tracks with [`orm_deck`]
+//!   through [`raise_features`] ([`speed_bridges`]): up to their 6 m decks over 40 m (less on a
+//!   short bridge) from each end the tile does not cut, in pieces of at most 6 m.
+//!
+//! **How high, as today.** The TypeScript writes those heights in deck's common units
+//! (`× 512 / (circumference · cos φ)` at the tile's middle), but the sublayers are deck's
+//! `CARTESIAN` tiles, whose `z` deck reads as metres (`commonUnitsPerWorldUnit[2] =
+//! unitsPerMeter`): today's bridges stand [`rail_map_lift`] metres up for each metre of deck, a
+//! 6 m deck 0.15 mm at Stockholm, on the ground to the eye, and do not rise at their ends (seen in
+//! today's app at Söderström, pitched: the main line's bridge where its ground is, no ramp at the
+//! tunnel's mouth). The draw lists keep that: the deck heights of `bridge_parts` and
+//! `raise_features` (metres) times [`rail_map_lift`]. What shows of the split is the order: a
+//! tile's bridges are drawn after its other lines. (The trains and the signal blocks on the
+//! track, from the backend's structures with [`level_at`] and [`on_structures`], are in
+//! longitude and latitude, whose heights deck reads as metres: they do stand 6 m up on a bridge.)
+//!
+//! The flat map's tiles are loaders.gl's (in the tile's units, flat: no 5° cut): the network's
+//! binary (open paths, each part of a multi-line its own), the speed map's GeoJSON (a line whose
+//! last point is its first a loop). On the flat map MVTLayer's `ClipExtension` cuts each tile's
+//! lines at its square, fragment by fragment, by where they stand (`x`, `y`), not where they show.
+//! The ground lines are the layer's to clip (the stencil, as the network's other lines); a raised
+//! line shows higher up the screen than the ground it stands on, so the layer's stencil square
+//! would cut it in the wrong place: its pieces are cut at the tile's square here instead, and
+//! where the square cut a line the segment runs on into the vertex beyond (a straight joint, no
+//! cap: the next tile's piece starts where this one ends). Deviations, none visible: the cut end
+//! is square to the line, not along the tile's edge (the next tile's start fills the same sliver);
+//! a dash fits whole periods to the cut segment rather than to the whole one.
 
 use std::f64::consts::PI;
 
 use indexmap::IndexMap;
 use rustradar_core::geo::EARTH_CIRCUMFERENCE_M;
+use rustradar_core::mvt::{self, GeomType};
 use rustradar_core::num::clamp01;
 use serde_json::Value;
 
+use crate::geom::path::{Colors, END_CAP, LocalMercator, Paint, PathBuilder, PathSegment, PathType, START_CAP};
 use crate::geom::{js_hypot2, js_max, js_min};
+use crate::rail::{NETWORK_TILE_LAYER, SPEED_TILE_LAYER, rail_color, rail_dash, rail_speed_color, rail_speed_dash, rail_speed_width, rail_width};
+pub use crate::tess::vector::Cancelled;
 
 pub use rustradar_core::model::train::Structure;
 
@@ -549,6 +591,292 @@ pub fn on_structures(line: &[LonLat], structures: &[Structure]) -> Vec<Run> {
     out
 }
 
+// --- the rail map's bridges on the flat map (item T7) --------------------------
+
+/// The flat map draws its rail tiles from this zoom (deck's rule picks z12 from just above zoom
+/// 12, where the flat map begins; the speed map's tiles stop at z12): the tiles worth raising.
+pub const FLAT_MIN_Z: u32 = 12;
+
+/// One rail tile as the flat map draws it when it has bridges (see the module notes), in the
+/// tile's units ([`LocalMercator::tile`]: `u` east, `v` south, metres up), widths in pixels before
+/// the layer's width scale, as `crate::rail::RailTile`'s lines.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RaisedRail {
+    /// The tile's lines on the ground: every drawn line but the bridges, in the tile's order.
+    pub ground: Vec<PathSegment>,
+    /// `-bridges`: the bridges at the height today's app draws them ([`rail_map_lift`] of their
+    /// decks), cut at the tile's square.
+    pub raised: Vec<PathSegment>,
+}
+
+impl RaisedRail {
+    /// The bytes it holds (for the tile cache's budget).
+    pub fn byte_size(&self) -> usize {
+        size_of_val(self.ground.as_slice()) + size_of_val(self.raised.as_slice())
+    }
+}
+
+/// How high today's app draws the rail map's bridges on the flat map, metres for each metre of
+/// deck, at `tile` (see the module notes): `bridgeParts`' and `raiseFeatures`' common units per
+/// metre at the tile's middle, `512 / (circumference · cos φ)`, which deck reads as metres. About
+/// 2.5e-5 at Stockholm.
+pub fn rail_map_lift(tile: TileIndex) -> f64 {
+    let n = 2f64.powi(tile.z as i32);
+    let lat = (PI * (1.0 - (2.0 * (f64::from(tile.y) + 0.5)) / n)).sinh().atan();
+    512.0 / (EARTH_CIRCUMFERENCE_M * lat.cos())
+}
+
+/// `path` (`[u, v, metres of deck]`) at the height today's app draws it.
+fn lifted(mut path: Vec<[f64; 3]>, lift: f64) -> Vec<[f64; 3]> {
+    for p in &mut path {
+        p[2] *= lift;
+    }
+    path
+}
+
+/// A feature's properties as loaders.gl hands them to the accessors: its tags, and `layerName`
+/// (the MVT loader's `layerProperty`), as `crate::rail` reads them.
+fn properties_of(feature: &mvt::Feature<'_>, layer: &str) -> Properties {
+    let mut p = feature.json_properties();
+    p.insert("layerName".into(), Value::from(layer));
+    p
+}
+
+/// The network's paint of a line (`railNetworkLayer`'s accessors), an open path.
+fn network_paint(p: &Properties) -> Paint<'static> {
+    Paint { color: Colors::Same(rail_color(p)), width: rail_width(p), dash_array: rail_dash(p), path_type: PathType::Open }
+}
+
+/// The speed map's paint of a track (`railSpeedLayer`'s accessors), a GeoJSON line.
+fn speed_paint(p: &Properties) -> Paint<'static> {
+    Paint { color: Colors::Same(rail_speed_color(p)), width: rail_speed_width(p), dash_array: rail_speed_dash(p), path_type: PathType::Auto }
+}
+
+/// The flat map's rail network of one OpenFreeMap tile (`bytes`) at `tile` with its bridges split
+/// off and raised (`renderNetworkTile`: `bridgeParts(data.lines, tile, omtDeck)` on loaders.gl's
+/// binary lines, heights as today's app draws them), or `None` when it has no bridge (the tile's
+/// lines are drawn as they are). Only the lines `crate::rail::network_tile` draws are read (rail
+/// and transit of a colour): what deck draws in no colour and 0 px wide adds nothing, and each
+/// line is raised or not on its own. `cancelled` is asked between features.
+pub fn network_bridges(tile: TileIndex, bytes: &[u8], cancelled: &dyn Fn() -> bool) -> Result<Option<RaisedRail>, Cancelled> {
+    let mut lines = Lines { kind: "LineString".into(), size: 2, path_indices: vec![0], ..Lines::default() };
+    for layer in mvt::layers_named(bytes, &[NETWORK_TILE_LAYER]) {
+        for feature in layer.features() {
+            if cancelled() {
+                return Err(Cancelled);
+            }
+            if feature.kind != GeomType::LineString || !matches!(feature.text("class"), Some("rail" | "transit")) {
+                continue;
+            }
+            let p = properties_of(&feature, layer.name);
+            if rail_color(&p)[3] == 0 {
+                continue;
+            }
+            let id = lines.properties.len() as u32;
+            lines.properties.push(p);
+            for line in feature.lines() {
+                for &(x, y) in &line {
+                    lines.positions.extend([x / layer.extent, y / layer.extent]);
+                    lines.feature_ids.push(id);
+                    lines.global_feature_ids.push(id);
+                }
+                lines.path_indices.push((lines.positions.len() / 2) as u32);
+            }
+        }
+    }
+    let Some(parts) = bridge_parts(&lines, tile, &omt_deck) else { return Ok(None) };
+    let local = LocalMercator::tile(tile);
+    let mut ground = PathBuilder::new(local);
+    each_path(&parts.ground, |p, path| ground.push(&path, &network_paint(p)));
+    let (mut raised, lift) = (Vec::new(), rail_map_lift(tile));
+    each_path(&parts.raised, |p, path| push_inside(&mut raised, local, &lifted(path, lift), &network_paint(p)));
+    Ok(Some(RaisedRail { ground: ground.finish(), raised }))
+}
+
+/// The flat map's speed map of one backend rail tile (`bytes`) at `tile` with its bridges split
+/// off and raised (`renderSpeedTile`'s local tiles: `raiseFeatures(features, tile, ormDeck)` on
+/// the tile's GeoJSON features in its units, heights as today's app draws them), or `None` when
+/// it has no bridge. Tracks drawn in no colour are
+/// left out; the speed labels are `crate::rail::speed_tile`'s, from the tracks as they lie.
+/// `cancelled` is asked between features.
+pub fn speed_bridges(tile: TileIndex, bytes: &[u8], cancelled: &dyn Fn() -> bool) -> Result<Option<RaisedRail>, Cancelled> {
+    let mut features: Vec<LineFeature> = Vec::new();
+    for layer in mvt::layers_named(bytes, &[SPEED_TILE_LAYER]) {
+        for feature in layer.features() {
+            if cancelled() {
+                return Err(Cancelled);
+            }
+            // the GeoJsonLayer's points are 0 px and its polygons neither filled nor stroked
+            if feature.kind != GeomType::LineString {
+                continue;
+            }
+            let mut parts: Vec<Vec<Coord>> = feature.lines().iter().map(|l| l.iter().map(|&(x, y)| vec![x / layer.extent, y / layer.extent]).collect()).collect();
+            let geometry = if parts.len() == 1 {
+                Geometry { kind: "LineString".into(), coordinates: Coordinates::Line(parts.remove(0)) }
+            } else {
+                Geometry { kind: "MultiLineString".into(), coordinates: Coordinates::Lines(parts) }
+            };
+            features.push(LineFeature { geometry, properties: properties_of(&feature, layer.name) });
+        }
+    }
+    let Some(parts) = raise_features(&features, tile, &orm_deck) else { return Ok(None) };
+    let local = LocalMercator::tile(tile);
+    let lines_of = |f: &LineFeature| -> Vec<Vec<[f64; 3]>> {
+        let point = |c: &Coord| [c.first().copied().unwrap_or(f64::NAN), c.get(1).copied().unwrap_or(f64::NAN), c.get(2).copied().unwrap_or(0.0)];
+        match &f.geometry.coordinates {
+            Coordinates::Line(line) => vec![line.iter().map(point).collect()],
+            Coordinates::Lines(lines) => lines.iter().map(|l| l.iter().map(point).collect()).collect(),
+            Coordinates::Point(_) | Coordinates::Polygons(_) => Vec::new(),
+        }
+    };
+    let mut ground = PathBuilder::new(local);
+    for f in &parts.ground {
+        let paint = speed_paint(&f.properties);
+        if let Colors::Same(c) = paint.color
+            && c[3] > 0
+        {
+            for line in lines_of(f) {
+                ground.push(&line, &paint);
+            }
+        }
+    }
+    let (mut raised, lift) = (Vec::new(), rail_map_lift(tile));
+    for f in &parts.raised {
+        let paint = speed_paint(&f.properties);
+        if let Colors::Same(c) = paint.color
+            && c[3] > 0
+        {
+            for line in lines_of(f) {
+                push_inside(&mut raised, local, &lifted(line, lift), &paint);
+            }
+        }
+    }
+    Ok(Some(RaisedRail { ground: ground.finish(), raised }))
+}
+
+/// Each path of `lines` with its feature's properties, as `[u, v, metres]`.
+fn each_path(lines: &Lines, mut f: impl FnMut(&Properties, Vec<[f64; 3]>)) {
+    let empty = Properties::new();
+    let size = lines.size;
+    for w in lines.path_indices.windows(2) {
+        let (start, end) = (w[0] as usize, w[1] as usize);
+        let p = lines.feature_ids.get(start).and_then(|&i| lines.properties.get(i as usize)).unwrap_or(&empty);
+        let path = (start..end)
+            .map(|i| {
+                let at = |k: usize| lines.positions.get(i * size + k).copied().unwrap_or(f64::NAN);
+                [at(0), at(1), if size == 3 { at(2) } else { 0.0 }]
+            })
+            .collect();
+        f(p, path);
+    }
+}
+
+/// A stretch of a path inside a tile's square ([`inside_square`]).
+#[derive(Debug, Clone, PartialEq)]
+struct Inside {
+    points: Vec<[f64; 3]>,
+    /// The vertex before the first point, where the square cut the path there.
+    before: Option<[f64; 3]>,
+    /// The vertex after the last point, where the square cut the path there.
+    after: Option<[f64; 3]>,
+}
+
+/// The stretch `[t0, t1]` of the segment from `a` to `b` that lies in the square `[0, 1]²` of
+/// `u` and `v` (edges included), or `None` (Liang–Barsky).
+fn clip_segment(a: [f64; 3], b: [f64; 3]) -> Option<(f64, f64)> {
+    let (du, dv) = (b[0] - a[0], b[1] - a[1]);
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for (p, q) in [(-du, a[0]), (du, 1.0 - a[0]), (-dv, a[1]), (dv, 1.0 - a[1])] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let r = q / p;
+        if p < 0.0 {
+            if r > t1 {
+                return None;
+            }
+            t0 = t0.max(r);
+        } else {
+            if r < t0 {
+                return None;
+            }
+            t1 = t1.min(r);
+        }
+    }
+    Some((t0, t1))
+}
+
+fn lerp(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
+    [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t)
+}
+
+/// `path` (tile units, metres up) cut at the tile's square by `u` and `v` alone, as deck's
+/// `ClipExtension` cuts a tile's lines by where they stand: the stretches inside, in order, each
+/// with the vertex beyond each end the square cut.
+fn inside_square(path: &[[f64; 3]]) -> Vec<Inside> {
+    let mut out = Vec::new();
+    let mut current: Option<Inside> = None;
+    for i in 1..path.len() {
+        let (a, b) = (path[i - 1], path[i]);
+        match clip_segment(a, b) {
+            Some((t0, t1)) if t0 < t1 => {
+                let part = current.get_or_insert_with(|| {
+                    if t0 > 0.0 {
+                        Inside { points: vec![lerp(a, b, t0)], before: Some(a), after: None }
+                    } else {
+                        // in from outside at a vertex on the edge, or the path's start
+                        Inside { points: vec![a], before: (i > 1).then(|| path[i - 2]), after: None }
+                    }
+                });
+                if t1 < 1.0 {
+                    part.points.push(lerp(a, b, t1));
+                    part.after = Some(b);
+                    out.extend(current.take());
+                } else {
+                    part.points.push(b);
+                }
+            }
+            // out from a vertex on the edge (or not in at all)
+            _ => {
+                if let Some(mut part) = current.take() {
+                    part.after = Some(b);
+                    out.push(part);
+                }
+            }
+        }
+    }
+    out.extend(current);
+    out
+}
+
+/// The segments of `path` in `paint` inside the tile's square: a path wholly inside as it is, a
+/// stretch the square cuts open and running on into the vertex beyond each cut end (a straight
+/// joint, no cap).
+fn push_inside(out: &mut Vec<PathSegment>, local: LocalMercator, path: &[[f64; 3]], paint: &Paint<'_>) {
+    for part in inside_square(path) {
+        let mut b = PathBuilder::new(local);
+        if part.before.is_none() && part.after.is_none() {
+            b.push(&part.points, paint);
+            out.extend(b.finish());
+            continue;
+        }
+        b.push(&part.points, &Paint { path_type: PathType::Open, ..*paint });
+        let mut segments = b.finish();
+        if let (Some(q), Some(s)) = (part.before, segments.first_mut()) {
+            s.left = q.map(|c| c as f32);
+            s.types &= !START_CAP;
+        }
+        if let (Some(q), Some(s)) = (part.after, segments.last_mut()) {
+            s.right = q.map(|c| c as f32);
+            s.types &= !END_CAP;
+        }
+        out.extend(segments);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,6 +1161,347 @@ mod tests {
         assert_eq!(orm(json!({ "bridge": true })), RAIL_DECK_M);
         assert_eq!(orm(json!({ "bridge": "yes" })), 0.0);
         assert_eq!(orm(json!({})), 0.0);
+    }
+
+    // --- T7 -------------------------------------------------------------------------------
+
+    /// A bridge's height `d` metres along it, of `total`, with ends that ramp (`on`: those that do
+    /// not): smoothstep up to 6 m over 40 m (30 % of a short bridge) from each end that ramps.
+    fn deck_at(d: f64, total: f64, on: [bool; 2]) -> f64 {
+        let ramp = (total * 0.3).min(40.0);
+        let k = (if on[0] { 1.0 } else { d / ramp }).min(if on[1] { 1.0 } else { (total - d) / ramp }).clamp(0.0, 1.0);
+        RAIL_DECK_M * k * k * (3.0 - 2.0 * k)
+    }
+
+    /// T7's acceptance: a line along a bridge structure is at the deck's height along it and
+    /// ramps up and down at its ends; before and after, and along a bridge that goes on past an
+    /// end, as the structure says.
+    #[test]
+    fn a_line_along_a_bridge_structure_rises_to_its_deck_and_ramps_at_its_ends() {
+        let metres = |p: &[f64; 3]| (p[0] - 18.0) / DEG_PER_M;
+        let bridge = structure(false, 1000.0, 1300.0, [false, false]);
+        let runs = on_structures(&[at(900.0), at(1400.0)], std::slice::from_ref(&bridge));
+        assert_eq!(runs.len(), 1);
+        let path = &runs[0].path;
+        assert!(!runs[0].tunnel);
+        // in pieces of at most 6 m near the bridge: 84 over the 500 m
+        assert_eq!(path.len(), 85);
+        let mut seen = [0; 3];
+        for p in path {
+            let m = metres(p);
+            let want = if m < 1000.0 { 0.0 } else { deck_at(m - 1000.0, 300.0, [false, false]) };
+            assert_close!(p[2], want, 6);
+            match m {
+                m if (1000.0..1040.0).contains(&m) => {
+                    assert!(p[2] < RAIL_DECK_M);
+                    seen[0] += 1;
+                }
+                m if (1040.0..=1260.0).contains(&m) => {
+                    assert_eq!(p[2], RAIL_DECK_M, "{m} m");
+                    seen[1] += 1;
+                }
+                m if (1260.0..1300.0).contains(&m) => {
+                    assert!(p[2] > 0.0 && p[2] < RAIL_DECK_M);
+                    seen[2] += 1;
+                }
+                m if !(1000.0..=1300.0).contains(&m) => assert_eq!(p[2], 0.0, "{m} m"),
+                _ => {}
+            }
+        }
+        // both ramps and the deck between them are sampled
+        assert!(seen.iter().all(|&n| n >= 6), "{seen:?}");
+        // halfway up its ramp, half the deck's height
+        assert_close!(level_at(at(1020.0), Some(90.0), std::slice::from_ref(&bridge)).height, RAIL_DECK_M / 2.0, 9);
+        assert_close!(level_at(at(1280.0), Some(270.0), std::slice::from_ref(&bridge)).height, RAIL_DECK_M / 2.0, 9);
+        // a bridge that goes on past its west end: up from there
+        let goes_on = structure(false, 1000.0, 1300.0, [true, false]);
+        let runs = on_structures(&[at(1000.0), at(1100.0)], &[goes_on]);
+        assert!(runs[0].path.iter().all(|p| p[2] == RAIL_DECK_M), "{:?}", runs[0].path);
+    }
+
+    /// A tag value of a test tile.
+    #[derive(Clone, Copy)]
+    enum V {
+        S(&'static str),
+        U(u64),
+        B(bool),
+    }
+
+    /// A line feature of a test tile: tags and parts (points in tile units of 4096).
+    type TestLine = (&'static [(&'static str, V)], &'static [&'static [(i64, i64)]]);
+
+    fn varint(out: &mut Vec<u8>, mut v: u64) {
+        while v >= 0x80 {
+            out.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+
+    fn field_bytes(out: &mut Vec<u8>, field: u64, b: &[u8]) {
+        varint(out, (field << 3) | 2);
+        varint(out, b.len() as u64);
+        out.extend_from_slice(b);
+    }
+
+    fn field_uint(out: &mut Vec<u8>, field: u64, v: u64) {
+        varint(out, field << 3);
+        varint(out, v);
+    }
+
+    fn field_packed(out: &mut Vec<u8>, field: u64, values: &[u64]) {
+        let mut body = Vec::new();
+        for &v in values {
+            varint(&mut body, v);
+        }
+        field_bytes(out, field, &body);
+    }
+
+    /// A vector tile of one layer `name` of lines, extent 4096.
+    fn lines_tile(name: &str, lines: &[TestLine]) -> Vec<u8> {
+        let zigzag = |v: i64| ((v << 1) ^ (v >> 63)) as u64;
+        let (mut keys, mut values): (Vec<&str>, Vec<Vec<u8>>) = (Vec::new(), Vec::new());
+        let mut layer = Vec::new();
+        field_uint(&mut layer, 15, 2);
+        field_bytes(&mut layer, 1, name.as_bytes());
+        for (tags, parts) in lines {
+            let mut t = Vec::new();
+            for &(k, v) in *tags {
+                let ki = keys.iter().position(|&x| x == k).unwrap_or_else(|| {
+                    keys.push(k);
+                    keys.len() - 1
+                });
+                let mut value = Vec::new();
+                match v {
+                    V::S(s) => field_bytes(&mut value, 1, s.as_bytes()),
+                    V::U(n) => field_uint(&mut value, 5, n),
+                    V::B(b) => field_uint(&mut value, 7, u64::from(b)),
+                }
+                values.push(value);
+                t.extend([ki as u64, values.len() as u64 - 1]);
+            }
+            let (mut cx, mut cy) = (0, 0);
+            let mut geometry = Vec::new();
+            for part in *parts {
+                for (k, &(x, y)) in part.iter().enumerate() {
+                    if k == 0 {
+                        geometry.push((1 << 3) | 1);
+                    } else if k == 1 {
+                        geometry.push(((part.len() as u64 - 1) << 3) | 2);
+                    }
+                    geometry.extend([zigzag(x - cx), zigzag(y - cy)]);
+                    (cx, cy) = (x, y);
+                }
+            }
+            let mut feature = Vec::new();
+            field_packed(&mut feature, 2, &t);
+            field_uint(&mut feature, 3, 2);
+            field_packed(&mut feature, 4, &geometry);
+            field_bytes(&mut layer, 2, &feature);
+        }
+        for k in &keys {
+            field_bytes(&mut layer, 3, k.as_bytes());
+        }
+        for v in &values {
+            field_bytes(&mut layer, 4, v);
+        }
+        field_uint(&mut layer, 5, 4096);
+        let mut tile = Vec::new();
+        field_bytes(&mut tile, 3, &layer);
+        tile
+    }
+
+    fn never() -> bool {
+        false
+    }
+
+    /// The z14 tile south of Stockholm Central (Söderström's bridges).
+    const NETWORK_TILE: TileIndex = TileIndex { x: 9014, y: 4818, z: 14 };
+
+    const RAIL: (&str, V) = ("class", V::S("rail"));
+    const BRIDGE: (&str, V) = ("brunnel", V::S("bridge"));
+
+    /// Across the tile: a main line on the ground at a quarter of the way down, a road bridge
+    /// above it (no rail: not drawn), a 312 m rail bridge in the middle, a tram bridge the
+    /// tile's east edge cuts, a rail tunnel three quarters down.
+    fn network_lines() -> Vec<TestLine> {
+        vec![
+            (&[RAIL], &[&[(0, 1024), (4096, 1024)]]),
+            (&[("class", V::S("minor")), BRIDGE], &[&[(0, 512), (4096, 512)]]),
+            (&[RAIL, BRIDGE], &[&[(1024, 2048), (2048, 2048)]]),
+            (&[("class", V::S("transit")), ("subclass", V::S("tram")), BRIDGE], &[&[(3584, 2560), (4160, 2560)]]),
+            (&[RAIL, ("brunnel", V::S("tunnel"))], &[&[(0, 3072), (4096, 3072)]]),
+        ]
+    }
+
+    /// The segments' starts and their last end, as `[u, v, metres]`.
+    fn vertices(segments: &[PathSegment]) -> Vec<[f64; 3]> {
+        let mut out: Vec<[f64; 3]> = segments.iter().map(|s| s.start.map(f64::from)).collect();
+        out.extend(segments.last().map(|s| s.end.map(f64::from)));
+        out
+    }
+
+    /// T7's draw lists, the network: on the flat map the tile's rail bridges are raised to their
+    /// decks (up over 40 m from each end), the rest left on the ground as `crate::rail` styles it.
+    #[test]
+    fn the_flat_networks_bridges_rise_to_their_decks_and_the_rest_stays_on_the_ground() {
+        use crate::rail::{RAIL_MAIN, RAIL_TRANSIT, tunnel_of};
+        let bytes = lines_tile(NETWORK_TILE_LAYER, &network_lines());
+        let parts = network_bridges(NETWORK_TILE, &bytes, &never).expect("decoded").expect("it has bridges");
+        // on the ground: the main line and the faint, dashed tunnel; the bridges and the road not
+        let ground: Vec<(Rgba4, f32, [f32; 2], f32)> = parts.ground.iter().map(|s| (s.color, s.width, s.dash_array, s.start[1])).collect();
+        assert_eq!(ground, [(RAIL_MAIN, 1.9, [0.0, 0.0], 0.25), (tunnel_of(RAIL_MAIN), 1.9, [3.0, 2.5], 0.75)]);
+        assert!(parts.ground.iter().all(|s| s.start[2] == 0.0 && s.end[2] == 0.0));
+        // raised: the rail bridge, then the tram's
+        let rail: Vec<&PathSegment> = parts.raised.iter().filter(|s| s.start[1] == 0.5).collect();
+        let tram: Vec<&PathSegment> = parts.raised.iter().filter(|s| s.start[1] == 0.625).collect();
+        assert_eq!(rail.len() + tram.len(), parts.raised.len());
+        assert!(rail.iter().all(|s| (s.color, s.width, s.dash_array) == (RAIL_MAIN, 1.9, [0.0, 0.0])));
+        assert!(tram.iter().all(|s| (s.color, s.width) == (RAIL_TRANSIT, 1.2)));
+        let tile_metres = tile_metres(NETWORK_TILE);
+        let total = 0.25 * tile_metres;
+        // heights as today's app draws them: each metre of deck 2.5e-5 m up
+        let lift = rail_map_lift(NETWORK_TILE);
+        let top = f64::from((RAIL_DECK_M * lift) as f32);
+        let rail = vertices(&rail.into_iter().copied().collect::<Vec<_>>());
+        // in pieces of at most 6 m, from one end to the other
+        assert_eq!(rail.len(), (total / 6.0).ceil() as usize + 1);
+        assert_eq!((rail[0][0], rail[rail.len() - 1][0]), (0.25, 0.5));
+        for w in rail.windows(2) {
+            assert!((w[1][0] - w[0][0]) * tile_metres <= 6.0 + 1e-6);
+        }
+        // up from the ground at each end to the 6 m deck over 40 m, smoothly (to 4 digits: the
+        // vertices read back from the segments' f32 tile units)
+        for p in &rail {
+            assert_close!(p[2] / lift, deck_at((p[0] - 0.25) * tile_metres, total, [false, false]), 4);
+        }
+        assert_eq!((rail[0][2], rail[rail.len() - 1][2]), (0.0, 0.0));
+        assert!(rail.iter().filter(|p| p[2] == top).count() > 30);
+        let ramp: Vec<f64> = rail.iter().take_while(|p| p[2] < top).map(|p| p[2]).collect();
+        assert!(ramp.windows(2).all(|w| w[1] > w[0]) && ramp.len() == 7, "{ramp:?}");
+        // the tram's bridge: up from its west end, still up where the tile's edge cuts it (it goes
+        // on into the next tile), which is where it stops, running on into the vertex beyond
+        let tram_vertices = vertices(&tram.iter().map(|s| **s).collect::<Vec<_>>());
+        assert_eq!(tram_vertices[0][2], 0.0);
+        let last = tram_vertices[tram_vertices.len() - 1];
+        assert_eq!((last[0], last[2]), (1.0, top));
+        let (first, end) = (tram[0], tram[tram.len() - 1]);
+        assert_eq!(first.types, START_CAP);
+        assert_eq!(end.types, 0, "no cap where the tile cuts it");
+        assert!(end.right[0] > 1.0 && f64::from(end.right[2]) == top, "{:?}", end.right);
+    }
+
+    type Rgba4 = [u8; 4];
+
+    #[test]
+    fn no_bridge_nothing_raised() {
+        let lines = network_lines();
+        // the main line, the road bridge (not drawn) and the tunnel
+        let bytes = lines_tile(NETWORK_TILE_LAYER, &[lines[0], lines[1], lines[4]]);
+        assert_eq!(network_bridges(NETWORK_TILE, &bytes, &never), Ok(None));
+        assert_eq!(network_bridges(NETWORK_TILE, &[], &never), Ok(None));
+        let all = lines_tile(NETWORK_TILE_LAYER, &lines);
+        assert_eq!(network_bridges(NETWORK_TILE, &all, &|| true), Err(Cancelled));
+        // another layer's lines are not the network's
+        assert_eq!(network_bridges(NETWORK_TILE, &lines_tile("water", &lines), &never), Ok(None));
+    }
+
+    /// The z12 tile over Stockholm Central.
+    const SPEED_TILE: TileIndex = TileIndex { x: 2253, y: 1204, z: 12 };
+
+    /// T7's draw lists, the speed map: OpenRailwayMap's bridges (`bridge` true) raised, by their
+    /// limit's colour; the rest on the ground as the speed map draws it.
+    #[test]
+    fn the_flat_speed_maps_bridges_rise_to_their_decks() {
+        use crate::rail::{RAIL_TRANSIT, SPEED_BANDS, SPEED_UNKNOWN, tunnel_of};
+        let tracks: Vec<TestLine> = vec![
+            (&[("feature", V::S("rail")), ("maxspeed", V::U(160))], &[&[(0, 1024), (4096, 1024)]]),
+            (&[("feature", V::S("rail")), ("maxspeed", V::U(160)), ("bridge", V::B(true))], &[&[(1024, 2048), (1536, 2048)]]),
+            // OpenRailwayMap's bridges are booleans: "yes" is on the ground
+            (&[("feature", V::S("rail")), ("bridge", V::S("yes"))], &[&[(0, 2560), (4096, 2560)]]),
+            (&[("feature", V::S("tram")), ("bridge", V::B(true))], &[&[(2048, 3072), (2560, 3072)], &[(2048, 3200), (2560, 3200)]]),
+            (&[("feature", V::S("rail")), ("maxspeed", V::U(40)), ("tunnel", V::B(true))], &[&[(0, 3584), (4096, 3584)]]),
+            // not drawn: no colour, so nothing raised
+            (&[("feature", V::S("abandoned")), ("bridge", V::B(true))], &[&[(0, 4000), (4096, 4000)]]),
+        ];
+        let bytes = lines_tile(SPEED_TILE_LAYER, &tracks);
+        let parts = speed_bridges(SPEED_TILE, &bytes, &never).expect("decoded").expect("it has bridges");
+        let ground: Vec<(Rgba4, f32, [f32; 2])> = parts.ground.iter().map(|s| (s.color, s.width, s.dash_array)).collect();
+        let tunnel = tunnel_of(SPEED_BANDS[0].color);
+        assert_eq!(ground, [(SPEED_BANDS[3].color, 2.2, [0.0, 0.0]), (SPEED_UNKNOWN, 2.2, [0.0, 0.0]), (tunnel, 2.2, [3.0, 2.5])]);
+        let line: Vec<PathSegment> = parts.raised.iter().filter(|s| s.start[1] == 0.5).copied().collect();
+        let tram: Vec<PathSegment> = parts.raised.iter().filter(|s| s.start[1] > 0.7).copied().collect();
+        assert_eq!(line.len() + tram.len(), parts.raised.len());
+        assert!(line.iter().all(|s| (s.color, s.width) == (SPEED_BANDS[3].color, 2.2)));
+        // both parts of the tram's bridge, each up and down
+        assert!(tram.iter().all(|s| (s.color, s.width) == (RAIL_TRANSIT, 1.1)));
+        assert_eq!(tram.iter().filter(|s| s.types == START_CAP).count(), 2);
+        let tile_metres = tile_metres(SPEED_TILE);
+        let total = 0.125 * tile_metres;
+        let lift = rail_map_lift(SPEED_TILE);
+        let line = vertices(&line);
+        assert_eq!(line.len(), (total / 6.0).ceil() as usize + 1);
+        for p in &line {
+            assert_close!(p[2] / lift, deck_at((p[0] - 0.25) * tile_metres, total, [false, false]), 4);
+        }
+        assert_eq!(line.iter().map(|p| p[2]).fold(f64::NEG_INFINITY, js_max), f64::from((RAIL_DECK_M * lift) as f32));
+        // a tile without bridges: none
+        let plain = lines_tile(SPEED_TILE_LAYER, &[tracks[0], tracks[2], tracks[4]]);
+        assert_eq!(speed_bridges(SPEED_TILE, &plain, &never), Ok(None));
+        assert_eq!(speed_bridges(SPEED_TILE, &bytes, &|| true), Err(Cancelled));
+    }
+
+    /// Today's app writes the bridges' heights in deck's common units where deck reads metres: a
+    /// 6 m deck stands 0.15 mm up at Stockholm, as `bridgeParts`' `commonPerMetre` there.
+    #[test]
+    fn the_rail_maps_bridges_stand_as_high_as_todays() {
+        let lift = rail_map_lift(NETWORK_TILE);
+        assert_close!(RAIL_DECK_M * lift * 1000.0, 0.15, 2);
+        // `512 / (EARTH_CIRCUMFERENCE · cos lat)` at the tile's middle
+        assert_close!(lift, 512.0 / (tile_metres(NETWORK_TILE) * 2f64.powi(14)), 15);
+        assert_close!(rail_map_lift(TileIndex { x: 0, y: 0, z: 1 }) * EARTH_CIRCUMFERENCE_M / 512.0, 1.0 / (PI * (1.0 - 1.0 / 2.0)).sinh().atan().cos(), 12);
+        // the same at every zoom for the same place
+        assert_close!(rail_map_lift(SPEED_TILE) / rail_map_lift(TileIndex { x: 2253 * 4 + 1, y: 1204 * 4 + 1, z: 14 }), 1.0, 3);
+    }
+
+    #[test]
+    fn a_path_is_cut_at_the_tiles_square() {
+        let inside = |path: &[[f64; 3]]| inside_square(path);
+        // across: in at the west edge, out at the east, heights along
+        let across = [[-0.5, 0.5, 0.0], [0.5, 0.5, 2.0], [1.5, 0.5, 4.0]];
+        assert_eq!(
+            inside(&across),
+            [Inside { points: vec![[0.0, 0.5, 1.0], [0.5, 0.5, 2.0], [1.0, 0.5, 3.0]], before: Some(across[0]), after: Some(across[2]) }]
+        );
+        // wholly inside: as it is
+        let within = [[0.1, 0.1, 0.0], [0.9, 0.9, 6.0]];
+        assert_eq!(inside(&within), [Inside { points: within.to_vec(), before: None, after: None }]);
+        // wholly outside, or touching a corner: nothing
+        assert!(inside(&[[1.5, 0.5, 0.0], [2.5, 0.5, 0.0]]).is_empty());
+        assert!(inside(&[[1.5, 0.5, 0.0], [0.5, -0.5, 0.0]]).is_empty());
+        // out and in again: two stretches
+        let back = [[0.5, 0.5, 0.0], [1.5, 0.5, 0.0], [1.5, 0.75, 0.0], [0.5, 0.75, 0.0]];
+        assert_eq!(
+            inside(&back),
+            [
+                Inside { points: vec![[0.5, 0.5, 0.0], [1.0, 0.5, 0.0]], before: None, after: Some(back[1]) },
+                Inside { points: vec![[1.0, 0.75, 0.0], [0.5, 0.75, 0.0]], before: Some(back[2]), after: None },
+            ]
+        );
+        // in and out through vertices on the edge: the vertices beyond carry on
+        let edges = [[-1.0, 0.5, 0.0], [0.0, 0.5, 0.0], [0.5, 0.8, 0.0], [1.0, 0.5, 0.0], [2.0, 0.5, 0.0]];
+        assert_eq!(inside(&edges), [Inside { points: edges[1..4].to_vec(), before: Some(edges[0]), after: Some(edges[4]) }]);
+        // the segments: a cut end runs on into the vertex beyond, without a cap
+        let local = LocalMercator::tile(NETWORK_TILE);
+        let mut out = Vec::new();
+        push_inside(&mut out, local, &across, &Paint::solid([1, 2, 3, 4], 2.0));
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].left, out[0].start, out[0].types), ([-0.5, 0.5, 0.0], [0.0, 0.5, 1.0], 0));
+        assert_eq!((out[1].end, out[1].right, out[1].types), ([1.0, 0.5, 3.0], [1.5, 0.5, 4.0], 0));
+        // a path wholly inside keeps its caps
+        let mut whole = Vec::new();
+        push_inside(&mut whole, local, &within, &Paint::solid([1, 2, 3, 4], 2.0));
+        assert_eq!(whole.iter().map(|s| s.types).collect::<Vec<_>>(), [START_CAP | END_CAP]);
     }
 
     #[test]

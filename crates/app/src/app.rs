@@ -33,7 +33,7 @@ use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
-use crate::ui::{attribution, map_error, modebar, shell, theme, tooltip};
+use crate::ui::{attribution, map_controls, map_error, modebar, shell, theme, tooltip};
 use crate::{Options, platform, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
@@ -363,7 +363,11 @@ impl Engine {
 fn ui_pass(ui: &mut egui::Ui, state: &AppState, local_ms: f64, actions: &mut Vec<Action>) {
     // the mode bar, before the sidebar in the page (and in the tab order: U7)
     modebar::ui(ui.ctx(), state, actions);
+    // Escape closes the map controls' menu before the page's keys see it (U16)
+    map_controls::escape(ui.ctx(), state, actions);
     shell::ui(ui.ctx(), state, local_ms, actions);
+    // the map controls and their menu, after the panels (U16)
+    map_controls::ui(ui.ctx(), state, actions);
     // the credits along the bottom, and the view's readout in debug builds (U7)
     attribution::ui(ui.ctx(), state, local_ms);
 }

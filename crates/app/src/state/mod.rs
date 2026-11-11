@@ -244,6 +244,24 @@ pub enum Action {
     CloseShip,
     /// The ship panel's Try again: `loadShipCard(selectedShip.mmsi)` (U15).
     RetryShipCard,
+    /// A choice of the map controls' menus that no key makes (U16): [`AppState::set_setting`].
+    Set(Setting),
+}
+
+/// A setting the layers and settings menus choose and no key toggles (U16).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Setting {
+    /// The realistic map's weather.
+    Sky(rustradar_core::weather::Sky),
+    TiltShift(bool),
+    /// What the rail map shows.
+    RailShows(rustradar_core::settings::RailShows),
+    /// The place names' size, a multiple of the default.
+    LabelSize(f64),
+    /// The altitude exaggeration, 1 to 40.
+    Exaggeration(f64),
+    /// Aircraft-reported data from adsb.lol.
+    Adsb(bool),
 }
 
 /// The app's state: the camera, the clocks' sync, settings, and one part per feed.
@@ -544,6 +562,20 @@ impl AppState {
                 self.ships.retry_card();
                 open
             }
+            Action::Set(setting) => self.set_setting(setting),
+        }
+    }
+
+    /// Sets `setting` (saved and drawn from the next poll on); returns whether it changed.
+    pub fn set_setting(&mut self, setting: Setting) -> bool {
+        let s = &mut self.persisted.settings;
+        match setting {
+            Setting::Sky(v) => std::mem::replace(&mut s.sky, v) != v,
+            Setting::TiltShift(v) => std::mem::replace(&mut s.tilt_shift, v) != v,
+            Setting::RailShows(v) => std::mem::replace(&mut s.rail_shows, v) != v,
+            Setting::LabelSize(v) => std::mem::replace(&mut s.label_size, v) != v,
+            Setting::Exaggeration(v) => std::mem::replace(&mut s.exaggeration, v) != v,
+            Setting::Adsb(v) => std::mem::replace(&mut s.adsb, v) != v,
         }
     }
 }

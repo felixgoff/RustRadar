@@ -13,6 +13,7 @@
 //! own thread) and `rustradar_ios_main` (iOS's `main.m` calls it).
 
 pub mod app;
+pub mod dev;
 pub mod headless;
 pub mod input;
 pub mod platform;

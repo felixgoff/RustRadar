@@ -298,6 +298,7 @@ impl AppState {
         self.liveries.poll(&mut cx);
         self.taxiways.poll(&mut cx);
         self.airport.poll(&mut cx);
+        self.trains.set_flight_open(self.flight.selected_id().is_some());
         self.trains.poll(&mut cx);
         self.blocks.poll(&mut cx);
         self.ships.poll(&mut cx);

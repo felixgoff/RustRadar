@@ -705,6 +705,22 @@ mod tests {
     }
 
     #[test]
+    fn the_strip_on_phones() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(390.0, 844.0));
+        let line = 7.0 * LINE_HEIGHT;
+        // upright: on the sheet, across the window, 7 × 1.3 + 2 = 11.1 px on whole pixels
+        let rect = strip_rect(screen, Place::Phone { sheet_height: 140.6 }, 900.0, line);
+        assert_eq!(rect, Rect::from_min_max(Pos2::new(0.0, 692.0), Pos2::new(390.0, 703.0)));
+        // on its side: bottom right, clear of 360, shrunk to its text
+        let side = Rect::from_min_size(Pos2::ZERO, Vec2::new(844.0, 390.0));
+        let rect = strip_rect(side, Place::PhoneLandscape, 900.0, line);
+        assert_eq!(rect, Rect::from_min_max(Pos2::new(360.0, 379.0), Pos2::new(844.0, 390.0)));
+        let rect = strip_rect(side, Place::PhoneLandscape, 100.0, line);
+        assert_eq!(rect.left(), 844.0 - 108.0);
+        assert_eq!((Place::Desktop.size(), Place::PhoneLandscape.size()), (8.0, 7.0));
+    }
+
+    #[test]
     fn the_strip_hugs_the_bottom_right_and_cuts_at_352_from_the_left() {
         let ctx = Context::default();
         theme::apply(&ctx);

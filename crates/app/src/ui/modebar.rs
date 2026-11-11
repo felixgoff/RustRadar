@@ -443,6 +443,20 @@ mod tests {
     }
 
     #[test]
+    fn a_phone_s_row_is_icons_in_44_by_36_cells() {
+        let ctx = context();
+        let b = Bar { counts: [Some(12), None, None], ..bar(Mode::Ships, &[], true) };
+        let mut rect = Rect::NOTHING;
+        for time in [0.0, 0.1] {
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(390.0, 844.0))), time: Some(time), ..Default::default() };
+            let mut output = ctx.run_ui(raw, |ui| rect = row(ui, &b, Layout::Phone, &mut Vec::new()));
+            output.textures_delta.clear();
+        }
+        // three cells 2 apart, the two eyes folded (no names, no counts)
+        assert_eq!(rect.size(), Vec2::new(3.0 * 44.0 + 2.0 * 2.0, 36.0));
+    }
+
+    #[test]
     fn counts_group_from_five_digits() {
         assert_eq!(count_text(0), "0");
         assert_eq!(count_text(1443), "1443");

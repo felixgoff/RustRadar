@@ -18,3 +18,4 @@ pub mod map_error;
 pub mod text;
 pub mod theme;
 pub mod tooltip;
+pub mod widgets;

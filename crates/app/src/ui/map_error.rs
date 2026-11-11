@@ -22,6 +22,16 @@
 //!   border, radius 4, transparent, 13 px, `--text-1`; `--surface-hover` under the pointer, eased
 //!   in over 150 ms with `--ease-out`).
 //!
+//! The window's part (`app.rs`; not wired yet, as that file is not this item's):
+//! - once in `View::new`: `engine.map.catch_errors(&gpu, state.requests.as_ref().map(|r| r.wake()))`;
+//! - in the UI pass, over everything else: `map_error::ui(&ctx, &mut engine.map,
+//!   Some(&gpu.adapter.get_info()))`;
+//! - when the map's error is a lost device (`MapError::lost`), at once (plan 2.2), and again on
+//!   [`Retry::Rebuild`]: a new `Gpu::for_surface` on the window's instance and surface, the surface
+//!   configured on it, `map.rebuild(&gpu, format)`, and egui's renderer made again on the new
+//!   device with a fresh egui context (its font atlas was on the old device; a context sends it
+//!   whole only once). `tests/map_error.rs` draws the card and the rebuild as such a frame does.
+//!
 //! Deviations, until the design system of stage 7 exists (U1: `ui::theme`, `ui::fonts`,
 //! `ui::widgets`): the text is in egui's own fonts (Overpass at weights 600 and 550, and Overpass
 //! Mono, come with `ui::fonts`), and "Copy details" names the app's version and system where

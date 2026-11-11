@@ -54,6 +54,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rustradar_backend::{Backend, BackendEvent};
 use rustradar_core::filters::Filters;
 use rustradar_core::train_list::TrainFilters;
+use rustradar_core::ship_list::ShipFilters;
 use rustradar_core::geo::Basemap;
 use rustradar_core::motion::aircraft::Motion;
 use rustradar_core::settings::{Mode, Persisted};
@@ -230,6 +231,19 @@ pub enum Action {
     HoverTrain(Option<usize>),
     /// The train panel's close button: `selectTrain(null)` (U14).
     CloseTrain,
+    /// The ships list's sort and Show all, the ship filter panel's chips, movement, Hide old
+    /// positions and Reset: the filters handed over in [`AppState::ship_filters_handed`] replace
+    /// `persisted.ship_filters` (U15).
+    SetShipFilters,
+    /// A row of the ships list: `pickShip(ship)` with the loaded ship of this MMSI (U15).
+    PickShip(u32),
+    /// The pointer or the keyboard on a row of the ships list (its MMSI), or off the rows
+    /// (`hoveredShipMmsi`): that ship is drawn highlighted (U15).
+    HoverShip(Option<u32>),
+    /// The ship panel's close button: `selectShip(null)` (U15).
+    CloseShip,
+    /// The ship panel's Try again: `loadShipCard(selectedShip.mmsi)` (U15).
+    RetryShipCard,
 }
 
 /// The app's state: the camera, the clocks' sync, settings, and one part per feed.
@@ -268,6 +282,12 @@ pub struct AppState {
     /// The id of the train hovered in the trains list (`hoveredTrainId`; U14): the trains' scene
     /// builder draws it highlighted while trains are the focus.
     pub hovered_train: Option<String>,
+    /// The ship filters the ships list or the ship filter panel handed over, for the
+    /// [`Action::SetShipFilters`] pushed with them (U15).
+    pub ship_filters_handed: Cell<Option<ShipFilters>>,
+    /// The MMSI of the ship hovered in the ships list (`hoveredShipMmsi`; U15): the ships' scene
+    /// builder draws it highlighted while ships are the focus.
+    pub hovered_ship: Option<u32>,
 }
 
 impl AppState {
@@ -314,6 +334,8 @@ impl AppState {
             filters_handed: Cell::new(None),
             train_filters_handed: Cell::new(None),
             hovered_train: None,
+            ship_filters_handed: Cell::new(None),
+            hovered_ship: None,
         }
     }
 
@@ -491,6 +513,35 @@ impl AppState {
             Action::CloseTrain => {
                 let open = self.trains.selected_id().is_some();
                 self.select_train(None, local_ms);
+                open
+            }
+            Action::SetShipFilters => match self.ship_filters_handed.take() {
+                Some(filters) if filters != self.persisted.ship_filters => {
+                    self.persisted.ship_filters = filters;
+                    true
+                }
+                _ => false,
+            },
+            Action::PickShip(mmsi) => match self.ships.ships().iter().find(|s| s.mmsi == mmsi).cloned() {
+                Some(ship) => {
+                    self.pick_ship(ship, local_ms);
+                    true
+                }
+                None => false,
+            },
+            Action::HoverShip(mmsi) => {
+                let changed = mmsi != self.hovered_ship;
+                self.hovered_ship = mmsi;
+                changed
+            }
+            Action::CloseShip => {
+                let open = self.ships.selected().is_some();
+                self.select_ship(None, local_ms);
+                open
+            }
+            Action::RetryShipCard => {
+                let open = self.ships.selected().is_some();
+                self.ships.retry_card();
                 open
             }
         }

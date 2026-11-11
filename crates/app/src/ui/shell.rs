@@ -105,13 +105,13 @@ impl Slots {
         search: Some(super::search::show),
         aircraft_filters: Some(super::filters::aircraft::show),
         train_filters: Some(super::filters::trains::show),
-        ship_filters: None,
+        ship_filters: Some(super::filters::ships::show),
         aircraft_list: Some(super::lists::flights::show),
         train_list: Some(super::lists::trains::show),
-        ship_list: None,
+        ship_list: Some(super::lists::ships::show),
         airport_panel: Some(super::airport_panel::show),
         flight_panel: Some(super::flight_panel::show),
-        ship_panel: None,
+        ship_panel: Some(super::ship_panel::show),
         train_panel: Some(super::train_panel::show),
     };
 

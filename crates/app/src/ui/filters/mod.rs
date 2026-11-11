@@ -2,4 +2,5 @@
 //! ([`super::shell::Slots::aircraft_filters`], `train_filters`, `ship_filters`).
 
 pub mod aircraft;
+pub mod ships;
 pub mod trains;

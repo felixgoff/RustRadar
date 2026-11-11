@@ -28,6 +28,7 @@ pub mod modebar;
 pub mod panel;
 pub mod search;
 pub mod shell;
+pub mod ship_panel;
 pub mod sidebar;
 pub mod text;
 pub mod theme;

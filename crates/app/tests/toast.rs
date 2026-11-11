@@ -102,6 +102,9 @@ impl Canvas {
         }
         commands.push(encoder.finish());
         queue.submit(commands);
+        // SwiftShader's workers must be done before the process ends (exiting while they still
+        // run the last frame crashes in them)
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
         for id in textures.free.drain() {
             self.egui.free_texture(&id);
         }

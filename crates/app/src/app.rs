@@ -33,7 +33,7 @@ use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
-use crate::ui::{attribution, hover_card, keys_dialog, map_controls, map_error, modebar, shell, shortcuts, theme, toast, tooltip};
+use crate::ui::{attribution, dev_panel, hover_card, keys_dialog, map_controls, map_error, modebar, shell, shortcuts, theme, toast, tooltip};
 use crate::{Options, images, platform, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
@@ -381,6 +381,8 @@ fn ui_pass(ui: &mut egui::Ui, state: &AppState, local_ms: f64, actions: &mut Vec
     // the modal dialogs over everything: the shortcuts' help and the keys (U17)
     shortcuts::ui(ui.ctx(), state, actions);
     keys_dialog::ui(ui.ctx(), state, actions);
+    // the API calls and the selected train, right, over the rest in debug builds (U20)
+    dev_panel::ui(ui.ctx(), state, local_ms, actions);
 }
 
 /// Opens the window and runs until it is closed.

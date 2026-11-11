@@ -18,6 +18,7 @@
 pub mod airport_panel;
 pub mod anim;
 pub mod attribution;
+pub mod dev_panel;
 pub mod filters;
 pub mod flight_panel;
 pub mod fonts;

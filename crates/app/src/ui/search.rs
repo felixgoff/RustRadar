@@ -42,12 +42,22 @@
 //! (`platform::android::text::report`), so the app's own changes (a pick, the clear button) reach
 //! the keyboard.
 //!
+//! **Checked** against Chromium's rendering of today's markup and CSS (`SearchBox.svelte`'s
+//! styles over `app.css`, the same rows): the dropdown's border rows and columns, the highlighted
+//! row, the tiles, the rule and the bottom border land on the same pixels; text sits up to 1 px
+//! lower (egui's baseline, as everywhere in the shell). To get there, boxes are painted on whole
+//! pixels as Chromium snaps them (the dropdown from its exact top, `field.bottom + 8`, to its exact
+//! bottom), the rows' height is worked out before they are drawn (`content_height`), and a
+//! message's lines are set one by one 18.2 px apart (egui rounds a row to whole pixels).
+//!
 //! Deviations:
 //! - No `combobox`/`listbox` roles or live region (egui's AccessKit output is left as egui makes
 //!   it).
 //! - The dropdown does not animate (nor does today's).
 //! - A heading's credit stands 1 px below the heading's top, where CSS's baseline alignment of the
 //!   11 px credit with the 12 px heading puts it, rather than on egui's own baseline.
+//! - The scroll bar of a dropdown taller than 440 px is egui's, as the theme styles it (6 px and a
+//!   2 px margin, inside the box), where Chromium's thin bar is 11 px.
 
 use std::borrow::Cow;
 
@@ -483,6 +493,10 @@ pub fn search_box(ui: &mut Ui, pass: &mut Pass<'_>, layout: Layout) -> Shown {
         }
     }
     mem.shown = dropdown.is_some();
+    if !mem.shown {
+        // new rows under a resting pointer count as entered when they come
+        mem.hovered = None;
+    }
     if let Some(row) = pick {
         // `pick`: reset (the state's part with the action), close, blur
         pass.actions.push(Action::Search(Ask::Pick(row)));

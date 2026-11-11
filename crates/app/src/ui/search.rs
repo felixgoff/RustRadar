@@ -52,6 +52,7 @@
 use std::borrow::Cow;
 
 use egui::emath::GuiRounding;
+use egui::scroll_area::ScrollBarVisibility;
 use egui::{Area, Context, CornerRadius, Event, Frame, Id, Key, LayerId, Margin, Order, Pos2, Rect, ScrollArea, Sense, Stroke, StrokeKind, SurrenderFocusOn, Ui, Vec2};
 use egui::text::{CCursor, CCursorRange};
 use egui::text_edit::TextEditState;
@@ -508,9 +509,21 @@ fn results(ctx: &Context, anchor: Rect, model: &Model<'_>, items: &[Item<'_>], m
     let active = active_index(items, mem.active.as_deref());
     let mut clicked = None;
     let mut hovered_now = None;
+    // Chromium paints the box from its exact top to its exact bottom, each snapped to the pixel
+    // grid; egui puts the area's corner on the grid: the rows' height is cut to match, so the
+    // bottom border lands on today's row
+    let top = anchor.bottom() + DROPDOWN_GAP;
+    let edges = 2.0 * (theme::BORDER + DROPDOWN_PADDING);
+    let ppp = ctx.pixels_per_point();
+    let snap = |y: f32| (y * ppp).round() / ppp;
+    let content = content_height(ctx, model, items, inner);
+    let height = (snap(top + edges + content.min(max_height)) - snap(top) - edges).max(0.0);
+    // the fraction of a pixel cut off by the snapping is no reason to scroll: a scroll bar only
+    // when the rows run past the most height
+    let bar = if content > max_height { ScrollBarVisibility::VisibleWhenNeeded } else { ScrollBarVisibility::AlwaysHidden };
     let area = Area::new(dropdown_id())
         .order(Order::Foreground)
-        .fixed_pos(Pos2::new(anchor.left(), anchor.bottom() + DROPDOWN_GAP))
+        .fixed_pos(Pos2::new(anchor.left(), top))
         .fade_in(false)
         .constrain(false)
         .show(ctx, |ui| {
@@ -521,12 +534,17 @@ fn results(ctx: &Context, anchor: Rect, model: &Model<'_>, items: &[Item<'_>], m
                 .inner_margin(Margin::same(DROPDOWN_PADDING as i8))
                 .show(ui, |ui| {
                     ui.set_width(inner);
+                    ui.set_max_width(inner);
                     ui.set_max_height(max_height);
-                    let mut scroll = ScrollArea::vertical().id_salt("rustradar::search::scroll").max_height(max_height).auto_shrink([false, true]);
+                    let mut scroll = ScrollArea::vertical()
+                        .id_salt("rustradar::search::scroll")
+                        .max_height(height)
+                        .min_scrolled_height(height)
+                        .auto_shrink([false, false])
+                        .scroll_bar_visibility(bar);
                     if fresh {
                         scroll = scroll.vertical_scroll_offset(0.0);
                     }
-                    let top = ui.cursor().min.y;
                     scroll.show(ui, |ui| {
                         ui.set_width(inner);
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -588,9 +606,6 @@ fn results(ctx: &Context, anchor: Rect, model: &Model<'_>, items: &[Item<'_>], m
                             }
                         }
                     });
-                    // a whole number of pixels high, so the bottom border is as crisp as the rest
-                    let height = ui.min_rect().bottom() - top;
-                    ui.expand_to_include_y(top + height.round());
                 });
         });
     // `mouseenter`: the pointer entering a row highlights it
@@ -599,6 +614,89 @@ fn results(ctx: &Context, anchor: Rect, model: &Model<'_>, items: &[Item<'_>], m
     }
     mem.hovered = hovered_now;
     (area.response.rect, clicked)
+}
+
+/// The dropdown's rows, headings and messages laid out `inner` wide: their whole height, as
+/// [`results`] draws them.
+fn content_height(ctx: &Context, model: &Model<'_>, items: &[Item<'_>], inner: f32) -> f32 {
+    let heading = HEADING_PADDING[0] + heading_style().line_px() + HEADING_PADDING[2];
+    let message = |words: &str, quiet: bool, spin: bool| message_height(ctx, words, quiet, spin, inner);
+    let first = if model.local.is_some() { model.local_rows.len() } else { model.flights.results().len() };
+    let mut height = 0.0;
+    match model.local {
+        Some((_, noun)) => {
+            height += heading;
+            if first == 0 {
+                height += message(&format!("No {noun} in view match \u{201c}{}\u{201d}.", model.query), false, false);
+            }
+        }
+        None => {
+            if model.show_places() {
+                height += heading;
+            }
+            height += match &*model.flights {
+                Phase::Searching => message("Searching flights\u{2026}", true, true),
+                Phase::Error => message("Flight search failed. Check your connection and try again.", false, false),
+                _ if first == 0 => message(&format!("No live flights or airports match \u{201c}{}\u{201d}.", model.query), false, false),
+                _ => 0.0,
+            };
+        }
+    }
+    if model.show_places() {
+        height += GROUP_GAP + theme::BORDER + heading;
+        height += match &*model.places {
+            Phase::Searching => message("Looking up places\u{2026}", true, true),
+            Phase::Error => message("Places unavailable", true, false),
+            _ if model.places.results().is_empty() => message(&format!("No places match \u{201c}{}\u{201d}.", model.query), false, false),
+            _ => 0.0,
+        };
+    }
+    height + items.iter().map(row_height).sum::<f32>()
+}
+
+/// What a message's text wraps to within a dropdown `inner` wide: its lines.
+fn message_lines(ctx: &Context, words: &str, quiet: bool, spin: bool, inner: f32) -> Vec<String> {
+    let [_, side, _] = MESSAGE_PADDING;
+    let lead = if spin { spinner::SIZE_SMALL + theme::SPACE_2 } else { 0.0 };
+    let galley = ctx.fonts_mut(|f| f.layout_job(text::wrapped(words, &message_style(quiet), inner - 2.0 * side - lead)));
+    galley.rows.iter().map(|r| r.row.text()).collect()
+}
+
+/// A message's height: its padding and a 18.2 px line box per line.
+fn message_height(ctx: &Context, words: &str, quiet: bool, spin: bool, inner: f32) -> f32 {
+    let [top, _, bottom] = MESSAGE_PADDING;
+    top + message_lines(ctx, words, quiet, spin, inner).len() as f32 * message_style(quiet).line_px() + bottom
+}
+
+/// What a row shows: its icon and colour, label, detail and the detail's tooltip.
+fn row_parts(item: &Item<'_>, mode: Mode) -> (Icon, egui::Color32, String, String, Option<String>) {
+    match item {
+        Item::Flight(_, e) => {
+            let live = matches!(e.detail, FindDetail::Live(_));
+            (if live { Icon::Plane } else { Icon::MapPin }, if live { theme::AMBER } else { theme::TEXT_2 }, e.label.clone(), flight_detail(e), None)
+        }
+        Item::Local(_, l) => {
+            // `local.icon`: the focus's
+            let icon = if mode == Mode::Ships { Icon::Ship } else { Icon::TrainFront };
+            (icon, egui::Color32::from_rgb(l.color[0], l.color[1], l.color[2]), l.label.clone(), l.detail.clone(), None)
+        }
+        Item::Place(_, p) => (place_icon(p.kind), theme::TEXT_2, p.name.clone(), place_detail(p), Some(p.label.clone())),
+    }
+}
+
+/// Whether a row has a second line.
+fn has_detail(item: &Item<'_>) -> bool {
+    match item {
+        Item::Flight(_, e) => !flight_detail(e).is_empty(),
+        Item::Local(_, l) => !l.detail.is_empty(),
+        Item::Place(_, p) => !place_detail(p).is_empty(),
+    }
+}
+
+/// A row's height: its padding round the tile or its two lines, whichever is taller.
+fn row_height(item: &Item<'_>) -> f32 {
+    let column = label_style().line_px() + if has_detail(item) { detail_style().line_px() } else { 0.0 };
+    2.0 * ROW_PADDING + column.max(TILE)
 }
 
 /// A group's heading (`h3.group`), with the Photon credit on its right when `credit`.
@@ -627,35 +725,35 @@ fn message(ui: &mut Ui, words: &str, quiet: bool, spin: bool) {
     let style = message_style(quiet);
     let width = ui.available_width();
     let lead = if spin { spinner::SIZE_SMALL + theme::SPACE_2 } else { 0.0 };
-    let galley = ui.painter().layout_job(text::wrapped(words, &style, width - 2.0 * side - lead));
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, top + galley.size().y + bottom), Sense::hover());
-    let body = Rect::from_min_size(Pos2::new(rect.left() + side, rect.top() + top), Vec2::new(width - 2.0 * side, galley.size().y));
+    // CSS's line boxes are 1.4 × 13 = 18.2 px apart, where egui's rows take whole pixels: each
+    // line is set on its own at its line box
+    let lines = message_lines(ui.ctx(), words, quiet, spin, width);
+    let height = lines.len() as f32 * style.line_px();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, top + height + bottom), Sense::hover());
+    let body = Rect::from_min_size(Pos2::new(rect.left() + side, rect.top() + top), Vec2::new(width - 2.0 * side, height));
     if spin {
         let spot = Rect::from_center_size(Pos2::new(body.left() + spinner::SIZE_SMALL / 2.0, body.center().y), Vec2::splat(spinner::SIZE_SMALL));
         spinner::paint(ui.painter(), spot, spinner::SIZE_SMALL, style.color);
     }
-    ui.painter().galley(Pos2::new(body.left() + lead, body.top()), galley, style.color);
+    for (n, line) in lines.iter().enumerate() {
+        let galley = ui.painter().layout_job(text::job(js_trim_end(line), &style));
+        ui.painter().galley(Pos2::new(body.left() + lead, body.top() + n as f32 * style.line_px()), galley, style.color);
+    }
+}
+
+/// A wrapped row's text without the space it broke at.
+fn js_trim_end(line: &str) -> &str {
+    line.trim_end_matches(' ')
 }
 
 /// One row (`button[role=option]`): its tile, label and detail, highlighted when `active`.
 fn row(ui: &mut Ui, item: &Item<'_>, mode: Mode, active: bool) -> egui::Response {
-    let (icon, color, label, detail, title) = match item {
-        Item::Flight(_, e) => {
-            let live = matches!(e.detail, FindDetail::Live(_));
-            (if live { Icon::Plane } else { Icon::MapPin }, if live { theme::AMBER } else { theme::TEXT_2 }, e.label.clone(), flight_detail(e), None)
-        }
-        Item::Local(_, l) => {
-            // `local.icon`: the focus's
-            let icon = if mode == Mode::Ships { Icon::Ship } else { Icon::TrainFront };
-            (icon, egui::Color32::from_rgb(l.color[0], l.color[1], l.color[2]), l.label.clone(), l.detail.clone(), None)
-        }
-        Item::Place(_, p) => (place_icon(p.kind), theme::TEXT_2, p.name.clone(), place_detail(p), Some(p.label.clone())),
-    };
+    let (icon, color, label, detail, title) = row_parts(item, mode);
     let label_style = label_style();
     let detail_style = detail_style();
     let column = label_style.line_px() + if detail.is_empty() { 0.0 } else { detail_style.line_px() };
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 2.0 * ROW_PADDING + column.max(TILE)), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, row_height(item)), Sense::click());
     let painter = ui.painter();
     let ppp = ui.pixels_per_point();
     if active {
@@ -929,6 +1027,45 @@ mod tests {
         assert_eq!(h.state.search.query(Mode::Ships), "", "cleared");
         let shown = h.frame(Vec::new()).unwrap();
         assert!(!shown.focused && shown.dropdown.is_none());
+    }
+
+    /// The heights CSS gives: a heading 8 + 16.8 + 4, a message 8 + 18.2 per line + 12, a row
+    /// 8 + max(26, 18.2 + 16.8) + 8, or 8 + 26 + 8 without a detail.
+    #[test]
+    fn the_parts_are_as_tall_as_today_s() {
+        let ctx = Context::default();
+        theme::apply(&ctx);
+        let mut heights = Vec::new();
+        let entry = live("1", "SK1");
+        let mut bare = live("2", "SK2");
+        if let FindDetail::Live(d) = &mut bare.detail {
+            d.route = None;
+            d.ac_type = None;
+        }
+        let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 800.0))), ..Default::default() }, |ui| {
+            ui.set_width(276.0);
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            let mut at = |ui: &mut Ui, f: &dyn Fn(&mut Ui)| {
+                let top = ui.cursor().min.y;
+                f(ui);
+                heights.push(ui.cursor().min.y - top);
+            };
+            at(ui, &|ui| heading(ui, "Places", true));
+            at(ui, &|ui| message(ui, "Places unavailable", true, false));
+            at(ui, &|ui| message(ui, "Flight search failed. Check your connection and try again.", false, false));
+            at(ui, &|ui| message(ui, "Searching flights\u{2026}", true, true));
+            at(ui, &|ui| {
+                row(ui, &Item::Flight(0, &entry), Mode::Aircraft, false);
+            });
+            at(ui, &|ui| {
+                row(ui, &Item::Flight(1, &bare), Mode::Aircraft, false);
+            });
+        });
+        out.textures_delta.clear();
+        let want = [28.8, 38.2, 56.4, 38.2, 51.0, 42.0];
+        for (got, want) in heights.iter().zip(want) {
+            assert!((got - want).abs() <= 1.0 / 32.0, "{heights:?} for {want:?}: egui keeps sizes in 32nds");
+        }
     }
 
     #[test]

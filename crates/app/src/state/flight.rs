@@ -14,8 +14,9 @@
 //! flight scene builder calls it at the start of each scene refresh (`scene_builder::flight`),
 //! which the poll forces whenever something arrived, so both run in the same frame, as the page's
 //! effects run after the answer that set them off; [`AppState::select_flight`] and the other UI
-//! asks call it too. (`AppState::poll` may also call it after `self.flight.poll`: twice a frame
-//! changes nothing.)
+//! asks call it too. (`AppState::poll` does not call it; were it to, after `self.flight.poll`, a
+//! second call in the frame would change nothing, and the camera would get a stream's relock in
+//! the same frame instead of the next: see the deviations.)
 //!
 //! **Selecting** ([`AppState::select_flight`], `select(id, {hint, fly, follow, fromBoard})`):
 //! - the same id without `fly`: a flight whose stream ended is asked for again (another click
@@ -1070,8 +1071,9 @@ mod tests {
     use std::sync::mpsc::Sender;
 
     use rustradar_core::model::{Airport, AircraftInfo, BoundingBox, FlightInfo, LiveSnapshot, RunwayEnd, ScheduleInfo, SessionInfo, TopFlight, TrailPoint};
+    use rustradar_core::geo::{effective_exaggeration, elevation};
     use rustradar_core::settings::Mode;
-    use rustradar_scene::camera::ViewState;
+    use rustradar_scene::camera::{ViewState, viewport_for};
 
     use super::*;
     use crate::state::Startup;
@@ -1488,6 +1490,41 @@ mod tests {
         let asked = w.log.lock().unwrap().adsb.len();
         w.frame(t + 60_000.0);
         assert_eq!(w.log.lock().unwrap().adsb.len(), asked);
+    }
+
+    /// Item A10's lock engages through this state: a click selects without moving the camera; C
+    /// (or a selection with `follow`) hands the camera the row shown and the lock, and each frame
+    /// then holds the aircraft as drawn at the screen's centre; deselecting lets go.
+    #[test]
+    fn following_the_selected_flight_locks_the_camera_on_it_and_deselecting_lets_go() {
+        let mut w = World::new();
+        let before = w.state.controller.view();
+        w.state.select_flight(Some(ID), SelectOptions::default(), T0 + 100.0);
+        w.frame(T0 + 200.0);
+        assert_eq!(w.state.camera.selected().map(|f| f.id), Some(ID), "the row shown handed over");
+        assert!(!w.state.camera.following() && !w.state.controller.locked(), "a click does not lock");
+        assert_eq!(w.state.controller.view(), before);
+        w.state.toggle_follow(T0 + 300.0);
+        assert!(w.state.camera.following(), "handed over at once");
+        w.send(FollowEvent::Details(Box::new(details(T0 + 250.0))), T0 + 400.0);
+        for k in 0..6 {
+            let t = T0 + 500.0 + 1_000.0 * f64::from(k);
+            w.frame(t);
+            assert!(w.state.controller.locked());
+            let shown = w.flight().selected().cloned().expect("a row shown");
+            assert_eq!(w.state.camera.selected(), Some(&shown), "the stream's newer report, handed over");
+            let pose = w.state.motion.pose(&shown, w.state.clocks(t).feed_ms);
+            let v = w.state.controller.view();
+            let size = w.state.controller.size();
+            let h = elevation(pose.alt_ft, effective_exaggeration(w.state.persisted.settings.exaggeration, v.zoom));
+            let [x, y, _] = viewport_for(&v, size).project([pose.lon, pose.lat, h]);
+            let off = (x - size[0] / 2.0).hypot(y - size[1] / 2.0);
+            assert!(off < 1.0, "frame {k}: the aircraft {off} px from the centre");
+        }
+        w.state.select_flight(None, SelectOptions::default(), T0 + 7_000.0);
+        assert!(w.state.camera.selected().is_none() && !w.state.camera.following());
+        w.frame(T0 + 7_100.0);
+        assert!(!w.state.controller.locked(), "let go");
     }
 
     #[test]

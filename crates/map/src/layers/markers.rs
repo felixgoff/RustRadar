@@ -18,6 +18,10 @@
 //! deck's TextLayer defaults: centred on the anchor (`getTextAnchor: "middle"`,
 //! `getAlignmentBaseline: "center"`), billboards, sizes in pixels.
 //!
+//! The plan's A8 row gives the ring `[55,142,240,235]`: that is the selected ship's and train's ring
+//! (`ship-selection-ring`, G:3316, 2 px). The aircraft's is `[55,142,240,230]` at 1.5 px (G:3048), as
+//! drawn here.
+//!
 //! Every circle and glyph is placed at each frame for that frame's camera (a few of them).
 
 use rustradar_scene::text::{Face, Family, FontSettings, GlyphAtlas, LaidText, TextLayout};

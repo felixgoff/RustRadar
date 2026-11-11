@@ -159,25 +159,33 @@ fn shape(pixels: &[(u32, u32)], spot: &Spot) -> ([f64; 2], f64, f64) {
 
 /// V6: every ship an icon in its type colour where it stands, each hull lying along its heading
 /// with its broad stern behind (the colour's centroid sits behind the ship's place), the moored
-/// ones round, the old one faded, nothing for the long tanker (a model from zoom 12.5), and
-/// nothing else on the map changed.
+/// ones round, the old one faded, no icon for the long tanker (a model from zoom 12.5, item H3:
+/// drawn within its hull's outline), and nothing else on the map changed.
 #[test]
 fn v6_ships_are_icons_in_their_type_colours_pointing_along_their_headings() {
     let Some((with, without)) = shots() else { return };
     // every pixel the ships change on the map between the sidebar and the detail panel's places
-    // is within an icon's reach of an icon ship
+    // is within an icon's reach of an icon ship, or on the tanker's hull (its model, H3: 190 by
+    // 38 m about its reference point amidships, turned to its heading, and a pixel's edge)
     let icons = &SPOTS[..11];
+    let tanker = &SPOTS[11];
+    let mpp = rustradar_core::geo::meters_per_pixel(V6.view().zoom, V6.view().latitude);
+    let on_hull = |x: u32, y: u32| {
+        let h = f64::from(tanker.heading.unwrap()).to_radians();
+        let (dx, dy) = (f64::from(x) + 0.5 - tanker.xy[0], f64::from(y) + 0.5 - tanker.xy[1]);
+        let (along, across) = (dx * h.sin() - dy * h.cos(), dx * h.cos() + dy * h.sin());
+        along.abs() <= 95.0 / mpp + 1.5 && across.abs() <= 19.0 / mpp + 1.5
+    };
     let map = Rect::new(352, 70, 1080 - 352, 860 - 70);
     let changed: Vec<(u32, u32)> = map.pixels().filter(|&(x, y)| difference(with.pixel(x, y), without.pixel(x, y)) > 12).collect();
     assert!(changed.len() > 1000, "the ships are drawn: {} pixels", changed.len());
     for &(x, y) in &changed {
         let d = icons.iter().map(|s| (f64::from(x) + 0.5 - s.xy[0]).hypot(f64::from(y) + 0.5 - s.xy[1])).fold(f64::INFINITY, f64::min);
-        assert!(d < 16.0, "a pixel changed at {x},{y}, {d:.1} px from the nearest ship");
+        assert!(d < 16.0 || on_hull(x, y), "a pixel changed at {x},{y}, {d:.1} px from the nearest ship");
     }
-    // the long tanker is a model at zoom 13: no icon where it stands
-    let tanker = &SPOTS[11];
-    let around = Rect::around(&with, tanker.xy, 8.0).clip(&with);
-    assert!(around.pixels().all(|(x, y)| difference(with.pixel(x, y), without.pixel(x, y)) <= 12), "an icon at the tanker");
+    // the long tanker is a model at zoom 13: no icon where it stands (an icon's hull would be
+    // some 70 pixels of its type colour)
+    assert!(of_colour(&with, &without, tanker, 8.0).len() < 5, "an icon at the tanker");
     for (i, spot) in icons.iter().enumerate() {
         let pixels = of_colour(&with, &without, spot, 14.0);
         let (centroid, axis, elongation) = shape(&pixels, spot);

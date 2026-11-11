@@ -110,6 +110,9 @@ impl SceneBuilder {
         self.radar.build(state, &mut scene);
         self.ships.build(state, &mut scene);
         self.trains.build(state, &mut scene);
+        // the signal blocks (T5) see this refresh's trains as drawn (G:2733-2735)
+        let on_map: Vec<&rustradar_core::model::Train> = state.trains.on_map().iter().collect();
+        state.blocks.build(&state.persisted.settings, &on_map, self.trains.builder().drawn(), &mut scene);
         self.flight.build(state, &mut scene);
         self.aircraft.build(state, &mut scene);
         scene

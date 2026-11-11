@@ -209,6 +209,11 @@ pub enum Action {
     /// The aircraft filter panel's change: the filters it handed over in
     /// [`AppState::filters_handed`] replace `persisted.filters` (U9).
     SetFilters,
+    /// The flight panel's close button and back row: `select(null)` (U10).
+    CloseFlight,
+    /// The flight panel's origin (`false`) or destination (`true`) code: `openAirport(code)` with
+    /// the code it shows, `origin?.iata || flight.origin` (U10).
+    OpenAirportOf { destination: bool },
     /// The airport board's tabs, Show more, Try again, rows and close ([`AppState::board_ask`],
     /// U13).
     Board(airport::Ask),
@@ -421,6 +426,26 @@ impl AppState {
                 }
                 _ => false,
             },
+            Action::CloseFlight => {
+                let open = self.flight.selected_id().is_some();
+                self.select_flight(None, flight::SelectOptions::default(), local_ms);
+                open
+            }
+            Action::OpenAirportOf { destination } => {
+                let Some(row) = self.flight.selected() else { return false };
+                let airport = self.flight.route().and_then(|r| if destination { r.destination.as_ref() } else { r.origin.as_ref() });
+                let fallback = if destination { &row.destination } else { &row.origin };
+                let code = airport.map(|a| a.iata.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| fallback.clone());
+                if code.is_empty() {
+                    return false;
+                }
+                // `openAirport(code)`: the board, and the flight, the ship and the train let go
+                self.airport.open(&code, local_ms);
+                self.select_flight(None, flight::SelectOptions::default(), local_ms);
+                self.select_ship(None, local_ms);
+                self.select_train(None, local_ms);
+                true
+            }
             Action::Board(ask) => self.board_ask(ask, local_ms),
         }
     }

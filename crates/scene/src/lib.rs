@@ -19,6 +19,7 @@ pub mod declutter;
 pub mod geom;
 pub mod gpu_types;
 pub mod ground;
+pub mod ground_rails;
 pub mod hillshade;
 pub mod labels_map;
 pub mod landcover;

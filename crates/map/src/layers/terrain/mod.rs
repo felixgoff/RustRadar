@@ -7,7 +7,8 @@
 //! What today's app does, and so this layer:
 //! - **Tiles** ([`io::MAPTERHORN`], `MAPTERHORN_URL`): Mapterhorn's 512 px terrarium WebP, and
 //!   where it has none (404) Mapzen's terrarium PNG of the same `z/x/y` (`terrainFetch`: the app's
-//!   fetcher asks `backend::terrain`, which falls back; a `--fixture` folder answers what it holds).
+//!   fetcher asks `backend::terrain`, which falls back; a fixture folder, `io::DirTiles`, answers
+//!   a Mapterhorn `.none` with the terrarium tile it keeps beside it, to Mapzen's zoom 15).
 //!   By distance ([`LodSelect`] with [`surface_lod`]: every zoom 0 to 16, bias 0.5, no farthest
 //!   distance; 512 px tiles, `minZoom` 0) with the look-ahead while zooming, refined by
 //!   `keepCoarserUntilIn` (`LodTileLayer`), at most 8 requests (`maxRequests: 8`), deck's default
@@ -322,6 +323,35 @@ mod tests {
         assert_eq!(widen(Some([1200.0, 3400.0]), [f64::NAN, f64::NAN]), None);
     }
 
+    /// A fixture folder answers the surface's tiles as `terrainFetch` (and `backend::terrain`)
+    /// does: where Mapterhorn had nothing (`.none`), Mapzen's terrarium tile of the same `z/x/y`
+    /// that the set keeps beside it (`cargo xtask fixtures` keeps one to zoom 15); past Mapzen's
+    /// deepest zoom nothing, and no miss noted; a stand-in the set lacks is a miss of Mapzen's.
+    #[test]
+    fn a_fixture_folder_stands_mapzen_in_where_mapterhorn_has_nothing() {
+        let root = std::env::temp_dir().join(format!("rustradar-z1-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let put = |path: &str, bytes: &[u8]| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().expect("a folder")).expect("the folder");
+            std::fs::write(path, bytes).expect("written");
+        };
+        put("mapterhorn/14/1/2.webp", b"mapterhorn");
+        put("mapterhorn/14/3/4.none", b"");
+        put("terrarium/14/3/4.png", b"mapzen");
+        put("mapterhorn/14/5/6.none", b"");
+        put("mapterhorn/16/7/8.none", b"");
+        let tiles = DirTiles::at(&root);
+        let read = |x, y, z| tiles.read(io::MAPTERHORN, TileIndex::new(x, y, z));
+        assert_eq!(read(1, 2, 14), Ok(Some(b"mapterhorn".to_vec())));
+        assert_eq!(read(3, 4, 14), Ok(Some(b"mapzen".to_vec())));
+        assert_eq!(read(7, 8, 16), Ok(None));
+        assert!(tiles.misses().is_empty());
+        assert_eq!(read(5, 6, 14), Ok(None));
+        assert_eq!(tiles.misses(), [(io::TERRARIUM.to_owned(), TileIndex::new(5, 6, 14))]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // ------------------------------------------------------------------ on the GPU
 
     /// The surface's colour as deck lights it: flat ground seen from straight above is
@@ -503,7 +533,8 @@ mod tests {
 
         let terrain = watch.borrow();
         let range = terrain.z_range().expect("tiles loaded");
-        eprintln!("elevation range {range:?}, {} tiles drawn", terrain.tiles().visible().count());
+        let triangles: u32 = terrain.tiles().visible().filter_map(|(t, _)| terrain.tiles().get(t)).map(|g| g.elements() / 3).sum();
+        eprintln!("elevation range {range:?}, {} tiles drawn, {triangles} triangles with the skirts", terrain.tiles().visible().count());
         assert!(range[0] < 1608.0 && range[1] > 4400.0, "{range:?}");
         let selected = terrain.tiles().selected();
         let held = selected.iter().filter(|t| fixtures.held(io::MAPTERHORN, **t) != Held::Missing).count();

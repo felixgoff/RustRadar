@@ -203,6 +203,10 @@ impl DirTiles {
     pub fn read(&self, source: &str, tile: TileIndex) -> FetchResult {
         match self.held(source, tile) {
             Held::Tile(path) => fs::read(&path).map(Some).map_err(|e| FetchError::Failed(format!("{}: {e}", path.display()))),
+            // the 3D surface's stand-in (Z1, `terrainFetch` as `backend::terrain` has it): where
+            // Mapterhorn had nothing, Mapzen's terrarium tile of the same z/x/y, which a fixture
+            // set keeps beside it to Mapzen's deepest zoom
+            Held::Nothing if source == MAPTERHORN && tile.z <= rustradar_scene::hillshade::TERRARIUM_MAX_ZOOM => self.read(TERRARIUM, tile),
             Held::Nothing => Ok(None),
             Held::Missing => {
                 self.misses.lock().unwrap_or_else(|e| e.into_inner()).push((source.to_owned(), tile));

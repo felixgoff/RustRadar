@@ -276,8 +276,9 @@ impl KeysFeeds for BackendFeeds {
     }
 
     fn reveal(&mut self, path: &Path) {
-        // the file manager is the desktop glue's (U20), which does not offer it yet
+        // the file manager, through the desktop glue (U20)
         log::info!("exported {}", path.display());
+        crate::platform::reveal(path);
     }
 
     fn pick(&mut self) -> Option<Answer<Picked>> {

@@ -138,6 +138,24 @@ impl SceneBuilder {
         self.aircraft.build(state, &mut scene);
         scene
     }
+
+    /// Where the followed train or ship is drawn now, `[lon, lat]` (`vehicleAt`, G:3142-3153):
+    /// its place in the last refresh's list, else its report; none when no train or ship is
+    /// followed, or while the camera follows an aircraft.
+    pub fn vehicle_at(&self, state: &AppState) -> Option<[f64; 2]> {
+        if state.camera.following() {
+            return None;
+        }
+        if let Some(train) = state.trains.selected().filter(|_| state.trains.following()) {
+            let drawn = self.trains.builder().drawn();
+            return Some(drawn.index_of(&train.id).map_or([train.lon, train.lat], |i| [drawn.positions[i][0], drawn.positions[i][1]]));
+        }
+        if let Some(ship) = state.ships.selected().filter(|_| state.ships.following()) {
+            let drawn = self.ships.builder().drawn();
+            return Some(drawn.index_of(ship.mmsi).map_or([ship.lon, ship.lat], |i| [drawn.positions[i][0], drawn.positions[i][1]]));
+        }
+        None
+    }
 }
 
 #[cfg(test)]

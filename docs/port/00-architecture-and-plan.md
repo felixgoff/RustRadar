@@ -36,7 +36,7 @@ Facts checked while writing this document (not taken from the spec documents)
 | winit 0.30.13 on Android | `Window::set_ime_allowed` shows and hides the soft keyboard, but the backend never reads `GameTextInput` text events and emits no `Ime` events; text arrives only as key events. `android-activity 0.6.1` exposes `AndroidApp::text_input_state()` / `set_text_input_state()` (GameActivity) and `content_rect()`. |
 | egui 0.37 safe areas | `RawInput::safe_area_insets` exists; egui-winit fills it on iOS only. |
 | Lucide icons | `node_modules/@lucide/svelte` 1.54.0 holds each icon's geometry as JSON (`iconData.node`: `path`, `circle`, `rect`, `line`, … with attributes) in `dist/icons/<name>.svelte`. |
-| Crates on crates.io today | `earcutr 0.5.0`, `glam 0.34.3`, `tiny-skia 0.12.0`, `resvg 0.49.0`, `jiff 0.2.41`, `pmtiles 0.28.0`, `minisign-verify 0.3.0`, `cargo-packager 0.11.8`, `cargo-ndk 4.1.2`, `rfd 0.18.0`, `webbrowser 1.2.6`, `image-webp 0.2.4`. |
+| Crates on crates.io today | `glam 0.34.3`, `tiny-skia 0.12.0`, `resvg 0.49.0`, `jiff 0.2.41`, `pmtiles 0.28.0`, `minisign-verify 0.3.0`, `cargo-packager 0.11.8`, `cargo-ndk 4.1.2`, `rfd 0.18.0`, `webbrowser 1.2.6`, `image-webp 0.2.4`. |
 | Tools in this container | `bun` and `node` 22 are installed (needed once, in stage 1, to generate fixtures from the TypeScript before it is deleted). |
 
 ---
@@ -109,7 +109,7 @@ picture), `terrain.rs` (elevation tiles), `rainviewer.rs`, `convert.rs` (fr24 re
 | `camera.rs` | `ViewState`, globe and Mercator viewports (f64 matrices), project/unproject, limits, `meters_per_pixel` | doc 01 §2 |
 | `controller.rs` | north-up pan, drag-rotate, wheel zoom, pinch, linear transitions, follow/lock view | doc 01 §3, doc 03 §11.4 |
 | `tiles.rs`, `lod.rs` | tile ids and bounds, deck's zoom rule and view-frustum selection, distance LOD selection, the two refinement strategies, look-ahead | doc 01 §5, doc 04 §13 |
-| `geom/{densify,grid_cut,earcut,path}.rs` | ≤ 5° subdivision for the globe, `cutPolygonByGrid` port, `earcutr` wrapper, path segment records | docs 01 §2, 02 §3.4 |
+| `geom/{densify,grid_cut,earcut,path}.rs` | ≤ 5° subdivision for the globe, `cutPolygonByGrid` port, earcut 2.2.4 port (item G1), path segment records | docs 01 §2, 02 §3.4 |
 | `tess/{vector,ground,buildings}.rs` | decoded MVT features → fills, path segments, extrusions | docs 01 §5.6, 04 §6–7 |
 | `sdf.rs`, `text.rs`, `declutter.rs` | TinySDF port, glyph atlas packing, label layout, greedy collision with fades | docs 01 §5.9/§6, 03 §7 |
 | `pick.rs` | CPU picking | doc 03 §10.1 |
@@ -163,7 +163,7 @@ Pinned in `[workspace.dependencies]`; members write `dep.workspace = true`.
 | UI | `egui 0.37`, `egui-wgpu 0.37`, `egui-winit 0.37` (no default features, per-target features as in the spike) | immediate mode fits the request/poll backend pattern; `egui_extras` and `eframe` are not used (we own the loop and the renderer) |
 | Maths | `glam 0.34` (`DVec3`, `DMat4` on the CPU; `Vec3`, `Mat4` for uniforms) | small, no generics; nalgebra rejected as heavier with no gain |
 | GPU structs | `bytemuck 1` with explicit padding | `encase` rejected: the one large uniform (`rlight`, 192 bytes) has documented offsets (doc 04 §4.1) |
-| Polygon triangulation | `earcutr 0.5` | the same algorithm deck.gl and math.gl use (earcut), so hole handling and winding expectations carry over |
+| Polygon triangulation | own port of earcut 2.2.4 (`geom::earcut`, item G1; `earcutr` was dropped) | the same code deck.gl and math.gl use, index for index, so hole handling and winding expectations carry over |
 | Line rendering | none: an own instanced segment pipeline | widths are in screen pixels with minimum/maximum clamps and must stay constant under zoom and pitch, so expansion happens in the vertex shader as in deck's PathLayer. `lyon` tessellates on the CPU at a fixed world width and cannot do that; rejected |
 | Polygon grid cutting, marching squares, RTIN | own code in `scene` (`grid_cut`, `radar::iso`, `terrain::martini`) | each is a 100–300 line port whose exact behaviour is pinned by tile-edge seams (doc 02 §14.3); the `contour` crate stays in `backend` for the measured volumes only; `i_overlay`, `martini` crates rejected |
 | MVT decoding | own `core::mvt` (from `RS:rail.rs`) | already written and tested in the backend; no protobuf code generation; one place to implement "absent numeric property reads as 0" (doc 04 §17.9). `prost`, `mvt-reader`, `geozero` rejected |
@@ -857,7 +857,7 @@ are.
 | ☐ | `fly_to` 1500 ms, `zoom_by` 250 ms, reset orientation 400 ms, tilt to 55°; linear, no inertia | 01 §1.3, §3.6 | E2 |
 | ☑ | Scene refresh pacing 0 / 50 / 150 / 500 ms | 01 §2.6 | E17 |
 | ☐ | Cursor: grab, grabbing, pointer | 01 §1.4 | B8 |
-| ☐ | Lock on an aircraft; follow a train or ship | 01 §3.9–3.10 | A10, T1, H1 |
+| ☑ | Lock on an aircraft; follow a train or ship | 01 §3.9–3.10 | A10, T1, H1 |
 
 **Basemaps**
 
@@ -893,23 +893,23 @@ are.
 
 | ☐ | Feature | Spec | Item |
 |---|---|---|---|
-| ☐ | Trains in view, watched set, live updates, key gate | 06 §3.3, §3.9 | T1 |
-| ☐ | Icons by kind and operator, tunnel fade, eased motion that never runs backward | 02 §5.1–5.5 | T2 |
-| ☐ | Cars and operator models close in | 02 §5.6 | T3 |
-| ☐ | Rail map: network, speed map with legend, overview, stations | 02 §8 | T4 |
-| ☐ | Signal blocks and signals | 02 §6 | T5 |
-| ☐ | Selected train's route, stops, ring | 02 §5.7, §7 | T6 |
-| ☐ | Bridges and tunnels | 02 §9 | T7 |
-| ☐ | Tooltips for trains and signals | 02 §11.4 | T8 |
+| ☑ | Trains in view, watched set, live updates, key gate | 06 §3.3, §3.9 | T1 |
+| ☑ | Icons by kind and operator, tunnel fade, eased motion that never runs backward | 02 §5.1–5.5 | T2 |
+| ☑ | Cars and operator models close in | 02 §5.6 | T3 |
+| ☑ | Rail map: network, speed map with legend, overview, stations | 02 §8 | T4 |
+| ☑ | Signal blocks and signals | 02 §6 | T5 |
+| ☑ | Selected train's route, stops, ring | 02 §5.7, §7 | T6 |
+| ☑ | Bridges and tunnels | 02 §9 | T7 |
+| ☑ | Tooltips for trains and signals | 02 §11.4 | T8 |
 
 **Ships**
 
 | ☐ | Feature | Spec | Item |
 |---|---|---|---|
-| ☐ | Ships in view, refresh, details | 06 §3.8 | H1 |
-| ☐ | Icons by type, old positions faded, eased motion | 02 §4.1–4.5 | H2 |
-| ☐ | 3D hulls from zoom 12.5 | 02 §4.6 | H3 |
-| ☐ | Selection halo and ring, tooltip | 02 §4.8, §11 | H4 |
+| ☑ | Ships in view, refresh, details | 06 §3.8 | H1 |
+| ☑ | Icons by type, old positions faded, eased motion | 02 §4.1–4.5 | H2 |
+| ☑ | 3D hulls from zoom 12.5 | 02 §4.6 | H3 |
+| ☑ | Selection halo and ring, tooltip | 02 §4.8, §11 | H4 |
 
 **Weather radar**
 
@@ -939,21 +939,21 @@ are.
 
 | ☐ | Feature | Spec | Item |
 |---|---|---|---|
-| ☐ | Tokens, fonts and weights, icons | 06 §1, §26 | U1, U2 |
-| ☐ | Desktop shell: sidebar, ModeBar, detail panel, map controls, attribution | 06 §2.3–2.10 | U6, U7 |
-| ☐ | Modes and "also show"; trains gated by the key | 06 §3.3 | U5, U7 |
-| ☐ | Search: flights, airports, places, local trains and ships | 06 §5 | U8 |
-| ☐ | Aircraft list and filters | 06 §11, §14 | U9 |
-| ☐ | Flight panel: overview, route, aircraft, history, photos, footer, follow | 06 §7 | U10, U11 |
-| ☐ | Altitude chart; export KML, GPX, CSV, GeoJSON | 06 §9–10 | U12 |
-| ☐ | Airport board | 06 §8.3 | U13 |
-| ☐ | Train list, filters, panel; ship list, filters, panel | 06 §8.1–8.2, §12–13, §15–16 | U14, U15 |
-| ☐ | Layers menu, settings menu, map controls, compass | 06 §19 | U16 |
-| ☐ | Keys dialog with sign-in, import and export; shortcuts help; all shortcuts | 06 §3.13, §20–21 | U6, U17 |
-| ☐ | Hover card with photo; map tooltips | 06 §18.1; 03 §10 | U18, T8 |
+| ☑ | Tokens, fonts and weights, icons | 06 §1, §26 | U1, U2 |
+| ☑ | Desktop shell: sidebar, ModeBar, detail panel, map controls, attribution | 06 §2.3–2.10 | U6, U7 |
+| ☑ | Modes and "also show"; trains gated by the key | 06 §3.3 | U5, U7 |
+| ☑ | Search: flights, airports, places, local trains and ships | 06 §5 | U8 |
+| ☑ | Aircraft list and filters | 06 §11, §14 | U9 |
+| ☑ | Flight panel: overview, route, aircraft, history, photos, footer, follow | 06 §7 | U10, U11 |
+| ☑ | Altitude chart; export KML, GPX, CSV, GeoJSON | 06 §9–10 | U12 |
+| ☑ | Airport board | 06 §8.3 | U13 |
+| ☑ | Train list, filters, panel; ship list, filters, panel | 06 §8.1–8.2, §12–13, §15–16 | U14, U15 |
+| ☑ | Layers menu, settings menu, map controls, compass | 06 §19 | U16 |
+| ☑ | Keys dialog with sign-in, import and export; shortcuts help; all shortcuts | 06 §3.13, §20–21 | U6, U17 |
+| ☑ | Hover card with photo; map tooltips | 06 §18.1; 03 §10 | U18, T8 |
 | ☐ | Phone layout: top bar, bottom sheet, landscape, safe areas, back gesture | 06 §2.4–2.5, §17 | U19, E19 |
-| ☐ | Dev panel and dev readout (dev builds) | 06 §2.7, §25 | U7, U20 |
-| ☐ | Settings persisted with the documented schema | 06 §23 | U5 |
+| ☑ | Dev panel and dev readout (dev builds) | 06 §2.7, §25 | U7, U20 |
+| ☑ | Settings persisted with the documented schema | 06 §23 | U5 |
 
 **Platform and delivery**
 
@@ -1113,7 +1113,7 @@ non-Latin labels.
 | Zone abbreviations | Generated lookup table checked in (S1.11) |
 | Locale | English everywhere |
 | `motion.ts` approach | Transliterate, port all tests, golden fixtures before the TypeScript goes (S1.17–S1.20) |
-| earcut, `cutPolygonByGrid`, d3-contour | `earcutr`; own `grid_cut`; own `IsoRings` port (also used for land cover) |
+| earcut, `cutPolygonByGrid`, d3-contour | own earcut 2.2.4 port (G1); own `grid_cut`; own `IsoRings` port (also used for land cover) |
 | GeoTIFF, PMTiles, KTX2 crates | Own COG range reader in `backend::canopy` (as `canopy.ts` does it by hand); `pmtiles`; `basisu_c_sys` |
 | Dead exports | Ported as test helpers with their tests |
 | Modules without tests | New tests written with each port (listed per item) |
@@ -1165,7 +1165,8 @@ non-Latin labels.
   in CI, Chrome's SwiftShader ICD or `mesa-vulkan-drivers` (lavapipe). Without an adapter the GPU tests print
   `skipped: …` and pass.
 - Shot command:
-  `cargo run -p rustradar-app -- --screenshot out.png --size 1100x720 [--scale 2] --view <lat,lon,zoom[,pitch[,bearing]]> --basemap <dark|satellite|realistic> [--now <unix ms>] [--fixture <dir>] [--demo] [--ui <fixture name>]`.
+  `cargo run -p rustradar-app -- --screenshot out.png --size 1100x720 [--scale 2] --view <lat,lon,zoom[,pitch[,bearing]]> --basemap <dark|satellite|realistic> [--now <unix ms>] [--fixture <dir>] [--demo] [--ui] [--mode aircraft|trains|ships] [--select <flight id>]`
+  (`--ui` draws the window's UI over the map; the stages 5-7 review).
   A shot never touches the network: tiles come from `crates/map/tests/data/tiles`, feeds from the fixture, and a
   missing tile is simply not drawn. The headless path runs frames until no tile job is pending, then two more with
   the egui clock one second apart (areas are invisible on their first frame, spike pitfall 9).
@@ -1887,3 +1888,182 @@ for the vector map and the labels (the same selection worked out twice), the lab
 - The scratchpad folder is shared by every engineer of a run and was emptied once while this item ran: keep files
   that matter in a subfolder of your own and expect to lose them.
 - `target/release` was deleted after the measurements (disk).
+
+---
+
+## Stages 5-7 status
+
+Checked on 2026-11-12 on `rust-port` (from `543accd`) by the stages 5-7 review (the item that owns no files), after
+every stage 5, 6 and 7 item and the two new items G1 (one earcut) and P1 (performance) had reported. The review's
+fixes are in the commit that adds this section.
+
+**In short.**
+- Stages 5, 6 and 7 are done. Every row's acceptance holds in its tests; the lines restated below follow today's
+  app where the rows did not. The window draws the trains (icons, cars, rail map, signal blocks, the selected
+  train's route and ring, picking and tooltips), the ships (icons, models, halo and ring, picking) and the whole
+  UI: the desktop page, and the phone layout in a phone-sized window.
+- Built but not reachable before this review (fixed here, below): following a train or ship with the camera (the
+  panels' Follow and the key C set a flag nothing read), the speed map's legend (no item drew it), the sign-in
+  prompts' focus on the email field, the keys export's file-manager reveal. Shots without `--fixture` also asked
+  VesselFinder, the blocks feed and the follow stream over the network.
+- 27 more lines of section 4 are ticked (one camera line, the 8 train lines, the 4 ship lines, 14 UI lines): 51
+  in all. Not ticked: the phone layout (device check pending), open links and reveal (never run on Windows or
+  macOS), and the camera lines still waiting for B8's person check.
+- `--ui` draws the window's whole page in a headless shot (with `--mode` and `--select`); that is how the
+  reference views below were compared.
+
+**Checks**
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | clean |
+| `cargo test --workspace` (SwiftShader) | 2533 passed, 0 failed, 23 ignored, after this review's fixes; run crate by crate, the app's integration files in two batches (each test binary is about 260 MB and the shared disk does not hold all of them with the rest); no GPU test skipped |
+| `cargo clippy --workspace --all-targets` | no warnings; `cargo doc -p rustradar-app --no-deps` none either |
+| `cargo check -p rustradar` (shim) | passes (its 2 tests pass) |
+| `bun run check` | 0 errors, 0 warnings (5589 files) |
+| `bun test src` | 394 pass |
+| CI "Build" on `rust-port` | run 224 (`7666514`, U12) is the last finished run and fully green (Rust tests on SwiftShader, clippy, Windows, macOS, iOS and Android checks). 223 (`2e1ed5e`) was red only in uploading the shots artifact, its tests and clippy green; 226 and 227 were cancelled by newer pushes; 225 and 228 (`543accd`, the review's base: the four native checks green) were still running their tests at the time of writing. This commit starts a new run |
+
+The passing tests, by crate:
+
+| Crate | Passed | Ignored | Since the stages 3-4 review |
+|---|---|---|---|
+| core | 603 unit + 2 in `tests/motion.rs` | 0 | +1 (P1) |
+| scene | 612 | 0 | +101 (T2–T9, H2–H4, G1, P1) |
+| map | 310 unit + 9 + 2 | 1 doc block (an example) | +47 (T2–T7, T9, H2–H4, G1, P1) |
+| backend | 221 | 22 (as in stage 2) | +10 (U18) |
+| app | 571 unit + 152 in 39 integration files | 0 | +415 unit, +113 integration (29 new files) |
+| xtask | 31 | 0 | – |
+| fr24 | 17 + 1 doc-test | 0 | – |
+| shim | 2 | 0 | – |
+
+No test is marked `#[ignore]` outside the backend's 22 of stages 1–2; no item's test was found loosened, beyond
+the two assertions G1 changed to earcut.js's own answers (NaN input now checked exactly; the empty-hole rule is
+gap 6) and H3's edit of H2's
+ship shot (pixels inside the tanker, which now draws as a model, are allowed to change).
+
+**What was looked at.** Every reference view through the binary with the UI (`--screenshot --ui --size … --now
+1782036000000`, the references' summer morning; V3 and V5 with `--demo --mode trains`, V6 with `--mode ships`), at
+1440 × 900 and 390 × 844, each beside its `docs/port/reference/` picture (crops at 2–3× for the cards and the
+controls); then the ship fixture at V6, a selected flight (the backend's wire sample of a follow event as
+`flight_details`, moved to Stockholm) and V6 again without a fixture:
+- **The shell matches today's** at both sizes: sidebar, wordmark, search field and its key cap, Filters, list
+  card, mode bar, the map controls' three stacks (same pixels), the credits strip, the phone's top bar, sheet,
+  handle and rail. Text sits up to 1 px lower everywhere (egui's baseline; U1's trap, open).
+- **The maps match** stages 3-4's comparison (dark V1, V2, V3, V4, V8; satellite V2, V6, V7): same water, roads,
+  names and their places. The realistic views draw the white globe and outlined names only (stage 8).
+- **Expected differences**, from the data and not the drawing:
+  - The references are a plain browser (no backend). Ours show the feed's own failure ("Can't reach Flightradar24.
+    Trying again in 0 s." with Retry now) where today says "No live … data in a plain browser", so the list card
+    sits lower on the desktop.
+  - V3 `--demo` is in the trains mode with the demo trains (list, icons, the train credit first in the strip);
+    today's plain browser never offers trains, so its V3 is in the aircraft mode.
+  - In the ships mode the status shows its loading bar while VesselFinder has not answered, as today's Tauri app
+    does (`isTauri()`); the plain browser shows none.
+  - The dev readout's frames per second.
+- **The ship fixture** (10 ships on the Göta älv): the list sorted by size with swatches, lengths, motion and the
+  old position's badge, icons in their type colours, the 296 m cargo ship drawn as its model at zoom 13.
+- **A selected flight**: the panel's strip, photo block with credit, route with times and badges, progress,
+  distances, tabs, facts, the gated sign-in note, the altitude chart and the footer; on a phone the summary in
+  the sheet with the top bar gone. Photos stay empty in shots (the image loader is the window's).
+- Kept in `/tmp/…/verify57/shots` during the review only (scratch).
+
+**Per item**
+
+| Item | Verdict | Evidence, and what differs from the row |
+|---|---|---|
+| T1 | done; one row line restated | 21 state tests on a fake clock and 4 for the demo trains. "A shorter answer does not replace a fuller set" is the blocks' rule (T5's); today's train list takes every answer it keeps. |
+| T2 | done | atlas test (every key a non-empty cell of its size); V3 `--demo` shot. Sidebar hover highlights (U14). |
+| T3 | done | zoom 16 `--demo`: each car within 0.4 px of length / mpp, the train 77.4 m, roof and side lit as the CPU twin; cars at zoom 13. Hover highlight wired by T8. |
+| T4 | done; legend drawn by this review | V3 coral, zoom 6 overview, speeds from made-up tiles (OpenRailwayMap answers 403 without the app's Referer; the backend sends it). No speed fixtures. |
+| T5 | done | `taken_blocks` hysteresis tests; the Arlanda fixture shot. |
+| T6 | done; row restated | route in today's black dashes on a light casing (G:2078), not `[55,142,240,210]`; no stop names (today draws discs). Ring and halo at the drawn place. |
+| T7 | done; row restated | today's rail map does not lift its bridges (deck's CARTESIAN z in metres, 0.15 mm), so neither does the port; the deck heights, ramps and `level_at` are tested. |
+| T8 | done | pick order ship → signal → train → labels → aircraft; tooltip texts against the spec strings. |
+| T9 | done (data only) | ground rails and platforms tessellated from tiles made in code (no committed OpenRailwayMap tile); drawn by R9. Dev sightings layer drawn. |
+| H1 | done | 20 state tests on a fake clock. |
+| H2 | done | atlas test; V6 fixture shot, hulls within 1° of their headings. |
+| H3 | done | V6 zoom 15: hulls within 0.7 px of length / mpp, lit as the CPU twin. |
+| H4 | done | halo and ring shot, pick tests through window events. |
+| U1 | done; fixed by this review | specimen shot; `.data` text now keeps Overpass Mono's own `·` (fix 3). |
+| U2 | done | icon sheet at 14–20 px, ink rises with the stroke; 15 shell icons on today's pixels. |
+| U3, U4 | done | widget galleries against Chromium's layout; token and key tests. |
+| U5 | done | round trip, schema, missing and corrupt files. Saving on suspend and exit on phones is a person check. |
+| U6 | done | shell shots; the height solver; `close_top`; the C key through window frames. |
+| U7 | done | 18 attribution conditions; the bar centred at 1440 and 1100. The weather credit waits for R11. |
+| U8 | done | debounce and stale-answer tests; dropdown shots against Chromium. |
+| U9 | done | list and filter shots; filters reach `core::filters` through actions. |
+| U10, U11 | done | loading, live, ended and every tab against Chromium; the gradient stops. |
+| U12 | done | chart shots; the four formats written through the backend to a temp folder. Reveal on a real desktop is a person check. |
+| U13 | done | arrivals and departures; "kept alive but hidden" test. |
+| U14, U15 | done | shots from the demo trains and the ship fixture, against Chromium. |
+| U16 | done | closed, layers, settings shots; toggles reach the settings. |
+| U17 | done | dialogs against Chromium; no inspector row. Import's file dialog is a person check. |
+| U18 | done | card shot; image cache tests against a local listener. |
+| U19 | done; **person check pending** | 390 × 844 at peek, half and full with 47/34 insets; device checklist in `device-notes.md` §8. |
+| U20 | done; **person check pending** | toast and dev panel shots; `desktop.rs` checked for the Windows, macOS and Linux targets, never run there. |
+| G1 | done; one decision for the owner | earcut.js's exact triangles everywhere; `earcutr` dropped. An empty hole now gives nothing (earcut.js throws) where B1 kept the outline; no caller makes one. |
+| P1 | partial | shots 2–12× faster (V2 dark 74 s → 6.4 s in release); tile 9/282/150 still 106 ms in earcut (target 30 ms), off the frame. |
+
+**Fixes made by this review**
+1. **Following a train or ship** (T1, H1, U6, U14, U15): `Camera::follow_vehicle` runs the page's effect and
+   `renderFrame`'s step 2 (G:3141-3177) before the transition step: Follow or C flies to where the vehicle is
+   drawn (at least zoom 13, 800 ms), then keeps it in the middle each frame (a drag comes back), the controller
+   locked and the scene rebuilt every frame; let go, the camera stays. `SceneBuilder::vehicle_at` reads the drawn
+   positions; `AppState::follow_vehicle`; two lines in `Engine::frame`. Test:
+   `scene_builder::trains::tests::a_followed_train_is_flown_to_then_kept_in_the_middle`.
+2. **The speed map's legend** (T4's data, G:3790-3859): `ui::speed_legend`, centred 26 px over the bottom (over
+   the sheet on phones), from the shown zoom 8, under the panels. Test for its place, chips and gating.
+3. **`.data` text's middle dot** (U1, as U18 and U20 found): `--font-data` has no "Middle Dot" face, so Chromium
+   draws Overpass Mono's own full-cell dot; `text::append` now narrows the dot only in `--font-ui` text (the airport
+   board's aircraft, registration and gate line was 3 px a dot too narrow; the hover card and the dev panel had
+   worked round it locally). U1's test changed to the corrected rule.
+4. **Shots stay offline** (H1's note): without `--fixture` the ships, the signal blocks, the follow stream and the
+   airport board have no source in a shot, as the aircraft already had none. V6 now shows today's "Couldn't reach
+   VesselFinder" instead of asking it.
+5. **`--ui`, `--mode`, `--select`** (screenshot only): the window's UI over the map, the settings' focus, a flight
+   selected at start; the UI's last frames a quarter of a second of egui's clock apart. Plan section 8's `--ui
+   <fixture name>` is this flag plus `--fixture`/`--demo`, not named fixtures.
+6. **Sign-in prompts** (U17's note to U10, U11): the overview's gated note and the route tab's Sign in call
+   `keys_dialog::prompt_sign_in`, so the email field takes the keyboard and focus returns on close.
+7. **Keys export reveal** (U20's note to U17): `BackendFeeds::reveal` calls `platform::reveal`.
+8. **Map error card fonts** (stages 3-4 gap 10): title Overpass 600, message Overpass Mono 400, buttons 550; its
+   test names those families.
+
+**Gaps** (each with the item that has it, and who should take it)
+1. **Text baseline** (U1's `text.rs`): egui puts text 0.3–1.2 px lower than Chromium at most sizes (Chromium rounds
+   ascent and descent and floors the half-leading). Seen in every UI shot; a per-size shift in `text.rs` would fix
+   it for all components at once. U12's `chart::css_shift` does it locally.
+2. **No tabular figures** (egui has no OpenType features): numbers in lists and panels are Overpass's own widths.
+3. **Times without a zone are UTC** in the panels, the chart and the dev panel: the app has no viewer time zone
+   (today uses the system's). Needs a small platform hook.
+4. **Speed map fixtures** (T4, T7, T9): no OpenRailwayMap tile is committed; the speed map, its bridges and the
+   ground rails are tested on tiles made in code only.
+5. **P1's archipelago tile** (106 ms in earcut, on the worker pool).
+6. **G1's empty-hole rule** is the owner's call (earcut.js's throw against B1's keep-the-outline).
+7. **Images in shots**: the http image loader is installed by the window only, so headless shots and tests show
+   empty photo blocks; the panels' module docs (U10, U14, U15) still say the photos read as failed until U18.
+8. **Dev readout on a notched phone** (U7, U19): measured from egui's safe area, so it sits under the notch.
+9. **Weather credit** (U7) waits for R11; the update toast's `Updater` for P3; the APK link for P4.
+10. Stages 3-4 gaps 3 (earcut, closed by G1), 6 (slow V2, explained and closed by P1) and 10 (error card fonts, fix
+    8) are closed; 4, 5, 7 and 8 stand (CI's lavapipe step runs with `continue-on-error`, so its green says nothing).
+
+**Plan text superseded by stages 5-7** (rows left as written; the code follows today's app):
+- T1: the shorter-answer rule belongs to the blocks (T5), not the train list.
+- T6: the route is black dashes on a light casing; stops are discs without names.
+- T7: the rail map's bridges stay on the ground, as deck draws today's (the structures data and `level_at` for
+  cars, icons and blocks are real heights).
+- 1.5: Overpass Mono has the weights 400, 500, 550, 600, 650 and 700 (the sources use them all); egui's default fonts
+  stay on as the last fallback; the middle dot is narrowed to today's width in UI text only.
+- 1.3 and S1.24: `geom::earcut` is a port of earcut 2.2.4, `earcutr` is gone (G1).
+- Section 8: the shell is drawn in shots only with `--ui`; UI tests build their state in code or with `--fixture`
+  folders, not named `--ui` fixtures.
+- Each finished item records its other deviations in its module docs.
+
+**Pending for the owner (person checks)**
+- The phone layout on an Android phone and an iPhone: `device-notes.md` §8 (U19), with E19's.
+- On Windows and macOS: links open in the browser, exported files and the keys export show in the file manager,
+  the keys import's file dialog (U12, U17, U20).
+- Following a train or ship in the window with live data (fix 1), and the hover card's photos and logos from the
+  real hosts (U18).
+- Everything under "Pending for the owner" in the stages 3-4 and stage 2 status (B8's input, B9's lost device).

@@ -608,7 +608,10 @@ pub fn show(ui: &mut Ui, view: &View<'_>, pass: &mut Pass<'_>) {
         paragraph(ui, runs_job(&explanation(view.route, &airac.ident), &style), style.line_px());
         if !view.authenticated {
             ui.add_space(STACK_GAP);
-            if Button::new().text(SIGN_IN).show(ui).clicked() {
+            let sign_in = Button::new().text(SIGN_IN).show(ui);
+            if sign_in.clicked() {
+                // `promptSignIn`: the email field takes the keyboard, the button gets it back (U17)
+                crate::ui::keys_dialog::prompt_sign_in(ui.ctx(), Some(sign_in.id));
                 pass.actions.push(Action::Open(Open::Keys, true));
             }
         }

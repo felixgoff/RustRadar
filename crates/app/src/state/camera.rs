@@ -14,9 +14,10 @@
 //!    it is handed with it, so the view is back at its first frame, and the 600 ms only keep the
 //!    app's other moves (a new lock, the terrain aim) off, as today.
 //!
-//! Step 2 (centring on a followed train or ship) belongs to items T1 and H1, which say when it is
-//! on with [`Camera::set_vehicle_locked`]; step 5 (the camera's aim easing to the ground's height
-//! under it, G:3204-3212) to item Z4, between steps 4 and 6.
+//! Step 2 (centring on a followed train or ship) is [`Camera::follow_vehicle`], which the frame
+//! runs before the transition step with where the scene builders last drew the vehicle; step 5
+//! (the camera's aim easing to the ground's height under it, G:3204-3212) belongs to item Z4,
+//! between steps 4 and 6.
 //!
 //! The scene is rebuilt every frame while locked close in (zoom above 7, no move of the app's
 //! running): [`super::AppState::locked_steady`] reads the controller's mode this step sets, and
@@ -63,6 +64,9 @@ pub struct Camera {
     selected: Option<LiveFlight>,
     /// Following a train or ship, once the camera has flown there (`vehicleLocked`).
     vehicle_locked: bool,
+    /// The page's `followingVehicle` as [`Self::follow_vehicle`] last saw it (its effect runs
+    /// when it changes).
+    vehicle_wanted: bool,
     /// How far the locked camera may tilt right now (`lockedMaxPitch`), as the last re-aim found.
     locked_max_pitch: f64,
     /// The last step was locked on an aircraft (`wasLocked`), to notice the lock ending.
@@ -79,6 +83,7 @@ impl Default for Camera {
             follow: false,
             selected: None,
             vehicle_locked: false,
+            vehicle_wanted: false,
             locked_max_pitch: FOLLOW_MAX_PITCH,
             was_locked: false,
             raised: false,
@@ -126,6 +131,39 @@ impl Camera {
     /// Whether a train or ship is followed ([`Self::set_vehicle_locked`]).
     pub fn vehicle_locked(&self) -> bool {
         self.vehicle_locked
+    }
+
+    /// Following a train or ship (`followVehicle`, G:3141-3177), before the transition step:
+    /// `wanted` is the page's `followingVehicle` (the key C or the panel's Follow with a train or
+    /// ship selected), `at` is `vehicleAt()`, where the followed train or ship is drawn now (none
+    /// while the camera follows an aircraft).
+    ///
+    /// - The effect, when `wanted` changes: turned on, the camera flies to `at` over 800 ms, at
+    ///   least to zoom 13 ([`rustradar_scene::controller::Controller::fly_to_vehicle`]), and is
+    ///   locked on the vehicle from then; turned off, it lets go. Turned on with nothing to fly
+    ///   to, nothing happens until it is turned on again, as today.
+    /// - `renderFrame`'s step 2: while locked and no move of the app's runs, the camera is kept
+    ///   on the vehicle (its centre set to `at`), which also brings a drag back to it at the next
+    ///   frame (today's `onViewStateChange` does it at the gesture's event).
+    pub fn follow_vehicle(&mut self, wanted: bool, at: Option<[f64; 2]>, controller: &mut rustradar_scene::controller::Controller, now_ms: f64) {
+        if wanted != self.vehicle_wanted {
+            self.vehicle_wanted = wanted;
+            if !wanted {
+                self.vehicle_locked = false;
+            } else if let Some([longitude, latitude]) = at {
+                controller.fly_to_vehicle(longitude, latitude, now_ms);
+                self.vehicle_locked = true;
+            }
+        }
+        if self.vehicle_locked
+            && now_ms > controller.transition_until()
+            && let Some([longitude, latitude]) = at
+        {
+            let view = controller.view();
+            if view.longitude != longitude || view.latitude != latitude {
+                controller.set_view(ViewState { longitude, latitude, ..view });
+            }
+        }
     }
 
     /// The flight the camera is locked on (`follow && selected`).

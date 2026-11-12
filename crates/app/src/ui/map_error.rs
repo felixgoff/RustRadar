@@ -34,9 +34,8 @@
 //!   `egui_winit::State`. `tests/map_error.rs` draws the card and the rebuild as such frames do,
 //!   and through `Engine` itself.
 //!
-//! Deviations, until the design system of stage 7 exists (U1: `ui::theme`, `ui::fonts`,
-//! `ui::widgets`): the text is in egui's own fonts (Overpass at weights 600 and 550, and Overpass
-//! Mono, come with `ui::fonts`), and "Copy details" names the app's version and system where
+//! The title is Overpass 600, the message Overpass Mono 400 and the buttons Overpass 550
+//! (`ui::fonts`, U1). Deviation: "Copy details" names the app's version and system where
 //! today names the browser (`Browser: <user agent>` → `System: RustRadar <version> (<os> <arch>)`)
 //! and the adapter where today names WebGL's vendor, renderer and versions.
 
@@ -47,6 +46,7 @@ use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Id, Pos2, Rect, Se
 use rustradar_map::MapRenderer;
 use rustradar_map::renderer::{MapError, Retry};
 
+use crate::ui::fonts::{self, Face};
 use crate::ui::theme;
 
 /// The card's title.
@@ -150,9 +150,9 @@ pub fn show(ctx: &egui::Context, error: &MapError, adapter: Option<&wgpu::Adapte
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
                     ui.set_width(width);
-                    text(ui, TITLE, TITLE_SIZE, FontFamily::Proportional, theme::TEXT_1, width);
+                    text(ui, TITLE, TITLE_SIZE, fonts::family(Face::Ui, 600), theme::TEXT_1, width);
                     ui.add_space(MESSAGE_ABOVE);
-                    text(ui, &error.message, MESSAGE_SIZE, FontFamily::Monospace, theme::TEXT_2, width);
+                    text(ui, &error.message, MESSAGE_SIZE, fonts::family(Face::Mono, 400), theme::TEXT_2, width);
                     ui.add_space(MESSAGE_BELOW);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(BUTTON_GAP, 0.0);
@@ -219,7 +219,7 @@ fn text(ui: &mut egui::Ui, text: &str, size: f32, family: FontFamily, color: Col
 /// `.button`: 32 px high, 12 px either side of its 13 px text, a 1 px `--line-control` border,
 /// radius 4, transparent; `--surface-hover` under the pointer.
 fn button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let format = TextFormat { font_id: FontId::new(BUTTON_TEXT_SIZE, FontFamily::Proportional), color: theme::TEXT_1, ..Default::default() };
+    let format = TextFormat { font_id: FontId::new(BUTTON_TEXT_SIZE, fonts::family(Face::Ui, theme::WEIGHT_BUTTON)), color: theme::TEXT_1, ..Default::default() };
     let galley = ui.painter().layout_job(LayoutJob::single_section(label.to_string(), format));
     let size = Vec2::new(galley.size().x + 2.0 * BUTTON_PADDING + 2.0 * BORDER, BUTTON_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
@@ -345,9 +345,10 @@ mod tests {
                     .filter_map(|c| if let Shape::Text(t) = &c.shape { Some(&t.galley.job.sections[0].format.font_id) } else { None })
                     .map(|f| (f.family.clone(), f.size))
                     .collect();
-                assert_eq!(fonts[0], (FontFamily::Proportional, 14.0));
-                assert_eq!(fonts[1], (FontFamily::Monospace, 12.0));
-                assert_eq!(fonts[2], (FontFamily::Proportional, 13.0));
+                // `.map-error .title` at 600, the message in Overpass Mono 400, `.button` at 550
+                assert_eq!(fonts[0], (FontFamily::Name("ui-600".into()), 14.0));
+                assert_eq!(fonts[1], (FontFamily::Name("mono-400".into()), 12.0));
+                assert_eq!(fonts[2], (FontFamily::Name("ui-550".into()), 13.0));
                 // the card's own fill and border
                 let surface = out.shapes.iter().any(|c| matches!(&c.shape, Shape::Rect(r) if r.fill == theme::SURFACE && r.stroke.color == theme::LINE));
                 assert!(surface, "a --surface card with a --line border");

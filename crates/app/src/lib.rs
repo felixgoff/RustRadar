@@ -36,7 +36,8 @@ use crate::state::Startup;
 /// The command line (plan section 8).
 pub const USAGE: &str = "usage: rustradar-app [--view LAT,LON,ZOOM[,PITCH[,BEARING]]] [--basemap dark|satellite|realistic]
                      [--size WIDTHxHEIGHT] [--now UNIX_MS] [--fixture DIR] [--demo]
-                     [--screenshot FILE.png [--scale FACTOR] [--wait SECONDS]]
+                     [--screenshot FILE.png [--scale FACTOR] [--wait SECONDS] [--ui] [--select ID]
+                     [--mode aircraft|trains|ships]]
 
   --view        open the map there (degrees; zoom as deck.gl's; pitch and bearing default to 0)
   --basemap     the basemap to show instead of the saved one
@@ -47,7 +48,10 @@ pub const USAGE: &str = "usage: rustradar-app [--view LAT,LON,ZOOM[,PITCH[,BEARI
   --screenshot  draw one frame without a window into this PNG, and exit
   --scale       the shot's device pixels per CSS pixel (default 1)
   --wait        how long a shot waits for the map's tiles before it is taken anyway (default
-                $RUSTRADAR_SHOT_WAIT, else 30 s in a release build, 60 s in a debug build)";
+                $RUSTRADAR_SHOT_WAIT, else 30 s in a release build, 60 s in a debug build)
+  --ui          the shot draws the UI over the map as the window does (default: the map alone)
+  --select      the shot opens with this flight selected (its id as the fixture's files name it)
+  --mode        the shot's focus, as if saved in the settings (default: aircraft)";
 
 /// The canvas of a shot without `--size`, CSS pixels.
 pub const SHOT_SIZE: [u32; 2] = [1100, 720];
@@ -73,6 +77,15 @@ pub struct Options {
     pub screenshot: Option<PathBuf>,
     /// `--wait`: how long a shot waits for loading layers (`headless::max_wait` without it).
     pub wait: Option<std::time::Duration>,
+    /// `--ui`: the shot draws the shell, panels and controls as the window does
+    /// ([`app::Engine::shell`]; plan section 8's `--ui`, with the state from `--fixture`, `--demo`
+    /// and `--select` rather than named fixtures).
+    pub ui: bool,
+    /// `--select`: the flight a shot opens with selected, as a click on it selects it.
+    pub select: Option<u32>,
+    /// `--mode`: a shot's focus, as a saved `settings.json` would give it (the reference pictures'
+    /// `mode`, docs/port/reference/README.md).
+    pub mode: Option<rustradar_core::settings::Mode>,
 }
 
 /// Why the command line was not taken.
@@ -159,6 +172,21 @@ impl Options {
                         .ok_or_else(|| bad(format!("--wait wants seconds, e.g. 30, not {v:?}")))?;
                     options.wait = Some(wait);
                 }
+                "--ui" => options.ui = true,
+                "--mode" => {
+                    use rustradar_core::settings::Mode;
+                    let v = value()?;
+                    options.mode = Some(match v.as_str() {
+                        "aircraft" => Mode::Aircraft,
+                        "trains" => Mode::Trains,
+                        "ships" => Mode::Ships,
+                        _ => return Err(bad(format!("--mode wants aircraft, trains or ships, not {v:?}"))),
+                    });
+                }
+                "--select" => {
+                    let v = value()?;
+                    options.select = Some(v.parse().map_err(|_| bad(format!("--select wants a flight's id, e.g. 1001, not {v:?}")))?);
+                }
                 "-h" | "--help" => return Err(ArgsError::Help),
                 _ => return Err(bad(format!("unknown argument {flag:?}"))),
             }
@@ -168,6 +196,9 @@ impl Options {
         }
         if options.wait.is_some() && options.screenshot.is_none() {
             return Err(bad("--wait is for --screenshot".into()));
+        }
+        if (options.ui || options.select.is_some() || options.mode.is_some()) && options.screenshot.is_none() {
+            return Err(bad("--ui, --select and --mode are for --screenshot; the window always draws the UI and keeps the saved mode".into()));
         }
         Ok(options)
     }
@@ -299,6 +330,22 @@ mod tests {
             assert!(bad(&["--screenshot", "a.png", "--wait", wrong]).contains("--wait wants seconds"), "{wrong:?}");
         }
         assert!(bad(&["--wait", "10"]).contains("--screenshot"));
+    }
+
+    /// `--ui` and `--select`: a shot with the window's UI over the map, a flight selected.
+    #[test]
+    fn a_shot_may_draw_the_ui_with_a_flight_selected() {
+        let o = parse(&["--screenshot", "a.png", "--ui", "--select", "1001"]).expect("parsed");
+        assert!(o.ui);
+        assert_eq!(o.select, Some(1001));
+        assert!(!parse(&["--screenshot", "a.png"]).expect("parsed").ui);
+        assert!(bad(&["--screenshot", "a.png", "--select", "KLM76F"]).contains("--select wants a flight's id"));
+        assert!(bad(&["--ui"]).contains("--screenshot"));
+        assert!(bad(&["--select", "7"]).contains("--screenshot"));
+        let o = parse(&["--screenshot", "a.png", "--mode", "ships"]).expect("parsed");
+        assert_eq!(o.mode, Some(rustradar_core::settings::Mode::Ships));
+        assert!(bad(&["--screenshot", "a.png", "--mode", "boats"]).contains("aircraft, trains or ships"));
+        assert!(bad(&["--mode", "trains"]).contains("--screenshot"));
     }
 
     #[test]

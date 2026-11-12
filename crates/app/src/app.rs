@@ -33,7 +33,7 @@ use crate::input::{self, KeyGate, MapInput};
 use crate::requests::{self, Requests, WakeLatch};
 use crate::scene_builder::{Pacer, SceneBuilder};
 use crate::state::{Action, AppState, Clock};
-use crate::ui::{attribution, dev_panel, export_menu, hover_card, keys_dialog, map_controls, map_error, modebar, phone, shell, shortcuts, theme, toast, tooltip};
+use crate::ui::{attribution, dev_panel, export_menu, hover_card, keys_dialog, map_controls, map_error, modebar, phone, shell, shortcuts, speed_legend, theme, toast, tooltip};
 use crate::{Options, images, platform, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
@@ -208,6 +208,9 @@ impl Engine {
         }
         // the click and double click whose 300 ms are up, before the camera moves (B8)
         self.input.update(&mut self.state.controller, local_ms);
+        // following a train or ship: flown to, then kept in the middle where it was last drawn
+        let vehicle = self.scene.vehicle_at(&self.state);
+        self.state.follow_vehicle(vehicle, local_ms);
         let (_, camera_wants) = self.state.advance_camera(local_ms);
         wants.merge(camera_wants);
         // hover and clicks against the scene the map draws, before the scene refresh (A9): a new
@@ -377,10 +380,13 @@ fn ui_pass(ui: &mut egui::Ui, state: &AppState, local_ms: f64, actions: &mut Vec
     map_controls::escape(ui.ctx(), state, actions);
     // and the altitude chart's export menu, before the page's Escape closes the panel (U12)
     export_menu::escape(ui.ctx());
+    // `--sheet-h`: the phone's sheet's height, 0 on the desktop
+    let mut sheet_height = 0.0;
     if phone {
         // the page's keys, the top bar, the sheet with the list or the details, the rail, the
         // credits on the sheet (U19)
-        phone::ui(ui.ctx(), state, local_ms, actions);
+        let placed = phone::ui(ui.ctx(), state, local_ms, actions);
+        sheet_height = placed.and_then(|p| p.sheet).map_or(0.0, |s| s.height);
     } else {
         shell::ui(ui.ctx(), state, local_ms, actions);
         // the map controls and their menu, after the panels (U16)
@@ -388,6 +394,8 @@ fn ui_pass(ui: &mut egui::Ui, state: &AppState, local_ms: f64, actions: &mut Vec
         // the credits along the bottom, and the view's readout in debug builds (U7)
         attribution::ui(ui.ctx(), state, local_ms);
     }
+    // the speed map's legend along the bottom of the map, under the panels (T4's data)
+    speed_legend::ui(ui.ctx(), state, sheet_height);
     // the update offer at the bottom left, over the panels (U20)
     toast::ui(ui.ctx(), state);
     // the modal dialogs over everything: the shortcuts' help and the keys (U17)

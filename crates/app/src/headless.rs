@@ -11,7 +11,9 @@
 //! second apart (an egui area is invisible on its first frame, spike pitfall 9). Only the last
 //! frame is drawn ([`Engine::draw`]): the others poll, build the scene, run egui and prepare the
 //! map as a drawn frame does, but nobody sees their picture, and on SwiftShader a map pass can
-//! take seconds (P1: V2's dark map, about five).
+//! take seconds (P1: V2's dark map, about five). With `--ui` the shot draws the window's UI over
+//! the map ([`Engine::shell`]), its last frames a quarter of a second of egui's clock apart for
+//! the UI to settle; `--select` opens it with a flight selected, `--mode` with that focus.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,6 +29,10 @@ use rustradar_scene::camera::ViewState;
 use crate::app::{Engine, start_backend};
 use crate::requests::{self, Requests, no_wake};
 use crate::state::aircraft::Aircraft;
+use crate::state::airport::Airport;
+use crate::state::blocks::Blocks;
+use crate::state::flight::{Flight, SelectOptions};
+use crate::state::ships::Ships;
 use crate::state::liveries::Liveries;
 use crate::state::taxiways::Taxiways;
 use crate::state::{AppState, Clock, system_now_ms};
@@ -113,10 +119,26 @@ pub fn render_on_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppS
         state.aircraft = Aircraft::with_feeds(None);
         state.liveries = Liveries::with_source(None);
         state.taxiways = Taxiways::with_source(None);
+        // nor do the ships (VesselFinder), the signal blocks, a selected flight's stream and the
+        // airport board (H1, T5, A8, U13): each shows what it shows with no source
+        state.ships = Ships::with_feeds(None);
+        state.blocks = Blocks::with_feed(None);
+        state.flight = Flight::with_feeds(None);
+        state.airport = Airport::with_feeds(None);
+    }
+    // --mode: the focus as a saved settings file would give it
+    if let Some(mode) = options.mode {
+        state.persisted.settings.mode = mode;
+    }
+    // --select: the flight selected at start, as a click selects it (no fly-to)
+    if let Some(id) = options.select {
+        state.select_flight(Some(id), SelectOptions::default(), options.now_ms.unwrap_or_else(system_now_ms));
     }
     setup(&mut state);
 
     let mut engine = Engine::new(gpu, FORMAT, state);
+    // --ui: the shell, the panels and the controls over the map, as the window draws them
+    engine.shell = options.ui;
     // the shot's tiles, never the network's; the frames are drawn in a loop: nothing to wake
     let tiles = tile_fetcher::shot_tiles(options);
     match &tiles {
@@ -165,8 +187,11 @@ pub fn render_on_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppS
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    for egui_time in [1.0, 2.0] {
-        engine.draw = egui_time == 2.0;
+    // with the UI, a quarter of a second of egui's clock a frame for its parts to settle (the
+    // sidebar's heights, the sheet's summary and easing, the controls following it: U6, U19)
+    let egui_times: &[f64] = if options.ui { &[1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0] } else { &[1.0, 2.0] };
+    for (i, &egui_time) in egui_times.iter().enumerate() {
+        engine.draw = i + 1 == egui_times.len();
         engine.frame(gpu, target.view(), surface, scale, input(egui_time), clock.now_ms());
         poll(gpu)?;
     }

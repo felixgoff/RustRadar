@@ -40,6 +40,7 @@ pub mod shell;
 pub mod ship_panel;
 pub mod shortcuts;
 pub mod sidebar;
+pub mod speed_legend;
 pub mod text;
 pub mod theme;
 pub mod toast;

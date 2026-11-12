@@ -202,7 +202,10 @@ pub fn show(ui: &mut Ui, id: Id, view: &View<'_>, pass: &mut Pass<'_>, parts: &P
     panel::facts(ui, 3, panel::FACTS_GAP, facts(view, &values));
     if !values.gated.is_empty() {
         ui.add_space(STACK_GAP);
-        if gated_note(ui, id, &values.gated).clicked() {
+        let note = gated_note(ui, id, &values.gated);
+        if note.clicked() {
+            // `promptSignIn`: the email field takes the keyboard, the note gets it back (U17)
+            crate::ui::keys_dialog::prompt_sign_in(ui.ctx(), Some(note.id));
             pass.actions.push(Action::Open(Open::Keys, true));
         }
     }

@@ -427,6 +427,15 @@ impl AppState {
         wants
     }
 
+    /// Following a train or ship (the page's `followingVehicle`: the trains' or the ships' follow
+    /// flag), before [`Self::advance_camera`]: [`camera::Camera::follow_vehicle`] with `at`, where
+    /// the followed vehicle is drawn now
+    /// ([`crate::scene_builder::SceneBuilder::vehicle_at`]).
+    pub fn follow_vehicle(&mut self, at: Option<[f64; 2]>, local_ms: f64) {
+        let wanted = self.trains.following() || self.ships.following();
+        self.camera.follow_vehicle(wanted, at, &mut self.controller, local_ms);
+    }
+
     /// Step 3: advances the running transition, then the camera's own work. Returns whether the
     /// camera moved, and what [`camera`] wants.
     pub fn advance_camera(&mut self, local_ms: f64) -> (bool, Wants) {

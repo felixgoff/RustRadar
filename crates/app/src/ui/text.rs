@@ -13,7 +13,10 @@
 //!   system dots' (0.27–0.33 em), which would widen every separator by 4 px at 13 px; so the dot
 //!   is narrowed to [`DOT_ADVANCE_EM`] with its ink centred (the dot moved left and the text after
 //!   it pulled in, by `leading_space`), as wide as the reference pictures' dot. Deviation from
-//!   plan 1.5's "a fixed advance": the advance is today's, not Mono's.
+//!   plan 1.5's "a fixed advance": the advance is today's, not Mono's. Only `--font-ui` text
+//!   takes this dot: `--font-data` lists no "Middle Dot" face (app.css:44-45), so Chromium draws
+//!   a `.data` text's `·` from Overpass Mono itself, in its weight and spacing, a full cell wide,
+//!   and [`append`] leaves it so.
 //! - **Truncation**: `white-space: nowrap; overflow: hidden; text-overflow: ellipsis` is
 //!   [`truncated`]: one row, cut at any character, `…` at the end, within the width.
 //!
@@ -128,10 +131,15 @@ impl Style {
     }
 }
 
-/// Appends `text` in `style` to `job`, each [`MIDDLE_DOT`] as its own section in
-/// [`dot_family`], narrowed to [`DOT_ADVANCE_EM`] round its ink.
+/// Appends `text` in `style` to `job`, each [`MIDDLE_DOT`] of a `--font-ui` text as its own
+/// section in [`dot_family`], narrowed to [`DOT_ADVANCE_EM`] round its ink (a `--font-data`
+/// text keeps Overpass Mono's own dot, as today).
 pub fn append(job: &mut LayoutJob, text: &str, style: &Style) {
     let format = style.format();
+    if style.face == Face::Mono {
+        push(job, text, format);
+        return;
+    }
     let mut rest = text;
     while let Some(at) = rest.find(MIDDLE_DOT) {
         if at > 0 {
@@ -276,11 +284,12 @@ mod tests {
         assert_eq!(two.sections.last().map(|s| s.leading_space), Some(-squeeze));
         assert_eq!(sections(&job("plain", &style)), [("plain", "ui-650".to_string())]);
         assert_eq!(job("", &style).sections.len(), 1, "an empty text still has its format (its line box)");
-        // in data text too, without its letter spacing
+        // not in data text: `--font-data` has no "Middle Dot" face, so its dot is Overpass Mono's
+        // own, in the text's weight and letter spacing (one section, nothing pulled in)
         let data = job("12 · 34", &Style::data(12.0, 600, theme::TEXT_1));
-        assert_eq!(data.sections[0].format.font_id.family, FontFamily::Name("mono-600".into()));
+        assert_eq!(sections(&data), [("12 · 34", "mono-600".to_string())]);
         assert!((data.sections[0].format.extra_letter_spacing + 0.12).abs() < 1e-6);
-        assert_eq!(data.sections[1].format.extra_letter_spacing, 0.0);
+        assert_eq!(data.sections[0].leading_space, 0.0);
     }
 
     #[test]

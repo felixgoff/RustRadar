@@ -251,6 +251,56 @@ mod tests {
         assert_eq!(build(&mut state, &mut builder, NOW_MS + 1050.0).trains.route, train_route::Input::default());
     }
 
+    /// Following a train (the key C or the panel's Follow; G:3141-3177): the camera flies to where
+    /// it is drawn, at least to zoom 13 over 800 ms, then keeps it in the middle as it runs on, as
+    /// the window's frame does it (where the last refresh drew it, then the camera's step, then
+    /// the refresh); let go, the camera stays where it is and is free again.
+    #[test]
+    fn a_followed_train_is_flown_to_then_kept_in_the_middle() {
+        let mut state = demo_state(V3);
+        let train = state.trains.on_map().get(0).cloned().expect("Skånetrafiken's demo train");
+        state.select_train(Some(train.clone()), NOW_MS);
+        state.poll(NOW_MS);
+        let mut builder = SceneBuilder::default();
+        build(&mut state, &mut builder, NOW_MS);
+        assert_eq!(builder.vehicle_at(&state), None, "not followed");
+        assert!(state.toggle_following(NOW_MS));
+        assert_eq!(builder.vehicle_at(&state), Some([train.lon, train.lat]), "drawn at its report so far");
+        let frame = |state: &mut AppState, builder: &mut SceneBuilder, t: f64| {
+            let at = builder.vehicle_at(state);
+            state.follow_vehicle(at, t);
+            state.advance_camera(t);
+            build(state, builder, t);
+        };
+        frame(&mut state, &mut builder, NOW_MS);
+        assert!(state.camera.vehicle_locked() && state.controller.locked() && state.controller.in_transition());
+        let mut t = NOW_MS;
+        while t < NOW_MS + 2000.0 {
+            t += 50.0;
+            frame(&mut state, &mut builder, t);
+        }
+        // in the middle: where the last refresh drew it, which has run on from its report
+        let at = builder.vehicle_at(&state).expect("followed");
+        assert_ne!(at, [train.lon, train.lat], "it ran on");
+        state.follow_vehicle(Some(at), t + 50.0);
+        let v = state.controller.view();
+        assert_eq!([v.longitude, v.latitude], at);
+        assert!((v.zoom - 13.0).abs() < 1e-6, "flown in to zoom 13: {}", v.zoom);
+        assert!(state.locked_steady(t + 50.0), "the scene is rebuilt every frame");
+        // a drag away comes back to it at the next frame
+        state.controller.set_view(ViewState { longitude: at[0] + 0.01, ..v });
+        state.follow_vehicle(Some(at), t + 60.0);
+        assert_eq!(state.controller.view().longitude, at[0]);
+        // let go: the camera stays and is free
+        assert!(state.toggle_following(t + 70.0));
+        let held = state.controller.view();
+        frame(&mut state, &mut builder, t + 100.0);
+        frame(&mut state, &mut builder, t + 150.0);
+        assert_eq!(builder.vehicle_at(&state), None);
+        assert!(!state.camera.vehicle_locked() && !state.controller.locked());
+        assert_eq!(state.controller.view(), held);
+    }
+
     /// Canned train feeds: the key "ok", `list` in view, `route` for every train, every answer at
     /// once; counts the route requests.
     struct Feeds {

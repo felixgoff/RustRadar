@@ -46,17 +46,23 @@ fn tile_at(lat: f64, lon: f64, z: u32) -> TileIndex {
 }
 
 /// E16 held V3 to V6 under 40 MB; T3 added the dark and satellite views of stages 3 and 4 within
-/// 60 MB (`cargo xtask fixtures`' budget).
+/// 60 MB; X1 the tiles and data of stages 8 to 10 within 80 MB, the tiles and the data beside
+/// them together (`cargo xtask fixtures`' budget).
 #[test]
-fn the_set_stays_under_60_mb() {
+fn the_set_stays_under_80_mb() {
     let bytes = file_bytes(&fixtures_dir());
-    assert!(bytes < 60_000_000, "{bytes} bytes");
+    assert!(bytes < 80_000_000, "{bytes} bytes");
+    let all = file_bytes(fixtures_dir().parent().unwrap());
+    assert!(all < 80_000_000, "{all} bytes with the data");
 }
 
 #[test]
-fn the_set_holds_the_five_sources_and_a_notice() {
+fn the_set_holds_its_sources_and_a_notice() {
     let tiles = FixtureTiles::new();
-    assert_eq!(tiles.sources(), ["esri", "openfreemap", "rainviewer", "streets-gl", "terrarium"]);
+    assert_eq!(
+        tiles.sources(),
+        ["esri", "mapterhorn", "nmd", "openfreemap", "openrailwaymap", "rainviewer", "streets-gl", "terrarium", "worldcover"]
+    );
     let notice = fs::read_to_string(fixtures_dir().join("NOTICE")).unwrap();
     for source in tiles.sources() {
         assert!(notice.contains(&format!("\n{source}/\n")), "the NOTICE says nothing of {source}");

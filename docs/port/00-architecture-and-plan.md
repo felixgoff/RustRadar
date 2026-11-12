@@ -2067,3 +2067,82 @@ controls); then the ship fixture at V6, a selected flight (the backend's wire sa
 - Following a train or ship in the window with live data (fix 1), and the hover card's photos and logos from the
   real hosts (U18).
 - Everything under "Pending for the owner" in the stages 3-4 and stage 2 status (B8's input, B9's lost device).
+
+---
+
+## Fixtures for stages 8-10 (X1)
+
+Item X1 (new): the offline data the realistic map, terrain and weather radar items need for their tests and
+acceptance shots, fetched by `cargo xtask fixtures` (`crates/xtask/src/fixtures.rs`, extended from E16/T3) on
+2026-11-12 and committed in `crates/map/tests/data`.
+
+**Budget.** `BUDGET_BYTES` is now **80 MB for the whole data folder** (tiles and the data beside them; E16 40 MB,
+T3 60 MB for the tiles alone). The committed set is 76.9 MB: 54.6 MB before X1, 22.3 MB added. Trimmed to get
+there: the new views are covered at one canvas size only (the shot default 1100 × 720, the terrain views
+800 × 500), the hillshade-only Alps view takes no 3D surface, the 3D surface's tiles are those of its settled
+state only (raised camera, elevation range up to the peak), canopy heights, close-up land cover and Overture only
+for the 3 × 3 tree tiles round three views' centres. `crates/map/tests/fixture_tiles.rs` (E16's checks of the
+set) now names the nine tile sources and the 80 MB budget.
+
+**Layout.** `--fixture crates/map/tests/data` reads both halves (`tile_fetcher::fixture_tiles` takes `tiles/`).
+
+- `tiles/<source>/<z>/<x>/<y>.<ext>` as before (`io::DirTiles`; an empty `.none` is a 404/204), with
+  `tiles/NOTICE`. New sources: `mapterhorn` (`.webp`), `openrailwaymap` (`.pbf`, the map's `RAIL_TILES`
+  name), `nmd` and `worldcover` (`.png`, the land cover pictures as the servers send them, not class grids;
+  `worldcover/register.json` is the Planetary Computer registration that gave the mosaic id).
+- Beside it, with `NOTICE`: `clouds/`, `canopy/`, `overture/`, `radar/`.
+
+**New views** (`fixtures.rs`; lat, lon, zoom, pitch, bearing):
+
+| List | Views | Size | Sources | For |
+|---|---|---|---|---|
+| `RADAR_VIEWS`, `PITCHED_RADAR_VIEWS` | V2; V2 at pitch 45 | 3 sizes; 1100 × 720 | RainViewer | W1–W3 (pitch 10 has no lifted layers, so V2 flat serves "at 10 none") |
+| `REALISTIC_VIEWS` | V4, V5 | 3 sizes | OpenFreeMap with both LODs, Streets GL (LODs, trees), OpenRailwayMap tracks and platforms, NMD + WorldCover | R2–R9 against `realistic-v4/-v5`; V5 shows Stockholm Central's tracks at its left edge |
+| `CLOSE_UP_VIEWS` | Humlegarden (59.3398, 18.0727, 16, 45, 20); Stockholm C (59.3311, 18.0573, 16, 45, 0) | 1100 × 720 | as above | R7's park, R9's station |
+| `RELIEF_VIEWS` | Alps (46.0, 7.75, 9.45, 0, 0) | 1100 × 720 | OpenFreeMap, Esri, terrarium z10 | R12 on all three basemaps |
+| `TERRAIN_VIEWS` | Zermatt (46.0207, 7.7491, 16, 60, 0) | 800 × 500 | OpenFreeMap, Streets GL, terrarium, Mapterhorn z11–16 + the z12 ground tile | Z2–Z4 on any map |
+| `SKYLINE_VIEWS` | Zermatt skyline (same, pitch 75) | 800 × 500 | terrarium, Mapterhorn z10–16 | Z1 on the realistic map |
+
+The terrain views carry `ground` 1608 m (the target raised with the terrain on, Z4) and `peak` 4634 m (the
+terrain's `zRange` once loaded): the 2D layers are covered from both cameras, the surface from the raised one.
+
+**What each file is for.**
+
+| Files | Count, size | For | Notes |
+|---|---|---|---|
+| `tiles/mapterhorn` | 76, 12.3 MB | Z1–Z4 | Switzerland has Mapterhorn tiles to z16, so no tile fell back to Mapzen (the fallback rule is in the downloader and the plan check: a `.none` here pulls terrarium's same `z/x/y` up to z15) |
+| `tiles/terrarium` (new tiles) | +23 | R12, Z1–Z4 hillshade | |
+| `tiles/openfreemap`, `streets-gl`, `esri` (new tiles) | +36, +31, +12 | the Alps, Zermatt, the close-ups | same OpenFreeMap build as the set (`20261101_080013_pt`) |
+| `tiles/openrailwaymap` | 60 (39 `.none`), 0.1 MB | R9; also the first committed rail tiles (stages 5-7 gap 4) | tracks z12 at the realistic views, platforms z15 within 4 km; fetched through `backend::rail::tile`, so with the app's own identification |
+| `tiles/nmd`, `tiles/worldcover` | 66 + 67, 0.9 MB | R8 decode tests and the land cover layer; the close-up tree tiles' land | Swedish tiles hold both pictures (today asks WorldCover where NMD has nothing); z14 of V4, V5 and the close-ups, z16 for the close-up tree tiles |
+| `tiles/rainviewer` (new tiles) | +125 | W1–W3 at V2 | the set's frame of 2026-11-10 16:30 is still served, so V2 has the same frame as V3–V6. A later top-up whose frame is gone refetches the whole folder from the day's frame |
+| `clouds/worldcloudmap_ir108.jpg` + `.json` | 0.7 MB | R10 | 4096 × 1934, fetched 2026-11-12 01:23 UTC |
+| `canopy/1200312213.json`, `canopy/1200312213/<start>-<end>.bin` | 26 ranges, 0.56 MB | R7 | the COG's head (all IFDs, 64 KiB at least) and the internal tiles under the windows `canopy(tile)` reads for 25 z16 tiles (the 3 × 3 round V5, Humlegården and Stockholm C). A fixture reader serves a read lying within one recorded range of the JSON's `ranges`, else fails |
+| `overture/buildings.pmtiles`, `catalog.json` | 4 tiles, 0.35 MB | R6 | release 2026-10-21.0; z14 tiles 9013–9014 × 4817–4818 (under the close-ups); PMTiles v3, one gzip root directory, no leaves, metadata and tiles copied as stored (tiles gzip'd MVT, layers `building`, `building_part`) |
+| `radar/mrms/` | 1.2 MB | W4 | `volume.json` is `radar_volumes`' `RadarVolume` (scan 2026-11-12 01:22, 12 heights); `ground.bin`, `coverage.bin` (700 × 350) and `<km>.bin` are `radar_image`'s blobs in `radar::contour`'s encoding, made by `backend::mrms::fetch` itself |
+| `radar/dwd/` | 0.15 MB | a future DWD decoder | see below |
+
+**Not fetched, and the stand-ins.** No host was refused by the proxy.
+- **NVDB road widths (R9)**: today's app asks Trafikverket's API with the user's own key; a key must never be
+  in the fixtures, and none is in this container. R9 should build `RoadPiece` lists in its tests (a straight
+  piece over a fixture road's centre line, a known width and paved flag) and leave shots without widths (what
+  today's app draws without a key).
+- **DWD (W4)**: today's `backend::dwd::fetch` cannot load anything any more. DWD's folder now holds
+  `composite_wn_<date>_<time>.tar` (uncompressed) of ODIM HDF5 members, not the `WN*.tar.bz2` RADOLAN runs the
+  backend looks for ("no WN composite published"; checked 2026-11-12, today's Tauri app has the same failure).
+  `radar/dwd/` keeps the newest run's analysis member as it came (`composite_wn_20261112_0120_000-hd5`, with
+  `source.json`) for whoever teaches the backend the new format. W4's shot should use the MRMS volume; a DWD test
+  needs a volume built in code through `radar::contour` from a made-up grid. Needs an owner (new item).
+- Canopy and land cover for the other tree tiles of V5 (about 150) are not held (8 MB): there the trees are
+  planted without surroundings (`plantTile`'s null land and canopy), unlike the reference picture.
+
+**Traps.**
+- Shots of the terrain views must use `--size 800x500`; other sizes miss tiles at the edges.
+- The Z1 row asks for a silhouette at pitch 60: impossible, the top of deck's view (fovy 36.87°) is 11.6° below
+  the horizontal at 60°. The skyline view is at the realistic map's 75° (row restated).
+- The fixture plan picks the realistic map's terrain-on selection from the settled state; a shot's first frames
+  ask for other tiles (sea-level `zRange`, the target not yet raised) that `DirTiles` notes as misses.
+- `xtask` now depends on `rustradar-backend`, `tokio`, `reqwest` and `flate2` (section 1.1 said core only):
+  OpenRailwayMap's tiles and the MRMS volume are fetched through the backend's own code, and PMTiles
+  directories are gzip'd.
+- `cargo xtask fixtures` keeps OpenFreeMap's build; `--missing` lists what the set lacks, tiles and data alike.

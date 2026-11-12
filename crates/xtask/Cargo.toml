@@ -10,6 +10,13 @@ publish = false
 rustradar-core = { workspace = true }
 # The fixtures' tiles are the ones the map's tile selection asks for.
 rustradar-scene = { workspace = true }
+# The fixtures OpenRailwayMap's tiles and the measured radar volumes are fetched as the app
+# fetches them, through the backend's own code (on a runtime of its own, with a client of its own).
+rustradar-backend = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+# PMTiles directories are gzip'd (the Overture extract).
+flate2 = { workspace = true }
 wuff = { workspace = true }
 resvg = { workspace = true }
 serde_json = { workspace = true }

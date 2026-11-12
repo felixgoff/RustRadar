@@ -1,27 +1,38 @@
-Tile fixtures of crates/map (docs/port/00-architecture-and-plan.md, items E16 and T3, section 8)
+Tile fixtures of crates/map (docs/port/00-architecture-and-plan.md, items E16, T3 and X1, section 8)
 
 Downloaded by `cargo xtask fixtures` (crates/xtask/src/fixtures.rs) on 2026-11-10 16:31 UTC.
-Topped up on 2026-11-10 18:52 UTC with the planned tiles the set lacked, from the same
-OpenFreeMap build and RainViewer frame (the tiles held before were left as they were).
+Topped up on 2026-11-12 01:24 UTC with the planned tiles the set lacked, from the same
+OpenFreeMap build (the tiles held before were left as they were).
 Each folder holds one source's tiles as <z>/<x>/<y>.<ext>, the bytes the server sent with the
 HTTP compression undone; an empty <y>.none marks a tile the server had nothing for (404/204).
 They hold every tile the map's tile selection asks for at these views (the plan's section 8 and
-the shots of its stages 3 and 4; lat, lon, zoom, pitch, bearing) at 1100x720, 1440x900 and
-390x844 CSS pixels, of the sources named, and OpenFreeMap's world at zooms 0 to 2:
-  V3 (59.33, 18.07, 9, 0, 0): every source below
-  V4 (59.6519, 17.9186, 13.5, 45, 30): every source below
-  V5 (59.3293, 18.0686, 15.5, 60, 20): every source below
-  V6 (57.7, 11.93, 13, 0, 0): every source below
-  V1 (35, 10, 1.9, 0, 0): openfreemap, esri
-  V2 (52, 10, 4.5, 0, 0): openfreemap, esri
-  V7 (78.2, 15.6, 6, 0, 0): openfreemap, esri
-  V8 (0, 179.5, 3, 0, 0): openfreemap, esri
-  V3 at 11.9 (59.33, 18.07, 11.9, 0, 0): openfreemap
-  V3 at 12.1 (59.33, 18.07, 12.1, 0, 0): openfreemap
-  V4 at 11.9 (59.6519, 17.9186, 11.9, 45, 30): openfreemap
-  V4 at 12.1 (59.6519, 17.9186, 12.1, 45, 30): openfreemap
-  B5 night (0, 180, 1.9, 0, 0): openfreemap
-  B5 day (0, 0, 1.9, 0, 0): openfreemap
+the shots of its stages 3 to 10; lat, lon, zoom, pitch, bearing) at the canvas sizes in CSS
+pixels named, of the sources named, and OpenFreeMap's world at zooms 0 to 2:
+  V3 (59.33, 18.07, 9, 0, 0) at 1100x720, 1440x900, 390x844: openfreemap, streets-gl, esri, terrarium, rainviewer
+  V4 (59.6519, 17.9186, 13.5, 45, 30) at 1100x720, 1440x900, 390x844: openfreemap, streets-gl, esri, terrarium, rainviewer
+  V5 (59.3293, 18.0686, 15.5, 60, 20) at 1100x720, 1440x900, 390x844: openfreemap, streets-gl, esri, terrarium, rainviewer
+  V6 (57.7, 11.93, 13, 0, 0) at 1100x720, 1440x900, 390x844: openfreemap, streets-gl, esri, terrarium, rainviewer
+  V1 (35, 10, 1.9, 0, 0) at 1100x720, 1440x900, 390x844: openfreemap, esri
+  V2 (52, 10, 4.5, 0, 0) at 1100x720, 1440x900, 390x844: openfreemap, esri
+  V7 (78.2, 15.6, 6, 0, 0) at 1100x720, 1440x900, 390x844: openfreemap, esri
+  V8 (0, 179.5, 3, 0, 0) at 1100x720, 1440x900, 390x844: openfreemap, esri
+  V3 at 11.9 (59.33, 18.07, 11.9, 0, 0) at 1100x720, 1440x900, 390x844: openfreemap
+  V3 at 12.1 (59.33, 18.07, 12.1, 0, 0) at 1100x720, 1440x900, 390x844: openfreemap
+  V4 at 11.9 (59.6519, 17.9186, 11.9, 45, 30) at 1100x720, 1440x900, 390x844: openfreemap
+  V4 at 12.1 (59.6519, 17.9186, 12.1, 45, 30) at 1100x720, 1440x900, 390x844: openfreemap
+  B5 night (0, 180, 1.9, 0, 0) at 1100x720, 1440x900, 390x844: openfreemap
+  B5 day (0, 0, 1.9, 0, 0) at 1100x720, 1440x900, 390x844: openfreemap
+  V2 (52, 10, 4.5, 0, 0) at 1100x720, 1440x900, 390x844: rainviewer
+  V2 at 45 (52, 10, 4.5, 45, 0) at 1100x720: rainviewer
+  V4 (59.6519, 17.9186, 13.5, 45, 30) at 1100x720, 1440x900, 390x844: openfreemap, streets-gl, openrailwaymap, nmd, worldcover
+  V5 (59.3293, 18.0686, 15.5, 60, 20) at 1100x720, 1440x900, 390x844: openfreemap, streets-gl, openrailwaymap, nmd, worldcover
+  Humlegarden (59.3398, 18.0727, 16, 45, 20) at 1100x720: openfreemap, streets-gl, openrailwaymap, nmd, worldcover
+  Stockholm C (59.3311, 18.0573, 16, 45, 0) at 1100x720: openfreemap, streets-gl, openrailwaymap, nmd, worldcover
+  Alps (46, 7.75, 9.45, 0, 0) at 1100x720: openfreemap, esri, terrarium
+  Zermatt (46.0207, 7.7491, 16, 60, 0; ground 1608 m, peak 4634 m) at 800x500: openfreemap, streets-gl, terrarium, mapterhorn
+  Zermatt skyline (46.0207, 7.7491, 16, 75, 0; ground 1608 m, peak 4634 m) at 800x500: terrarium, mapterhorn
+The data beside this folder (clouds, canopy heights, Overture buildings, radar volumes) has its
+own NOTICE, in the folder above.
 
 These files are third-party data, kept here only so that the tests and headless screenshots run
 without the network. They are not covered by the licence of this repository's code; each stays
@@ -60,6 +71,13 @@ terrarium/
     - United Kingdom terrain data © Environment Agency copyright and/or database right 2015. All rights reserved
     - United States 3DEP (formerly NED) and global GMTED2010 and SRTM terrain data courtesy of the U.S. Geological Survey
 
+mapterhorn/
+  Terrain tiles (terrarium encoding, 512 px lossless WebP) from Mapterhorn, https://mapterhorn.com
+  Template: https://tiles.mapterhorn.com/{z}/{x}/{y}.webp
+  Where Mapterhorn has no tile (an empty .none), terrarium/ holds Mapzen's of the same z/x/y.
+  Credit as the app gives it: Terrain: © Mapterhorn (Lantmäteriet, Kartverket, Copernicus GLO-30 and others); Mapzen Terrain Tiles (AWS Open Data): USGS 3DEP, SRTM, GMTED2010; NOAA ETOPO1; Copernicus EU-DEM; and others
+  Mapterhorn's sources and their licences: https://mapterhorn.com/attribution/
+
 rainviewer/
   One weather radar frame from RainViewer, https://www.rainviewer.com, frame of 2026-11-10 16:30 UTC
   (1794328200), the latest past frame of https://api.rainviewer.com/public/weather-maps.json (kept as rainviewer/weather-maps.json).
@@ -73,3 +91,27 @@ streets-gl/
   Template: https://tiles.streets.gl/vector/{z}/{x}/{y}
   Map data © OpenStreetMap contributors, available under the Open Database License (ODbL) 1.0,
   https://www.openstreetmap.org/copyright
+
+openrailwaymap/
+  Vector tiles from OpenRailwayMap, https://openrailwaymap.app: the tracks (railway_line_high,
+  railway_text_km) at zooms 7 to 12 and stations' platforms (standard_railway_platforms,
+  standard_railway_platform_edges) at zoom 15, fetched through the app's own backend
+  (backend::rail::tile, identified as the app is to OpenRailwayMap).
+  Credit as the app gives it: Rail: OpenRailwayMap, © OpenStreetMap contributors
+  Map data © OpenStreetMap contributors, available under the Open Database License (ODbL) 1.0,
+  https://www.openstreetmap.org/copyright
+
+nmd/
+  Land cover pictures (256 px PNG) of Naturvårdsverket's Nationella Marktäckedata 2023 (NMD2023,
+  v2) from its WMS, https://geodata.naturvardsverket.se/geoserver/wms (layer
+  lc-nmd:LC.LandCoverRaster.Bas.2023.v2.x, EPSG:3857, each tile's box), tiles in Sweden only.
+  Naturvårdsverket publishes NMD under CC0 1.0. Credit as the app gives it: Land cover: NMD2023
+  Naturvårdsverket
+
+worldcover/
+  Land cover pictures (256 px PNG, the class code in the red channel) of ESA WorldCover 2021 from
+  Microsoft's Planetary Computer, mosaic pc1.1794532982.287170e7380340878f5385c850a3fc2a (its registration kept as
+  worldcover/register.json).
+  Template: https://planetarycomputer.microsoft.com/api/data/v1/mosaic/pc1.1794532982.287170e7380340878f5385c850a3fc2a/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?assets=map&collection=esa-worldcover&format=png
+  © ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by
+  ESA WorldCover consortium, under CC BY 4.0, https://esa-worldcover.org/en/data-access

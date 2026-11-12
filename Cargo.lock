@@ -8042,13 +8042,17 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "epaint",
+ "flate2",
  "indexmap 2.14.2",
+ "reqwest",
  "resvg",
+ "rustradar-backend",
  "rustradar-core",
  "rustradar-scene",
  "serde",
  "serde_json",
  "skrifa",
+ "tokio",
  "wuff",
 ]
 

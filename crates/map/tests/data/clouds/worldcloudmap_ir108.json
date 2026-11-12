@@ -1,0 +1,4 @@
+{
+  "fetched": 1794446629,
+  "url": "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=mumi:worldcloudmap_ir108&styles=&crs=EPSG:4326&bbox=-85,-180,85,180&width=4096&height=1934&format=image/jpeg"
+}

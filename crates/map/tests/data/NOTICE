@@ -1,0 +1,42 @@
+Data fixtures of crates/map beside the tiles (docs/port/00-architecture-and-plan.md, item X1)
+
+Written by `cargo xtask fixtures` (crates/xtask/src/fixtures.rs). The tiles are in tiles/, with
+their own NOTICE. These files are third-party data, kept here only so that the tests and headless
+screenshots run without the network. They are not covered by the licence of this repository's
+code; each stays under its owner's terms, below. Do not use them for anything else.
+
+clouds/
+  EUMETSAT's world cloud map (infrared 10.8 µm, mumi:worldcloudmap_ir108) from EUMETView's WMS,
+  4096 x 1934 JPEG over longitude -180 to 180 and latitude -85 to 85, fetched 2026-11-12 01:23 UTC:
+  https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=mumi:worldcloudmap_ir108&styles=&crs=EPSG:4326&bbox=-85,-180,85,180&width=4096&height=1934&format=image/jpeg
+  Credit as the app gives it: Clouds: © EUMETSAT. Under EUMETSAT's data policy,
+  https://www.eumetsat.int/data-policy
+
+canopy/
+  Byte ranges of Meta and the World Resources Institute's canopy height map v2 (Cloud-Optimised
+  GeoTIFFs, one per zoom-10 web mercator tile named by its quadkey) as Taylor Geospatial Engine
+  Labs mirror it on Source Cooperative: each <quadkey>.json names its file, length and the ranges
+  held ([start, end), in <quadkey>/<start>-<end>.bin): the file's head with all its IFDs and the
+  internal tiles under the close-up tiles' windows.
+  1200312213: https://data.source.coop/tge-labs/meta-chm-v2/chm/1200312213.tif
+  Under CC BY 4.0. Credit as the app gives it: Canopy height: Meta & WRI (CC BY 4.0), via TGE Labs
+
+overture/
+  buildings.pmtiles: 4 zoom-14 tiles of Overture Maps' buildings, release 2026-10-21.0 (the latest the
+  catalogue at https://stac.overturemaps.org/catalog.json named, kept as catalog.json), copied as stored from
+  https://tiles.overturemaps.org/2026-10-21.0/buildings.pmtiles into a PMTiles v3 archive with one root directory.
+  Credit as the app gives it: Building heights: © Overture Maps Foundation, © OpenStreetMap (ODbL).
+  Overture's buildings are under the Open Database License (ODbL) 1.0,
+  https://docs.overturemaps.org/attribution/
+
+radar/
+  mrms/: one measured reflectivity volume as the app's backend served it (radar_volumes'
+  volume.json; radar_image's ground.bin, coverage.bin and <km>.bin, the isobands encoded as
+  backend::radar::contour describes), made by the backend's own fetch:
+  mrms: scan of 2026-11-12 01:22 UTC (1794446561), heights [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.0, 14.0] km
+  from NOAA's Multi-Radar Multi-Sensor MergedReflectivityQC in the NOAA Open Data
+  Dissemination bucket noaa-mrms-pds, https://registry.opendata.aws/noaa-mrms-pds/ (NOAA data,
+  open to all).
+  dwd/: Deutscher Wetterdienst's WN composite analysis (ODIM HDF5) as DWD publishes it, kept as it
+  came: composite_wn_20261112_0120_000-hd5 from https://opendata.dwd.de/weather/radar/composite/wn/composite_wn_20261112_0120.tar (named in source.json). Source: Deutscher Wetterdienst, under DWD's terms of use,
+  https://www.dwd.de/EN/service/copyright/copyright_node.html

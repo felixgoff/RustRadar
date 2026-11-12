@@ -663,6 +663,56 @@ mod tests {
         }
     }
 
+    /// On the flat map (zoom above 12) the relief is the z12 tiles stretched (deck's rule clamped
+    /// to `HILLSHADE_MAX_ZOOM`), drawn in each tile's frame, and the zoom's fade in twentieths
+    /// takes off its strength: over one plane facing away from the light the dark map at zoom
+    /// 13.5 takes `round(0.667 · 20) / 20 = 0.65` of the shadow alpha the tile has, the
+    /// realistic map at V5's zoom 15.5 takes `0.6 · 0.6` of it times the haze's transmittance,
+    /// each within 0.015.
+    #[test]
+    fn the_zoom_fades_the_relief_on_the_flat_map() {
+        let Some(gpu) = gpu() else { return };
+        let size = [480.0, 320.0];
+        for (basemap, zoom, opacity) in [(Basemap::Dark, 13.5, 0.65), (Basemap::Realistic, 15.5, 0.6 * 0.6)] {
+            let view = ViewState { zoom, ..ALPS };
+            let tiles = tile_indices(&viewport_for(&view, size), &HILLSHADE_TILES);
+            assert!(!tiles.is_empty() && tiles.iter().all(|t| t.z == 12), "{tiles:?}");
+            assert!((layer_for(basemap, basemap != Basemap::Realistic, true, zoom).expect("drawn").opacity - opacity).abs() < 1e-12);
+            // the plane's shadow alpha in a z12 tile there: the full 135 (the slope is steep at z12)
+            let a0 = {
+                let shaded = decode(tiles[0], &slope_png(), &Cancel::new()).expect("decoded").expect("a picture");
+                assert!(shaded.rgba.chunks_exact(4).all(|p| p[..3] == SHADOW && p[3] == 135));
+                135.0 / 255.0
+            };
+            let fixtures = Arc::new(Noted { tiles: Slope, asked: Mutex::new(Vec::new()) });
+            let mut renderer = MapRenderer::new(&gpu, FORMAT);
+            renderer.set_tiles(fixtures.clone(), None);
+            let terrain = basemap != Basemap::Realistic;
+            let base = render_with(&gpu, &mut renderer, &scene(view, size, basemap, false, terrain), 1.0).expect("rendered");
+            let over = render_with(&gpu, &mut renderer, &scene(view, size, basemap, true, terrain), 1.0).expect("rendered");
+            assert!(!renderer.pending(), "{:?}", renderer.pending_layers());
+            let asked = fixtures.terrarium();
+            assert!(!asked.is_empty() && asked.iter().all(|t| t.z == 12), "{asked:?}");
+            over.save_png(&shots_dir().join(format!("r12-flat-{basemap:?}.png").to_lowercase())).expect("png");
+            let frame = ViewFrame::new(&view, size, 1.0, 0.0);
+            let sky = sky::Input { shown: true, weather: Some(PRESETS.sunny), daylight: true };
+            let look = look::frame_look(&sky, &view, size, MIDSUMMER);
+            let light = RLight::new(&look, &frame, 0.0);
+            let (mut num, mut den) = (0.0, 0.0);
+            for y in (20..300).step_by(3) {
+                for x in (20..460).step_by(3) {
+                    let (n, d) = shadow_terms(base.pixel(x, y), over.pixel(x, y));
+                    let haze = if basemap == Basemap::Realistic { clear_at(&look, &light, &frame, [f64::from(x) + 0.5, f64::from(y) + 0.5]) } else { 1.0 };
+                    num += n;
+                    den += d * a0 * opacity * haze;
+                }
+            }
+            let ratio = num / den;
+            eprintln!("{basemap:?} at zoom {zoom}: base {:?} over {:?}, alpha {:.4} expected {:.4}", base.pixel(240, 160), over.pixel(240, 160), ratio * a0 * opacity, a0 * opacity);
+            assert!((ratio - 1.0).abs() < 0.015 / (a0 * opacity), "{basemap:?}: {ratio}");
+        }
+    }
+
     /// Today's list (G:2649-2671): on dark and satellite the relief only with the terrain on (no
     /// terrarium tile asked for without), on realistic always; a layer that leaves the list drops
     /// its tiles (asked for again when it comes back), and a scene made with `SceneInput::new`

@@ -174,7 +174,7 @@ mod tests {
     }
 
     /// The blurred reflectivity `process_tile` contours, for each fixture tile asked.
-    struct Fields(std::collections::HashMap<TileIndex, Vec<f32>>);
+    struct Fields(std::collections::HashMap<TileIndex, Option<Vec<f32>>>);
 
     impl Fields {
         /// The bands of the blurred field's four samples round world point `[x, y]` in the `z`
@@ -183,12 +183,17 @@ mod tests {
             let extent = tile_extent(z);
             let (fx, fy) = (x / extent, (rustradar_scene::camera::WORLD_SIZE - y) / extent);
             let tile = TileIndex::new(fx.floor() as u32, fy.floor() as u32, z);
-            let field = self.0.entry(tile).or_insert_with(|| {
-                let path = io::fixture_tiles_dir().join(format!("rainviewer/{}/{}/{}.png", tile.z, tile.x, tile.y));
-                let image = image::load_from_memory(&std::fs::read(path).unwrap()).unwrap().into_rgba8();
-                let dbz: Vec<f32> = image.as_raw().chunks_exact(4).map(|p| radar::reflectivity(p[0], p[1], p[2], p[3]).max(0.0) as f32).collect();
-                radar::mesh::blur(&dbz, 256, 256)
-            });
+            // (a tile the fixtures do not hold was not drawn)
+            let field = self
+                .0
+                .entry(tile)
+                .or_insert_with(|| {
+                    let path = io::fixture_tiles_dir().join(format!("rainviewer/{}/{}/{}.png", tile.z, tile.x, tile.y));
+                    let image = image::load_from_memory(&std::fs::read(path).ok()?).ok()?.into_rgba8();
+                    let dbz: Vec<f32> = image.as_raw().chunks_exact(4).map(|p| radar::reflectivity(p[0], p[1], p[2], p[3]).max(0.0) as f32).collect();
+                    Some(radar::mesh::blur(&dbz, 256, 256))
+                })
+                .as_ref()?;
             // the samples sit at the pixels' middles
             let (px, py) = ((fx - fx.floor()) * 256.0 - 0.5, (fy - fy.floor()) * 256.0 - 0.5);
             let band = |dbz: f32| ((f64::from(dbz) - 5.0) / 5.0).floor();
@@ -205,6 +210,10 @@ mod tests {
 
     /// A triangle in world Mercator and its band.
     type Triangle = ([[f64; 2]; 3], usize);
+
+    /// The tile zooms a V2 view draws: its selection's (6), the coarser one deck takes far out on
+    /// the globe (5, 4), and pitched the finer one near the camera (7).
+    const ZOOMS: [u32; 4] = [7, 6, 5, 4];
 
     /// The fixture tiles' own meshes, as world-Mercator triangles with their bands.
     struct Meshes(std::collections::HashMap<TileIndex, Vec<Triangle>>);
@@ -237,20 +246,25 @@ mod tests {
         }
     }
 
-    /// The acceptance shot: V2 over the dark map with the committed RainViewer frame. Every pixel
-    /// the radar changes lies over Europe's rain, and wherever the radar is one colour it is one of
-    /// the NWS bands at 55 % over the map below it; the bands from light rain (cyan) to heavy (red)
-    /// are all there, and each sits where the frame's picture has that band (its blurred
-    /// reflectivity, as contoured). A few places show bands stacked: there a tile's own mesh covers
-    /// the place more than once, as today's does (the meshes are `processTile`'s, checked value for
-    /// value by W1).
+    /// The acceptance shot: V2 over the dark map with the committed RainViewer frame (at two sizes,
+    /// and pitched 45°). Wherever the radar is one colour it is one of the NWS bands at 55 % over
+    /// the map below it; the bands from light rain (cyan) to heavy (red) are all there, and each
+    /// sits on the ground where the frame's picture has that band (its blurred reflectivity, as
+    /// contoured). A few places show bands stacked: there a tile's own mesh covers the place more
+    /// than once, as today's does (the meshes are `processTile`'s, checked value for value by W1).
     #[test]
     fn v2_shows_the_nws_bands_at_55_percent_over_the_dark_map() {
         let Some(gpu) = gpu() else { return };
-        for (size, name) in [([1100.0, 720.0], "w2-radar-v2.png"), ([1440.0, 900.0], "w2-radar-v2-1440x900.png")] {
-            let base = dark_shot(&gpu, v2(), size, false, None);
-            let image = dark_shot(&gpu, v2(), size, true, Some(name));
-            let viewport = &ViewFrame::new(&v2(), size, 1.0, 0.0).viewport;
+        // pitched 45° the ground layer still lies on the ground (the stack is W3's)
+        let pitched = ViewState { pitch: 45.0, ..v2() };
+        for (view, size, name) in [
+            (v2(), [1100.0, 720.0], "w2-radar-v2.png"),
+            (v2(), [1440.0, 900.0], "w2-radar-v2-1440x900.png"),
+            (pitched, [1100.0, 720.0], "w2-radar-v2-pitched.png"),
+        ] {
+            let base = dark_shot(&gpu, view, size, false, None);
+            let image = dark_shot(&gpu, view, size, true, Some(name));
+            let viewport = &ViewFrame::new(&view, size, 1.0, 0.0).viewport;
             let mut fields = Fields(Default::default());
             let mut meshes = Meshes(Default::default());
             let (mut changed, mut inside, mut matched, mut placed, mut stacks) = (0usize, 0usize, 0usize, 0usize, 0usize);
@@ -278,7 +292,7 @@ mod tests {
                         // than once, up to that band
                         let [lon, lat] = viewport.unproject([f64::from(x) + 0.5, f64::from(y) + 0.5], 0.0);
                         let world = lng_lat_to_world([lon, lat]);
-                        let covering = [6, 5].map(|z| meshes.bands_covering(world, z));
+                        let covering = ZOOMS.map(|z| meshes.bands_covering(world, z));
                         assert!(
                             covering.iter().any(|bands| bands.len() >= 2 && bands.iter().max() == Some(&stack)),
                             "{name} ({x}, {y}): a stack up to band {stack} where the tiles' meshes hold {covering:?}"
@@ -291,8 +305,7 @@ mod tests {
                     bands[band] += 1;
                     let [lon, lat] = viewport.unproject([f64::from(x) + 0.5, f64::from(y) + 0.5], 0.0);
                     let world = lng_lat_to_world([lon, lat]);
-                    // the selection's zoom here (6), or the coarser one deck takes far out (5)
-                    if [6, 5].iter().any(|&z| fields.bands_round(world, z).is_some_and(|(lo, hi)| (lo..=hi).contains(&band))) {
+                    if ZOOMS.iter().any(|&z| fields.bands_round(world, z).is_some_and(|(lo, hi)| (lo..=hi).contains(&band))) {
                         placed += 1;
                     }
                 }

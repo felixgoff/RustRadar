@@ -16,11 +16,13 @@
 //!   (`SGL_FROM_ZOOM`) Streets GL's zoom-16 tiles (layers `SGL_TREE_LAYERS`), else OpenFreeMap's
 //!   zoom-14 tiles (`TREE_LAYERS`).
 //! - **The tile cache** ([`TreeTiles`], the module's `cache`): a tile is planted once, from its
-//!   features and what else is known of its ground, asked for at once: its land cover (NMD's
-//!   picture in Sweden, WorldCover's where NMD is clear somewhere or not to be had: `landCover`),
-//!   its canopy heights ([`CANOPY`], `backend::canopy`) and the towns' registered trees in it
-//!   (`static/street-trees`, embedded); each of those may be missing, and the tile is planted
-//!   without it; a tile that can't be read is failed and asked again only once it is forgotten. At
+//!   features and what else is known of its ground, asked for at once of the tile fetcher: its
+//!   land cover ([`LAND_COVER`]: `landCover`, NMD's classes in Sweden, WorldCover's where NMD is
+//!   clear or not to be had, `backend::landcover`'s tiles, which the land cover ground asks for
+//!   too) and its canopy heights ([`CANOPY`], `backend::canopy`); and the towns' registered trees
+//!   in it (`static/street-trees`, embedded). Each of those may be missing (an answer of nothing or
+//!   a failure), and the tile is planted without it; a tile whose own bytes can't be had (a
+//!   failure, or nothing there) is failed and asked again only once it is forgotten. At
 //!   most [`MAX_LOADING`] tiles load at once (a tile left out waits for a later frame); past
 //!   [`MAX_CACHED`] tiles the ones used longest ago are forgotten. The planting runs on the worker
 //!   pool.
@@ -46,9 +48,11 @@
 //! sun of that moment, at most half a degree on); a tile forgotten while it loads stops loading
 //! (today's promise runs on and still counts as loading until it ends); the GPU buffers of tiles
 //! not drawn this frame are let go of, as deck finalizes the layers that leave the list; the cards
-//! are sized at the view centre's metres, as deck's `project_size` does at these zooms; each tile's
-//! land cover is asked for by this layer alone (today's `landCover` cache is shared with the land
-//! cover ground's).
+//! are sized at the view centre's metres, as deck's `project_size` does at these zooms. A
+//! `--fixture` folder holds the canopy files' recorded ranges ([`fixture_canopy`], read for
+//! `io::DirTiles` as `backend::canopy` reads the network); only the 25 close-up tiles' canopy and
+//! land cover are held, so elsewhere the fixtures' trees grow without them (sparser in the
+//! courtyards than today's pictures, which had them).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

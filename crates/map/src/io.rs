@@ -210,6 +210,14 @@ impl DirTiles {
             };
             return crate::layers::roofs::archive_tile(&archive, tile);
         }
+        // the trees' canopy heights (R7): the fixture folder's recorded ranges of the canopy
+        // files, read as `backend::canopy` reads the network (a tile they do not hold is a miss)
+        if source == crate::layers::trees::CANOPY {
+            return crate::layers::trees::fixture_canopy(&self.root, tile).unwrap_or_else(|| {
+                self.misses.lock().unwrap_or_else(|e| e.into_inner()).push((source.to_owned(), tile));
+                Ok(None)
+            });
+        }
         match self.held(source, tile) {
             Held::Tile(path) => fs::read(&path).map(Some).map_err(|e| FetchError::Failed(format!("{}: {e}", path.display()))),
             // the 3D surface's stand-in (Z1, `terrainFetch` as `backend::terrain` has it): where

@@ -26,7 +26,8 @@
 //! | [`rail::Rail`] | 4 rail network | T4, T7 |
 //! | [`radar::Radar`] | 5a, 5b radar tiles, lifted radar, measured volumes | W1–W4 |
 //! | [`night::Night`] | 6 `night` | B5 |
-//! | [`buildings::Buildings`] | 7 city buildings | B7, R4–R6 |
+//! | [`buildings::Buildings`] | 7 city buildings (dark, satellite) | B7 |
+//! | [`buildings_realistic::BuildingsRealistic`] | 7 city buildings (realistic) | R4–R6 |
 //! | [`trees::Trees`] | 8 trees | R7 |
 //! | [`ships::Ships`] | 9–11 ship halo, ships, ship ring | H2–H4 |
 //! | [`blocks::Blocks`] | 12 signal blocks | T5 |
@@ -58,6 +59,7 @@
 pub mod aircraft;
 pub mod blocks;
 pub mod buildings;
+pub mod buildings_realistic;
 pub mod clouds;
 pub mod earth;
 pub mod ground;
@@ -253,6 +255,7 @@ pub fn ordered(init: &Init<'_>) -> Vec<Box<dyn Layer>> {
         Box::new(radar::Radar::new(init)),
         Box::new(night::Night::new(init)),
         Box::new(buildings::Buildings::new(init)),
+        Box::new(buildings_realistic::BuildingsRealistic::new(init)),
         Box::new(trees::Trees::new(init)),
         Box::new(ships::Ships::new(init)),
         Box::new(blocks::Blocks::new(init)),

@@ -259,7 +259,7 @@ mod tests {
             names,
             [
                 "sky", "earth", "terrain", "imagery", "ground-land", "ground", "land", "hillshade", "clouds", "vector-map", "rail", "radar", "night",
-                "buildings", "trees", "ships", "blocks", "trains", "labels", "route", "markers", "aircraft", "selection-ring"
+                "buildings", "buildings-realistic", "trees", "ships", "blocks", "trains", "labels", "route", "markers", "aircraft", "selection-ring"
             ]
         );
         assert!(!renderer.pending());

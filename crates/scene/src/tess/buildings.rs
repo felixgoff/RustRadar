@@ -1,7 +1,10 @@
 //! Plain buildings, the CPU side (item B7; doc 01 §9.3; doc 04 §7.1, §7.6, §13): OpenFreeMap's
 //! `building` layer as today's app draws it on the dark and satellite maps (`cityBuildingLayer`,
 //! G:1039-1092, through `BuildingLayer`, `building-layer.ts`, an `LodMVTLayer`, `lod-tileset.ts`).
-//! The GPU side is `rustradar_map::layers::buildings`.
+//! The GPU side is `rustradar_map::layers::buildings`. The realistic map's buildings (item R4:
+//! each building's look, walls with their bays and storeys, Streets GL's tiles) are the second
+//! half of this file, from [`tessellate_realistic`]; their GPU side is
+//! `rustradar_map::layers::buildings_realistic`.
 //!
 //! What today's app does, and so this module:
 //! - **Which tiles.** Only on the flat map (zoom > 12) and with the *buildings* setting on
@@ -55,12 +58,14 @@ use std::f64::consts::PI;
 
 use bytemuck::{Pod, Zeroable};
 use rustradar_core::mvt::{self, Feature, GeomType, Value};
-use rustradar_core::num::js_round;
+use rustradar_core::num::{js_round, to_int32};
 use rustradar_core::sun::{SHADOW_MIN_ALPHA, local_sun, sun_direction, sunlight};
 
 use crate::building_shadow::{self, BUILDING_SHADOW_ALPHA, shadow_step};
 use crate::geom::earcut::earcut;
 use crate::lod::Lod;
+use crate::roofs::pitched;
+use crate::streets_gl::{Facade, Properties, RoofMaterial, SglBuilding, sgl_building};
 use crate::tiles::{TileIndex, osm_tile_to_lng_lat};
 
 /// The MVT layer the buildings are read from (`BUILDING_LOAD_OPTIONS`, G:971).
@@ -531,6 +536,496 @@ impl ShadowSun {
     }
 }
 
+// ------------------------------------------------------------------ the realistic map's buildings
+//
+// Item R4 (doc 04 §7.1–7.3; `building-layer.ts`'s `wallColoursOf`, `styleAt`, `buildingHeight`,
+// `castHeight`, `lookOf`; `realistic.ts`'s `buildingStyle`, `roofColour`, `hash`, `pickWeighted`,
+// and the vertex half of its `rbuildInject`): `buildings-city-realistic` (G:1056-1092), drawn by
+// `rustradar_map`'s `layers::buildings_realistic` through `shaders/building.wgsl`.
+//
+// What today's app does, and so this part ([`tessellate_realistic`]):
+// - **Sources.** OpenFreeMap's `building` layer at zooms 13 and 14, Streets GL's `buildings` at its
+//   zoom 16 ([`REALISTIC_SOURCE_ZOOMS`], `cityBuildingSources`, G:1047-1053), by `CITY_LOD`
+//   ([`city_lod`]). A feature's properties are read as loaders.gl's binary tiles hand them to the
+//   accessors, `layerName` included.
+// - **Heights** ([`realistic_height`], `buildingHeight`): OpenFreeMap's as the plain buildings';
+//   Streets GL's from `scene::streets_gl::sgl_building`: a roof on posts (`buildingType` "roof")
+//   none, else up to its eaves where its roof is pitched (`roofs::pitched`, the roof mesh is item
+//   R6's) and half way up the roof otherwise. Every building stands on the ground. What its shadow
+//   is cast from ([`cast_height`], `castHeight`, item R5's): OpenFreeMap's the same, Streets GL's
+//   half way up its roof (none for a roof on posts).
+// - **Each building's look** ([`building_style`], `buildingStyle`): picked by a seed from the
+//   middle of its outline in the world ([`style_seed`], `styleAt`: the mean of the polygon's
+//   vertices, every ring's closing point included, at zoom-23 precision), so it is the same in a
+//   zoom-14 and a zoom-16 tile and each time it loads; its façade and roof as Streets GL maps them
+//   (`lookOf`, [`sgl_look`]) or picked by the seed and the height, its wall colour the one mapped
+//   (`colour` in OpenMapTiles, Streets GL's `color`) toned down, else one of its façade's
+//   [`WALL_COLOURS`] with a little jitter. deck carries the façade and roof in the colour's alpha
+//   (`255 − (façade + 5·roof)`); here a vertex carries the RGBA as deck's `fillColors` has it
+//   ([`RealisticVertex::tint`]) and the façade and roof explicitly ([`RealisticVertex::style`],
+//   doc 04 §16.1).
+// - **Walls as explicit quads** (doc 04 §16.3; deck's instanced sides): each ring edge a quad from
+//   the ground to the height, its normal out of the outline as the plain buildings' (deck's side
+//   normal), and its texture coordinates worked out here as `rbuildInject`'s vertex part does on
+//   the GPU: whole 4 m bays to the wall (`round(length / 4)`, the wall's own length in metres;
+//   none: the plain wall, `length / 4` across), whole 3.3 m storeys to the building (at least
+//   one), `uv = (along · bays, up · storeys)`. Roofs flat at the height, earcut's triangles as the
+//   plain buildings'; their texture lies fixed to the world (the shader's `rl_t`).
+// - **Far tiles** (zoom 13, under [`CITY_CLOSE_ZOOM`]): the footprints flat on the ground in the
+//   building's colour, alpha `255 − code` as deck's `fillColors` has it, no walls, unlit (the
+//   building shader needs `extruded`): what the plan's section 7 decided ("as today").
+//
+// Not here: Overture's heights for Streets GL's buildings that have none (`sglBuildingFetch`,
+// item R6: it writes `height` or `levels` into a building's properties before this reads them),
+// the pitched roofs' meshes (R6), the shadows and foot shade (R5: [`RealisticTile::footprints`]).
+//
+// Deviation, invisible: a wall's length is its own, at the tile's middle latitude, where deck's
+// shader divides the common-space length by the view centre's units per metre (both math.gl's
+// 40.03e6 m round the Earth); the bays of a wall change only where its length lies within a hair
+// of a half bay.
+
+/// The MVT layer of Streets GL's buildings (`cityBuildingSources`: `layers: ["buildings"]`).
+pub const SGL_SOURCE_LAYER: &str = "buildings";
+
+/// The zooms the realistic map's buildings come from (`cityBuildingSources`, G:1047-1053):
+/// OpenFreeMap's at 13 and 14 ([`SOURCE_ZOOMS`]), Streets GL's at its own zoom.
+pub const REALISTIC_SOURCE_ZOOMS: [u32; 3] = [13, 14, crate::streets_gl::SGL_ZOOM];
+
+/// A window bay and a storey, metres (`BAY_M`, `STOREY_M`, `R:582-583`).
+pub const BAY_M: f64 = 4.0;
+pub const STOREY_M: f64 = 3.3;
+
+/// Façades (`FACADES`, `R:1006-1007`), in the shader's order.
+pub const FACADES: u8 = 5;
+pub const PLASTER: u8 = 0;
+pub const BRICK: u8 = 1;
+pub const BLOCK: u8 = 2;
+pub const WOOD: u8 = 3;
+pub const GLASS: u8 = 4;
+/// Roofs (`R:1009`), in the shader's order: tar, concrete, metal, tiles, eternit, and two of
+/// Streets GL's flat roofs with their plant.
+pub const TAR: u8 = 0;
+pub const CONCRETE: u8 = 1;
+pub const METAL: u8 = 2;
+pub const TILES: u8 = 3;
+pub const ETERNIT: u8 = 4;
+pub const FLAT1: u8 = 5;
+pub const FLAT3: u8 = 6;
+
+/// Each façade's colours, sRGB (`WALL_COLOURS`, `R:1012-1047`): its texture is near white where
+/// tinted, so these are the walls'.
+pub const WALL_COLOURS: [&[[u8; 3]]; 5] = [
+    &[[238, 234, 222], [232, 220, 196], [226, 208, 172], [214, 214, 208], [236, 214, 196], [206, 220, 214], [240, 228, 180]],
+    &[[176, 92, 70], [150, 78, 60], [190, 130, 96], [128, 72, 58], [206, 176, 136]],
+    &[[212, 210, 204], [196, 194, 188], [222, 216, 204]],
+    // Falu red, ochre, white and grey: wooden houses as the north has them
+    &[[150, 44, 32], [150, 44, 32], [214, 172, 92], [236, 234, 226], [168, 170, 166]],
+    &[[200, 214, 222], [190, 206, 200], [214, 206, 190]],
+];
+
+/// The colours OpenStreetMap's `building:colour` most often names, as `#rrggbb` (`NAMED`,
+/// `R:1053-1075`).
+pub fn named_colour(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "white" => "#f2f0ea",
+        "black" => "#3a3a3a",
+        "grey" | "gray" => "#9a9a9a",
+        "lightgrey" | "lightgray" => "#c8c8c8",
+        "darkgrey" | "darkgray" => "#6a6a6a",
+        "silver" => "#c0c0c0",
+        "red" => "#b04a3a",
+        "maroon" => "#7a3028",
+        "brown" => "#8a5a40",
+        "tan" => "#d2b48c",
+        "beige" => "#e6dcc0",
+        "cream" => "#f0e6c8",
+        "yellow" => "#e8d27a",
+        "gold" => "#d8b860",
+        "orange" => "#d88a50",
+        "pink" => "#e0b0b0",
+        "green" => "#8aa080",
+        "blue" => "#8098b0",
+        _ => return None,
+    })
+}
+
+/// `Math.imul`.
+fn imul(a: i32, b: i32) -> i32 {
+    a.wrapping_mul(b)
+}
+
+/// A hash of `seed`, 0 to 1, a different one for each `salt` (`hash`, `R:1078-1082`).
+pub fn style_hash(seed: i32, salt: i32) -> f64 {
+    let mut h = imul(seed ^ imul(salt.wrapping_add(1), 0x9e37_79b9_u32 as i32), 0x85eb_ca6b_u32 as i32) as u32;
+    h = imul((h ^ (h >> 13)) as i32, 0xc2b2_ae35_u32 as i32) as u32;
+    f64::from(h ^ (h >> 16)) / 4_294_967_296.0
+}
+
+/// `pickWeighted`: walk `weights` taking each one's weight off `r · total`.
+fn pick_weighted(r: f64, weights: &[(u8, f64)]) -> u8 {
+    let total = weights.iter().fold(0.0, |s, &(_, w)| s + w);
+    let mut left = r * total;
+    for &(value, w) in weights {
+        if left < w {
+            return value;
+        }
+        left -= w;
+    }
+    weights[weights.len() - 1].0
+}
+
+/// A building's roof as its seed and height pick it (both `buildingStyle` and `roofColour`).
+fn picked_roof(seed: i32, height: f64) -> u8 {
+    if height < 10.0 {
+        pick_weighted(style_hash(seed, 3), &[(TILES, 0.55), (METAL, 0.2), (ETERNIT, 0.15), (TAR, 0.1)])
+    } else {
+        pick_weighted(style_hash(seed, 3), &[(TAR, 0.35), (CONCRETE, 0.25), (FLAT1, 0.2), (FLAT3, 0.15), (METAL, 0.05)])
+    }
+}
+
+/// A building's façade (0–4) and roof (the shader's order) where its map data says
+/// (`BuildingLook`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BuildingLook {
+    pub facade: Option<u8>,
+    pub roof: Option<u8>,
+}
+
+/// A building's look (`buildingStyle`, `R:1128-1169`), picked by `seed` (the same each time it is
+/// loaded) and its `height`: its wall colour (the one OpenStreetMap maps for it, toned down, where
+/// it has one) and in the alpha its façade and roof (`255 − (façade + 5 · roof)`), which the
+/// shader reads.
+pub fn building_style(seed: i32, height: f64, colour: Option<&str>, look: BuildingLook) -> [u8; 4] {
+    let facade = look.facade.unwrap_or_else(|| {
+        if height > 30.0 && style_hash(seed, 1) < 0.55 {
+            GLASS
+        } else {
+            let block = if height > 12.0 { 0.25 } else { 0.1 };
+            let wood = if height < 9.0 { 0.22 } else { 0.02 };
+            pick_weighted(style_hash(seed, 2), &[(PLASTER, 0.42), (BRICK, 0.28), (BLOCK, block), (WOOD, wood)])
+        }
+    });
+    let roof = look.roof.unwrap_or_else(|| picked_roof(seed, height));
+    // (`NAMED[colour.toLowerCase()] ?? colour`, then `/^#[0-9a-f]{6}$/i`)
+    let hex = colour.map(|c| named_colour(&c.to_lowercase()).map_or_else(|| c.to_owned(), str::to_owned));
+    let parsed = hex.as_deref().and_then(|h| {
+        let digits = h.strip_prefix('#')?;
+        (digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_hexdigit())).then(|| u32::from_str_radix(digits, 16).ok()).flatten()
+    });
+    let rgb = match parsed {
+        Some(v) => {
+            let soften = |c: u32| js_round(f64::from(c) * 0.75 + 200.0 * 0.25) as u8;
+            [soften(v >> 16), soften((v >> 8) & 255), soften(v & 255)]
+        }
+        None => {
+            let list = WALL_COLOURS[usize::from(facade)];
+            let base = list[(style_hash(seed, 4) * list.len() as f64).floor() as usize];
+            // a little variety within each
+            let j = js_round((style_hash(seed, 5) - 0.5) * 14.0);
+            base.map(|c| (f64::from(c) + j).clamp(0.0, 255.0) as u8)
+        }
+    };
+    [rgb[0], rgb[1], rgb[2], 255 - (facade + FACADES * roof)]
+}
+
+/// A building's roof as seen from far out, sRGB (`roofColour`, `R:1100-1120`): its roof (as
+/// [`building_style`] picks it by `seed` and height) in its texture's mean colour under the
+/// building shader's tint for it. Today's app has it but switches it on nowhere (doc 04 §17.1);
+/// kept for the post-parity far tiles.
+pub fn roof_colour(seed: i32, height: f64) -> [u8; 3] {
+    let roof = picked_roof(seed, height);
+    let which = style_hash(seed, 6);
+    match roof {
+        TILES if which < 0.75 => [190, 117, 93],
+        TILES => [131, 131, 141],
+        METAL if which < 0.8 => [169, 181, 190],
+        METAL => [140, 174, 163],
+        TAR => [64, 64, 64],
+        CONCRETE => [139, 139, 139],
+        ETERNIT => [88, 86, 84],
+        FLAT1 => [100, 99, 100],
+        _ => [142, 144, 144],
+    }
+}
+
+/// The seed of a building's look (`styleAt`, `BL:219-231`): the mean of its polygon's vertices
+/// (`rings` closed, in its tile's units), in the world in the tile grid's units at zoom 23,
+/// `imul(gx, 73 856 093) ^ imul(gy, 19 349 663)`: the same in a zoom-14 and a zoom-16 tile.
+pub fn style_seed(tile: TileIndex, rings: &[Vec<[f32; 2]>]) -> i32 {
+    let (mut sx, mut sy, mut n) = (0.0, 0.0, 0usize);
+    for ring in rings {
+        for &[x, y] in ring {
+            sx += f64::from(x);
+            sy += f64::from(y);
+            n += 1;
+        }
+    }
+    let n = n.max(1) as f64;
+    let scale = 2f64.powi(23 - tile.z as i32);
+    let gx = js_round((f64::from(tile.x) + sx / n) * scale);
+    let gy = js_round((f64::from(tile.y) + sy / n) * scale);
+    imul(to_int32(gx), 73_856_093) ^ imul(to_int32(gy), 19_349_663)
+}
+
+/// Streets GL's mapped façades and roofs in the shader's order (`SGL_FACADES`, `SGL_ROOFS`,
+/// `BL:52-53`; `lookOf`).
+pub fn sgl_look(b: &SglBuilding) -> BuildingLook {
+    let facade = b.facade.map(|f| match f {
+        Facade::Plaster => PLASTER,
+        Facade::Brick => BRICK,
+        Facade::CementBlock => BLOCK,
+        Facade::Wood => WOOD,
+        Facade::Glass => GLASS,
+    });
+    let roof = b.roof.map(|r| match r {
+        RoofMaterial::Tar => TAR,
+        RoofMaterial::Concrete => CONCRETE,
+        RoofMaterial::Metal | RoofMaterial::Glass => METAL,
+        RoofMaterial::Tiles | RoofMaterial::Thatch => TILES,
+        RoofMaterial::Eternit => ETERNIT,
+        RoofMaterial::Grass => FLAT3,
+    });
+    BuildingLook { facade, roof }
+}
+
+/// Whether a Streets GL building is a roof on posts (`buildingType` "roof").
+fn is_roof(p: &Properties) -> bool {
+    p.get("buildingType").and_then(serde_json::Value::as_str) == Some("roof")
+}
+
+/// A Streets GL building's height as drawn, metres (`buildingHeight` for `layerName` "buildings"):
+/// a roof on posts none; else to its eaves where its roof is pitched (the roof mesh stands on
+/// them), half way up its roof otherwise.
+pub fn realistic_height(p: &Properties, b: &SglBuilding) -> f64 {
+    if is_roof(p) {
+        return 0.0;
+    }
+    b.height - if pitched(b.roof_type) { b.roof_height } else { b.roof_height / 2.0 }
+}
+
+/// What a Streets GL building's shadow is cast from (`castHeight`): half way up its roof, none for
+/// a roof on posts.
+pub fn cast_height(p: &Properties, b: &SglBuilding) -> f64 {
+    if is_roof(p) { 0.0 } else { b.height - b.roof_height / 2.0 }
+}
+
+/// [`RealisticVertex::style`]'s fourth byte: a wall.
+pub const STYLE_WALL: u8 = 1;
+/// ... a wall with a window to each bay (`rb_bays > 0.5`).
+pub const STYLE_BAYS: u8 = 2;
+
+/// [`RealisticVertex::style`]'s third byte for a roof (`rb_info.z`): its texture fixed to the
+/// world (a flat roof), along its own face (a pitched roof's face, R6), along it in its own mapped
+/// colour (R6).
+pub const ROOF_WORLD: u8 = 0;
+pub const ROOF_FACE: u8 = 1;
+pub const ROOF_OWN_COLOUR: u8 = 2;
+
+/// One vertex of a realistic building: what deck's solid-polygon shaders and `rbuildInject` give
+/// the building shader, made explicit (doc 04 §16.1). 40 bytes, `#[repr(C)]`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct RealisticVertex {
+    /// `(u, v, h)` in the tile's frame: tile units (`v` south) and metres up.
+    pub position: [f32; 3],
+    /// East, north, up (not unit length): a wall's out of its outline, a roof's up.
+    pub normal: [f32; 3],
+    /// `rb_uv`: a wall's bays along it and storeys up it; 0 for a flat roof (its texture lies on
+    /// `rl_t`).
+    pub uv: [f32; 2],
+    /// The building's RGBA as [`building_style`] gives it (deck's `fillColors`): sRGB, alpha
+    /// `255 − (façade + 5 · roof)` (a far tile's flat footprint is drawn in it as it is).
+    pub tint: [u8; 4],
+    /// Façade, roof, [`ROOF_WORLD`] (or R6's kinds), and [`STYLE_WALL`] | [`STYLE_BAYS`].
+    pub style: [u8; 4],
+}
+
+/// One tile of the realistic map's buildings, tessellated.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RealisticTile {
+    /// Whether its buildings stand (zoom ≥ [`CITY_CLOSE_ZOOM`]): walls and roofs in the building
+    /// shader; else footprints flat on the ground, unlit, in each building's colour.
+    pub extruded: bool,
+    /// Streets GL's (zoom 16) rather than OpenFreeMap's.
+    pub sgl: bool,
+    pub vertices: Vec<RealisticVertex>,
+    /// Three indices into [`Self::vertices`] per triangle, building after building, each one's
+    /// walls then its roof.
+    pub indices: Vec<u32>,
+    /// What its shadows and foot shade are cast from (extruded tiles only): each polygon's
+    /// [`cast_height`] (OpenFreeMap's: its drawn height).
+    pub footprints: Footprints,
+}
+
+impl RealisticTile {
+    /// Whether it draws nothing.
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    /// The bytes it holds (for the tile cache's budget).
+    pub fn byte_size(&self) -> usize {
+        size_of_val(self.vertices.as_slice()) + size_of_val(self.indices.as_slice()) + self.footprints.byte_size()
+    }
+}
+
+/// One building of a realistic tile: what its look and shape are made from.
+pub struct RealisticBuilding<'a> {
+    /// Its polygon: rings closed, tile units (the outline first).
+    pub rings: &'a [Vec<[f32; 2]>],
+    /// Drawn height (deck's `elevations`, `f32`) and what its look is picked with (`f64`).
+    pub height: f32,
+    pub style_height: f64,
+    /// What its shadow is cast from.
+    pub cast_height: f32,
+    pub colour: Option<&'a str>,
+    pub look: BuildingLook,
+}
+
+/// Builds one realistic tile.
+struct RealisticBuilder {
+    tile: TileIndex,
+    /// Metres per tile unit at the tile's middle (math.gl's circumference, as deck's shader).
+    metres_per_unit: f64,
+    out: RealisticTile,
+}
+
+impl RealisticBuilder {
+    fn new(tile: TileIndex, extruded: bool, sgl: bool) -> Self {
+        let [_, lat] = tile_middle(tile);
+        let metres_per_unit = crate::camera::MERCATOR_EARTH_CIRCUMFERENCE_M * (lat * PI / 180.0).cos() / 2f64.powi(tile.z as i32);
+        RealisticBuilder { tile, metres_per_unit, out: RealisticTile { extruded, sgl, ..Default::default() } }
+    }
+
+    fn building(&mut self, b: &RealisticBuilding<'_>) {
+        let tint = building_style(style_seed(self.tile, b.rings), b.style_height, b.colour, b.look);
+        let code = 255 - tint[3];
+        let (facade, roof) = (code % FACADES, code / FACADES);
+        let out = &mut self.out;
+        let height = b.height;
+        if out.extruded {
+            let f = &mut out.footprints;
+            f.polygon_starts.push((f.positions.len() / 2) as u32);
+            for ring in b.rings {
+                f.ring_starts.push((f.positions.len() / 2) as u32);
+                f.positions.extend(ring.iter().flatten());
+            }
+            f.heights.push(b.cast_height);
+            if height > 0.0 {
+                // whole storeys to the building (Streets GL's way): f32, as the shader worked it out
+                let levels = (height / STOREY_M as f32 + 0.5).floor().max(1.0);
+                for ring in b.rings {
+                    for edge in ring.windows(2) {
+                        let ([u0, v0], [u1, v1]) = (edge[0], edge[1]);
+                        let (du, dv) = (u1 - u0, v1 - v0);
+                        if du == 0.0 && dv == 0.0 {
+                            continue;
+                        }
+                        // the wall's length, metres, and whole bays of windows to it
+                        let length = (f64::from(du).hypot(f64::from(dv)) * self.metres_per_unit) as f32;
+                        let bays = (length / BAY_M as f32 + 0.5).floor();
+                        let across = if bays > 0.5 { bays } else { length / BAY_M as f32 };
+                        let normal = [dv, du, 0.0];
+                        let style = [facade, roof, ROOF_WORLD, STYLE_WALL | if bays > 0.5 { STYLE_BAYS } else { 0 }];
+                        let base = out.vertices.len() as u32;
+                        for ([u, v, h], uv) in [
+                            ([u0, v0, 0.0], [0.0, 0.0]),
+                            ([u1, v1, 0.0], [across, 0.0]),
+                            ([u1, v1, height], [across, levels]),
+                            ([u0, v0, height], [0.0, levels]),
+                        ] {
+                            out.vertices.push(RealisticVertex { position: [u, v, h], normal, uv, tint, style });
+                        }
+                        out.indices.extend([0, 1, 2, 0, 2, 3].map(|k| base + k));
+                    }
+                }
+            }
+        }
+        // the roof (flat tiles: the footprint on the ground), earcut's triangles of the polygon
+        let top = if out.extruded { height } else { 0.0 };
+        let mut positions = Vec::new();
+        let mut holes = Vec::new();
+        for (i, ring) in b.rings.iter().enumerate() {
+            if i > 0 {
+                holes.push(positions.len() / 2);
+            }
+            positions.extend(ring.iter().flat_map(|&[u, v]| [f64::from(u), f64::from(v)]));
+        }
+        let triangles = earcut(&positions, &holes, 2);
+        if triangles.is_empty() {
+            return;
+        }
+        let base = out.vertices.len() as u32;
+        let style = [facade, roof, ROOF_WORLD, 0];
+        for ring in b.rings {
+            for &[u, v] in ring {
+                out.vertices.push(RealisticVertex { position: [u, v, top], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], tint, style });
+            }
+        }
+        out.indices.extend(triangles.into_iter().map(|i| base + i as u32));
+    }
+}
+
+/// The buildings of one tile of the realistic map (`bytes`, the tile as served, decompressed) at
+/// `tile`: Streets GL's `buildings` at its zoom, else OpenFreeMap's `building`; extruded when its
+/// zoom is at least `close_from_zoom` ([`CITY_CLOSE_ZOOM`]), flat otherwise. `cancelled` is asked
+/// between features; once it says so the work stops.
+pub fn tessellate_realistic(tile: TileIndex, bytes: &[u8], close_from_zoom: u32, cancelled: &dyn Fn() -> bool) -> Result<RealisticTile, Cancelled> {
+    let sgl = tile.z >= crate::streets_gl::SGL_ZOOM;
+    let mut b = RealisticBuilder::new(tile, tile.z >= close_from_zoom, sgl);
+    let name = if sgl { SGL_SOURCE_LAYER } else { SOURCE_LAYER };
+    for layer in mvt::layers_named(bytes, &[name]) {
+        let heights = Heights::of(&layer);
+        for feature in layer.features() {
+            if cancelled() {
+                return Err(Cancelled);
+            }
+            if feature.kind != GeomType::Polygon {
+                continue;
+            }
+            let polygons = binary_polygons(&feature, layer.extent);
+            if sgl {
+                let mut p = feature.json_properties();
+                p.insert("layerName".into(), serde_json::Value::from(SGL_SOURCE_LAYER));
+                let sgl = sgl_building(&p);
+                let height = realistic_height(&p, &sgl);
+                for rings in &polygons {
+                    b.building(&RealisticBuilding {
+                        rings,
+                        height: height as f32,
+                        style_height: height,
+                        cast_height: cast_height(&p, &sgl) as f32,
+                        colour: sgl.colour.as_deref(),
+                        look: sgl_look(&sgl),
+                    });
+                }
+            } else {
+                let height = building_height(&feature, heights);
+                let colour = match feature.get("colour") {
+                    Some(Value::Str(s)) => Some(*s),
+                    _ => None,
+                };
+                for rings in &polygons {
+                    b.building(&RealisticBuilding {
+                        rings,
+                        height: height as f32,
+                        style_height: height,
+                        cast_height: height as f32,
+                        colour,
+                        look: BuildingLook::default(),
+                    });
+                }
+            }
+        }
+    }
+    let f = &mut b.out.footprints;
+    if b.out.extruded {
+        f.polygon_starts.push((f.positions.len() / 2) as u32);
+        f.ring_starts.push((f.positions.len() / 2) as u32);
+    }
+    Ok(b.out)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -839,5 +1334,224 @@ mod tests {
         assert_eq!(size_of::<BuildingVertex>(), 24);
         assert_eq!(string_to_number("0x10"), 16.0);
         assert!(string_to_number("12 m").is_nan());
+    }
+
+    // ---- the realistic map's buildings (R4) ----
+
+    /// `buildingStyle` and `roofColour` against today's own (`realistic.ts`, run under bun):
+    /// seeds over the whole 32-bit range, heights each side of the thresholds, colours mapped as
+    /// `#rrggbb` (either case) or by name (either case), unknown ones, mapped façades and roofs.
+    #[test]
+    fn building_style_is_today_s() {
+        let look = |facade: Option<u8>, roof: Option<u8>| BuildingLook { facade, roof };
+        /// Seed, height, colour, mapped look, and today's RGBA.
+        type Case<'a> = (i32, f64, Option<&'a str>, BuildingLook, [u8; 4]);
+        let cases: [Case<'_>; 10] = [
+            (0, 0.0, None, look(None, None), [242, 240, 232, 237]),
+            (123_456_789, 5.0, None, look(None, None), [220, 178, 98, 237]),
+            (-987_654_321, 35.0, None, look(None, None), [203, 217, 225, 251]),
+            (42, 12.5, Some("#aabbcc"), look(None, None), [178, 190, 203, 228]),
+            (7, 8.0, Some("Red"), look(None, None), [182, 106, 94, 245]),
+            (99, 40.0, Some("white"), look(Some(1), None), [232, 230, 226, 229]),
+            (1000, 20.0, Some("nonsense"), look(None, Some(6)), [226, 220, 208, 223]),
+            (-1, 3.0, None, look(Some(0), Some(3)), [209, 209, 203, 240]),
+            (i32::MAX, 31.0, None, look(None, None), [205, 219, 227, 226]),
+            (i32::MIN, 9.0, Some("#ABCDEF"), look(None, None), [178, 204, 229, 239]),
+        ];
+        for (seed, height, colour, look, today) in cases {
+            assert_eq!(building_style(seed, height, colour, look), today, "{seed} {height} {colour:?} {look:?}");
+        }
+        for (seed, height, today) in [(0, 0.0, [190, 117, 93]), (5, 5.0, [131, 131, 141]), (77, 20.0, [139, 139, 139]), (-12_345, 9.9, [64, 64, 64]), (31_337, 50.0, [64, 64, 64])] {
+            assert_eq!(roof_colour(seed, height), today, "{seed} {height}");
+        }
+        // the shader's decoding of the alpha gives back the façade and the roof
+        let [_, _, _, a] = building_style(0, 0.0, None, look(Some(GLASS), Some(FLAT3)));
+        assert_eq!(((255 - a) % FACADES, (255 - a) / FACADES), (GLASS, FLAT3));
+    }
+
+    /// Each building of four fixture tiles (two of Streets GL's at V5, OpenFreeMap's zoom-14 tile
+    /// under V5's centre and a zoom-13 one) as today's app styles it: its vertex count, seed,
+    /// height (`f32`, in mm) and RGBA, as `building-layer.ts`'s `styleAt` and `buildingHeight` give
+    /// them over loaders.gl's binary tiles under bun, as an FNV-1a digest of the lot (with the
+    /// first rows spelled out).
+    #[test]
+    fn fixture_buildings_look_as_today_s() {
+        fn sgl_fixture(z: u32, x: u32, y: u32) -> Vec<u8> {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../map/tests/data/tiles/streets-gl/{z}/{x}/{y}.pbf"));
+            std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        }
+        /// `[vertices, seed, height mm, r, g, b, a]` of each building, as the TypeScript lists them.
+        fn rows(tile: TileIndex, bytes: &[u8]) -> Vec<[i64; 7]> {
+            let sgl = tile.z >= crate::streets_gl::SGL_ZOOM;
+            let mut out = Vec::new();
+            for layer in mvt::layers_named(bytes, &[if sgl { SGL_SOURCE_LAYER } else { SOURCE_LAYER }]) {
+                let heights = Heights::of(&layer);
+                for feature in layer.features().filter(|f| f.kind == GeomType::Polygon) {
+                    let (height, colour, look) = if sgl {
+                        let mut p = feature.json_properties();
+                        p.insert("layerName".into(), serde_json::Value::from(SGL_SOURCE_LAYER));
+                        let b = sgl_building(&p);
+                        (realistic_height(&p, &b), b.colour.clone(), sgl_look(&b))
+                    } else {
+                        let colour = match feature.get("colour") {
+                            Some(Value::Str(s)) => Some((*s).to_owned()),
+                            _ => None,
+                        };
+                        (building_height(&feature, heights), colour, BuildingLook::default())
+                    };
+                    for rings in binary_polygons(&feature, layer.extent) {
+                        let seed = style_seed(tile, &rings);
+                        let [r, g, b, a] = building_style(seed, height, colour.as_deref(), look);
+                        let n = rings.iter().map(Vec::len).sum::<usize>();
+                        let mm = js_round(f64::from(height as f32) * 1000.0) as i64;
+                        out.push([n as i64, i64::from(seed), mm, i64::from(r), i64::from(g), i64::from(b), i64::from(a)]);
+                    }
+                }
+            }
+            out
+        }
+        fn fnv(rows: &[[i64; 7]]) -> u32 {
+            let mut h: u32 = 0x811c_9dc5;
+            for &v in rows.iter().flatten() {
+                for byte in (v as u32).to_le_bytes() {
+                    h ^= u32::from(byte);
+                    h = h.wrapping_mul(0x0100_0193);
+                }
+            }
+            h
+        }
+        let today: [(TileIndex, usize, u32, [[i64; 7]; 3]); 4] = [
+            (
+                TileIndex { x: 36057, y: 19267, z: 16 },
+                38,
+                0x6d42_0c2a,
+                [[14, -226_391_345, 12000, 169, 85, 63, 229], [28, -1_847_315_158, 73000, 184, 76, 76, 239], [28, 1_106_534_311, 16000, 205, 203, 197, 253]],
+            ),
+            (
+                TileIndex { x: 36056, y: 19269, z: 16 },
+                23,
+                0xe773_ad27,
+                [[53, -1_076_731_213, 4000, 232, 210, 192, 240], [82, -893_807_872, 4000, 222, 204, 168, 240], [23, 1_892_200_301, 4000, 217, 211, 199, 233]],
+            ),
+            (
+                TileIndex { x: 9014, y: 4818, z: 14 },
+                1106,
+                0x24a7_6fc4,
+                [[5, 1_969_432_688, 0, 201, 171, 131, 239], [5, -183_671_296, 2000, 147, 75, 57, 239], [5, -1_072_268_540, 3000, 229, 211, 175, 240]],
+            ),
+            (
+                TileIndex { x: 4507, y: 2409, z: 13 },
+                489,
+                0xe6c8_72c0,
+                [[6, -418_412_049, 6000, 192, 132, 98, 239], [6, 1_371_270_478, 6000, 238, 234, 222, 240], [10, -1_885_692_243, 6000, 209, 207, 201, 233]],
+            ),
+        ];
+        for (tile, count, digest, first) in today {
+            let bytes = if tile.z == 16 { sgl_fixture(tile.z, tile.x, tile.y) } else { fixture(tile.z, tile.x, tile.y) };
+            let got = rows(tile, &bytes);
+            assert_eq!(got.len(), count, "{tile:?}");
+            assert_eq!(got[..3], first, "{tile:?}");
+            assert_eq!(fnv(&got), digest, "{tile:?}: {got:?}");
+            // the tile's vertices carry those colours (the far tile's as deck's flat polygons)
+            let out = tessellate_realistic(tile, &bytes, CITY_CLOSE_ZOOM, &|| false).expect("not cancelled");
+            assert_eq!(out.sgl, tile.z == 16);
+            assert_eq!(out.extruded, tile.z >= CITY_CLOSE_ZOOM);
+            let tints: std::collections::HashSet<[u8; 4]> = got.iter().map(|r| [r[3], r[4], r[5], r[6]].map(|c| c as u8)).collect();
+            assert!(out.vertices.iter().all(|v| tints.contains(&v.tint)), "{tile:?}");
+            assert_eq!(out.footprints.len(), if out.extruded { count } else { 0 });
+        }
+    }
+
+    /// A wall is a quad from the ground to the height with whole 4 m bays along it and whole
+    /// 3.3 m storeys up it (`rbuildInject`'s vertex part), its normal out of the outline; a wall
+    /// under 2 m has no bay, its plain texture `length / 4` across; the roof lies flat at the
+    /// height, its texture on the world's (`rl_t`). Each vertex carries the building's RGBA and its
+    /// façade and roof.
+    #[test]
+    fn a_realistic_wall_has_whole_bays_and_storeys() {
+        // the square of the plain tests, and a sliver 1.5 m wide in the same tile
+        let sliver: &[(i64, i64)] = &[(3000, 3000), (3005, 3000), (3005, 3400), (3000, 3400)];
+        let square: &[&[(i64, i64)]] = &[&SQUARE];
+        let thin: &[&[(i64, i64)]] = &[sliver];
+        let tile = mvt_tile("building", &[(&[("render_height", Value::Num(20.0))], square), (&[("render_height", Value::Num(2.0))], thin)]);
+        let out = tessellate_realistic(Z14, &tile, CITY_CLOSE_ZOOM, &|| false).expect("not cancelled");
+        assert!(out.extruded && !out.sgl);
+        let [_, lat] = tile_middle(Z14);
+        let metres_per_unit = crate::camera::MERCATOR_EARTH_CIRCUMFERENCE_M * lat.to_radians().cos() / 2f64.powi(14);
+        let side = 0.25 * metres_per_unit;
+        let bays = (side / BAY_M).round() as f32;
+        let levels = (20.0f64 / STOREY_M).round() as f32;
+        eprintln!("a side of {side:.1} m: {bays} bays, {levels} storeys");
+        let walls = &out.vertices[..16];
+        let tint = walls[0].tint;
+        for wall in walls.chunks(4) {
+            assert_eq!(wall.iter().map(|v| v.uv).collect::<Vec<_>>(), [[0.0, 0.0], [bays, 0.0], [bays, levels], [0.0, levels]]);
+            assert_eq!(wall.iter().map(|v| v.position[2]).collect::<Vec<_>>(), [0.0, 0.0, 20.0, 20.0]);
+            let code = 255 - tint[3];
+            assert!(wall.iter().all(|v| v.tint == tint && v.style == [code % FACADES, code / FACADES, ROOF_WORLD, STYLE_WALL | STYLE_BAYS]));
+            // out of the square (its middle at 0.375, 0.375; v south)
+            let mid = [(wall[0].position[0] + wall[1].position[0]) / 2.0, (wall[0].position[1] + wall[1].position[1]) / 2.0];
+            let n = wall[0].normal;
+            assert!(n[0] * (mid[0] - 0.375) - n[1] * (mid[1] - 0.375) > 0.0);
+        }
+        let roof = &out.vertices[16..21];
+        assert!(roof.iter().all(|v| v.position[2] == 20.0 && v.normal == [0.0, 0.0, 1.0] && v.uv == [0.0, 0.0] && v.style[3] == 0 && v.tint == tint));
+        // the sliver's short walls: no bay, the plain wall a fraction across
+        let sliver_walls: Vec<&RealisticVertex> = out.vertices[21..].iter().filter(|v| v.style[3] & STYLE_WALL != 0).collect();
+        let short = sliver_walls.chunks(4).find(|w| w[1].uv[0] < 1.0).expect("a short wall");
+        let width = 5.0 / 4096.0 * metres_per_unit;
+        assert!((f64::from(short[1].uv[0]) - width / BAY_M).abs() < 1e-4, "{:?} for {width} m", short[1].uv);
+        assert!(short.iter().all(|v| v.style[3] == STYLE_WALL));
+        assert_eq!(short[2].uv[1], 1.0, "at least one storey");
+        // footprints for the shadows: the drawn heights
+        assert_eq!(out.footprints.heights, [20.0, 2.0]);
+    }
+
+    /// Streets GL's buildings (`buildingHeight` for `layerName` "buildings"): a pitched roof's
+    /// walls stop at its eaves, a flat roof's half way up it, a roof on posts lies flat; their
+    /// shadows are cast from half way up the roof (none for the roof on posts); a mapped material
+    /// and colour give the façade, the roof and the wall colour.
+    #[test]
+    fn streets_gl_buildings_stand_to_their_eaves_in_their_mapped_looks() {
+        let square: &[&[(i64, i64)]] = &[&SQUARE];
+        let tile = mvt_tile(
+            "buildings",
+            &[
+                (&[("height", Value::Num(20.0)), ("roofHeight", Value::Num(6.0)), ("roofType", Value::Str("gabled")), ("material", Value::Str("brick")), ("roofMaterial", Value::Str("tiles"))], square),
+                (&[("height", Value::Num(20.0)), ("roofHeight", Value::Num(6.0)), ("color", Value::Num(f64::from(0x00ff_0000u32)))], square),
+                (&[("height", Value::Num(5.0)), ("buildingType", Value::Str("roof"))], square),
+            ],
+        );
+        let z16 = TileIndex { x: 36057, y: 19267, z: 16 };
+        let out = tessellate_realistic(z16, &tile, CITY_CLOSE_ZOOM, &|| false).expect("not cancelled");
+        assert!(out.sgl && out.extruded);
+        assert_eq!(out.footprints.heights, [17.0, 17.0, 0.0]);
+        let tops: Vec<f32> = out.vertices.iter().filter(|v| v.normal == [0.0, 0.0, 1.0]).map(|v| v.position[2]).collect();
+        assert_eq!(tops, [14.0, 14.0, 14.0, 14.0, 14.0, 17.0, 17.0, 17.0, 17.0, 17.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        // the roof on posts has no walls: 2 × 4 walls of 4 vertices and three roofs of 5
+        assert_eq!(out.vertices.len(), 2 * 16 + 3 * 5);
+        // brick with tiles; red (Streets GL's 0xff0000, the map's "red" toned down)
+        assert_eq!(out.vertices[0].style[..2], [BRICK, TILES]);
+        let red = out.vertices.iter().find(|v| v.position[2] == 17.0).expect("the red one").tint;
+        assert_eq!(red[..3], [182, 106, 94]);
+    }
+
+    /// A far tile (zoom 13) of the realistic map: the footprints flat on the ground in each
+    /// building's colour with deck's alpha, no walls, no footprints for shadows; a cancelled job
+    /// stops; a tile without buildings gives nothing.
+    #[test]
+    fn a_far_realistic_tile_lies_flat_in_each_building_s_colour() {
+        let far = TileIndex { x: 4507, y: 2409, z: 13 };
+        let out = tessellate_realistic(far, &fixture(13, 4507, 2409), CITY_CLOSE_ZOOM, &|| false).expect("not cancelled");
+        assert!(!out.extruded && !out.is_empty());
+        assert!(out.vertices.iter().all(|v| v.position[2] == 0.0 && v.style[3] == 0));
+        assert!(out.footprints.is_empty());
+        let colours: std::collections::HashSet<[u8; 4]> = out.vertices.iter().map(|v| v.tint).collect();
+        assert!(colours.len() > 50, "{}", colours.len());
+        assert!(out.vertices.iter().all(|v| v.tint[3] >= 255 - (GLASS + FACADES * FLAT3)));
+        assert!(tessellate_realistic(far, &[], CITY_CLOSE_ZOOM, &|| false).expect("not cancelled").is_empty());
+        assert_eq!(tessellate_realistic(far, &fixture(13, 4507, 2409), CITY_CLOSE_ZOOM, &|| true), Err(Cancelled));
+        assert_eq!(size_of::<RealisticVertex>(), 40);
+        assert_eq!(REALISTIC_SOURCE_ZOOMS, [13, 14, 16]);
     }
 }

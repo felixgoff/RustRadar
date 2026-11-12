@@ -58,6 +58,7 @@
 
 pub mod aircraft;
 pub mod blocks;
+pub mod building_shadows;
 pub mod buildings;
 pub mod buildings_realistic;
 pub mod clouds;

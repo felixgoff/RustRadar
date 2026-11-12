@@ -51,6 +51,7 @@ use rustradar_scene::lod::TILE_SIZE;
 use rustradar_scene::streets_gl::SGL_ZOOM;
 use rustradar_scene::tess::buildings::{self as tess, Footprints, RealisticTile, RealisticVertex};
 
+use super::building_shadows::BuildingShadows;
 use super::{ByteSize, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::FrameSlot;
 use crate::io;
@@ -235,6 +236,8 @@ pub struct BuildingsRealistic {
     look: Option<Look>,
     /// This frame's tiles in draw order, each with its frame.
     drawn: Vec<(FrameSlot, TileIndex)>,
+    /// The near tiles' foot shade and shadows (R5).
+    shadows: BuildingShadows,
 }
 
 impl BuildingsRealistic {
@@ -248,7 +251,8 @@ impl BuildingsRealistic {
         let shader = BuildingShader::new(init, "realistic buildings");
         let walls = shader.pipeline(init, "realistic buildings", "vs_building", "fs_building", DrawState::NO_CULL);
         let flat = shader.pipeline(init, "realistic buildings, far", "vs_building", "fs_flat", DrawState::NO_CULL);
-        BuildingsRealistic { tiles, shader, walls, flat, shown: false, textures_loading: false, look: None, drawn: Vec::new() }
+        let shadows = BuildingShadows::new(init);
+        BuildingsRealistic { tiles, shader, walls, flat, shown: false, textures_loading: false, look: None, drawn: Vec::new(), shadows }
     }
 
     /// The tile set (tests).
@@ -282,12 +286,14 @@ impl Layer for BuildingsRealistic {
             }
             self.textures_loading = false;
             self.look = None;
+            self.shadows.clear();
             return;
         }
         cx.update_tiles(&mut self.tiles, |gpu, _tile, decoded| upload(&gpu.device, decoded));
         load_textures(cx);
         self.textures_loading = cx.textures.pending();
         self.look = Some(self.shader.prepare(cx));
+        self.shadows.prepare(cx, &self.tiles);
         for (tile, _) in self.tiles.visible() {
             self.drawn.push((cx.tile_frame(tile, 0.0), tile));
         }
@@ -302,7 +308,8 @@ impl Layer for BuildingsRealistic {
             if meshes.mesh.index_count() == 0 {
                 continue;
             }
-            // (R5: a near tile's foot shade, then its shadows, on the ground under its buildings)
+            // a near tile's foot shade, then its shadows, on the ground under its buildings
+            self.shadows.draw_tile(pass, cx, slot, tile);
             // far off, flat: only the roofs show from there
             self.shader.begin(pass, if meshes.extruded { &self.walls } else { &self.flat });
             cx.bind_frame(pass, slot);
@@ -316,7 +323,7 @@ impl Layer for BuildingsRealistic {
     }
 
     fn pending(&self) -> bool {
-        self.shown && (self.tiles.loading() || self.textures_loading)
+        self.shown && (self.tiles.loading() || self.textures_loading || self.shadows.pending())
     }
 }
 

@@ -12,8 +12,9 @@
 //!   `shaders/post.wgsl` (across, then down, [`taps`]), the last drawn onto the surface in place of
 //!   the composite (with its sRGB rule). The middle of the screen (from 42 % to 58 % of the height)
 //!   is the composite's picture, texel for texel.
-//! - **Rain** (`RainOverlay.svelte`, shown by `updateLook`'s `showRain`, G:3640-3660; [`Rain`]): while
-//!   it rains where the camera is (the weather under the clouds' `rain`, [`look::weather_here`]),
+//! - **Rain** (`RainOverlay.svelte`, shown by `updateLook`'s `showRain`, G:3640-3660; [`Rain`]), in a
+//!   scene that has the overlay ([`Input::rain`]: the app's always does): while it rains where the
+//!   camera is (the weather under the clouds' `rain`, [`look::weather_here`]),
 //!   at least [`MIN_AMOUNT`], streaks in three depths ([`DEPTHS`]), their number by the canvas's
 //!   area and the rain, slanting [`SLANT`] in the wind, shorter as the camera looks down
 //!   (`lengthen`), dimmer at night. The rain, the tilt and the night are taken in steps
@@ -64,6 +65,10 @@ pub const SHADER: &str = include_str!("shaders/post.wgsl");
 pub struct Input {
     /// The *tilt-shift* setting (`settings.tiltShift`): drawn on the realistic basemap only.
     pub tilt_shift: bool,
+    /// The rain overlay (`RainOverlay`, which today's map always has): it falls while the light
+    /// says it rains. The app's scene always asks for it; a scene that does not (the map's own
+    /// shots of the ground under the rain preset) has none.
+    pub rain: bool,
 }
 
 /// The tilt-shift's layers, in order: each blur's standard deviation (CSS pixels) and how far its
@@ -592,11 +597,12 @@ impl Post {
 
     /// Before the frame is drawn: the tilt-shift from the scene (the realistic basemap with the
     /// setting on), the rain from this frame's camera `view` and light at the local clock
-    /// `now_ms` ([`rain_shown`]), and the drops' fall since the last frame.
+    /// `now_ms` ([`rain_shown`]) when the scene has the overlay ([`Input::rain`]), and the drops'
+    /// fall since the last frame.
     pub fn prepare(&mut self, scene: &SceneInput, view: &ViewFrame, now_ms: f64) {
         self.tilt_shift = scene.basemap == Basemap::Realistic && scene.post.tilt_shift;
         self.css_size = view.size;
-        let shown = rain_shown(scene.basemap, &scene.sky, &view.view, view.size, now_ms);
+        let shown = if scene.post.rain { rain_shown(scene.basemap, &scene.sky, &view.view, view.size, now_ms) } else { RainShown::NONE };
         self.rain.show(shown, view.size, now_ms);
         self.rain.step(now_ms);
     }
@@ -943,17 +949,21 @@ mod tests {
     }
 
     /// The renderer prepares the post effects each frame: the rain animates the map while it falls
-    /// on the realistic basemap, and the tilt-shift is drawn there alone.
+    /// on the realistic basemap, in a scene with the overlay.
     #[test]
     fn the_renderer_animates_while_it_rains() {
         let Some(gpu) = gpu() else { return };
         let mut renderer = MapRenderer::new(&gpu, crate::headless::FORMAT);
         let mut scene = SceneInput::new(view(59.6519, 17.9186, 13.5, 45.0), [1100.0, 720.0], 1.0, Basemap::Realistic);
         scene.sky = sky::Input { shown: true, weather: Some(PRESETS.rain), daylight: true };
-        scene.post = Input { tilt_shift: true };
+        scene.post = Input { tilt_shift: true, rain: true };
         renderer.update(scene.clone());
         renderer.prepare(&gpu, MORNING);
         assert!(renderer.animating());
+        // a scene without the overlay has no rain
+        renderer.update(SceneInput { post: Input { rain: false, ..scene.post }, ..scene.clone() });
+        renderer.prepare(&gpu, MORNING);
+        assert!(!renderer.animating());
         scene.basemap = Basemap::Dark;
         renderer.update(scene.clone());
         renderer.prepare(&gpu, MORNING);

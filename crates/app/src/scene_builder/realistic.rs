@@ -41,7 +41,8 @@ impl Realistic {
         // (live weather: `state::weather`'s, none until it has come)
         scene.sky = sky::Input { shown: true, weather: sky_conditions(settings.sky, state.weather.conditions()), daylight: settings.daylight };
         // the tilt-shift (R11; `tiltShift && basemap === "realistic"`: the map checks the basemap)
-        scene.post = post::Input { tilt_shift: settings.tilt_shift };
+        // and the rain overlay, which falls as the map's light says it rains
+        scene.post = post::Input { tilt_shift: settings.tilt_shift, rain: true };
         // the ground's tiles and textures (R2; drawn on the realistic basemap only)
         scene.ground = ground::Input::SHOWN;
         // the latest cloud picture (R10; `cloudPicture`'s, the bytes shared): the map draws it on

@@ -91,7 +91,7 @@ pub struct SceneInput {
     pub route: layers::route::Input,
     pub markers: layers::markers::Input,
     pub aircraft: layers::aircraft::Input,
-    /// What is drawn over the map after its pass: the tilt-shift (R11; the rain follows the light).
+    /// What is drawn over the map after its pass: the tilt-shift and the rain overlay (R11).
     pub post: crate::post::Input,
 }
 

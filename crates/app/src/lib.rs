@@ -38,7 +38,7 @@ use crate::state::Startup;
 pub const USAGE: &str = "usage: rustradar-app [--view LAT,LON,ZOOM[,PITCH[,BEARING]]] [--basemap dark|satellite|realistic]
                      [--size WIDTHxHEIGHT] [--now UNIX_MS] [--fixture DIR] [--demo]
                      [--screenshot FILE.png [--scale FACTOR] [--wait SECONDS] [--ui] [--select ID]
-                     [--mode aircraft|trains|ships]]
+                     [--mode aircraft|trains|ships]] [--updated]
 
   --view        open the map there (degrees; zoom as deck.gl's; pitch and bearing default to 0)
   --basemap     the basemap to show instead of the saved one
@@ -52,7 +52,8 @@ pub const USAGE: &str = "usage: rustradar-app [--view LAT,LON,ZOOM[,PITCH[,BEARI
                 $RUSTRADAR_SHOT_WAIT, else 30 s in a release build, 60 s in a debug build)
   --ui          the shot draws the UI over the map as the window does (default: the map alone)
   --select      the shot opens with this flight selected (its id as the fixture's files name it)
-  --mode        the shot's focus, as if saved in the settings (default: aircraft)";
+  --mode        the shot's focus, as if saved in the settings (default: aircraft)
+  --updated     started by the updater after an install: no update check at launch";
 
 /// The canvas of a shot without `--size`, CSS pixels.
 pub const SHOT_SIZE: [u32; 2] = [1100, 720];
@@ -87,6 +88,9 @@ pub struct Options {
     /// `--mode`: a shot's focus, as a saved `settings.json` would give it (the reference pictures'
     /// `mode`, docs/port/reference/README.md).
     pub mode: Option<rustradar_core::settings::Mode>,
+    /// `--updated`: the updater started this run after installing it, so the launch does not look
+    /// for an update again (`UPDATED_FLAG`, item P3; the Tauri updater passes it too).
+    pub updated: bool,
 }
 
 /// Why the command line was not taken.
@@ -174,6 +178,7 @@ impl Options {
                     options.wait = Some(wait);
                 }
                 "--ui" => options.ui = true,
+                "--updated" => options.updated = true,
                 "--mode" => {
                     use rustradar_core::settings::Mode;
                     let v = value()?;

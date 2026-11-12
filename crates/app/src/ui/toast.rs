@@ -2,7 +2,11 @@
 //! the updater has downloaded (desktop) or found (Android), at the bottom left over everything but
 //! the dev panel and the modal dialogs. The UI only: the updater (stage 11, P3 and P4) sets
 //! `state.update_ready` (from `BackendEvent::UpdateReady`, and at start from its `pending_update`)
-//! and answers [`Updater::restart_to_update`] ([`install_updater`]).
+//! and answers [`Updater::restart_to_update`] ([`install_updater`]): on the desktop
+//! `update::install::connect`'s `Restart` (the hourly watch's download installed off the UI
+//! thread, the app relaunched and closed; a failure comes back as the sub line), on Android
+//! `update::android::connect`'s `Download`; the window installs either again on a rebuilt egui
+//! context.
 //!
 //! **Shown** while a version is known (`state.update_ready`) and the toast was not dismissed for
 //! that version (`Later` hides it for the session; a newer version shows it again).

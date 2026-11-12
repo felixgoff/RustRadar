@@ -43,6 +43,9 @@ type Error = Box<dyn std::error::Error>;
 pub enum UserEvent {
     /// A request finished, a stream delivered, the backend has an event: draw a frame and poll.
     Wake,
+    /// An update has taken over (the new version relaunched, or its installer started): close the
+    /// app (P3).
+    Exit,
 }
 
 /// The window's size before it is maximised (doc 07 §5.2, §11.7), CSS pixels.
@@ -426,10 +429,24 @@ pub fn run_with(mut builder: EventLoopBuilder<UserEvent>, options: Options) -> R
     // Android's update notice reaches the toast through the backend's queue (P4)
     #[cfg(target_os = "android")]
     let notice = rustradar_backend::Notifier::new(events.clone(), wake.clone());
+    // the desktop's update watch reaches the toast through the same queue (P3)
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let update_notice = rustradar_backend::Notifier::new(events.clone(), wake.clone());
     let backend = start_backend(platform::dirs(), rt.handle(), events, wake.clone());
     // Android: the latest release's APK looked for now and every hour (P4)
     #[cfg(target_os = "android")]
     crate::update::android::start(backend.as_ref(), notice);
+    // the desktop's update: the launch's check (the main window waits for it; a splash while an
+    // update installs), the hourly watch, and the app closed once an update takes over (P3)
+    let launch = crate::update::splash::Launch::start(options.updated, rt.handle(), wake.clone());
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let exit = event_loop.create_proxy();
+        crate::update::install::on_exit(move || {
+            let _ = exit.send_event(UserEvent::Exit);
+        });
+        crate::update::install::start_watch(rt.handle(), update_notice);
+    }
     let requests = Requests::new(rt.handle().clone(), wake);
     let view = options.view.unwrap_or(ViewState::INITIAL);
     let mut state = AppState::new(options.startup(), backend, Some(requests), Some(events_rx), view, WINDOW_SIZE);
@@ -442,7 +459,7 @@ pub fn run_with(mut builder: EventLoopBuilder<UserEvent>, options: Options) -> R
     }
     let clock = options.now_ms.map_or_else(Clock::system, Clock::starting_at);
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App { options, clock, latch, state: Some(state), view: None, next: None, error: None };
+    let mut app = App { options, clock, latch, state: Some(state), view: None, next: None, error: None, launch };
     event_loop.run_app(&mut app)?;
     app.error.map_or(Ok(()), Err)
 }
@@ -458,6 +475,8 @@ struct App {
     next: Option<Next>,
     /// Why start-up failed, reported once the loop has exited.
     error: Option<Error>,
+    /// The launch's update check and its splash while they hold the main window back (P3).
+    launch: Option<crate::update::splash::Launch>,
 }
 
 /// Everything tied to the window.
@@ -496,6 +515,9 @@ impl View {
         tile_fetcher::connect(&mut engine.map, &engine.state);
         // remote pictures (photos, logos) through the backend's picture cache (U18)
         images::connect(&engine.egui, &engine.state);
+        // the desktop's update toast: Restart installs the downloaded version and relaunches (P3)
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        crate::update::install::connect(&engine.egui);
         // Android's update toast: Download opens the newer release's APK (P4)
         #[cfg(target_os = "android")]
         crate::update::android::connect(&engine.egui);
@@ -579,6 +601,11 @@ impl View {
                 self.engine.rebuild(&gpu, self.config.format);
                 // the new egui context needs the picture loader again (U18)
                 images::connect(&self.engine.egui, &self.engine.state);
+                // and the update toast its Restart (P3) or Download (P4)
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                crate::update::install::connect(&self.engine.egui);
+                #[cfg(target_os = "android")]
+                crate::update::android::connect(&self.engine.egui);
                 self.egui_input = egui_winit::State::new(
                     self.engine.egui.clone(),
                     egui::ViewportId::ROOT,
@@ -604,6 +631,24 @@ impl App {
         self.next = view.redraw(now);
     }
 
+    /// The launch's update (P3): the splash opened or updated, the main window shown once there
+    /// is nothing to install, the app closed once the new version has been started.
+    fn step_launch(&mut self, event_loop: &ActiveEventLoop) {
+        let (Some(launch), view) = (&mut self.launch, &self.view) else { return };
+        match launch.poll(event_loop, view.as_ref().map(|v| &v.gpu)) {
+            crate::update::splash::Step::Wait => {}
+            crate::update::splash::Step::Open => {
+                self.launch = None;
+                if let Some(view) = &self.view {
+                    view.window.set_visible(true);
+                    view.window.focus_window();
+                    view.window.request_redraw();
+                }
+            }
+            crate::update::splash::Step::Exit => event_loop.exit(),
+        }
+    }
+
     /// Writes a settings change still waiting for its 500 ms, and waits for the disk.
     fn flush_settings(&mut self) {
         let state = match (&mut self.view, &mut self.state) {
@@ -617,7 +662,8 @@ impl App {
 
 impl ApplicationHandler<UserEvent> for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        if let (StartCause::ResumeTimeReached { .. }, Some(view)) = (cause, &self.view) {
+        // (the launch's splash keeps its own pace; the main window waits for it, P3)
+        if let (StartCause::ResumeTimeReached { .. }, Some(view), None) = (cause, &self.view, &self.launch) {
             view.window.request_redraw();
         }
     }
@@ -632,10 +678,14 @@ impl ApplicationHandler<UserEvent> for App {
                         // the first frame now, then show the window: a hidden window gets no redraw
                         // request on every platform
                         self.redraw();
-                        if let Some(view) = &self.view {
+                        // unless the launch's update check holds it back (P3)
+                        if let Some(view) = &self.view
+                            && self.launch.is_none()
+                        {
                             view.window.set_visible(true);
                             view.window.request_redraw();
                         }
+                        self.step_launch(event_loop);
                     }
                     Err(e) => {
                         self.error = Some(e);
@@ -656,15 +706,20 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Wake => {
                 // taken before the frame polls, so a wake raised meanwhile is sent again
                 self.latch.reset();
-                if let Some(view) = &self.view {
+                // the launch's update first: the main window draws once it is shown (P3)
+                self.step_launch(event_loop);
+                if let Some(view) = &self.view
+                    && self.launch.is_none()
+                {
                     view.window.request_redraw();
                 }
             }
+            UserEvent::Exit => event_loop.exit(),
         }
     }
 
@@ -685,7 +740,13 @@ impl ApplicationHandler<UserEvent> for App {
         self.flush_settings();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // the update's splash takes its own window's events (P3)
+        if let (Some(launch), Some(view)) = (&mut self.launch, &self.view)
+            && launch.window_event(&view.gpu, id, &event)
+        {
+            return;
+        }
         let now = self.clock.now_ms();
         let Some(view) = &mut self.view else { return };
         // egui sees every event first
@@ -714,6 +775,12 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // while the launch's update check holds the main window back, only the splash moves (P3)
+        self.step_launch(event_loop);
+        if let Some(launch) = &self.launch {
+            launch.about_to_wait(event_loop);
+            return;
+        }
         let Some(view) = &self.view else { return };
         let now = self.clock.now_ms();
         match self.next {

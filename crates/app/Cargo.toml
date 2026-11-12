@@ -58,6 +58,9 @@ egui-winit = { version = "0.37", default-features = false, features = ["clipboar
 winit = "0.30.13"
 # The keys dialog's Import… (ui::keys_dialog): the system's file dialog, desktop only (plan 1.3).
 rfd = { workspace = true }
+# The updater's installs (update/install.rs): the macOS `.app.tar.gz` and an AppImage in a `.tar.gz`.
+flate2 = { workspace = true }
+tar = { workspace = true }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 egui-winit = { version = "0.37", default-features = false, features = ["links"] }

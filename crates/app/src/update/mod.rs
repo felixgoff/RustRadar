@@ -49,7 +49,9 @@
 //! newer.
 
 pub mod android;
+pub mod install;
 pub mod manifest;
+pub mod splash;
 
 use std::fmt;
 use std::time::Duration;

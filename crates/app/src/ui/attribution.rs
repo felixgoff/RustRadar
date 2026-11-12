@@ -15,7 +15,8 @@
 //! (`viewport-fit=cover`); item U19 places it there.
 //!
 //! **The dev readout** ([`dev_readout`], debug builds only: `import.meta.env.DEV`): a `<pre>` at
-//! top 8, right 8, `4px 6px` of padding, radius 4, on `oklch(0.15 0 0 / 0.75)`, 10 px monospace at
+//! top 8, right 8 (inside the safe area: [`readout_corner`]), `4px 6px` of padding, radius 4, on
+//! `oklch(0.15 0 0 / 0.75)`, 10 px monospace at
 //! line height 1.35 in `--text-2`, under the pointer's notice (`pointer-events: none`), over the
 //! sidebar, the panels and the map controls (z-index 5): the view, the basemap (`· Streets GL` close
 //! in on the realistic map) with the frames a second, and how many aircraft, trains and ships are
@@ -36,6 +37,11 @@
 //!   system's browser (egui-winit's `links`); phones need the platform glue's opener (U20, U19).
 //! - The underline is 1 px (Chromium takes the font's underline thickness, rounded to at least a
 //!   device pixel).
+//! - The readout keeps inside the safe area (item F2): `top: max(8, safe-top)`, `right: max(8,
+//!   safe-right)` from the window's whole area, the rule the page gives the phone's top bar
+//!   (`max(var(--space-2), env(safe-area-inset-*))`). Today's `.dev-readout` has only `top: 8px;
+//!   right: 8px` in a page laid out under the notch (`viewport-fit=cover`), so on a notched phone
+//!   it sits under the notch or the status bar. Without insets (the desktop) the place is today's.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -437,7 +443,14 @@ pub fn dev_readout(ctx: &Context, state: &AppState) -> Rect {
     readout(ctx, &lines)
 }
 
-/// The readout box with `lines`, at top 8, right 8.
+/// The readout's top right corner in `viewport` (the window's whole area) with the safe area
+/// `insets`: [`READOUT_INSET`] in from its top and right, or the inset where that is more
+/// (`max(var(--space-2), env(safe-area-inset-top))` and `-right`; see the deviations).
+pub fn readout_corner(viewport: Rect, insets: egui::SafeAreaInsets) -> Pos2 {
+    Pos2::new(viewport.right() - READOUT_INSET.max(insets.0.right), viewport.top() + READOUT_INSET.max(insets.0.top))
+}
+
+/// The readout box with `lines`, at top 8, right 8 inside the safe area ([`readout_corner`]).
 pub fn readout(ctx: &Context, lines: &[String]) -> Rect {
     // `<pre>`: its spaces kept, one face for every character (the middle dot is the font's own)
     let style = Style::data(theme::TEXT_DEV_READOUT, theme::WEIGHT_REGULAR, theme::TEXT_2).line_height(theme::LINE_HEIGHT_DEV_READOUT).letter_spacing(0.0);
@@ -452,9 +465,9 @@ pub fn readout(ctx: &Context, lines: &[String]) -> Rect {
         .collect();
     let line_px = style.line_px();
     let width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max);
-    let screen = ctx.content_rect();
+    let corner = readout_corner(ctx.viewport_rect(), ctx.input(|i| i.safe_area_insets()));
     let size = Vec2::new(width, line_px * lines.len() as f32) + 2.0 * READOUT_PADDING;
-    let rect = Rect::from_min_size(Pos2::new(screen.right() - READOUT_INSET - size.x, screen.top() + READOUT_INSET), size);
+    let rect = Rect::from_min_size(Pos2::new(corner.x - size.x, corner.y), size);
     Area::new(Id::unique("rustradar::attribution::readout"))
         .order(Order::Foreground)
         .fixed_pos(rect.min)
@@ -672,6 +685,33 @@ mod tests {
         let close = ViewState { zoom: 15.5, ..view };
         assert_eq!(readout_lines(&close, Basemap::Realistic, 58.0, [12_345, 7, 1_000])[2..], ["realistic · Streets GL  58 fps", "12,345 aircraft · 7 trains · 1,000 ships"]);
         assert_eq!(readout_lines(&close, Basemap::Satellite, 58.0, [0, 0, 0])[2], "satellite  58 fps");
+    }
+
+    /// The readout's place (item F2): top 8, right 8 of the window, kept inside the safe area of a
+    /// notched phone (`max(8, inset)`), upright and on its side.
+    #[test]
+    fn the_readout_keeps_inside_the_safe_area() {
+        let insets = |left: f32, right: f32, top: f32, bottom: f32| egui::SafeAreaInsets(egui::epaint::MarginF32 { left, right, top, bottom });
+        let place = |size: Vec2, insets: egui::SafeAreaInsets| {
+            let ctx = Context::default();
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), safe_area_insets: Some(insets), ..Default::default() };
+            let mut rect = Rect::NOTHING;
+            ctx.run_ui(raw, |ui| rect = readout(ui.ctx(), &["z 1.90".to_owned(), "dark".to_owned()])).textures_delta.clear();
+            rect
+        };
+        // the desktop: today's top 8, right 8
+        let desktop = place(Vec2::new(1440.0, 900.0), insets(0.0, 0.0, 0.0, 0.0));
+        assert_eq!((desktop.top(), desktop.right()), (8.0, 1432.0));
+        // under a 47 px notch and above a 34 px home bar: at the notch's foot, 8 from the right
+        let notched = place(Vec2::new(390.0, 844.0), insets(0.0, 0.0, 47.0, 34.0));
+        assert_eq!((notched.top(), notched.right()), (47.0, 382.0));
+        assert_eq!(notched.size(), desktop.size());
+        // a status bar under 8 px changes nothing; on its side the notch is on the right
+        let thin = place(Vec2::new(390.0, 844.0), insets(0.0, 0.0, 5.0, 0.0));
+        assert_eq!((thin.top(), thin.right()), (8.0, 382.0));
+        let side = place(Vec2::new(844.0, 390.0), insets(47.0, 47.0, 0.0, 21.0));
+        assert_eq!((side.top(), side.right()), (8.0, 844.0 - 47.0));
+        assert_eq!(readout_corner(Rect::from_min_size(Pos2::ZERO, Vec2::new(390.0, 844.0)), insets(0.0, 12.5, 59.0, 0.0)), Pos2::new(377.5, 59.0));
     }
 
     #[test]

@@ -66,9 +66,10 @@
 //!   of `state`: no state file holds them.
 //! - The fixture folder's stops serve `--demo` too (`--demo --fixture DIR` shows stops); the demo
 //!   alone answers no timetable at once, where today's `#demo` draws no train at all.
-//! - The photo and the logo load through egui's image loaders ([`super::panel::remote`]): until
-//!   item U18's loader for `https:` lands they read as failed and are left out, as today when they
-//!   do not load.
+//! - The photo and the logo load through egui's image loaders ([`super::panel::remote`]):
+//!   `crate::images` (U18) from the network, or from the `--fixture` folder's files (F2; a shot
+//!   never asks the network, and the fixture's and the demo's feeds name no pictures); one that
+//!   fails is left out, as today when it does not load.
 //! - In the phone's bottom sheet ([`super::sheet::in_sheet`], U19): the strip, the journey and the
 //!   footer are marked for its peek detent, the photo follows the body, the source's button is
 //!   left out of the footer (doc 06 §8.1).

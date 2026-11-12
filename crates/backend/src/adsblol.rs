@@ -69,17 +69,26 @@ impl Cache {
 
     /// Reserves the next call slot; returns how long to wait for it.
     fn reserve(&mut self) -> Duration {
-        let now = Instant::now();
+        self.reserve_at(Instant::now())
+    }
+
+    /// [`Self::reserve`] at `now`.
+    fn reserve_at(&mut self, now: Instant) -> Duration {
         let at = self.next.filter(|t| *t > now).unwrap_or(now);
         self.next = Some(at + GAP);
         at - now
     }
 
     fn failed(&mut self, retry_after: Option<Duration>) {
+        self.failed_at(Instant::now(), retry_after);
+    }
+
+    /// [`Self::failed`] at `now`.
+    fn failed_at(&mut self, now: Instant, retry_after: Option<Duration>) {
         self.failures = self.failures.saturating_add(1);
         let doubling = BACKOFF_BASE.saturating_mul(1 << self.failures.min(8).saturating_sub(1));
         let wait = retry_after.unwrap_or(doubling).min(BACKOFF_MAX);
-        self.blocked_until = Some(Instant::now() + wait);
+        self.blocked_until = Some(now + wait);
     }
 
     fn succeeded(&mut self) {
@@ -372,27 +381,48 @@ mod tests {
         assert_eq!(a.seen_ms, 1_700_000_000_000);
     }
 
+    /// On a clock of the test's own (`*_at`), so a loaded machine's pauses between the lines
+    /// change nothing: every slot and every backoff is checked to the nanosecond.
     #[test]
     fn calls_are_spaced_and_back_off() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
         let mut cache = Cache::default();
-        assert!(cache.reserve().is_zero());
-        let second = cache.reserve();
-        assert!(second > GAP - Duration::from_millis(50) && second <= GAP);
-        let third = cache.reserve();
-        assert!(third > second + GAP - Duration::from_millis(50));
+        assert!(cache.reserve_at(t0).is_zero());
+        let second = cache.reserve_at(t0);
+        assert_eq!(second, GAP, "the second call waits a whole gap");
+        let third = cache.reserve_at(t0 + ms(100));
+        assert_eq!(third, second + GAP - ms(100), "the third a gap after the second");
+        // once the reserved slots have passed, a call goes at once and starts a new gap
+        let later = t0 + 3 * GAP + ms(1);
+        assert!(cache.reserve_at(later).is_zero());
+        assert_eq!(cache.reserve_at(later + ms(500)), GAP - ms(500));
+        // the wall clock's version reserves from now
+        assert!(Cache::default().reserve().is_zero());
 
-        cache.failed(None);
+        cache.failed_at(t0, None);
         let first = cache.blocked_until.unwrap();
-        cache.failed(None);
+        assert_eq!(first, t0 + BACKOFF_BASE);
+        cache.failed_at(t0, None);
         assert!(cache.blocked_until.unwrap() > first, "backoff grows");
+        assert_eq!(cache.blocked_until.unwrap(), t0 + 2 * BACKOFF_BASE, "doubling");
         for _ in 0..20 {
-            cache.failed(None);
+            cache.failed_at(t0, None);
         }
-        assert!(cache.blocked_until.unwrap() <= Instant::now() + BACKOFF_MAX);
-        cache.failed(Some(Duration::from_secs(30)));
-        assert!(cache.blocked_until.unwrap() <= Instant::now() + Duration::from_secs(30));
+        assert!(cache.blocked_until.unwrap() <= t0 + BACKOFF_MAX);
+        assert_eq!(cache.blocked_until.unwrap(), t0 + BACKOFF_MAX, "up to the maximum");
+        cache.failed_at(t0, Some(Duration::from_secs(30)));
+        assert!(cache.blocked_until.unwrap() <= t0 + Duration::from_secs(30));
+        assert_eq!(cache.blocked_until.unwrap(), t0 + Duration::from_secs(30), "the server's Retry-After");
+        cache.failed_at(t0, Some(Duration::from_secs(3_600)));
+        assert_eq!(cache.blocked_until.unwrap(), t0 + BACKOFF_MAX, "a Retry-After past the maximum is cut to it");
         cache.succeeded();
         assert!(cache.blocked_until.is_none() && cache.failures == 0);
+        // the wall clock's version blocks from now
+        let before = Instant::now();
+        cache.failed(None);
+        let until = cache.blocked_until.unwrap();
+        assert!(until >= before + BACKOFF_BASE && until <= Instant::now() + BACKOFF_BASE);
     }
 
     #[test]

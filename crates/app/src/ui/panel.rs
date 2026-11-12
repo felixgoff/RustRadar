@@ -30,10 +30,11 @@
 //! - **Text**: [`append_clock`] is `<Clock>` (the time in Mono, a word space, the zone's name in
 //!   Overpass `--text-3`, or a dash); [`title_style`], [`value_style`] and [`sub_style`] are the
 //!   strip's `h2`, `.value` and `p`/`.sub`.
-//! - **Remote images** ([`remote`]): through egui's image loaders (`Context::try_load_texture`).
-//!   Until a loader for `https:` URIs is installed (item U18's `app::images`), every remote image
-//!   reads as failed: a photo shows its `--surface-raised` block, an airline logo is left out, as
-//!   today when they do not load.
+//! - **Remote images** ([`remote`]): through egui's image loaders (`Context::try_load_texture`):
+//!   `crate::images` (U18) for `http:` and `https:` URIs, from the network, or from the
+//!   `--fixture` folder's files (F2; a shot never asks the network). One that fails (or that no
+//!   loader takes) reads as failed: a photo shows its `--surface-raised` block, an airline logo is
+//!   left out, as today when they do not load.
 //!
 //! Boxes, borders and rules are put on whole device pixels, as Chromium snaps a box's edges;
 //! heights add up CSS's line boxes (egui rounds a text row to whole pixels; the panel uses the

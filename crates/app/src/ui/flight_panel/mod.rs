@@ -52,8 +52,9 @@
 //! the altitude chart with its export menu (each a [`Slot`] drawn from the [`View`] in the tab
 //! panel's width); [`super::panel`] holds the anatomy the train, ship and airport panels share.
 //! The photo and the airline logo load through egui's image loaders ([`super::panel::remote`]):
-//! item U18 installs the loader for `https:` URIs; until then the photo shows its
-//! `--surface-raised` block and the logo is left out, as when they fail today.
+//! `crate::images` (U18) from the network, or from the `--fixture` folder's files (F2; a shot never
+//! asks the network); one that fails leaves the photo its `--surface-raised` block and the logo
+//! out, as when they fail today.
 //!
 //! Deviations:
 //! - The tooltips are the app's own (`ui::widgets::tooltip`), not the system's.

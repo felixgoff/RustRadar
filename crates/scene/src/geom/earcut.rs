@@ -30,6 +30,16 @@
 //! - numbers after the last whole vertex are left out (earcut.js reads the missing ones as
 //!   `undefined`).
 //!
+//! **An empty hole** (two equal hole indices, or the last at the vertex count) gives no triangles
+//! for the whole polygon, decided in item F2 (the stages 5-7 review's gap 6, the owner's call G1
+//! left open). It is earcut.js's own rule as near as a function that does not throw can keep it:
+//! there `linkedList` returns nothing for the hole and `eliminateHoles` throws on the next line
+//! (`list.next`), so today no triangle comes of such a polygon either (the throw stops the work of
+//! deck.gl's tessellator, `roofs.ts` or `radar-mesh.ts`). B1's `earcutr` kept the outline and
+//! dropped the hole; that is not followed, so this is no deviation from today's app. No caller
+//! makes one (G1's finding): every ring the tile decoders give starts with a vertex (its MoveTo),
+//! and `roofs` and the radar mesh leave out small rings before they start a hole.
+//!
 //! Triangles turn as earcut leaves them, which is no culling order: draw them unculled, as deck
 //! does.
 

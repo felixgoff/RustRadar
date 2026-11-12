@@ -26,19 +26,28 @@
 //! Other URIs (`bytes://`, `file://`, a test's own scheme) are not this loader's: egui asks the
 //! next one.
 //!
+//! **Sources** ([`Source`]): the backend's picture cache, as above; or a `--fixture` folder's
+//! pictures ([`fixture_file`]: `images/<host>/<path>`), read and decoded with the backend's
+//! [`decode`] in the pass that first asks, so a shot has them in its first frame; or none, every
+//! remote picture failing at once without asking anyone.
+//!
 //! **Wiring**: the window installs one ([`connect`]) on its egui context, and again on the new
-//! context after a lost device (B9), when the app has a backend. The headless shots and the tests
-//! of other items install none: a shot never touches the network, so every remote picture there
-//! reads as failed (left out, or the `--surface-raised` block), as today when one does not load.
+//! context after a lost device (B9): the `--fixture` folder's pictures when it has one (as its
+//! tiles and feeds come from there), else the backend's when the app has one. The headless shots
+//! install theirs ([`connect_offline`], item F2): the `--fixture` folder's pictures, else none,
+//! for a shot never touches the network; a remote picture a shot has no file for reads as failed
+//! (left out, or the `--surface-raised` block), as today when one does not load. The tests of
+//! other items install their own loaders or none.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::load::{LoadError, SizedTexture, TextureLoadResult, TextureLoader, TexturePoll};
 use egui::{ColorImage, Context, SizeHint, TextureHandle, TextureOptions, Vec2};
 use rustradar_backend::Wake;
-use rustradar_backend::images::{Images, Picture};
+use rustradar_backend::images::{Images, Picture, decode};
 use tokio::runtime::Handle;
 
 use crate::state::AppState;
@@ -50,10 +59,59 @@ pub const TEXTURE_CAP: usize = if cfg!(any(target_os = "android", target_os = "i
 /// How long a failed URI that nobody asks for is remembered here.
 pub const FORGET_FAILED: Duration = Duration::from_secs(5);
 
+/// The `--fixture` folder's pictures: `images/<host>/<path>` ([`fixture_file`]).
+pub const FIXTURE_IMAGES: &str = "images";
+/// Why a remote picture fails where the loader has no source (a shot without a fixture folder).
+pub const NO_SOURCE: &str = "no remote pictures in this run";
+
 /// Whether `uri` is this loader's: an `http:` or `https:` URL.
 pub fn is_remote(uri: &str) -> bool {
     let lower = |n: usize| uri.get(..n).map(str::to_ascii_lowercase);
     lower(7).as_deref() == Some("http://") || lower(8).as_deref() == Some("https://")
+}
+
+/// Where the `--fixture` folder `dir` keeps the picture at `url`: `images/<host>/<path>`, the
+/// URL's host (lower case, without a user name) and path, so
+/// `https://cdn.jetphotos.com/400/6/1.jpg` is `images/cdn.jetphotos.com/400/6/1.jpg`. A query is
+/// joined to the file's name after a `_`; a fragment is left out. In every part the characters
+/// other than ASCII letters, digits, `-`, `.` and `_` are `_`, and empty, `.` and `..` parts are
+/// left out, so the file is always inside `dir/images`. `None` for a URL that is not `http:` or
+/// `https:`, or that names no file.
+pub fn fixture_file(dir: &Path, url: &str) -> Option<PathBuf> {
+    if !is_remote(url) {
+        return None;
+    }
+    let rest = &url[url.find("://")? + 3..];
+    let rest = rest.split('#').next().unwrap_or_default();
+    let (rest, query) = match rest.split_once('?') {
+        Some((rest, query)) => (rest, Some(query)),
+        None => (rest, None),
+    };
+    let clean = |part: &str| -> String { part.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_') { c } else { '_' }).collect() };
+    let kept = |part: &String| !part.is_empty() && part != "." && part != "..";
+    let mut parts = rest.split('/');
+    let host = parts.next()?;
+    let host = clean(&host.rsplit('@').next().unwrap_or(host).to_ascii_lowercase());
+    let mut path: Vec<String> = parts.map(clean).filter(kept).collect();
+    if !kept(&host) || path.is_empty() {
+        return None;
+    }
+    if let (Some(query), Some(name)) = (query.filter(|q| !q.is_empty()), path.last_mut()) {
+        name.push('_');
+        name.push_str(&clean(query));
+    }
+    Some(path.iter().fold(dir.join(FIXTURE_IMAGES).join(host), |file, part| file.join(part)))
+}
+
+/// Where a loader's pictures come from (see the module documentation).
+pub enum Source {
+    /// The backend's picture cache (`images`), downloading on `rt`, calling `wake` when an
+    /// answer is in.
+    Backend { images: Images, rt: Handle, wake: Option<Wake> },
+    /// A `--fixture` folder's pictures ([`fixture_file`]), read in the pass that asks.
+    Folder(PathBuf),
+    /// None: every remote picture fails at once ([`NO_SOURCE`]).
+    None,
 }
 
 /// A download's answer, as the background task leaves it for the UI pass.
@@ -88,9 +146,7 @@ struct State {
 
 /// The texture loader for remote pictures (see the module documentation).
 pub struct Loader {
-    images: Images,
-    rt: Handle,
-    wake: Option<Wake>,
+    source: Source,
     texture_cap: usize,
     forget_failed: Duration,
     state: Mutex<State>,
@@ -104,7 +160,18 @@ impl Loader {
 
     /// [`Self::new`] with its own texture cap and failure time (tests).
     pub fn with_limits(images: Images, rt: Handle, wake: Option<Wake>, texture_cap: usize, forget_failed: Duration) -> Self {
-        Loader { images, rt, wake, texture_cap, forget_failed, state: Mutex::new(State::default()) }
+        Loader::with_source(Source::Backend { images, rt, wake }, texture_cap, forget_failed)
+    }
+
+    /// A loader on the `--fixture` folder `dir`'s pictures, or on none without one: nothing it
+    /// does reaches the network.
+    pub fn offline(dir: Option<PathBuf>) -> Self {
+        Loader::with_source(dir.map_or(Source::None, Source::Folder), TEXTURE_CAP, FORGET_FAILED)
+    }
+
+    /// A loader on `source` with its own texture cap and failure time.
+    pub fn with_source(source: Source, texture_cap: usize, forget_failed: Duration) -> Self {
+        Loader { source, texture_cap, forget_failed, state: Mutex::new(State::default()) }
     }
 
     /// Installs `self` on `ctx`, unless a loader of this kind is there already.
@@ -124,12 +191,24 @@ impl Loader {
         })
     }
 
-    /// Starts the download of `uri`, the answer left in the slot it returns.
+    /// Starts the download of `uri`, the answer left in the slot it returns (already there for a
+    /// fixture folder or no source: taken in the same pass).
     fn start(&self, ctx: &Context, uri: &str) -> Slot {
+        let (images, rt, wake) = match &self.source {
+            Source::Backend { images, rt, wake } => (images, rt, wake),
+            Source::Folder(dir) => {
+                let result = read_fixture(dir, uri);
+                if let Err(e) = &result {
+                    log::debug!("picture {uri}: {e}");
+                }
+                return Slot::Loading(Arc::new(Mutex::new(Some(result))));
+            }
+            Source::None => return Slot::Loading(Arc::new(Mutex::new(Some(Err(NO_SOURCE.to_owned()))))),
+        };
         let answer: Answer = Arc::new(Mutex::new(None));
-        let (images, url, ctx, wake, out) = (self.images.clone(), uri.to_owned(), ctx.clone(), self.wake.clone(), Arc::clone(&answer));
+        let (images, url, ctx, wake, out) = (images.clone(), uri.to_owned(), ctx.clone(), wake.clone(), Arc::clone(&answer));
         // a spawn from the main thread: through the runtime's handle (doc 07 §11.4)
-        self.rt.spawn(async move {
+        rt.spawn(async move {
             let result = match images.picture(&url).await {
                 Ok(picture) => tokio::task::spawn_blocking(move || color_image(&picture)).await.map_err(|e| e.to_string()),
                 Err(e) => Err(e),
@@ -150,6 +229,14 @@ impl Loader {
 /// `picture` as egui's colours (premultiplied).
 pub fn color_image(picture: &Picture) -> ColorImage {
     ColorImage::from_rgba_unmultiplied([picture.width as usize, picture.height as usize], &picture.rgba)
+}
+
+/// The `--fixture` folder `dir`'s picture for `url` ([`fixture_file`]), decoded as the backend's
+/// pictures are ([`decode`]).
+fn read_fixture(dir: &Path, url: &str) -> Result<ColorImage, String> {
+    let file = fixture_file(dir, url).ok_or_else(|| format!("{url}: no fixture file for it"))?;
+    let bytes = std::fs::read(&file).map_err(|e| format!("fixture {}: {e}", file.display()))?;
+    decode(&bytes).map(|picture| color_image(&picture)).map_err(|e| format!("fixture {}: {e}", file.display()))
 }
 
 impl TextureLoader for Loader {
@@ -241,10 +328,14 @@ impl TextureLoader for Loader {
     }
 }
 
-/// The window's loader for `state` installed on `ctx` (see the module documentation): through the
-/// backend's picture cache in its cache folder, on its runtime, waking its loop. Nothing without a
-/// backend, or when the cache folder does not open (remote pictures then read as failed).
+/// The window's loader for `state` installed on `ctx` (see the module documentation): the
+/// `--fixture` folder's pictures when it has one; else through the backend's picture cache in its
+/// cache folder, on its runtime, waking its loop. Nothing without either, or when the cache folder
+/// does not open (remote pictures then read as failed).
 pub fn connect(ctx: &Context, state: &AppState) -> Option<Arc<Loader>> {
+    if state.startup.fixture.is_some() {
+        return Some(connect_offline(ctx, state));
+    }
     let backend = state.backend.as_ref()?;
     let images = match Images::new(&backend.dirs().cache) {
         Ok(images) => images,
@@ -256,6 +347,14 @@ pub fn connect(ctx: &Context, state: &AppState) -> Option<Arc<Loader>> {
     let loader = Arc::new(Loader::new(images, backend.rt().clone(), Some(backend.waker())));
     Arc::clone(&loader).install(ctx);
     Some(loader)
+}
+
+/// A shot's loader for `state` installed on `ctx` (`--screenshot`, item F2): the `--fixture`
+/// folder's pictures, else none, never the network (see the module documentation).
+pub fn connect_offline(ctx: &Context, state: &AppState) -> Arc<Loader> {
+    let loader = Arc::new(Loader::offline(state.startup.fixture.clone()));
+    Arc::clone(&loader).install(ctx);
+    loader
 }
 
 #[cfg(test)]
@@ -496,5 +595,92 @@ mod tests {
         let image = color_image(&picture);
         assert_eq!(image.size, [1, 1]);
         assert_eq!(image.pixels[0], egui::Color32::from_rgba_unmultiplied(200, 100, 50, 128));
+    }
+
+    /// An egui context with an offline loader on `dir` (or none) installed.
+    fn offline(dir: Option<PathBuf>) -> (Context, Arc<Loader>) {
+        let ctx = Context::default();
+        let loader = Arc::new(Loader::offline(dir));
+        Arc::clone(&loader).install(&ctx);
+        (ctx, loader)
+    }
+
+    fn pass(ctx: &Context, uris: &[&str]) -> Vec<Remote> {
+        let mut seen = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            seen = uris.iter().map(|uri| panel::remote(ui.ctx(), uri)).collect();
+        });
+        output.textures_delta.clear();
+        seen
+    }
+
+    #[test]
+    fn a_fixture_folder_keeps_a_picture_under_its_host_and_path() {
+        let dir = Path::new("fx");
+        let file = |url: &str| fixture_file(dir, url);
+        let at = |parts: &[&str]| Some(parts.iter().fold(dir.join(FIXTURE_IMAGES), |f, p| f.join(p)));
+        assert_eq!(file("https://cdn.jetphotos.com/400/6/1_17.jpg"), at(&["cdn.jetphotos.com", "400", "6", "1_17.jpg"]));
+        assert_eq!(file("https://cdn.flightradar24.com/assets/airlines/logotypes/9.png"), at(&["cdn.flightradar24.com", "assets", "airlines", "logotypes", "9.png"]));
+        // the host in lower case without a user or a port's colon; the query joined, the fragment left out
+        assert_eq!(file("HTTP://User@Static.VesselFinder.net:8080/ship-photo/9234567.jpg#top"), at(&["static.vesselfinder.net_8080", "ship-photo", "9234567.jpg"]));
+        assert_eq!(file("https://commons.wikimedia.org/wiki/Special:FilePath/X 2.jpg?width=400"), at(&["commons.wikimedia.org", "wiki", "Special_FilePath", "X_2.jpg_width_400"]));
+        // never out of the folder
+        assert_eq!(file("https://h/../../etc/passwd"), at(&["h", "etc", "passwd"]));
+        assert_eq!(file("https://../a.png"), None);
+        assert_eq!(file("https://h/./"), None);
+        assert_eq!(file("https://h"), None);
+        assert_eq!(file("file:///tmp/a.png"), None);
+        assert_eq!(file("test://photo1.png"), None);
+    }
+
+    #[test]
+    fn a_fixture_folder_serves_its_pictures_in_the_pass_that_asks() {
+        let cache = TempCache::new("fixture");
+        let picture = cache.0.join(FIXTURE_IMAGES).join("cdn.jetphotos.com").join("400");
+        std::fs::create_dir_all(&picture).unwrap();
+        std::fs::write(picture.join("1.png"), png(30, 20, [200, 100, 50, 255])).unwrap();
+        std::fs::write(picture.join("2.png"), b"<html>not a picture</html>").unwrap();
+        let (ctx, loader) = offline(Some(cache.0.clone()));
+        let [ready, not_a_picture, missing] = ["https://cdn.jetphotos.com/400/1.png", "https://cdn.jetphotos.com/400/2.png", "https://cdn.jetphotos.com/400/3.png"];
+        let seen = pass(&ctx, &[ready, not_a_picture, missing, "test://photo1.png"]);
+        let Remote::Ready(texture) = seen[0] else { panic!("not ready in the first pass: {:?}", seen[0]) };
+        assert_eq!(texture.size, Vec2::new(30.0, 20.0));
+        assert_eq!(seen[1..], [Remote::Failed, Remote::Failed, Remote::Failed]);
+        assert_eq!(loader.counts(), (0, 1, 2), "the other scheme is not the loader's");
+        assert_eq!(loader.byte_size(), 30 * 20 * 4);
+    }
+
+    #[test]
+    fn without_a_fixture_folder_nothing_is_asked() {
+        let body = png(4, 4, [1, 2, 3, 255]);
+        let server = Server::start(move |_| (200, body.clone()));
+        let (ctx, loader) = offline(None);
+        let uri = server.url("/photo.png");
+        assert_eq!(pass(&ctx, &[&uri]), [Remote::Failed], "failed at once");
+        assert_eq!(pass(&ctx, &[&uri]), [Remote::Failed]);
+        assert_eq!(loader.counts(), (0, 0, 1));
+        assert_eq!(server.hits(), 0, "the network was not asked");
+    }
+
+    #[test]
+    fn a_shot_s_loader_reads_the_fixture_folder_or_nothing() {
+        use crate::state::Startup;
+        use rustradar_scene::camera::ViewState;
+        let state = |fixture: Option<PathBuf>| AppState::new(Startup { fixture, ..Default::default() }, None, None, None, ViewState::INITIAL, [1440.0, 900.0]);
+        let cache = TempCache::new("connect");
+        let folder = cache.0.join(FIXTURE_IMAGES).join("h");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.png"), png(2, 2, [9, 9, 9, 255])).unwrap();
+        for (fixture, want) in [(Some(cache.0.clone()), (0, 1, 0)), (None, (0, 0, 1))] {
+            let ctx = Context::default();
+            let loader = connect_offline(&ctx, &state(fixture.clone()));
+            assert!(ctx.is_loader_installed(LOADER_ID));
+            pass(&ctx, &["https://h/a.png"]);
+            assert_eq!(loader.counts(), want, "{fixture:?}");
+            // the window's: the fixture folder's too, and nothing without a fixture or a backend
+            let ctx = Context::default();
+            let window = connect(&ctx, &state(fixture.clone()));
+            assert_eq!(window.is_some(), fixture.is_some());
+        }
     }
 }

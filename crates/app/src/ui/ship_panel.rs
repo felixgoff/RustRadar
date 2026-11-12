@@ -57,13 +57,12 @@
 //! same props and laid out with app.css at 1440 × 900 (`tests/ship_ui.rs`: the full card with its
 //! photo, a free-text destination with a passed ETA, an alarming status, SAR, satellite AIS and a
 //! stale report, loading, the error): every part's box, rule, badge, skeleton and button lands on
-//! Chromium's pixels or within one; text sits up to a pixel lower (egui's baseline).
+//! Chromium's pixels or within one; text stands on Chromium's baselines (`ui::text`'s hook, F1).
 //!
 //! Deviations:
-//! - The report's time is in UTC (the app has no viewer's time zone yet, U6's note).
-//! - Digits are Overpass's own (no `tabular-nums` in egui).
-//! - The photo loads through egui's image loaders ([`super::panel::remote`]): until item U18's
-//!   loader for `https:` lands it reads as failed and is left out, as today when it does not load.
+//! - The photo loads through egui's image loaders ([`super::panel::remote`]): `crate::images`
+//!   (U18) from the network, or from the `--fixture` folder's files (F2; a shot never asks the
+//!   network); one that fails is left out, as today when it does not load.
 //! - Closed and opened again, the panel keeps how far its body was scrolled (egui keeps a scroll
 //!   area's state by its id); today's component mounts afresh at the top.
 //! - In the phone's bottom sheet ([`super::sheet::in_sheet`], U19): the strip, the voyage and the

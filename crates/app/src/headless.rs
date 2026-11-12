@@ -13,7 +13,9 @@
 //! map as a drawn frame does, but nobody sees their picture, and on SwiftShader a map pass can
 //! take seconds (P1: V2's dark map, about five). With `--ui` the shot draws the window's UI over
 //! the map ([`Engine::shell`]), its last frames a quarter of a second of egui's clock apart for
-//! the UI to settle; `--select` opens it with a flight selected, `--mode` with that focus.
+//! the UI to settle; `--select` opens it with a flight selected, `--mode` with that focus. Its
+//! remote pictures (photos, logos) come from the `--fixture` folder's `images/`, else from nowhere
+//! ([`images::connect_offline`], item F2): one without a file there reads as failed.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -36,8 +38,8 @@ use crate::state::ships::Ships;
 use crate::state::liveries::Liveries;
 use crate::state::taxiways::Taxiways;
 use crate::state::{AppState, Clock, system_now_ms};
-use crate::tile_fetcher;
 use crate::{Options, SHOT_SIZE};
+use crate::{images, tile_fetcher};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -139,6 +141,8 @@ pub fn render_on_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppS
     let mut engine = Engine::new(gpu, FORMAT, state);
     // --ui: the shell, the panels and the controls over the map, as the window draws them
     engine.shell = options.ui;
+    // the remote pictures from the --fixture folder, else none: never the network (F2)
+    images::connect_offline(&engine.egui, &engine.state);
     // the shot's tiles, never the network's; the frames are drawn in a loop: nothing to wake
     let tiles = tile_fetcher::shot_tiles(options);
     match &tiles {

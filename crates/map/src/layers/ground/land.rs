@@ -18,7 +18,10 @@
 //! that branch: the tint through `rl_linear`, snow lying on it (`rlight.snow · GS_SNOW[0]`), the wet
 //! darkening (`rlight.wet · 0.35`, unpaved), roughness `GS_ROUGH[0]`, the normal straight up, the
 //! clouds' shadows, `rl_shade`, `rl_aerial` and `rl_display`: what [`lit_colour`] works out on the
-//! CPU. R2 replaces this file's shader with its own and keeps the layer (or folds it in).
+//! CPU. R2 replaces this file's shader with its own and keeps the layer (or folds it in). Against
+//! `realistic-v3-1440x900.png` (V3 at the reference clock, its land where today's has no water)
+//! the untextured land averages (124, 150, 123) where today's textured land averages
+//! (128, 145, 130): a little greener, the terrain texture's own grey missing.
 
 use glam::DVec2;
 use rustradar_core::geo::Basemap;

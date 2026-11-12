@@ -20,7 +20,11 @@
 //! - `origin` and `cloud_origin` are the view centre's place within the texture and cloud periods
 //!   for every draw, not each layer's common origin: `lib/rlight.wgsl` measures `rl_m` from the view
 //!   centre on the flat map too (one uniform a frame serves every layer; precise near the centre,
-//!   where it matters).
+//!   where it matters). On the globe it is measured from the view centre itself (deck: from
+//!   `Math.fround` of its longitude and latitude, under 1e-4 of a period apart), and a longitude
+//!   difference is taken within ±180° (deck's runs on past the antimeridian; 512 units are a whole
+//!   number of both periods, so textures and cloud shadows land where deck's do). The test
+//!   `the_gpus_texture_places_are_decks` reads `rl_t` and `rl_c` back from the GPU against the twin.
 //! - `sun_globe` is the sun in the globe's render frame (`lib/project.wgsl`: common space turned by
 //!   `Rx(φc)·Rz(−λc)`), which is what common space is on the GPU here. On the flat map it is the
 //!   sun in common space, as deck's (unused there).

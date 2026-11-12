@@ -2,9 +2,12 @@
 //! arenas (doc 02 §3; doc 01 §5.11).
 //!
 //! RainViewer's tiles load and contour on the worker pool ([`tiles`], W1) once the scene carries a
-//! frame; nothing is drawn until W2–W4 fill the layer. Keep `new(&Init) -> Self` and the row in
-//! `layers::ordered`.
+//! frame and are drawn flat on the ground ([`ground`], W2); the lifted layers (W3) draw them from
+//! the GPU arenas ([`arena`], W2); the measured volumes ([`measured`], W4) come after. Keep
+//! `new(&Init) -> Self` and the row in `layers::ordered`.
 
+pub mod arena;
+pub mod ground;
 pub mod measured;
 pub mod tiles;
 
@@ -22,15 +25,18 @@ pub struct Input {
 
 /// Rows 5a and 5b (`weather`).
 pub struct Radar {
-    /// RainViewer's tiles (W1); the ground layer (W2) and the lifted layers (W3) draw them.
-    tiles: tiles::RadarTiles,
+    /// RainViewer's tiles (W1), each with echo uploaded for the ground layer; the ground layer (W2)
+    /// and the lifted layers (W3) draw them.
+    tiles: ground::Tiles,
+    /// RainViewer's ground layer (W2).
+    ground: ground::Ground,
     /// The measured volumes (W4), drawn after RainViewer.
     measured: measured::Measured,
 }
 
 impl Radar {
     pub fn new(init: &Init<'_>) -> Self {
-        Radar { tiles: tiles::RadarTiles::new(init), measured: measured::Measured::new(init) }
+        Radar { tiles: tiles::RadarTiles::new(init), ground: ground::Ground::new(init), measured: measured::Measured::new(init) }
     }
 }
 
@@ -45,10 +51,12 @@ impl Layer for Radar {
         // RainViewer stands back where a measured volume is drawn (`setRadarCoverage`)
         let measured = self.measured.coverages();
         let blanked = (!measured.is_empty()).then(|| tiles::Input { coverages: std::sync::Arc::clone(measured), ..scene.radar.tiles.clone() });
-        self.tiles.update(cx, blanked.as_ref().unwrap_or(&scene.radar.tiles), |_, _, _| ());
+        self.tiles.update(cx, blanked.as_ref().unwrap_or(&scene.radar.tiles), |gpu, _, radar| ground::GroundTile::upload(&gpu.device, radar));
+        self.ground.prepare(cx, &self.tiles);
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
+        self.ground.draw(pass, cx, &self.tiles);
         // after RainViewer's layers, in the backend's order
         self.measured.draw(pass, cx);
     }

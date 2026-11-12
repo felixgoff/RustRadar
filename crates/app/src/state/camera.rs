@@ -1,5 +1,6 @@
 //! The camera's own work each frame, after the transition step: the lock on an aircraft (item
-//! A10; doc 01 §2.4, §3.9, doc 03 §11.3–11.4), `renderFrame`'s steps 3, 4 and 6 (G:3171-3223):
+//! A10; doc 01 §2.4, §3.9, doc 03 §11.3–11.4) and the aim on the ground under it (item Z4),
+//! `renderFrame`'s steps 3 to 6 (G:3171-3223):
 //!
 //! 3. **Which controller**: locked on an aircraft, a train or a ship, the wheel and pinches zoom
 //!    about the centre and every drag orbits ([`Controller::set_locked`], `controllerFor`).
@@ -9,11 +10,6 @@
 //!    to 85, closer than zoom 20 until the camera is 1.3 aircraft lengths away). On the flat map
 //!    that raises the camera's target (`position`); when such a lock ends the target comes back
 //!    to the ground with the plain limits.
-//! 6. **The ease back**: a lock that ends closer than zoom 20 or steeper than 60° eases back
-//!    within them over 600 ms. deck holds each frame of that transition within the free limits
-//!    it is handed with it, so the view is back at its first frame, and the 600 ms only keep the
-//!    app's other moves (a new lock, the terrain aim) off, as today.
-//!
 //! 5. **The terrain aim** (item Z4; doc 04 §14.4, doc 01 §3.11; G:3204-3212): unless the camera is
 //!    locked on an aircraft, the ground under the view's centre is `groundHeight(lon, lat)` with
 //!    the terrain on and closer than zoom 12, else the sea (0 m); once it is known (its tile has
@@ -25,6 +21,10 @@
 //!    last 16 tiles kept ([`GroundHeights`], ported in stage 1): [`Ground`] fetches them through
 //!    the map's tile runtime and decodes them on its worker pool, and a tile that comes rebuilds
 //!    the scene (`onLoad`: `render`).
+//! 6. **The ease back**: a lock that ends closer than zoom 20 or steeper than 60° eases back
+//!    within them over 600 ms. deck holds each frame of that transition within the free limits
+//!    it is handed with it, so the view is back at its first frame, and the 600 ms only keep the
+//!    app's other moves (a new lock, the terrain aim) off, as today.
 //!
 //! Step 2 (centring on a followed train or ship) is [`Camera::follow_vehicle`], which the frame
 //! runs before the transition step with where the scene builders last drew the vehicle.
@@ -63,6 +63,12 @@
 //!   serves the map's (a shot never touches the network).
 //! - A ground tile is decoded on the map's worker pool, where the browser decoded it
 //!   asynchronously; one that fails is never asked again until it is evicted, as today.
+//! - A shot (`--screenshot`) draws its picture once the aim rests ([`Camera::aiming`]) as well as
+//!   the map's tiles, so a view on the terrain is taken from the settled camera.
+//!
+//! Until the app hands the map the 3D surface (stage 9's draping, item Z2), the terrain setting
+//! raises the target over the flat map alone, which then lies 1.6 km below it at Zermatt: today's
+//! picture needs the surface drawn with it.
 
 use std::sync::Arc;
 

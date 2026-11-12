@@ -14,7 +14,7 @@
 
 use rustradar_core::weather::{Conditions, Sky};
 use rustradar_map::SceneInput;
-use rustradar_map::layers::sky;
+use rustradar_map::layers::{ground, sky};
 
 use crate::state::AppState;
 
@@ -38,6 +38,8 @@ impl Realistic {
         let settings = &state.persisted.settings;
         // (live weather: R11 hands its conditions over here; none until then)
         scene.sky = sky::Input { shown: true, weather: sky_conditions(settings.sky, None), daylight: settings.daylight };
+        // the ground's tiles and textures (R2; drawn on the realistic basemap only)
+        scene.ground = ground::Input::SHOWN;
     }
 }
 
@@ -46,7 +48,6 @@ mod tests {
     use rustradar_core::geo::Basemap;
     use rustradar_core::weather::PRESETS;
     use rustradar_map::frame::ViewFrame;
-    use rustradar_map::layers::ground::land;
     use rustradar_map::{Gpu, GpuError, look};
     use rustradar_scene::camera::ViewState;
 
@@ -88,6 +89,16 @@ mod tests {
         }
     }
 
+    /// The scene shows the realistic ground (R2), which the map draws on the realistic basemap
+    /// alone.
+    #[test]
+    fn the_scene_shows_the_ground() {
+        let mut state = AppState::new(Startup { basemap: Some(Basemap::Realistic), ..Default::default() }, None, None, None, V2, [1100.0, 720.0]);
+        let clocks = Clocks { local_ms: V2_NOON, feed_ms: V2_NOON };
+        let scene = SceneBuilder::default().build(&mut state, clocks, 1.0);
+        assert_eq!(scene.ground, ground::Input::SHOWN);
+    }
+
     fn gpu() -> Option<Gpu> {
         match Gpu::headless() {
             Ok(gpu) => Some(gpu),
@@ -121,28 +132,40 @@ mod tests {
         (shot.image, ViewFrame::new(&view, size, 1.0, 0.0), look)
     }
 
+    /// The land's colour at `xy` far out as the CPU has it (the light of `scene::look` through the
+    /// ground shader's twin, `ground::twin`: from 1200 m a pixel the Earth picture's own colours,
+    /// lit, and its towns' lights at night), within a texel of the place: the lowest and highest.
+    fn far_land(far: &ground::twin::FarOut, look: &look::Look, view: &ViewFrame, xy: [f64; 2]) -> ([f64; 3], [f64; 3]) {
+        let [lon, lat] = view.viewport.unproject(xy, 0.0);
+        let rl = look::twin::vary(&look::RLight::new(look, view, 0.0), view, [lon, lat, 0.0]);
+        far.land_range(look, &rl, [lon, lat])
+    }
+
     /// R1's acceptance (`--screenshot --view 52,10,4.5 --basemap realistic`, the sunny preset at
-    /// local noon): a land pixel within 4 levels of the CPU's reference (doc 04 §3.5's display
-    /// transform of the light of `scene::look`, through the land's shader on the CPU); the space
-    /// round the globe (V2 is far out: space's colours, the horizon above the screen) as the
-    /// gradient's stops say; at night the land dark.
+    /// local noon) as R2 has it: a land pixel within 4 levels of the CPU's reference (doc 04 §3.5's
+    /// display transform of the light of `scene::look` on the ground far out, the Earth picture's
+    /// colours: [`far_land`]); the space round the globe (V2 is far out: space's colours, the
+    /// horizon above the screen) as the gradient's stops say; at night the land dark. (R1 drew the
+    /// land untextured, its tint alone, `land::lit_colour`; its points were (550, 360), (300, 200)
+    /// and (800, 550), the second now in the North Sea's water, so a point on the land replaces it.)
     #[test]
     fn v2_realistic_at_noon_is_lit_as_the_cpu_says() {
         let Some(gpu) = gpu() else { return };
+        let far = ground::twin::FarOut::load().expect("the Earth's pictures");
         let (image, view, look) = shot(&gpu, V2, V2_NOON, Sky::Sunny);
-        for xy in [[550.0, 360.0], [300.0, 200.0], [800.0, 550.0]] {
-            let expected = land::lit_colour(&look, &view, xy).expect("land there");
+        for xy in [[550.0, 360.0], [420.0, 470.0], [800.0, 550.0]] {
+            let (low, high) = far_land(&far, &look, &view, xy);
             let got = image.pixel(xy[0] as u32, xy[1] as u32);
-            eprintln!("V2 noon at {xy:?}: {got:?}, CPU {expected:?}");
-            assert!((0..3).all(|i| (f64::from(got[i]) - expected[i]).abs() <= 4.0), "{xy:?}: {got:?} vs {expected:?}");
+            eprintln!("V2 noon at {xy:?}: {got:?}, CPU {low:?} to {high:?}");
+            assert!((0..3).all(|i| f64::from(got[i]) >= low[i] - 4.0 && f64::from(got[i]) <= high[i] + 4.0), "{xy:?}: {got:?} vs {low:?} to {high:?}");
         }
         let sky = rustradar_map::layers::sky::gradient(&look, &V2, [1100.0, 720.0]);
         assert_eq!((sky.top, sky.horizon), ([4, 7, 16], [12, 18, 34]));
         let (night, view, look) = shot(&gpu, V2, MIDWINTER_NIGHT, Sky::Sunny);
         let centre = night.pixel(550, 360);
-        let expected = land::lit_colour(&look, &view, [550.0, 360.0]).expect("land there");
-        eprintln!("V2 night: {centre:?}, CPU {expected:?}");
-        assert!((0..3).all(|i| (f64::from(centre[i]) - expected[i]).abs() <= 4.0), "{centre:?} vs {expected:?}");
+        let (low, high) = far_land(&far, &look, &view, [550.0, 360.0]);
+        eprintln!("V2 night: {centre:?}, CPU {low:?} to {high:?}");
+        assert!((0..3).all(|i| f64::from(centre[i]) >= low[i] - 4.0 && f64::from(centre[i]) <= high[i] + 4.0), "{centre:?} vs {low:?} to {high:?}");
         assert!(centre[..3].iter().all(|&c| c < 30), "{centre:?}");
     }
 

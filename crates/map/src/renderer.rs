@@ -47,6 +47,7 @@ use crate::layers::{self, DrawCx, Init, Layer, Pass, PrepareCx};
 use crate::pipelines::mesh::LightRig;
 use crate::state::SHADOW_STENCIL_REFERENCE;
 use crate::target::{CLEAR, Composite, MAP_FORMAT, MapTarget};
+use crate::textures::RealisticTextures;
 use crate::tiles::{TileRuntime, UploadBudget};
 
 /// Everything the map draws from, as plain data (plan 1.4.7): the view, what is common to all
@@ -315,6 +316,8 @@ struct GpuParts {
     target: MapTarget,
     composite: Composite,
     layers: Vec<Box<dyn Layer>>,
+    /// The realistic map's textures (stand-ins until a layer starts them, `PrepareCx::textures`).
+    textures: RealisticTextures,
 }
 
 impl GpuParts {
@@ -331,6 +334,7 @@ impl GpuParts {
             composite: Composite::new(device, surface_format),
             layers,
             bindings,
+            textures: RealisticTextures::new(device, &gpu.queue),
         }
     }
 }
@@ -342,6 +346,8 @@ pub struct MapRenderer {
     target: MapTarget,
     composite: Composite,
     layers: Vec<Box<dyn Layer>>,
+    /// The realistic map's textures, which its layers share.
+    textures: RealisticTextures,
     scene: SceneInput,
     /// The scene refresh's frame (what common offsets are measured from).
     scene_view: ViewFrame,
@@ -366,13 +372,14 @@ impl MapRenderer {
     pub fn new(gpu: &Gpu, surface_format: wgpu::TextureFormat) -> Self {
         let scene = SceneInput::default();
         let tiles = TileRuntime::new(io::offline(), Arc::new(Pool::new(jobs::default_threads())));
-        let GpuParts { bindings, frames, target, composite, layers } = GpuParts::new(gpu, surface_format, &tiles);
+        let GpuParts { bindings, frames, target, composite, layers, textures } = GpuParts::new(gpu, surface_format, &tiles);
         let scene_view = ViewFrame::new(&scene.view, scene.size, scene.map_scale, 0.0);
         MapRenderer {
             frames,
             target,
             composite,
             layers,
+            textures,
             camera: scene.view,
             camera_size: scene.size,
             view: scene_view.clone(),
@@ -442,7 +449,8 @@ impl MapRenderer {
         if catching {
             self.errors.install(&gpu.device);
         }
-        let GpuParts { bindings, frames, target, composite, layers } = GpuParts::new(gpu, surface_format, &self.tiles);
+        let GpuParts { bindings, frames, target, composite, layers, textures } = GpuParts::new(gpu, surface_format, &self.tiles);
+        self.textures = textures;
         self.bindings = bindings;
         self.frames = frames;
         self.target = target;
@@ -567,6 +575,7 @@ impl MapRenderer {
             local_now_ms,
             tiles: &self.tiles,
             budget: &mut budget,
+            textures: &mut self.textures,
         };
         for layer in &mut self.layers {
             layer.prepare(&mut cx);

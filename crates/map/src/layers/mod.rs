@@ -85,6 +85,7 @@ use crate::gpu::Gpu;
 use crate::jobs::Cancel;
 use crate::pipelines::mesh::{LightRig, MeshPipeline};
 use crate::renderer::SceneInput;
+use crate::textures::RealisticTextures;
 pub use crate::tiles::{ByteSize, DeckSelect, LodSelect, Refinement, Select, Source, TileIndex, TileRuntime, TileSet, TileSetOptions, UploadBudget};
 
 /// How a layer stands on 3D terrain (plan 1.4.12, stage 9).
@@ -159,6 +160,9 @@ pub struct PrepareCx<'a> {
     /// What may still be uploaded this frame, shared by every layer in draw order (plan 1.4.4: 4
     /// tiles or 8 MB a frame in the window; no limit headless).
     pub budget: &'a mut UploadBudget,
+    /// The realistic map's textures, shared by its layers (doc 04 §5): the stand-ins until a layer
+    /// starts them loading (`ground::load_textures`), then the files' once they are all in.
+    pub textures: &'a mut RealisticTextures,
 }
 
 impl PrepareCx<'_> {

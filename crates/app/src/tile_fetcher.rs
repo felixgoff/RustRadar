@@ -204,8 +204,9 @@ pub fn for_state(state: &AppState) -> Arc<dyn TileFetcher> {
         return Arc::new(DirTiles::at(fixture_tiles(fixture)));
     }
     let Some(backend) = &state.backend else { return io::offline() };
-    match BackendTiles::in_cache(&backend.dirs().cache, backend.rt().clone(), backend.waker()) {
-        Ok(tiles) => Arc::new(tiles),
+    // the radar state's table: it sets RainViewer's template in it as each frame comes (W5)
+    match Tiles::new(&backend.dirs().cache) {
+        Ok(tiles) => Arc::new(BackendTiles::new(tiles, state.radar.tile_sources().clone(), backend.rt().clone(), backend.waker())),
         Err(e) => {
             log::error!("no map tiles: the tile cache did not open: {e}");
             io::offline()

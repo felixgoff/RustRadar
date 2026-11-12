@@ -48,6 +48,7 @@
 //! over (or P3 passes the right one to [`Updater::current_version`]), every published release looks
 //! newer.
 
+pub mod android;
 pub mod manifest;
 
 use std::fmt;

@@ -423,12 +423,23 @@ pub fn run_with(mut builder: EventLoopBuilder<UserEvent>, options: Options) -> R
     #[cfg(target_os = "android")]
     platform::android::init(winit::platform::android::EventLoopExtAndroid::android_app(&event_loop), wake.clone());
     let (events, events_rx) = mpsc::channel();
+    // Android's update notice reaches the toast through the backend's queue (P4)
+    #[cfg(target_os = "android")]
+    let notice = rustradar_backend::Notifier::new(events.clone(), wake.clone());
     let backend = start_backend(platform::dirs(), rt.handle(), events, wake.clone());
+    // Android: the latest release's APK looked for now and every hour (P4)
+    #[cfg(target_os = "android")]
+    crate::update::android::start(backend.as_ref(), notice);
     let requests = Requests::new(rt.handle().clone(), wake);
     let view = options.view.unwrap_or(ViewState::INITIAL);
     let mut state = AppState::new(options.startup(), backend, Some(requests), Some(events_rx), view, WINDOW_SIZE);
     // times without a zone in the system's (today: the browser's); shots keep UTC (item F1)
     state.viewer_clocks = rustradar_core::time::Clocks::new(&platform::time_zone());
+    // a version an earlier activity of this process found (the toast's `pending_update`; P4)
+    #[cfg(target_os = "android")]
+    {
+        state.update_ready = crate::update::android::pending_update();
+    }
     let clock = options.now_ms.map_or_else(Clock::system, Clock::starting_at);
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App { options, clock, latch, state: Some(state), view: None, next: None, error: None };
@@ -485,6 +496,9 @@ impl View {
         tile_fetcher::connect(&mut engine.map, &engine.state);
         // remote pictures (photos, logos) through the backend's picture cache (U18)
         images::connect(&engine.egui, &engine.state);
+        // Android's update toast: Download opens the newer release's APK (P4)
+        #[cfg(target_os = "android")]
+        crate::update::android::connect(&engine.egui);
         // wgpu's errors and a lost device stop the map with the error card, not the app (B9)
         engine.map.catch_errors(&gpu, engine.state.requests.as_ref().map(|r| r.wake()));
         let egui_input = egui_winit::State::new(

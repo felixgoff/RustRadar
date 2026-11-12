@@ -37,18 +37,28 @@
 //!   comes first (so within 2.5 m of a wall the foot shade, not the cast shadow; overlapping
 //!   parallelograms and neighbouring buildings' shadows never darken twice).
 //!
-//! How it is checked (the tests below): V5 from the fixtures at a low morning sun over the sky
-//! alone (the ground left out, so every shadow pixel is the sky's colour blended once with the
-//! shadow colour): the shadows run along the sun's azimuth within 3° (a line-concentration scan of
-//! the shadow pixels on the ground) and on the side away from it (they lie in the CPU's
-//! parallelograms for that sun, not the opposite one's); where the CPU's parallelograms overlap the
-//! picture is darkened once, at the tile's alpha times the CPU twin's `rl_clear`; at night only the
-//! foot shade is drawn, never darker than its 0.42; the shadows are recast when the sun moves.
+//! How it is checked (the tests below): V5 from the fixtures at a low morning sun (9.4° up),
+//! drawn over the land under the sky with the ground's tiles left out and again without the
+//! buildings, so a pixel that is the bare one blended once with the shadow colour is shade, its
+//! alpha read back: the shadows' alpha is the tile's (strength 0.8 at that sun) times the CPU
+//! twin's `rl_clear`, within 0.01 on average (0.0003 here); the sun whose shadows best hold the shadow pixels
+//! on the ground (every azimuth tried against the footprints) lies within 3° of the real one
+//! (0.08° here), the opposite sun holding far fewer; where two or more of the CPU's
+//! parallelograms overlap the picture is darkened once, and nowhere is it darker than one layer of
+//! shade. Close in, the foot shade's alpha falls from 0.42 at the wall to nothing 2.5 m out as
+//! `FootShadeExtension` has it. With *daylight* off the shadows are the afternoon sun's (215°);
+//! when the sun moves the tiles are recast to exactly what a fresh cast draws; at night the
+//! strength is 0 and no tile casts.
 //!
 //! Deviations, invisible: the foot shade's path is `rustradar_scene::geom::path`'s segments of
 //! each ring (deck's PathLayer tessellation, made on the main thread when the tile is first drawn,
 //! as deck makes its attributes); a tile's shadow colour is a uniform of its own (deck's constant
 //! `getFillColor`), written again only when it changes.
+//!
+//! Cost (K8): V5's 65 Streets GL tiles hold 34 516 foot-shade segments (2.9 MB of instances) and
+//! 17 252 shadow parallelograms at the low sun (1 MB); making all of them takes 18 ms and 10 ms in a
+//! debug build (1.3 ms for the worst tile), on the main thread as the tiles arrive (at most four a
+//! frame) and when the sun has moved (within the recasting budget). Two draws a near tile.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

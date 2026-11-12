@@ -296,6 +296,9 @@ pub struct AppState {
     pub ships: ships::Ships,
     pub weather: weather::Weather,
     pub radar: radar::Radar,
+    /// The realistic globe's cloud picture (R10; `clouds.ts`'s `cloudPicture`): the `--fixture`
+    /// folder's, else EUMETSAT's through the runtime, asked for while the clouds show.
+    pub clouds: rustradar_backend::clouds::Feed,
     pub search: search::Search,
     /// The aircraft filter panel's new filters, for the [`Action::SetFilters`] it pushes with
     /// them (the action is `Copy`).
@@ -334,6 +337,7 @@ impl AppState {
     ) -> Self {
         // the saved settings from the backend's config folder, `--basemap` over them (U5)
         let (settings, persisted) = settings::Store::open(backend.as_ref().map(Backend::dirs), &startup);
+        let clouds = rustradar_backend::clouds::Feed::new(startup.fixture.as_deref(), requests.as_ref().map(|r| (r.rt().clone(), r.wake())));
         let mut controller = Controller::new(view, size);
         // `createDeck` starts free (`controllerFor(false)`) with the basemap's limits
         controller.set_limits(cam::limits(persisted.settings.basemap, None), cam::max_zoom_now(None));
@@ -360,6 +364,7 @@ impl AppState {
             ships: Default::default(),
             weather: Default::default(),
             radar: Default::default(),
+            clouds,
             search: Default::default(),
             filters_handed: Cell::new(None),
             train_filters_handed: Cell::new(None),
@@ -426,6 +431,10 @@ impl AppState {
         self.search.poll(&mut cx);
         self.pick.poll(&mut cx);
         self.shortcuts.poll(&mut cx);
+        // the cloud picture while the clouds show (R10: realistic, below zoom 6.5; `cloudPicture` in
+        // `buildLayers`), a new one rebuilding the scene (`onLoad`)
+        let clouds_shown = self.basemap() == Basemap::Realistic && rustradar_scene::clouds::cloud_opacity(self.controller.view().zoom) > 0.0;
+        wants.scene |= self.clouds.poll(local_ms, clouds_shown);
         // the phone's sheet lowers as a detail opens and rises again as the details close (U19)
         let board_alone = self.airport.code().is_some() && self.flight.selected().is_none();
         self.sheet.follow(crate::ui::shell::detail_open(self), board_alone);

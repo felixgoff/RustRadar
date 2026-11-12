@@ -7,6 +7,10 @@
 //!   the same seed for the same shown rain and canvas): along the nearest depth's streaks the
 //!   picture is lighter than a few pixels beside them, by about what a streak's colour and opacity
 //!   give over the rainy ground.
+//! - **Live rain**: V4 under the *live* sky (today's default) with a forecast of rain read as MET
+//!   Norway's answer from a fixture folder (`state::weather::FixtureFeed`): it rains by the
+//!   forecast's own amount, the streaks where the map's drops for that amount are; on the
+//!   committed fixtures, which hold no forecast, the live sky stays a fine day.
 //! - **Tilt-shift**: V3 (Stockholm region, zoom 9) on a fine day with the setting on and off. The
 //!   rows between 42 % and 58 % of the height are the same picture; the top and bottom rows lose
 //!   most of their edges, and with it on they are less sharp than the middle.
@@ -21,8 +25,10 @@ mod common;
 use common::shots::{V3, V4, gpu, save};
 use common::{NOW_MS, app_shot_with, options};
 use rustradar_app::Options;
+use rustradar_app::state::weather::{FIXTURE_FORECAST, FixtureFeed, Weather};
 use rustradar_core::geo::Basemap;
-use rustradar_core::weather::{PRESETS, Sky};
+use rustradar_core::model::Weather as Forecast;
+use rustradar_core::weather::{PRESETS, Sky, conditions_of};
 use rustradar_map::headless::Image;
 use rustradar_map::io;
 use rustradar_map::layers::sky;
@@ -56,11 +62,60 @@ fn v4_in_the_rain_shows_the_streaks_where_the_drops_are() {
     let view = V4.view();
     let image = shot(&gpu, view, Sky::Rain, false);
     save(&image, "r11-rain-v4.png");
-    // the map's drops for this rain and canvas, as its post effects made them
     let size = [f64::from(SIZE[0]), f64::from(SIZE[1])];
     let input = sky::Input { shown: true, weather: Some(PRESETS.rain), daylight: true };
     let shown = rain_shown(Basemap::Realistic, &input, &view, size, NOW_MS);
     assert!(shown.falls() && shown.amount == 1.0, "{shown:?}");
+    let (on, beside) = streak_contrast(&image, &view, &input);
+    // a near streak is (215, 223, 235) at 0.4 over ground of about 90: some 40 levels at its line
+    assert!(on - beside > 15.0, "on {on:.1}, beside {beside:.1}");
+}
+
+/// A recorded MET Norway forecast of rain where V4 looks (`--fixture`'s
+/// `weather/locationforecast.json`, as its answer comes): overcast, 1.4 mm in the next hour.
+const RAINY_FORECAST: &str = r#"{"properties": {"timeseries": [{"time": "2026-06-21T10:00:00Z", "data": {
+    "instant": {"details": {"cloud_area_fraction": 100.0, "cloud_area_fraction_low": 87.5, "fog_area_fraction": 0.0, "air_temperature": 12.2}},
+    "next_1_hours": {"summary": {"symbol_code": "rain"}, "details": {"precipitation_amount": 1.4}}}}]}}"#;
+
+/// The live sky (today's default) through the whole app: the forecast read from a fixture folder
+/// as MET Norway's answer lights V4 and makes it rain by its own amount (`conditionsOf`: 0.805, in
+/// steps 0.8), the streaks where the map's drops for that rain are; the same view on the committed
+/// fixtures, which hold no forecast, stays dry (a fine day until the weather comes).
+#[test]
+fn v4_under_a_live_forecast_of_rain_rains_by_its_amount() {
+    let Some(gpu) = gpu() else { return };
+    let view = V4.view();
+    let dir = std::env::temp_dir().join(format!("rustradar-r11-live-weather-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("weather")).unwrap();
+    std::fs::write(dir.join(FIXTURE_FORECAST), RAINY_FORECAST).unwrap();
+    let fixture = io::fixture_tiles_dir().parent().expect("the data folder").to_owned();
+    let options = Options { fixture: Some(fixture), ..options(view, Basemap::Realistic, SIZE, 1.0) };
+    let feed_dir = dir.clone();
+    let image = app_shot_with(&gpu, &options, move |state| {
+        assert_eq!(state.persisted.settings.sky, Sky::Live, "today's default");
+        state.weather = Weather::with_feed(Some(Box::new(FixtureFeed::new(feed_dir))));
+    });
+    std::fs::remove_dir_all(&dir).ok();
+    save(&image, "r11-live-rain-v4.png");
+    let forecast = Forecast { cloud: 1.0, cloud_low: 0.875, fog: 0.0, precipitation: 1.4, symbol: "rain".into(), temperature: 12.2 };
+    let input = sky::Input { shown: true, weather: Some(conditions_of(&forecast)), daylight: true };
+    let size = [f64::from(SIZE[0]), f64::from(SIZE[1])];
+    let shown = rain_shown(Basemap::Realistic, &input, &view, size, NOW_MS);
+    assert_eq!(shown.amount, 0.8, "{shown:?}");
+    let (on, beside) = streak_contrast(&image, &view, &input);
+    assert!(on - beside > 12.0, "on {on:.1}, beside {beside:.1}");
+    // without a forecast the live sky is a fine day: no streaks along the same lines
+    let dry = app_shot_with(&gpu, &options, |_| {});
+    let (on, beside) = streak_contrast(&dry, &view, &input);
+    assert!((on - beside).abs() < 4.0, "dry: on {on:.1}, beside {beside:.1}");
+}
+
+/// The mean luma along the middle of the nearest depth's streaks that the map draws for `input`
+/// over `view`, and a few pixels to either side of them.
+fn streak_contrast(image: &Image, view: &rustradar_scene::camera::ViewState, input: &sky::Input) -> (f64, f64) {
+    // the map's drops for this rain and canvas, as its post effects made them
+    let size = [f64::from(SIZE[0]), f64::from(SIZE[1])];
+    let shown = rain_shown(Basemap::Realistic, input, view, size, NOW_MS);
     let mut rain = Rain::new();
     rain.show(shown, size, NOW_MS);
     rain.step(NOW_MS);
@@ -88,9 +143,8 @@ fn v4_in_the_rain_shows_the_streaks_where_the_drops_are() {
         }
     }
     let (on, beside) = (on / n, beside / n);
-    eprintln!("rain at V4: {} streaks; along the near ones {on:.1}, beside them {beside:.1} ({n} points)", streaks.len());
-    // a near streak is (215, 223, 235) at 0.4 over ground of about 90: some 40 levels at its line
-    assert!(on - beside > 15.0, "on {on:.1}, beside {beside:.1}");
+    eprintln!("rain {:.2} at V4: {} streaks; along the near ones {on:.1}, beside them {beside:.1} ({n} points)", shown.amount, streaks.len());
+    (on, beside)
 }
 
 #[test]

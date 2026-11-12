@@ -25,6 +25,7 @@ pub mod scene_builder;
 pub mod state;
 pub mod tile_fetcher;
 pub mod ui;
+pub mod update;
 
 use std::path::PathBuf;
 

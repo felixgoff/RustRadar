@@ -9,7 +9,7 @@
 //!
 //! Layers travel as smooth isobands rather than coloured pixels, so a storm
 //! keeps clean edges however far the globe zooms in: [`Polygon`]s in longitude
-//! and latitude, made by [`contour`].
+//! and latitude, made by [`contour()`].
 //!
 //! The native app takes them as they are ([`crate::Backend::radar_volumes`]:
 //! each volume shared, nothing encoded); it triangulates them off the UI thread
@@ -44,7 +44,7 @@ pub use rustradar_core::model::{RadarBounds as Bounds, RadarVolume as VolumeInfo
 /// One filled isoband polygon, in degrees.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Polygon {
-    /// The isoband: [`PALETTE`] index, `[5 + 5·band, 10 + 5·band)` dBZ.
+    /// The isoband: `PALETTE` index, `[5 + 5·band, 10 + 5·band)` dBZ.
     pub band: u8,
     /// `[lon, lat]` rings. Ring 0 is the outer ring and runs counter-clockwise;
     /// the rest are holes and run clockwise (where the next stronger band sits,
@@ -61,7 +61,7 @@ pub struct Volume {
     pub time: i64,
     pub fetched: Instant,
     pub bounds: Bounds,
-    /// Isobands ([`contour`]) of the strongest echo at any height, for the
+    /// Isobands ([`contour()`]) of the strongest echo at any height, for the
     /// ground; empty when nothing reaches [`GROUND_MIN_DBZ`].
     pub ground: Vec<Polygon>,
     /// Isobands per height (km), lowest first; `None` where nothing reaches

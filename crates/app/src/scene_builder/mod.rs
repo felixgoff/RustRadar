@@ -109,6 +109,9 @@ impl SceneBuilder {
         // the rail map (T4; G:2679) on every basemap, coloured by speed unless it shows the blocks
         let settings = &state.persisted.settings;
         scene.rail = rail::Input { shown: settings.rail_map, speeds: rustradar_scene::rail::rail_speeds(settings.rail_map, settings.rail_shows) };
+        // the shaded relief (R12; G:2649-2671): always on realistic, on dark and satellite with the
+        // *terrain* setting; the layer works out the basemap's rule
+        scene.hillshade = rustradar_map::layers::hillshade::Input { shown: true, terrain: settings.terrain };
         self.radar.build(state, &mut scene);
         // the ship hovered in the ships list while ships are the focus (U15), handed over when it
         // changes

@@ -1,8 +1,9 @@
 //! Weather radar: RainViewer tiles, the ground layer, lifted layers and walls, measured volumes, GPU
 //! arenas (doc 02 §3; doc 01 §5.11).
 //!
-//! Stage 2 stub (E4): draws nothing until W1–W4 fill it; keep `new(&Init) -> Self` and
-//! the row in `layers::ordered`.
+//! RainViewer's tiles load and contour on the worker pool ([`tiles`], W1) once the scene carries a
+//! frame; nothing is drawn until W2–W4 fill the layer. Keep `new(&Init) -> Self` and the row in
+//! `layers::ordered`.
 
 pub mod tiles;
 

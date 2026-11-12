@@ -52,8 +52,9 @@
 //! - The PNG's pixels come from the `image` crate exactly as stored; the browser's canvas stores
 //!   them premultiplied by alpha, so its `getImageData` may differ by a level in the colour of
 //!   partly transparent pixels (whose reflectivity reads only their alpha).
-//! - A tile the source has nothing for (404) or that fails does not stand in for its ancestors
-//!   (the tile runtime's rule; deck counts it loaded with nothing in it).
+//! - A tile the source has nothing for (404) or whose fetch fails does not stand in for its
+//!   ancestors (the tile runtime's rule; today's `fetchPixels` answers `null`, which deck counts
+//!   loaded with nothing in it). Bytes that are no picture are a dry tile, cached, as today.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -329,7 +330,13 @@ impl<G> RadarTiles<G> {
             if let Some(tile) = lock(&jobs).results.get(&key) {
                 return Ok(Some(Decoded { tile }));
             }
-            let decoded = decode(tile, &bytes, &coverages, cancel)?;
+            let decoded = match decode(tile, &bytes, &coverages, cancel) {
+                Ok(decoded) => decoded,
+                // bytes that are no picture: a tile with nothing in it, kept as such
+                // (`fetchPixels`' null)
+                Err(_) if !cancel.is_cancelled() => Decoded::default(),
+                Err(e) => return Err(e),
+            };
             if cancel.is_cancelled() {
                 // an aborted load is not cached
                 return Err("cancelled".into());
@@ -547,8 +554,9 @@ mod tests {
     #[test]
     fn fixture_tiles_mesh_as_the_typescript_does() {
         // the committed RainViewer frame's tiles over Germany and Poland, run through `processTile`
-        // in bun on the same pixels (the PNG has no colour chunks: the browser reads them as
-        // stored): the same bands, vertices, triangles and walls, value for value
+        // (radar.ts) in bun on the same pixels (the PNG has no colour chunks: the browser reads
+        // them as stored; decoded to raw RGBA by Pillow for bun): the same bands, vertices,
+        // triangles and walls, value for value
         check(
             TileIndex::new(35, 22, 6),
             &Golden {
@@ -609,6 +617,28 @@ mod tests {
                     138192499.23242378,
                     74775382426.0,
                     [0, 12648, 25434, 41934, 56154, 69660, 79044, 84756, 88332, 90780, 92172, 93084, 93258, 93258, 93258],
+                ),
+            },
+        );
+        // the southern neighbour the seam test meets: six levels (none at 12 km)
+        check(
+            TileIndex::new(35, 23, 6),
+            &Golden {
+                levels: &[(1.5, 1), (3.0, 2), (4.5, 4), (6.0, 5), (8.0, 7), (10.0, 9)],
+                slices: (
+                    57330,
+                    80025,
+                    88401513.67266655,
+                    56320236404.0,
+                    [0, 13911, 28818, 44256, 59205, 70233, 75771, 78303, 79677, 80019, 80025, 80025, 80025, 80025, 80025],
+                    [0, 5014, 10362, 15914, 21239, 25141, 27111, 28025, 28516, 28660, 28665, 28665, 28665, 28665, 28665],
+                ),
+                walls: (
+                    41622,
+                    40116,
+                    43113793.666526794,
+                    13561325337.0,
+                    [0, 5616, 12252, 18936, 26040, 32736, 36774, 38466, 39528, 40092, 40116, 40116, 40116, 40116, 40116],
                 ),
             },
         );
@@ -907,5 +937,29 @@ mod tests {
         assert_eq!(tiles.visible().count(), 0, "a dry tile counts as loaded");
         assert!(tiles.in_view().is_empty());
         assert_eq!(tiles.version(), 2);
+    }
+
+    #[test]
+    fn bytes_that_are_no_picture_are_a_dry_tile() {
+        // hail at zoom 5, garbage at zoom 6: as `fetchPixels`' null, the garbage loads with
+        // nothing in it, hides the hail and is cached
+        let hail = plain([255, 255, 255, 255]);
+        let fetcher = FnFetcher(move |_: &str, tile: TileIndex| -> FetchResult { Ok(Some(if tile.z == 5 { hail.clone() } else { b"<html>".to_vec() })) });
+        let runtime = TileRuntime::new(Arc::new(fetcher), Arc::new(Pool::new(2)));
+        let mut tiles: RadarTiles = RadarTiles::on(&runtime);
+        let input = Input { url: Some(FRAME.into()), ..Default::default() };
+        let mut view = v2();
+        view.zoom = 3.9;
+        settle(&mut tiles, &runtime, &viewport_for(&view, [800.0, 600.0]), &input);
+        assert!(tiles.visible().count() > 0);
+        view.zoom = 4.6;
+        settle(&mut tiles, &runtime, &viewport_for(&view, [800.0, 600.0]), &input);
+        let selected = tiles.tile_set().selected().to_vec();
+        assert!(!selected.is_empty() && selected.iter().all(|t| t.z == 6));
+        assert!(selected.iter().all(|&t| tiles.tile_set().state(t) == Some(crate::tiles::TileState::Loaded)));
+        assert_eq!(tiles.visible().count(), 0);
+        assert!(tiles.in_view().is_empty());
+        let held = tiles.cache_stats().held;
+        assert!(held >= selected.len(), "{held} of {}", selected.len());
     }
 }

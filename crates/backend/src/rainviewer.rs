@@ -16,9 +16,11 @@
 //!   (`tile_fetcher::TileSources::set_template`) before the scene carries the new frame, and they
 //!   are kept on disk by `backend::tiles` like every map tile.
 //!
+//! - The answer is read as JSON whatever its status, as `(await fetch(…)).json()` reads it: an
+//!   error page is no JSON and so an error, a list sent with any status gives its frame.
+//!
 //! Deviations: a frame whose host or path is not a string is no frame (the TypeScript would make a
-//! URL with `undefined` in it, whose every tile fails); the answer is read as JSON whatever its
-//! status, as `fetch(…).json()` does, but a status other than 2xx is an error here.
+//! URL with `undefined` in it, whose every tile fails).
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -91,26 +93,25 @@ fn client() -> Option<&'static reqwest::Client> {
 }
 
 /// The newest frame of the frame list at `url`, asked with `http`: `None` when the list has none,
-/// an error when it cannot be had or read.
+/// an error when it cannot be had or read. The answer is read as JSON whatever its status, as
+/// `(await fetch(…)).json()` reads it (an error page is no JSON, so it is an error all the same).
 pub async fn fetch(http: &reqwest::Client, url: &str) -> CmdResult<Option<Frame>> {
     let call = crate::devlog::start("RainViewer", "GET", url, None);
     let answer = async {
         let response = http.get(url).send().await.map_err(|e| format!("can't reach RainViewer: {e}"))?;
-        let status = response.status();
+        let status = response.status().as_u16();
         let body = response.bytes().await.map_err(|e| e.to_string())?;
-        if !status.is_success() {
-            return Err(format!("RainViewer answered {status}"));
-        }
-        Ok(body)
+        Ok::<_, String>((status, body))
     }
     .await;
     if let Some(c) = call {
         match &answer {
-            Ok(body) => c.finish(200, body),
+            Ok((status, body)) => c.finish(*status, body),
             Err(e) => c.fail(e),
         }
     }
-    parse(&answer?)
+    let (status, body) = answer?;
+    parse(&body).map_err(|e| if (200..300).contains(&status) { e } else { format!("RainViewer answered {status}: {e}") })
 }
 
 /// The frame to draw now (`refreshRadar`): the newest of RainViewer's frame list.
@@ -220,9 +221,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_ask_is_an_error_and_an_empty_list_no_frame() {
-        let (base, _, task) = serve(503, MAPS).await;
+        let (base, _, task) = serve(503, "<html>Service Unavailable</html>").await;
         let err = fetch(&local_client(), &base).await.unwrap_err();
-        assert!(err.contains("503"), "{err}");
+        assert!(err.starts_with("RainViewer answered 503"), "{err}");
+        task.abort();
+        // the body is read whatever the status, as `fetch(…).json()` reads it
+        let (base, _, task) = serve(503, MAPS).await;
+        assert_eq!(fetch(&local_client(), &base).await.unwrap().unwrap().time, Some(1794328200));
         task.abort();
         let (base, _, task) = serve(200, r#"{"host":"https://h","radar":{"past":[]}}"#).await;
         assert_eq!(fetch(&local_client(), &base).await, Ok(None));

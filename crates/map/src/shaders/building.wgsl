@@ -14,6 +14,8 @@
 // - `vs_roof` + `fs_roof`: pitched roofs' meshes (item R6; `RoofExtension`'s `roofInject`): the
 //   same vertex, its tangent across the slope (`cross(up, n)`) and no foot shading (`rb_z` 10), the
 //   same fragment not clipped to the tile (the roofs' SimpleMeshLayer has no `ClipExtension`).
+//   Today every corner of them arrives as a plain plaster wall (deck drops `rr_info`:
+//   `layers::roofs::AS_DRAWN`), so the roof branch's `ROOF_FACE` and `ROOF_OWN_COLOUR` stay unused.
 //
 // What differs from the GLSL, and why (doc 04 §16.2):
 // - deck's varyings `rb_uv`, `rb_n`, `rb_z` and `rb_info` are worked out on the CPU per vertex

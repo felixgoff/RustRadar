@@ -162,6 +162,11 @@ impl TileFetcher for BackendTiles {
                 if &*source == rustradar_map::layers::roofs::OVERTURE {
                     return rustradar_backend::overture::tile(tile.z, tile.x, tile.y).await;
                 }
+                // the trees' canopy heights (R7): `backend::canopy` reads the canopy height map's
+                // files with range requests (`--fixture` folders: `DirTiles` reads their recording)
+                if &*source == rustradar_map::layers::trees::CANOPY {
+                    return rustradar_backend::canopy::tile(tile.z, tile.x, tile.y).await;
+                }
                 let source = sources.resolve(&tiles, &source).await?;
                 // Streets GL (R3): only its zoom 16 goes to its server (`sglFetch`)
                 if source.name == rustradar_backend::streets_gl::NAME {

@@ -15,7 +15,7 @@
 
 use rustradar_core::weather::{Conditions, Sky};
 use rustradar_map::SceneInput;
-use rustradar_map::layers::{clouds, ground, sky};
+use rustradar_map::layers::{clouds, ground, sky, trees};
 use rustradar_map::post;
 
 use crate::state::AppState;
@@ -48,6 +48,8 @@ impl Realistic {
         // the latest cloud picture (R10; `cloudPicture`'s, the bytes shared): the map draws it on
         // the realistic basemap while the zoom shows the clouds
         scene.clouds = clouds::Input { picture: state.clouds.picture().map(|p| clouds::Picture(p.jpeg.clone())) };
+        // the trees (R7; no setting: the map draws them on the realistic flat map from zoom 14)
+        scene.trees = trees::Input::SHOWN;
     }
 }
 

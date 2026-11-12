@@ -33,6 +33,15 @@
 //!   are 0.11 % larger about the tile's corner than the walls they stand on (up to 0.35 m at the
 //!   far corner of a zoom-16 tile), and the port puts each corner where deck does
 //!   ([`deck_meter_offset`]).
+//! - **Shaded as today's are**, which is not as `tileRoofs` means them: deck 9.4's SimpleMeshLayer
+//!   keeps only a mesh's `positions`, `colors`, `normals` and `texCoords`
+//!   (`normalizeGeometryAttributes`), so the `rr_info` attribute never reaches the shader, which
+//!   reads WebGL's value for an attribute with no buffer, `(0, 0, 0, 1)`: every face and gable is a
+//!   wall of code 0 without bays, plain plaster (texture layer 0) in its corners' colour (a face's
+//!   mapped roof colour, else the building's wall colour), its texture repeating once a unit of
+//!   `texCoords` (a face's metres, a gable's bays and storeys), no snow, no lit windows ([`AS_DRAWN`];
+//!   `TileRoofs::info` keeps what `tileRoofs` computes). Checked against today's picture of V5: a
+//!   hipped roof in its mapped dark grey shows light grey, a terracotta one pink, within a few levels.
 //! - **Drawn** after the tile's buildings with the building shader's roof entry points
 //!   (`vs_roof`, `fs_roof`: `RoofExtension`'s `roofInject`, the tangent across the slope, no shade
 //!   at the foot) and `NO_CULL`, not clipped to the tile (the roofs' SimpleMeshLayer has no
@@ -92,6 +101,9 @@ const STOREY_M: f64 = tess::STOREY_M;
 
 /// Web Mercator's equator (`EARTH_CIRCUMFERENCE` of `building-layer.ts`), metres.
 const EARTH_CIRCUMFERENCE: f64 = 2.0 * PI * 6_378_137.0;
+/// Degrees to radians (`DEG`, as `building-layer.ts` multiplies by it: a roof's corners are the
+/// TypeScript's to the last bit).
+const DEG: f64 = PI / 180.0;
 
 /// How often a job waiting for an Overture tile looks whether it was cancelled.
 const WAIT_STEP: Duration = Duration::from_millis(50);
@@ -504,20 +516,66 @@ fn js_number(v: Option<&Value>) -> f64 {
     }
 }
 
-/// The pitched roofs of Streets GL's tile `tile` (`bytes`, as served; `tileRoofs`) as triangles in
-/// the tile's frame, three vertices each, each building's properties first handed to `adjust`
-/// with its place in its layer (Overture's heights, [`Given::apply`]). `cancelled` is asked
-/// between buildings.
-pub fn roof_vertices(
-    tile: TileIndex,
-    bytes: &[u8],
-    adjust: &dyn Fn(usize, &mut Properties),
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Vec<RealisticVertex>, Cancelled> {
-    let mut out = Vec::new();
+/// How the building shader reads every corner of today's roof meshes: deck 9.4's SimpleMeshLayer
+/// keeps only a mesh's positions, colours, normals and texture coordinates
+/// (`normalizeGeometryAttributes`), so `rr_info` never reaches the shader, which reads WebGL's
+/// default for an attribute with no buffer, `(0, 0, 0, 1)`: code 0 (plaster, tar), no bays, a wall.
+pub const AS_DRAWN: [u8; 4] = [tess::PLASTER, tess::TAR, 0, STYLE_WALL];
+
+/// A tile's pitched roofs as `tileRoofs` hands them to deck: each corner of each triangle (three a
+/// triangle) with the mesh's attributes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TileRoofs {
+    /// East, north and up, metres from the tile's north-west corner (`METER_OFFSETS`).
+    pub positions: Vec<[f64; 3]>,
+    pub normals: Vec<[f64; 3]>,
+    /// `texCoords`: a gable's in bays and storeys, a roof face's in metres along it.
+    pub tex_coords: Vec<[f64; 2]>,
+    /// `colors` as bytes (the mesh has them over 255): the building's wall colour, or a roof
+    /// face's own mapped colour.
+    pub colors: Vec<[u8; 3]>,
+    /// `rr_info`: the building's code (`255 − alpha` of its look), 0, a roof face's kind (0 for a
+    /// gable, [`ROOF_FACE`], [`ROOF_OWN_COLOUR`]), 1 for a gable.
+    pub info: Vec<[u8; 4]>,
+}
+
+impl TileRoofs {
+    pub fn len(&self) -> usize {
+        self.info.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.info.is_empty()
+    }
+
+    /// As the building shader's vertices in `tile`'s frame: each corner where deck draws it
+    /// ([`deck_meter_offset`]), its colour with its building's alpha, its code as façade and roof.
+    pub fn vertices(&self, tile: TileIndex) -> Vec<RealisticVertex> {
+        (0..self.len())
+            .map(|k| {
+                let [x, y, z] = self.positions[k];
+                let [u, v] = deck_meter_offset(tile, x, y);
+                let [r, g, b] = self.colors[k];
+                RealisticVertex {
+                    position: [u as f32, v as f32, z as f32],
+                    normal: self.normals[k].map(|n| n as f32),
+                    uv: self.tex_coords[k].map(|t| t as f32),
+                    tint: [r, g, b, 255],
+                    style: AS_DRAWN,
+                }
+            })
+            .collect()
+    }
+}
+
+/// The pitched roofs of Streets GL's tile `tile` (`bytes`, as served; `tileRoofs`), each
+/// building's properties first handed to `adjust` with its place in its layer (Overture's
+/// heights, [`Given::apply`]). `cancelled` is asked between buildings.
+pub fn tile_roofs(tile: TileIndex, bytes: &[u8], adjust: &dyn Fn(usize, &mut Properties), cancelled: &dyn Fn() -> bool) -> Result<TileRoofs, Cancelled> {
+    let mut out = TileRoofs::default();
     let [_, lat] = tess::tile_middle(tile);
     // a tile's width in metres on the ground, at its middle
-    let tile_metres = (EARTH_CIRCUMFERENCE * (lat * PI / 180.0).cos()) / 2f64.powi(tile.z as i32);
+    let tile_metres = (EARTH_CIRCUMFERENCE * (lat * DEG).cos()) / 2f64.powi(tile.z as i32);
     for layer in mvt::layers_named(bytes, &[SGL_SOURCE_LAYER]) {
         for (index, feature) in layer.features().enumerate() {
             if cancelled() {
@@ -543,7 +601,8 @@ pub fn roof_vertices(
                 Some(v) => js_string(v),
             };
             let direction = Some(js_number(p.get("roofDirection"))).filter(|d| *d != 0.0 && !d.is_nan());
-            // a roof colour mapped, its own (toned down as a wall's); else the shader's for its kind
+            // a roof colour mapped, its own (toned down as a wall's: `hexRgb`); else the shader's
+            // for its kind
             let roof_colour = b.roof_colour.as_deref().map(|c| tess::building_style(0, 0.0, Some(c), BuildingLook::default()));
             for rings in &polygons {
                 // its rings, in metres (the tile's y runs south)
@@ -563,37 +622,38 @@ pub fn roof_vertices(
                 }
                 let style = tess::building_style(tess::style_seed(tile, rings), tess::realistic_height(&p, &b), b.colour.as_deref(), tess::sgl_look(&b));
                 let code = 255 - style[3];
-                let (facade, roof) = (code % tess::FACADES, code / tess::FACADES);
                 for (k, &wall) in parts.walls.iter().enumerate() {
-                    let [x, y, z] = [parts.positions[k * 3], parts.positions[k * 3 + 1], parts.positions[k * 3 + 2]];
-                    let [u, v] = deck_meter_offset(tile, x, y);
-                    let (s, t) = (parts.uvs[k * 2], parts.uvs[k * 2 + 1]);
+                    out.positions.push([parts.positions[k * 3], parts.positions[k * 3 + 1], parts.positions[k * 3 + 2]]);
+                    out.normals.push([parts.normals[k * 3], parts.normals[k * 3 + 1], parts.normals[k * 3 + 2]]);
+                    let [u, v] = [parts.uvs[k * 2], parts.uvs[k * 2 + 1]];
+                    out.tex_coords.push(if wall { [u / BAY_M, v / STOREY_M] } else { [u, v] });
                     let colour = match roof_colour {
                         Some(c) if !wall => c,
                         _ => style,
                     };
-                    out.push(RealisticVertex {
-                        position: [u as f32, v as f32, z as f32],
-                        normal: [parts.normals[k * 3] as f32, parts.normals[k * 3 + 1] as f32, parts.normals[k * 3 + 2] as f32],
-                        uv: if wall { [(s / BAY_M) as f32, (t / STOREY_M) as f32] } else { [s as f32, t as f32] },
-                        tint: [colour[0], colour[1], colour[2], style[3]],
-                        // (`rr_info`: the code, no bays, a roof face's kind, whether a wall)
-                        style: [
-                            facade,
-                            roof,
-                            match (wall, roof_colour) {
-                                (true, _) => 0,
-                                (false, Some(_)) => ROOF_OWN_COLOUR,
-                                (false, None) => ROOF_FACE,
-                            },
-                            if wall { STYLE_WALL } else { 0 },
-                        ],
-                    });
+                    out.colors.push([colour[0], colour[1], colour[2]]);
+                    let kind = match (wall, roof_colour) {
+                        (true, _) => 0,
+                        (false, Some(_)) => ROOF_OWN_COLOUR,
+                        (false, None) => ROOF_FACE,
+                    };
+                    out.info.push([code, 0, kind, u8::from(wall)]);
                 }
             }
         }
     }
     Ok(out)
+}
+
+/// The pitched roofs of Streets GL's tile `tile` as triangles in the tile's frame, three vertices
+/// each ([`tile_roofs`], [`TileRoofs::vertices`]).
+pub fn roof_vertices(
+    tile: TileIndex,
+    bytes: &[u8],
+    adjust: &dyn Fn(usize, &mut Properties),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<RealisticVertex>, Cancelled> {
+    Ok(tile_roofs(tile, bytes, adjust, cancelled)?.vertices(tile))
 }
 
 /// A realistic tile's decode step (the buildings layer's, on the worker pool): Streets GL's tiles
@@ -970,7 +1030,7 @@ mod tests {
     fn meter_offsets_land_where_deck_puts_them() {
         let tile = TileIndex::new(36057, 19273, 16);
         let [_, lat] = tess::tile_middle(tile);
-        let tile_metres = (EARTH_CIRCUMFERENCE * (lat * PI / 180.0).cos()) / 2f64.powi(16);
+        let tile_metres = (EARTH_CIRCUMFERENCE * (lat * DEG).cos()) / 2f64.powi(16);
         let [u, v] = deck_meter_offset(tile, tile_metres, -tile_metres);
         // the far corner, in the tile's own metres, as deck draws it
         assert!((u - 1.00116).abs() < 1e-4 && (v - 1.00110).abs() < 1e-4, "{u} {v}");
@@ -1082,30 +1142,37 @@ mod tests {
         assert!(overture.is_empty());
     }
 
-    /// The pitched roofs of Streets GL's fixture tiles in Gamla stan: triangles of roof faces (normals up
-    /// the slope, the shader's kinds) and gables (walls, normals level); each roof's lowest corners
-    /// at its building's eaves, where the walls stop; every building with a pitched roof roofed.
+    /// The pitched roofs of Streets GL's fixture tiles in Gamla stan: triangles of roof faces
+    /// (normals up the slope, the kinds `tileRoofs` gives them) and gables (walls, normals level);
+    /// each roof's lowest corners at its building's eaves, where the walls stop; every building
+    /// with a pitched roof roofed; on the GPU every corner as today's shader reads it.
     #[test]
     fn streets_gl_s_pitched_roofs() {
         let (mut faces, mut gables, mut own, mut buildings, mut roofed) = (0, 0, 0, 0, 0);
         // (Gamla stan's: the old town's roofs)
         for tile in [TileIndex::new(36057, 19275, 16), TileIndex::new(36057, 19274, 16), TileIndex::new(36056, 19275, 16), TileIndex::new(36058, 19275, 16)] {
             let bytes = sgl_fixture(tile);
-            let decoded = decode(tile, &bytes, &Cancel::new(), None).expect("decoded").expect("buildings");
-            assert_eq!(decoded.roofs.len() % 3, 0);
-            for v in &decoded.roofs {
-                let n = v.normal;
-                if v.style[3] == STYLE_WALL {
+            let roofs = tile_roofs(tile, &bytes, &|_, _| {}, &|| false).expect("not cancelled");
+            assert_eq!(roofs.len() % 3, 0);
+            for k in 0..roofs.len() {
+                let n = roofs.normals[k];
+                if roofs.info[k][3] == 1 {
                     gables += 1;
-                    assert_eq!(v.style[2], 0);
-                    assert!(n[2].abs() < 1e-6 && (n[0].hypot(n[1]) - 1.0).abs() < 1e-4, "{n:?}");
+                    assert_eq!(roofs.info[k][2], 0);
+                    assert!(n[2].abs() < 1e-9 && (n[0].hypot(n[1]) - 1.0).abs() < 1e-9, "{n:?}");
                 } else {
                     faces += 1;
                     assert!(n[2] > 0.0 && n[2] < 1.0, "{n:?}");
-                    assert!([ROOF_FACE, ROOF_OWN_COLOUR].contains(&v.style[2]));
-                    own += usize::from(v.style[2] == ROOF_OWN_COLOUR);
+                    assert!([ROOF_FACE, ROOF_OWN_COLOUR].contains(&roofs.info[k][2]));
+                    own += usize::from(roofs.info[k][2] == ROOF_OWN_COLOUR);
                 }
-                // within the tile, give or take the buildings over its edge
+            }
+            // on the GPU: where deck draws them, within the tile give or take the buildings over its
+            // edge, each in its colour and as today's shader reads it
+            let decoded = decode(tile, &bytes, &Cancel::new(), None).expect("decoded").expect("buildings");
+            assert_eq!(decoded.roofs, roofs.vertices(tile));
+            for (v, colour) in decoded.roofs.iter().zip(&roofs.colors) {
+                assert_eq!((v.style, &v.tint[..3]), (AS_DRAWN, &colour[..]));
                 assert!((-0.3..1.3).contains(&v.position[0]) && (-0.3..1.3).contains(&v.position[1]), "{:?}", v.position);
             }
             let layer = mvt::layers_named(&bytes, &[SGL_SOURCE_LAYER]).into_iter().next().expect("the buildings");
@@ -1118,14 +1185,90 @@ mod tests {
                     // its walls stop at the eaves
                     assert_eq!(tess::realistic_height(&p, &b), b.height - b.roof_height);
                     // (a footprint under a square metre, or too thin, has none)
-                    let eaves = (b.height - b.roof_height) as f32;
-                    roofed += usize::from(decoded.roofs.iter().any(|v| (v.position[2] - eaves).abs() < 1e-3));
+                    let eaves = b.height - b.roof_height;
+                    roofed += usize::from(roofs.positions.iter().any(|p| (p[2] - eaves).abs() < 1e-9));
                 }
             }
         }
         eprintln!("{buildings} buildings with pitched roofs ({roofed} roofed from their eaves): {} roof triangles ({own} corners in their own colour), {} gable triangles", faces / 3, gables / 3);
         assert!(buildings >= 20 && faces > 0 && gables > 0, "{buildings} {faces} {gables}");
         assert!(roofed * 10 >= buildings * 9, "{roofed} of {buildings}");
+    }
+
+    /// Today's `tileRoofs` and `withOvertureHeights`, run under bun on Streets GL's fixture tiles
+    /// in Gamla stan and at V5 (`building-layer.ts`'s `tileRoofs` as written, through the app's own
+    /// `roofs.ts`, `streets-gl.ts`, `realistic.ts` and `overture.ts`, loaders.gl's binary tiles, and
+    /// `fetch` answering from the committed archive): each tile's roof corners (positions to the
+    /// millimetre, normals to 1e-5, texture coordinates to 1e-3, colours, `rr_info`) as an FNV-1a
+    /// digest of their numbers as `i32`s, the first corner spelled out, before and after Overture's
+    /// heights; and every building's `height` and `levels` after them (its place among the tile's
+    /// polygons, millimetres).
+    #[test]
+    fn roofs_and_overture_heights_are_today_s() {
+        type Today = (TileIndex, usize, u32, u32, u32, usize, [i64; 15]);
+        let today: [Today; 5] = [
+            (TileIndex::new(36057, 19275, 16), 2859, 0xe18a1264, 0xe18a1264, 0xbabed857, 186, [335960, -144453, 20000, -33851, -26510, 90285, 320869, 160114, 219, 213, 201, 2, 0, 1, 0]),
+            (TileIndex::new(36057, 19274, 16), 2541, 0x75caa355, 0xc3a351c5, 0x76efaa6a, 152, [158434, -203959, 6518, -5384, 19214, 97989, -97523, 234837, 223, 215, 194, 11, 0, 1, 0]),
+            (TileIndex::new(36056, 19275, 16), 471, 0xed90eee5, 0xed90eee5, 0x1da85ba1, 18, [197943, -71072, 28000, 15706, 2009, 98739, -95608, -184332, 224, 208, 142, 10, 0, 1, 0]),
+            (TileIndex::new(36058, 19275, 16), 3576, 0xa8b5f1cc, 0xa8b5f1cc, 0x630c2df7, 129, [59258, -214049, 16101, -11837, -26156, 95790, 142241, -163365, 234, 217, 184, 10, 0, 1, 0]),
+            (TileIndex::new(36057, 19273, 16), 339, 0xbe863425, 0xbe863425, 0xeba871df, 18, [55375, -66453, 20000, -15770, 29565, 94219, -17583, 82479, 202, 200, 194, 7, 0, 1, 0]),
+        ];
+        let fnv = |values: &[i64]| {
+            let mut h: u32 = 0x811c_9dc5;
+            for &v in values {
+                for byte in (v as i32 as u32).to_le_bytes() {
+                    h ^= u32::from(byte);
+                    h = h.wrapping_mul(0x0100_0193);
+                }
+            }
+            h
+        };
+        let round = |x: f64, by: f64| rustradar_core::num::js_round(x * by) as i64;
+        let rows = |t: &TileRoofs| -> Vec<i64> {
+            let mut v = Vec::new();
+            for k in 0..t.len() {
+                v.extend(t.positions[k].map(|n| round(n, 1000.0)));
+                v.extend(t.normals[k].map(|n| round(n, 1e5)));
+                v.extend(t.tex_coords[k].map(|n| round(n, 1000.0)));
+                v.extend(t.colors[k].map(i64::from));
+                v.extend(t.info[k].map(i64::from));
+            }
+            v
+        };
+        let runtime = TileRuntime::new(Arc::new(DirTiles::fixtures()), Arc::new(crate::jobs::Pool::new(1)));
+        let overture = Overture::new(&runtime);
+        for (tile, corners, plain_digest, overture_digest, heights_digest, features, first) in today {
+            let bytes = sgl_fixture(tile);
+            let plain = tile_roofs(tile, &bytes, &|_, _| {}, &|| false).expect("not cancelled");
+            let got = rows(&plain);
+            assert_eq!(plain.len(), corners, "{tile:?}");
+            assert_eq!(got[..15], first, "{tile:?}");
+            assert_eq!(fnv(&got), plain_digest, "{tile:?}");
+            let given = overture_heights(tile, &bytes, |points| overture.heights_at(points, &Cancel::new())).expect("not cancelled");
+            let with = tile_roofs(tile, &bytes, &|i, p| given.apply(i, p), &|| false).expect("not cancelled");
+            assert_eq!(fnv(&rows(&with)), overture_digest, "{tile:?}");
+            // every building's height and levels as the layer reads them, by its place among the
+            // tile's polygons
+            let layer = mvt::layers_named(&bytes, &[SGL_SOURCE_LAYER]).into_iter().next().expect("the buildings");
+            let (mut heights, mut polygon) = (Vec::new(), 0);
+            for (index, feature) in layer.features().enumerate() {
+                if feature.kind != GeomType::Polygon {
+                    continue;
+                }
+                polygon += 1;
+                if tess::binary_polygons(&feature, layer.extent).is_empty() {
+                    continue;
+                }
+                let mut p = feature.json_properties();
+                given.apply(index, &mut p);
+                let read = |key: &str| p.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+                heights.extend([polygon - 1, round(read("height"), 1000.0), round(read("levels"), 1000.0)]);
+            }
+            assert_eq!(heights.len() / 3, features, "{tile:?}");
+            assert_eq!(fnv(&heights), heights_digest, "{tile:?}: {:?}", &heights[..12]);
+        }
+        // (the one zoom-14 tile all five lie in, asked once)
+        assert_eq!(overture.len(), 1);
     }
 
     /// 2026-06-21 06:00 UTC: a summer morning in Stockholm, the sun low in the east (the faces
@@ -1161,10 +1304,17 @@ mod tests {
         }
     }
 
-    /// `tile`'s roofs as the layer decodes them (with the fixtures' Overture heights).
-    fn decoded_roofs(tile: TileIndex) -> Option<RealisticTile> {
+    /// `tile`'s roofs as the layer makes them (with the fixtures' Overture heights): today's mesh,
+    /// and its vertices in the tile's frame.
+    fn fixture_roofs(tile: TileIndex) -> Option<(TileRoofs, Vec<RealisticVertex>)> {
         let bytes = DirTiles::fixtures().read(io::STREETS_GL, tile).ok()??;
-        decode_from_fixtures(tile, &bytes, &Cancel::new()).ok()?
+        let decoded = decode_from_fixtures(tile, &bytes, &Cancel::new()).ok()??;
+        let runtime = TileRuntime::new(Arc::new(DirTiles::fixtures()), Arc::new(crate::jobs::Pool::new(1)));
+        let overture = Overture::new(&runtime);
+        let given = overture_heights(tile, &bytes, |points| overture.heights_at(points, &Cancel::new())).ok()?;
+        let roofs = tile_roofs(tile, &bytes, &|i, p| given.apply(i, p), &|| false).ok()?;
+        assert_eq!(decoded.roofs, roofs.vertices(tile));
+        Some((roofs, decoded.roofs))
     }
 
     /// A point of a tile (its units, metres up) on the screen of `view`.
@@ -1186,9 +1336,9 @@ mod tests {
     }
 
     /// The roof shot: Gamla stan from the fixtures on a summer morning. Each large roof face
-    /// turned to the camera is drawn where it stands, in its roofing's colour (a warm colour of its
-    /// own warm, a grey roofing grey); the faces turned most to the low sun lighter than those
-    /// turned least.
+    /// turned to the camera is drawn where it stands, in its corners' colour as today's (a warm one
+    /// warm, a grey one grey: its mapped roof colour, else its walls'); the faces turned most to the
+    /// low sun lighter than those turned least.
     #[test]
     fn old_town_roofs_stand_in_their_colours() {
         let Some(gpu) = gpu() else { return };
@@ -1210,9 +1360,9 @@ mod tests {
             if tile.z != SGL_ZOOM {
                 continue;
             }
-            let Some(decoded) = decoded_roofs(tile) else { continue };
-            for t in decoded.roofs.chunks_exact(3) {
-                if t[0].style[3] == STYLE_WALL {
+            let Some((roofs, vertices)) = fixture_roofs(tile) else { continue };
+            for (k, t) in vertices.chunks_exact(3).enumerate() {
+                if roofs.info[3 * k][3] == 1 {
                     continue;
                 }
                 // the face's middle on the screen, and how big and how turned to the camera it is
@@ -1233,16 +1383,16 @@ mod tests {
                 // a small patch at its middle)
                 let p = median_pixel(&image, m);
                 seen += 1;
+                // (today's faces in their corners' colour, as plaster walls: `AS_DRAWN`)
                 let [r, g, b] = [t[0].tint[0], t[0].tint[1], t[0].tint[2]].map(i32::from);
                 let [pr, pg, pb] = [p[0], p[1], p[2]].map(i32::from);
-                if t[0].style[2] == ROOF_OWN_COLOUR && r > b + 40 {
+                if r > b + 40 && r >= g {
                     warm += 1;
                     warm_drawn += usize::from(pr > pb + 10);
-                } else if t[0].style[2] == ROOF_FACE && [tess::TAR, tess::CONCRETE, tess::ETERNIT, tess::FLAT1, tess::FLAT3].contains(&t[0].style[1]) {
+                } else if (r - b).abs() <= 8 && (r - g).abs() <= 8 {
                     grey += 1;
                     grey_drawn += usize::from((pr - pb).abs() <= 24 && (pr - pg).abs() <= 24);
                 }
-                let _ = g;
                 lit_by.push((n.dot(sun), luma(p)));
             }
         }
@@ -1256,7 +1406,7 @@ mod tests {
         };
         let ((least, dark), (most, lit)) = (median(&lit_by[..quarter]), median(&lit_by[lit_by.len() - quarter..]));
         eprintln!(
-            "{seen} roof faces seen; {warm_drawn} of {warm} in a warm colour of their own drawn warm, {grey_drawn} of {grey} in a grey roofing drawn grey; turned to the sun by {most:.2}, luma {lit:.1}, by {least:.2}, luma {dark:.1}"
+            "{seen} roof faces seen; {warm_drawn} of {warm} in a warm colour drawn warm, {grey_drawn} of {grey} in a grey drawn grey; turned to the sun by {most:.2}, luma {lit:.1}, by {least:.2}, luma {dark:.1}"
         );
         assert!(seen >= 30, "{seen}");
         assert!(warm >= 3 && warm_drawn * 10 >= warm * 8, "{warm_drawn} of {warm}");
@@ -1279,9 +1429,9 @@ mod tests {
             if tile.z != SGL_ZOOM {
                 continue;
             }
-            let Some(decoded) = decoded_roofs(tile) else { continue };
-            for t in decoded.roofs.chunks_exact(3) {
-                if t[0].style[3] == STYLE_WALL {
+            let Some((roofs, vertices)) = fixture_roofs(tile) else { continue };
+            for (k, t) in vertices.chunks_exact(3).enumerate() {
+                if roofs.info[3 * k][3] == 1 {
                     continue;
                 }
                 let past = |p: [f32; 3]| p[0] < -0.002 || p[0] > 1.002 || p[1] < -0.002 || p[1] > 1.002;

@@ -867,6 +867,101 @@ mod tests {
         }
     }
 
+    /// A test layer: ground lines in a local frame round the view's centre, with the textures
+    /// loading (as the ground loads them).
+    struct Strokes {
+        shader: GroundShader,
+        pipeline: wgpu::RenderPipeline,
+        mesh: LineMesh,
+        slot: Option<FrameSlot>,
+        anchor: DVec2,
+        loading: bool,
+    }
+
+    impl Layer for Strokes {
+        fn name(&self) -> &'static str {
+            "test strokes"
+        }
+
+        fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
+            load_textures(cx);
+            self.loading = cx.textures.pending();
+            self.shader.prepare(cx);
+            self.slot = Some(cx.frames.push(&cx.view.local(self.anchor, STROKE_SCALE, 0.0)));
+        }
+
+        fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
+            self.shader.begin(pass, &self.pipeline, LineWidth::Hairline);
+            if let Some(slot) = self.slot {
+                self.shader.draw_lines(pass, cx, slot, &self.mesh);
+            }
+        }
+
+        fn pending(&self) -> bool {
+            self.loading
+        }
+    }
+
+    /// Local units of [`Strokes`] (world units each): 128 px at zoom 17.
+    const STROKE_SCALE: f64 = 1.0 / 1024.0;
+
+    /// The ground's lines as deck's PathLayer draws them with the ground's props: metres wide
+    /// (`widthUnits: "meters"`), round caps reaching half the width past each end, at least
+    /// 0.6 px wide far out; a road in its plain asphalt, a railway's track in its texture, laid
+    /// along it (`geometry.uv`: across 0 to 1, a repeat each full width of travel), its sleepers
+    /// across it. Straight down at zoom 17 over Stockholm.
+    #[test]
+    fn ground_lines_are_metres_wide_with_round_ends() {
+        use rustradar_scene::geom::path::{LocalMercator, Paint, PathBuilder, PathType};
+        let Some(gpu) = gpu() else { return };
+        let view = ViewState { latitude: 59.3293, longitude: 18.0686, zoom: 17.0, pitch: 0.0, bearing: 0.0, position: None };
+        let anchor = DVec2::from_array(lng_lat_to_world([view.longitude, view.latitude]));
+        let local = LocalMercator::new(anchor, STROKE_SCALE);
+        let mut paths = PathBuilder::new(local);
+        let explicit = |id: u8| rustradar_scene::tess::ground::explicit(rustradar_scene::ground::paint(id, [255, 255, 255]));
+        // a road 11 m wide 128 px above the centre, a railway's track 2.6 m wide 128 px below,
+        // both from 256 px left of the centre to 256 px right of it
+        paths.push(&[[-2.0, -1.0, 0.0], [2.0, -1.0, 0.0]], &Paint { path_type: PathType::Open, ..Paint::solid(explicit(32), 11.0) });
+        paths.push(&[[-2.0, 1.0, 0.0], [2.0, 1.0, 0.0]], &Paint { path_type: PathType::Open, ..Paint::solid(explicit(35), 2.6) });
+        let mut renderer = MapRenderer::new(&gpu, FORMAT);
+        let init = renderer.init(&gpu);
+        let shader = GroundShader::new(&init, "test strokes");
+        let pipeline = shader.lines(&init, "test strokes", DrawState::SURFACE_NO_CULL);
+        let mesh = LineMesh::new(&gpu.device, "test strokes", &paths.finish());
+        renderer.add_layer(Box::new(Strokes { shader, pipeline, mesh, slot: None, anchor, loading: true }));
+        let mut scene = SceneInput::new(view, SIZE, 1.0, Basemap::Realistic);
+        scene.local_now_ms = MIDSUMMER;
+        // (the light of a fine noon, the sky not drawn: the lines on the map's own background)
+        scene.sky = sky::Input { shown: false, weather: Some(PRESETS.sunny), daylight: true };
+        let image = render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered");
+        save(&image, "r2-ground-lines.png");
+        let background = image.pixel(5, 5);
+        let frame = ViewFrame::new(&view, SIZE, 1.0, 0.0);
+        let px_per_metre = f64::from(frame.globals.centre[2]) * f64::from(frame.globals.pixels_per_unit);
+        // the road's column at the centre: covered from top to bottom over its width
+        let covered = |x: u32, y0: u32, y1: u32| (y0..y1).filter(|&y| image.pixel(x, y) != background).count();
+        let road = covered(550, 200, 280) as f64;
+        let expected = 11.0 * px_per_metre;
+        eprintln!("road {road} px across, 11 m = {expected:.2} px");
+        assert!((road - expected).abs() <= 1.0, "{road} px for {expected:.2}");
+        // its round end: half the width past the end, on the axis only
+        let end = (550.0 + 256.0) as u32;
+        let reach = (end..end + 20).take_while(|&x| image.pixel(x, 232) != background).count() as f64;
+        eprintln!("the cap reaches {reach} px past the end ({:.2} expected)", expected / 2.0);
+        assert!((reach - expected / 2.0).abs() <= 1.0);
+        let corner = image.pixel(end + (expected / 2.0 - 1.0) as u32, 232 - (expected / 2.0 - 1.0) as u32);
+        assert_eq!(corner, background, "round, not square: {corner:?}");
+        // the railway: textured along its length, its pattern repeating every full width
+        let width = 2.6 * px_per_metre;
+        let row: Vec<f64> = (300..800).map(|x| f64::from(image.pixel(x, 488)[1])).collect();
+        let mean = row.iter().sum::<f64>() / row.len() as f64;
+        let wobble = |lag: usize| row.iter().zip(&row[lag..]).map(|(a, b)| (a - mean) * (b - mean)).sum::<f64>() / (row.len() - lag) as f64;
+        let period = (2..40).max_by(|&a, &b| wobble(a).total_cmp(&wobble(b))).expect("lags");
+        eprintln!("the track's pattern repeats every {period} px; a full width is {width:.2} px");
+        assert!(row.iter().any(|&g| (g - mean).abs() > 8.0), "a plain line: {row:?}");
+        assert!((period as f64 - width).abs() <= 1.5 || (period as f64 - 2.0 * width).abs() <= 1.5, "{period} px");
+    }
+
     /// Doc 04 §6.8's weather on the ground: the rain darkens what is paved (a road, its plain
     /// asphalt) more than what is not (a dirt track), and makes it shine. Close in on the flat map
     /// (V5's centre from straight above, the camera under the clouds, so the preset's own weather),

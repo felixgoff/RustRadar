@@ -387,6 +387,32 @@ mod tests {
         assert!(off.rgba.chunks_exact(4).all(|p| p == off.rgba[..4].as_ref()), "the clear colour alone");
     }
 
+    /// On the globe (zoom 1.2, the whole disc in view) the surface stands on the sphere: rough ground everywhere (martini
+    /// keeps every cell, so the mesh follows the curve) fills the globe's disc, lit, and leaves the
+    /// space round it the clear colour.
+    #[test]
+    fn the_globe_is_covered_too() {
+        let Some(gpu) = gpu() else { return };
+        let view = ViewState { latitude: 46.0, longitude: 7.75, zoom: 1.2, pitch: 0.0, bearing: 0.0, position: None };
+        let mut renderer = MapRenderer::new(&gpu, FORMAT);
+        renderer.set_tiles(every_tile(|x, y| 1000.0 + f64::from((x * 7 + y * 13) % 11) * 40.0), None);
+        let watch = watched(&mut renderer, &gpu);
+        let image = render_with(&gpu, &mut renderer, &surface_scene(view, [600.0, 400.0], Basemap::Dark, true), 1.0).expect("rendered");
+        image.save_png(&shots_dir().join("z1-globe.png")).expect("saved");
+        let terrain = watch.borrow();
+        let tiles = terrain.tiles().visible().count();
+        let clear = image.pixel(0, 0);
+        eprintln!("{tiles} tiles; centre {:?}, corner {clear:?}", image.pixel(300, 200));
+        assert_eq!(clear, [30, 30, 30, 255], "the clear colour (--ink) in the corner");
+        assert!(tiles >= 4, "{tiles} tiles");
+        assert!(luma(image.pixel(300, 200)) > luma(clear) + 10.0, "the ground at the centre, lit");
+        assert_eq!(image.pixel(599, 399), clear, "space round the globe");
+        // the disc: ground along the middle row round the centre
+        let ground = (0..600).filter(|&x| image.pixel(x, 200) != clear).count();
+        eprintln!("{ground} of 600 px of the middle row ground");
+        assert!((200..400).all(|x| image.pixel(x, 200) != clear) && ground < 590, "the globe's disc: {ground} px of the middle row");
+    }
+
     /// `SeaLevelExtension`: the sea floor is drawn at sea level, so a tile 300 m below the sea
     /// draws as one at sea level does (pitched, where heights move the picture), and one 300 m
     /// above it does not.

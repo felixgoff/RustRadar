@@ -58,16 +58,14 @@
 //! **Checked** against Chromium's layout of today's component, server-rendered by Svelte with the
 //! same props and laid out with app.css at 1440 × 900 (a moving train with its stops, a long name
 //! with a stale report, a bare strip with no timetable; `tests/train_ui.rs`): every box, rule,
-//! badge, dot, line and button lands on Chromium's pixels or within one; text sits up to a pixel
-//! lower (egui's baseline).
+//! badge, dot, line and button lands on Chromium's pixels or within one; text stands on Chromium's
+//! baselines (`ui::text`'s hook, F1).
 //!
 //! Deviations:
 //! - The panel's asks run from the UI pass (as the component's effects do today), not from a part
 //!   of `state`: no state file holds them.
 //! - The fixture folder's stops serve `--demo` too (`--demo --fixture DIR` shows stops); the demo
 //!   alone answers no timetable at once, where today's `#demo` draws no train at all.
-//! - Times are in UTC (the app has no viewer's time zone yet, U6's note); digits are Overpass's own
-//!   (no `tabular-nums`); text takes egui's baseline (U1).
 //! - The photo and the logo load through egui's image loaders ([`super::panel::remote`]): until
 //!   item U18's loader for `https:` lands they read as failed and are left out, as today when they
 //!   do not load.
@@ -502,7 +500,7 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
         stops: state.trains.live_stops().map(<[TrainStop]>::to_vec).or(stops),
         stops_failed,
         media,
-        clocks: Clocks::default(),
+        clocks: state.viewer_clocks.clone(),
         phone: super::sheet::in_sheet(&ctx),
     };
     let footer_height = footer_height(&ctx, &view);
@@ -565,7 +563,7 @@ fn strip(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
             let style = panel::sub_style(Face::Ui);
             let galley = painter.layout_job(text::truncated(&kind, &style, (rect.width() - SWATCH - SWATCH_GAP).max(0.0)));
             let top = rect.top() + (rect.height() - galley.size().y) / 2.0;
-            let baseline = top + galley.rows.first().and_then(|r| r.glyphs.first().map(|g| r.pos.y + g.pos.y)).unwrap_or(galley.size().y * 0.75);
+            let baseline = top + text::row_baseline(&galley, 0);
             // `vertical-align: 0`: the swatch stands on the baseline
             let at = Pos2::new(rect.left(), baseline - SWATCH);
             painter.rect_filled(panel::snap_rect(Rect::from_min_size(at, Vec2::splat(SWATCH)), painter.pixels_per_point()), CornerRadius::same(theme::RADIUS_SWATCH), swatch);
@@ -921,11 +919,11 @@ fn credit(ui: &mut Ui, source: TrainSource) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), rows * style.line_px()), Sense::hover());
     let at = Pos2::new(rect.left(), rect.top() + (rect.height() - galley.size().y) / 2.0);
     let mut link = Rect::NOTHING;
-    for row in &galley.rows {
+    for (i, row) in galley.rows.iter().enumerate() {
         let (Some(first), Some(last)) = (row.glyphs.first(), row.glyphs.last()) else { continue };
         let left = at.x + row.pos.x + first.pos.x;
         let right = at.x + row.pos.x + last.pos.x + last.advance_width;
-        let baseline = at.y + row.pos.y + first.pos.y;
+        let baseline = at.y + text::row_baseline(&galley, i);
         let top = (baseline + UNDERLINE_OFFSET).round();
         ui.painter().rect_filled(Rect::from_x_y_ranges(left..=right, top..=top + UNDERLINE_WIDTH), CornerRadius::ZERO, theme::LINE);
         link = link.union(Rect::from_x_y_ranges(left..=right, at.y + row.pos.y..=at.y + row.pos.y + row.size.y));
@@ -991,7 +989,7 @@ fn footer(ui: &mut Ui, rect: Rect, view: &View<'_>, actions: &mut Vec<Action>) {
         Status::Text(label) => {
             let style = status_style();
             let top = mid - style.line_px() / 2.0;
-            let w = put_line(&painter, text::job(&label, &style), &style, row.left(), top);
+            let w = put_line(&painter, text::tabular(text::job(&label, &style)), &style, row.left(), top);
             Rect::from_min_size(Pos2::new(row.left(), top), Vec2::new(w, style.line_px()))
         }
         Status::Badge(badge) => {

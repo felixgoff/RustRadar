@@ -314,6 +314,10 @@ pub struct AppState {
     pub hovered_ship: Option<u32>,
     /// The phone's bottom sheet: how far up it is (`sheetDetent`, U19).
     pub sheet: crate::ui::sheet::Sheet,
+    /// The viewer's clocks: a time without a zone reads in the viewer's own (the browser's in
+    /// today's app). UTC from [`AppState::new`], as tests and shots keep it; the window sets the
+    /// system's ([`crate::platform::time_zone`]; item F1).
+    pub viewer_clocks: rustradar_core::time::Clocks,
 }
 
 impl AppState {
@@ -363,6 +367,7 @@ impl AppState {
             ship_filters_handed: Cell::new(None),
             hovered_ship: None,
             sheet: Default::default(),
+            viewer_clocks: Default::default(),
         }
     }
 

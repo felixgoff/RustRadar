@@ -11,6 +11,13 @@
 //!
 //! Output, all generated (re-running gives identical bytes):
 //! - `<family>-<subset>.ttf` for the families of [`FAMILIES`] and the subsets of [`SUBSETS`];
+//! - [`TABULAR`] (`overpass-tnum-latin.ttf`, item F1): Overpass's latin subset with its `tnum`
+//!   feature renamed `rclt` ([`tabular`]). Shapers (egui's harfrust, as HarfBuzz) apply `rclt`
+//!   by default and nothing can switch features on in egui, so this file draws the tabular figures
+//!   that `font-variant-numeric: tabular-nums` asks for, everything else as Overpass. Renaming the
+//!   feature rather than pointing the `cmap` at the `.tf` glyphs (as `pyftfeatfreeze` does) keeps
+//!   the lookup order Chromium shapes with when it turns `tnum` on. Only latin has figures, and
+//!   Overpass Mono's default figures are its tabular ones;
 //! - `OFL.txt`, the SIL Open Font License 1.1 of both packages;
 //! - `README.md`, where the files come from.
 
@@ -23,6 +30,9 @@ pub const FAMILIES: [&str; 2] = ["overpass", "overpass-mono"];
 
 /// The subsets, in the fallback order the app registers them in (doc 00 §1.5).
 pub const SUBSETS: [&str; 5] = ["latin", "latin-ext", "cyrillic", "cyrillic-ext", "vietnamese"];
+
+/// The vendored file with Overpass's tabular figures as its default ones ([`tabular`]).
+pub const TABULAR: &str = "overpass-tnum-latin.ttf";
 
 /// The repository root: `crates/xtask` is two levels below it.
 fn repo_root() -> PathBuf {
@@ -101,6 +111,62 @@ fn licence(source: &Path) -> Result<String, String> {
     Ok(mono)
 }
 
+fn be16(bytes: &[u8], at: usize) -> Result<usize, String> {
+    bytes.get(at..at + 2).map(|b| usize::from(u16::from_be_bytes([b[0], b[1]]))).ok_or_else(|| format!("the font ends before byte {at}"))
+}
+
+fn be32(bytes: &[u8], at: usize) -> Result<u32, String> {
+    bytes.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])).ok_or_else(|| format!("the font ends before byte {at}"))
+}
+
+/// The OpenType checksum of `table`: the sum of its big-endian 32-bit words, zero-padded.
+fn checksum(table: &[u8]) -> u32 {
+    table.chunks(4).fold(0u32, |sum, word| {
+        let mut w = [0u8; 4];
+        w[..word.len()].copy_from_slice(word);
+        sum.wrapping_add(u32::from_be_bytes(w))
+    })
+}
+
+/// Where table `tag`'s directory record is, and the table's offset and length.
+fn table(ttf: &[u8], tag: &[u8; 4]) -> Result<(usize, usize, usize), String> {
+    let count = be16(ttf, 4)?;
+    (0..count)
+        .map(|i| 12 + 16 * i)
+        .find(|&record| ttf.get(record..record + 4) == Some(tag))
+        .map(|record| Ok((record, be32(ttf, record + 8)? as usize, be32(ttf, record + 12)? as usize)))
+        .unwrap_or_else(|| Err(format!("no {} table", String::from_utf8_lossy(tag))))
+}
+
+/// `ttf` with its `GSUB` feature `tnum` renamed `rclt` (see the module documentation), the
+/// table's checksum and `head.checkSumAdjustment` brought up to date. Fails if the font has no
+/// `tnum` feature or already an `rclt` one.
+pub fn tabular(ttf: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = ttf.to_vec();
+    let (gsub_record, gsub, gsub_len) = table(ttf, b"GSUB")?;
+    let features = gsub + be16(ttf, gsub + 6)?;
+    let count = be16(ttf, features)?;
+    let tags: Vec<usize> = (0..count).map(|i| features + 2 + 6 * i).collect();
+    if tags.iter().any(|&at| ttf.get(at..at + 4) == Some(b"rclt")) {
+        return Err("the font has an rclt feature already".into());
+    }
+    let tnum: Vec<usize> = tags.into_iter().filter(|&at| ttf.get(at..at + 4) == Some(b"tnum")).collect();
+    if tnum.is_empty() {
+        return Err("the font has no tnum feature".into());
+    }
+    for at in tnum {
+        out[at..at + 4].copy_from_slice(b"rclt");
+    }
+    let sum = checksum(&out[gsub..gsub + gsub_len]);
+    out[gsub_record + 4..gsub_record + 8].copy_from_slice(&sum.to_be_bytes());
+    // the whole font sums to 0xB1B0AFBA with the adjustment in `head`
+    let (_, head, _) = table(ttf, b"head")?;
+    out[head + 8..head + 12].copy_from_slice(&[0; 4]);
+    let adjustment = 0xB1B0_AFBAu32.wrapping_sub(checksum(&out));
+    out[head + 8..head + 12].copy_from_slice(&adjustment.to_be_bytes());
+    Ok(out)
+}
+
 fn readme(source: &Path) -> Result<String, String> {
     let mut packages = Vec::new();
     for family in FAMILIES {
@@ -116,6 +182,9 @@ fn readme(source: &Path) -> Result<String, String> {
          They are variable fonts with a `wght` axis: Overpass 100 to 900 (default 400),\n\
          Overpass Mono 300 to 700 (default 300).\n\
          Subsets, in fallback order: {}.\n\
+         \n\
+         `{TABULAR}` is `overpass-latin.ttf` with its `tnum` feature renamed `rclt`, which shapers\n\
+         apply by default: Overpass with tabular figures, for `font-variant-numeric: tabular-nums`.\n\
          \n\
          Licensed under the SIL Open Font License 1.1, see `OFL.txt`.\n",
         packages.join(" and "),
@@ -137,6 +206,8 @@ fn vendored_files(source: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
             files.push((ttf_name(family, subset), decode(source, family, subset)?));
         }
     }
+    let latin = &files.iter().find(|(name, _)| *name == ttf_name("overpass", "latin")).expect("Overpass's latin subset").1;
+    files.push((TABULAR.to_owned(), tabular(latin)?));
     files.push(("OFL.txt".to_owned(), licence(source)?.into_bytes()));
     files.push(("README.md".to_owned(), readme(source)?.into_bytes()));
     Ok(files)
@@ -213,6 +284,95 @@ mod tests {
         }
     }
 
+    /// The vertical metrics `ui::text`'s baselines are computed from (`ASCENT`, `DESCENT`,
+    /// `UNITS_PER_EM` there): the same in both faces and every subset, `USE_TYPO_METRICS` set so
+    /// that the typo metrics are the ones used, and no `MVAR` to change them with the weight.
+    #[test]
+    fn both_faces_have_the_vertical_metrics_the_baselines_use() {
+        use skrifa::raw::TableProvider as _;
+        for family in FAMILIES {
+            for subset in SUBSETS {
+                let name = ttf_name(family, subset);
+                let bytes = vendored(&name);
+                let font = skrifa::FontRef::new(&bytes).unwrap();
+                let (head, hhea, os2) = (font.head().unwrap(), font.hhea().unwrap(), font.os2().unwrap());
+                assert_eq!(head.units_per_em(), 2000, "{name}");
+                assert_eq!((hhea.ascender().to_i16(), hhea.descender().to_i16(), hhea.line_gap().to_i16()), (1766, -766, 0), "{name}");
+                assert_eq!((os2.s_typo_ascender(), os2.s_typo_descender(), os2.s_typo_line_gap()), (1766, -766, 0), "{name}");
+                assert_ne!(os2.fs_selection().bits() & (1 << 7), 0, "{name}: USE_TYPO_METRICS");
+                assert!(font.table_data(skrifa::raw::types::Tag::new(b"MVAR")).is_none(), "{name} has an MVAR");
+            }
+        }
+    }
+
+    /// The tabular file is Overpass's latin file with one feature tag changed, its checksums
+    /// right, and that feature maps each figure to a glyph 0.616 em wide.
+    #[test]
+    fn the_tabular_file_renames_tnum_to_rclt() {
+        use skrifa::raw::TableProvider as _;
+        let latin = vendored(&ttf_name("overpass", "latin"));
+        let tnum = vendored(TABULAR);
+        assert_eq!(tnum, tabular(&latin).unwrap());
+        assert_eq!(latin.len(), tnum.len());
+        let changed: Vec<usize> = (0..latin.len()).filter(|&i| latin[i] != tnum[i]).collect();
+        // the four tag bytes (fewer where the letters agree), the GSUB record's checksum, head's adjustment
+        assert!(changed.len() <= 12, "{} bytes changed", changed.len());
+        // every table's checksum, and the whole font's
+        let count = be16(&tnum, 4).unwrap();
+        for i in 0..count {
+            let record = 12 + 16 * i;
+            let (offset, length) = (be32(&tnum, record + 8).unwrap() as usize, be32(&tnum, record + 12).unwrap() as usize);
+            let mut data = tnum[offset..offset + length].to_vec();
+            if &tnum[record..record + 4] == b"head" {
+                data[8..12].copy_from_slice(&[0; 4]);
+            }
+            assert_eq!(checksum(&data), be32(&tnum, record + 4).unwrap(), "{}", String::from_utf8_lossy(&tnum[record..record + 4]));
+        }
+        assert_eq!(checksum(&tnum), 0xB1B0_AFBA);
+        // the features: rclt where tnum was, and its single substitutions give 1232-unit figures
+        let font = skrifa::FontRef::new(&tnum).unwrap();
+        let gsub = font.gsub().unwrap();
+        let features = gsub.feature_list().unwrap();
+        let tags: Vec<String> = features.feature_records().iter().map(|r| r.feature_tag().to_string()).collect();
+        assert!(tags.contains(&"rclt".to_string()) && !tags.contains(&"tnum".to_string()), "{tags:?}");
+        let record = features.feature_records().iter().find(|r| r.feature_tag() == skrifa::raw::types::Tag::new(b"rclt")).unwrap();
+        let feature = record.feature(features.offset_data()).unwrap();
+        let lookups = gsub.lookup_list().unwrap();
+        let hmtx = font.hmtx().unwrap();
+        let charmap = font.charmap();
+        for c in '0'..='9' {
+            let glyph = charmap.map(c).unwrap();
+            let mut to = None;
+            for index in feature.lookup_list_indices() {
+                let lookup = lookups.lookups().get(usize::from(index.get())).unwrap();
+                if let skrifa::raw::tables::gsub::SubstitutionLookup::Single(single) = lookup {
+                    for sub in single.subtables().iter().flatten() {
+                        if let Some(g) = single_substitute(&sub, skrifa::raw::types::GlyphId16::new(glyph.to_u32() as u16)) {
+                            to = Some(g);
+                        }
+                    }
+                }
+            }
+            let to = to.unwrap_or_else(|| panic!("{c} has no tabular glyph"));
+            assert_eq!(hmtx.h_metrics()[usize::from(to)].advance(), 1232, "{c}");
+        }
+    }
+
+    /// The glyph a single substitution puts for `glyph`.
+    fn single_substitute(sub: &skrifa::raw::tables::gsub::SingleSubst<'_>, glyph: skrifa::raw::types::GlyphId16) -> Option<u16> {
+        use skrifa::raw::tables::gsub::SingleSubst;
+        match sub {
+            SingleSubst::Format1(f) => {
+                f.coverage().ok()?.get(glyph)?;
+                Some((i32::from(glyph.to_u16()) + i32::from(f.delta_glyph_id())) as u16)
+            }
+            SingleSubst::Format2(f) => {
+                let at = f.coverage().ok()?.get(glyph)?;
+                f.substitute_glyph_ids().get(usize::from(at)).map(|g| g.get().to_u16())
+            }
+        }
+    }
+
     #[test]
     fn the_licence_is_the_ofl() {
         let text = String::from_utf8(vendored("OFL.txt")).unwrap();
@@ -228,7 +388,7 @@ mod tests {
             return;
         }
         let files = vendored_files(&source).unwrap();
-        assert_eq!(files.len(), FAMILIES.len() * SUBSETS.len() + 2);
+        assert_eq!(files.len(), FAMILIES.len() * SUBSETS.len() + 3);
         for (name, bytes) in files {
             let stale = "is stale: run `cargo xtask vendor-fonts`";
             assert!(vendored(&name) == bytes, "assets/fonts/{name} {stale}");

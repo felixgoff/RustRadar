@@ -40,8 +40,6 @@
 //! 900 and 390 × 844; `tests/dev_panel.rs`).
 //!
 //! Deviations:
-//! - The times are `HH:MM:SS` in UTC (today: the viewer's local time): the app has no viewer time
-//!   zone yet (as U6's stale badge).
 //! - The blocks' text is Overpass Mono, as everything else in the panel; today's `<pre>` takes the
 //!   browser's own `monospace` face (DejaVu Sans Mono on Linux, Consolas on Windows, Menlo on a
 //!   Mac). It cannot be selected with the pointer (today's can); Copy copies it.
@@ -221,6 +219,9 @@ pub struct Panel {
     shown_cache: Vec<usize>,
     /// The opened call's request and answer as laid out ([`pretty`]).
     opened: Option<Opened>,
+    /// The viewer's IANA zone, the calls' times are read in (`AppState::viewer_clocks`; UTC when
+    /// empty or unknown; item F1).
+    pub zone: String,
 }
 
 /// What the listed calls depend on: the calls held (first id, last id, count), the source, the
@@ -358,10 +359,13 @@ pub fn status(e: &Entry) -> String {
     if e.error.is_some() { FAILED.to_owned() } else { e.status.map(|s| s.to_string()).unwrap_or_default() }
 }
 
-/// `time(ms)`: `HH:MM:SS` (24-hour), in UTC (see the deviations).
-pub fn time(at_ms: i64) -> String {
-    let s = at_ms.div_euclid(1000).rem_euclid(86_400);
-    format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+/// `time(ms)`: `HH:MM:SS` (24-hour) in the viewer's IANA `zone` (`toLocaleTimeString(undefined,
+/// { hour12: false })`); UTC for an empty or unknown zone.
+pub fn time(at_ms: i64, zone: &str) -> String {
+    let zone = jiff::tz::TimeZone::get(zone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let at = jiff::Timestamp::from_millisecond(at_ms).unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+    let wall = zone.to_datetime(at);
+    format!("{:02}:{:02}:{:02}", wall.hour(), wall.minute(), wall.second())
 }
 
 /// `size(b)`: `{b} B`, `{kB with one decimal} kB` from 1024, `{MB} MB` from 1024².
@@ -798,6 +802,7 @@ pub fn ui(ctx: &Context, state: &AppState, now_ms: f64, actions: &mut Vec<Action
         stops: state.trains.live_stops(),
         route: state.trains.route(),
     };
+    state.viewer_clocks.own_zone().clone_into(&mut panel(ctx).lock().unwrap_or_else(PoisonError::into_inner).zone);
     if show(ctx, shown).close {
         actions.push(Action::Open(Open::Dev, false));
     }
@@ -988,7 +993,7 @@ fn calls(ui: &mut Ui, p: &mut Panel, body: Rect, screen: Rect) {
         for &i in &shown {
             let e = &p.entries[i];
             let open = opened.as_ref().filter(|o| o.0 == e.id);
-            if call(ui, e, open, pre_max) {
+            if call(ui, e, open, pre_max, &p.zone) {
                 clicked = Some(e.id);
             }
         }
@@ -1033,7 +1038,7 @@ fn choose_source(ctx: &Context, p: &mut Panel, select: Rect, sources: &[String])
 
 /// One call: its row, and its detail when it is the opened one. Returns whether its row was
 /// clicked.
-fn call(ui: &mut Ui, e: &Entry, opened: Option<&Opened>, pre_max: f32) -> bool {
+fn call(ui: &mut Ui, e: &Entry, opened: Option<&Opened>, pre_max: f32, zone: &str) -> bool {
     let line = mono(400, theme::TEXT_1).line_px();
     let width = ui.available_width();
     let (row, response) = ui.allocate_exact_size(Vec2::new(width, 2.0 * ROW_PAD.y + 2.0 * line + ROW_GAP.y), Sense::click());
@@ -1046,7 +1051,7 @@ fn call(ui: &mut Ui, e: &Entry, opened: Option<&Opened>, pre_max: f32) -> bool {
     let st = if failed(e) { theme::WARN } else { theme::TEXT_1 };
     let mut x = x0;
     for (text, style) in [
-        (time(e.at_ms), mono(400, theme::TEXT_3)),
+        (time(e.at_ms, zone), mono(400, theme::TEXT_3)),
         (e.source.clone(), mono(600, theme::TEXT_1)),
         (status(e), mono(400, st)),
         (size_and_time(e), mono(400, theme::TEXT_3)),
@@ -1261,8 +1266,11 @@ mod tests {
         assert_eq!(size(1024), "1.0 kB");
         assert_eq!(size(49_357), "48.2 kB");
         assert_eq!(size(1_363_149), "1.3 MB");
-        assert_eq!(time(1_782_036_007_000), "10:00:07");
-        assert_eq!(time(1_782_000_000_999), "00:00:00");
+        assert_eq!(time(1_782_036_007_000, "UTC"), "10:00:07");
+        assert_eq!(time(1_782_000_000_999, ""), "00:00:00");
+        // in the viewer's zone (F1): Stockholm's summer time, New York's
+        assert_eq!(time(1_782_036_007_000, "Europe/Stockholm"), "12:00:07");
+        assert_eq!(time(1_782_036_007_000, "America/New_York"), "06:00:07");
         let ok = entry(1, "A", "u", Some(200), None, "");
         let not_found = entry(2, "A", "u", Some(404), None, "");
         let broken = entry(3, "A", "u", None, Some("timed out"), "");

@@ -257,7 +257,7 @@ fn inline_action(ui: &mut Ui, id: Id, rect: Rect, galley: std::sync::Arc<egui::G
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, galley.text()));
     let painter = ui.painter();
     let text_top = rect.top() + ACTION_PAD + (style.line_px() - galley.size().y) / 2.0;
-    let baseline = text_top + galley.rows.first().map_or(galley.size().y, |r| r.pos.y + r.glyphs.first().map_or(0.0, |g| g.pos.y));
+    let baseline = text_top + text::row_baseline(&galley, 0);
     let underline = transition_color(&ctx, response.id.with("underline"), if response.hovered() { theme::AMBER } else { theme::LINE_CONTROL }, anim::HOVER);
     let line = Rect::from_x_y_ranges(rect.x_range(), baseline + UNDERLINE_OFFSET..=baseline + UNDERLINE_OFFSET + 1.0);
     painter.rect_filled(panel::snap_rect(line, ctx.pixels_per_point()), CornerRadius::ZERO, underline);

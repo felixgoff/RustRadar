@@ -357,7 +357,7 @@ fn toolbar(ui: &mut Ui, pass: &mut Pass<'_>) {
     let Some(counts) = sidebar::counts(state, pass.now_ms, pass.query()) else { return };
     let mut job = text::job(&group_thousands(counts.listed as f64), &count_style());
     text::append(&mut job, &counts_rest(&counts, mode), &sidebar::counts_style());
-    let galley = ui.painter().layout_job(job);
+    let galley = ui.painter().layout_job(text::tabular(job));
     let rect = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), Rect::from_min_max(row.min, Pos2::new(at.left(), row.bottom())));
     ui.painter().galley(rect.min, galley, theme::TEXT_2);
 }

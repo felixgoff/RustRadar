@@ -319,9 +319,10 @@ fn status_width(ctx: &egui::Context, r: &BoardRow) -> f32 {
     dot + text
 }
 
-/// The distance from a galley's top to its first row's baseline.
+/// The distance from a galley's top to its first row's baseline (Chromium's, as `ui::text`'s hook
+/// draws it).
 fn baseline(galley: &egui::Galley) -> f32 {
-    galley.rows.first().map_or(0.0, |row| row.pos.y + row.row.glyphs.first().map_or(row.row.size.y, |g| g.pos.y))
+    text::row_baseline(galley, 0)
 }
 
 /// The panel in the shell's slot.
@@ -330,7 +331,7 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
     let Some(code) = state.airport.code() else { return };
     let ctx = ui.ctx().clone();
     let id = Id::unique("rustradar::airport_panel");
-    let clocks = Clocks::default();
+    let clocks = state.viewer_clocks.clone();
     let airport = state.aircraft.reference().and_then(|r| r.airport(Some(code)));
     let zone = zone(airport);
     let width = ui.available_width();

@@ -30,13 +30,12 @@
 //! the primary card not at all. Each card's natural height is measured as it is drawn and the
 //! heights are solved from the last frame's measures (an egui area learns its size by drawing).
 //!
+//! The status's and counts' `tabular-nums` are Overpass's tabular figures (`ui::text::tabular`),
+//! the stale badge's tooltip reads the viewer's time zone (`AppState::viewer_clocks`) and text
+//! stands on Chromium's baselines (`ui::text`'s hook; item F1).
+//!
 //! Deviations:
-//! - The status's and counts' `tabular-nums`: egui has no OpenType features, so Overpass draws its
-//!   default figures.
-//! - The stale badge's tooltip reads the time in UTC: the app has no viewer's time zone yet (the
-//!   platform glue's; `core::time::Clocks::new` with it is all that changes).
 //! - A card whose slot no item fills yet (the search box, a filter panel, a list) is not drawn.
-//! - Text in the shell takes egui's baseline (U1's `ui::text`), up to a pixel lower than Chromium's.
 
 use egui::{Align2, Area, Context, Id, Margin, Order, Pos2, Rect, ScrollArea, Sense, Ui, Vec2};
 use rustradar_core::filters::active_count;
@@ -44,7 +43,6 @@ use rustradar_core::freshness::Freshness;
 use rustradar_core::settings::Mode;
 use rustradar_core::ship_list::{ship_filter, ship_filter_count, ship_matches};
 use rustradar_core::text::group_thousands;
-use rustradar_core::time::Clocks;
 use rustradar_core::train_list::{train_filter, train_filter_count, train_matches};
 use rustradar_core::trains::train_running;
 
@@ -210,7 +208,7 @@ pub fn status(state: &AppState, now_ms: f64) -> Status {
             match (aircraft.snapshot(), fresh) {
                 (Some(_), Some((true, label))) => {
                     let at = aircraft.shown_feed().map_or(0, |f| f.at);
-                    let clock = Clocks::default().clock_at((at as f64 / 1000.0).floor(), None);
+                    let clock = state.viewer_clocks.clock_at((at as f64 / 1000.0).floor(), None);
                     let tooltip = format!("Last update at {clock}{}", if aircraft.loading() { "; updating now" } else { "" });
                     Status::Stale { label, tooltip: Some(tooltip) }
                 }
@@ -469,7 +467,7 @@ fn brand(ui: &mut Ui, pass: &Pass<'_>) {
     match status(pass.state, pass.now_ms) {
         Status::Text { label, tooltip } => {
             let style = status_style();
-            let galley = ui.painter().layout_job(text::job(&label, &style));
+            let galley = ui.painter().layout_job(text::tabular(text::job(&label, &style)));
             let rect = Align2::RIGHT_CENTER.align_size_within_rect(Vec2::new(galley.size().x, style.line_px()), row);
             ui.painter().galley(rect.min, galley, theme::TEXT_3);
             if let Some(tip) = tooltip {
@@ -479,7 +477,7 @@ fn brand(ui: &mut Ui, pass: &Pass<'_>) {
             ui.ctx().request_repaint_after_secs(1.0);
         }
         Status::Stale { label, tooltip } => {
-            let badge = Badge::new(label, Tone::Warn).size(theme::TEXT_SM);
+            let badge = Badge::new(label, Tone::Warn).size(theme::TEXT_SM).tabular();
             let size = badge.measure(ui.ctx());
             let rect = Align2::RIGHT_CENTER.align_size_within_rect(size, row);
             badge.paint(ui.painter(), rect.min);
@@ -519,7 +517,7 @@ fn toolbar(ui: &mut Ui, pass: &mut Pass<'_>) {
     let Some(counts) = counts(pass.state, pass.now_ms, pass.query()) else { return };
     let mut job = text::job(&group_thousands(counts.listed as f64), &count_style());
     text::append(&mut job, &counts.rest(), &counts_style());
-    let galley = ui.painter().layout_job(job);
+    let galley = ui.painter().layout_job(text::tabular(job));
     let row = Rect::from_min_max(Pos2::new(pressed.right(), row_top), Pos2::new(ui.max_rect().right(), pressed.bottom()));
     let rect = Align2::RIGHT_CENTER.align_size_within_rect(galley.size(), row);
     ui.painter().galley(rect.min, galley, theme::TEXT_2);
@@ -693,6 +691,14 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        // the time in the viewer's zone (F1): UTC in tests and shots, the system's in the window
+        let tip = |s: &AppState| match status(s, T0 + 3_600_000.0) {
+            Status::Stale { tooltip, .. } => tooltip.unwrap_or_default(),
+            other => panic!("{other:?}"),
+        };
+        assert!(tip(&s).starts_with("Last update at 10:00"), "{}", tip(&s));
+        s.viewer_clocks = rustradar_core::time::Clocks::new("Europe/Stockholm");
+        assert!(tip(&s).starts_with("Last update at 12:00"), "{}", tip(&s));
         assert_eq!(notice(&s, T0), None);
     }
 }

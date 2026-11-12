@@ -4,7 +4,9 @@
 //! - [`FONTS`]: Overpass and Overpass Mono as variable TTFs (`wght` 100–900, default 400; Mono
 //!   300–700, default 300), one file per subset, in the fallback order the fonts' CSS gives them
 //!   (`@fontsource-variable/overpass`'s `unicode-range`s: latin, latin-ext, cyrillic, cyrillic-ext,
-//!   vietnamese). [`crate::ui::fonts`] makes the egui families of them.
+//!   vietnamese). [`crate::ui::fonts`] makes the egui families of them. Overpass's latin subset
+//!   also comes as Overpass with tabular figures (`overpass-tnum-latin.ttf`, item F1), for
+//!   `font-variant-numeric: tabular-nums`.
 //! - [`ICONS`]: the Lucide icons in use (doc 06 §26), as Lucide's SVG files, for `ui::icons`
 //!   (U2) to rasterise. An icon added to `assets/icons/lucide/` gets a line here (a test checks
 //!   the two agree).
@@ -20,6 +22,9 @@ pub enum FontFile {
     Overpass,
     /// Overpass Mono (`--font-data`).
     OverpassMono,
+    /// Overpass with its `tnum` figures as the default ones (latin only: the other subsets have
+    /// no figures).
+    OverpassTabular,
 }
 
 /// One vendored font file: its family, its subset and its bytes.
@@ -38,7 +43,7 @@ macro_rules! font {
 }
 
 /// Every font file, each family's subsets in their fallback order.
-pub static FONTS: [Font; 10] = [
+pub static FONTS: [Font; 11] = [
     font!(Overpass, "latin", "overpass-latin.ttf"),
     font!(Overpass, "latin-ext", "overpass-latin-ext.ttf"),
     font!(Overpass, "cyrillic", "overpass-cyrillic.ttf"),
@@ -49,6 +54,7 @@ pub static FONTS: [Font; 10] = [
     font!(OverpassMono, "cyrillic", "overpass-mono-cyrillic.ttf"),
     font!(OverpassMono, "cyrillic-ext", "overpass-mono-cyrillic-ext.ttf"),
     font!(OverpassMono, "vietnamese", "overpass-mono-vietnamese.ttf"),
+    font!(OverpassTabular, "latin", "overpass-tnum-latin.ttf"),
 ];
 
 /// The fonts' licence (SIL OFL 1.1).
@@ -160,6 +166,7 @@ mod tests {
             let subsets: Vec<&str> = fonts(file).map(|f| f.subset).collect();
             assert_eq!(subsets, order, "{file:?}");
         }
+        assert_eq!(fonts(FontFile::OverpassTabular).map(|f| f.subset).collect::<Vec<_>>(), ["latin"]);
         for font in &FONTS {
             // a TrueType file: version 1.0 in its first four bytes
             assert_eq!(&font.bytes[..4], &[0, 1, 0, 0], "{:?} {}", font.file, font.subset);

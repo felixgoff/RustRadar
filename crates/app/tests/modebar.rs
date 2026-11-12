@@ -218,10 +218,13 @@ fn the_bar_the_strip_and_the_readout_where_today_s_are() {
     assert!(ours.x0 <= theirs.x0 && theirs.x0 - ours.x0 <= 6, "the readout's left: {ours:?}, today {theirs:?}");
     let rows = |image: &Image, b: Rect| (b.y0..b.y1).filter(|&y| (b.x0..b.x1).any(|x| lum(pixel(image, x, y)) > 60.0)).collect::<Vec<u32>>();
     let (ours_rows, theirs_rows) = (rows(&image, ours), rows(&today, theirs));
-    // four lines of text 13.5 apart: the same rows within a pixel
+    // four lines of text 13.5 apart: the same rows within a pixel, once the faces' baselines are
+    // allowed for: in this 13.5 px line box Chromium puts the system monospace's (DejaVu Sans Mono,
+    // ascent 9 and descent 2 at 10 px) a pixel lower than Overpass Mono's (9 and 4), which the
+    // port draws on Chromium's baseline for Overpass Mono (F1)
     let runs = |r: &[u32]| r.windows(2).filter(|w| w[1] != w[0] + 1).count() + 1;
     assert_eq!((runs(&ours_rows), runs(&theirs_rows)), (4, 4), "{ours_rows:?} today {theirs_rows:?}");
-    assert!(ours_rows[0].abs_diff(theirs_rows[0]) <= 1 && ours_rows.last().unwrap().abs_diff(*theirs_rows.last().unwrap()) <= 1, "{ours_rows:?} today {theirs_rows:?}");
+    assert!((ours_rows[0] + 1).abs_diff(theirs_rows[0]) <= 1 && (ours_rows.last().unwrap() + 1).abs_diff(*theirs_rows.last().unwrap()) <= 1, "{ours_rows:?} today {theirs_rows:?}");
 }
 
 #[test]

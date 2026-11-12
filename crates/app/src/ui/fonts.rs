@@ -20,6 +20,16 @@
 //!
 //! egui's built-in families are bound too: `FontFamily::Proportional` is `ui-400` and
 //! `FontFamily::Monospace` is `mono-400`, so text that names no family is Overpass.
+//!
+//! `font-variant-numeric: tabular-nums` (item F1): egui's shaper applies no OpenType feature it is
+//! not told to, and it cannot be told. `cargo xtask vendor-fonts` writes Overpass's latin subset a
+//! second time with its `tnum` lookup under the tag `rclt`, which shapers apply by default, so that
+//! file draws Overpass's tabular figures (each 0.616 em) as Chromium does with `tnum` on, the rest
+//! as Overpass. The families `ui-tnum-400` … `ui-tnum-750` ([`tabular_family`]) chain it before
+//! Overpass's other subsets; `ui::text::tabular` moves a job's Overpass sections into them.
+//! Overpass Mono's default figures are its tabular ones already.
+//!
+//! [`install`] also adds `ui::text`'s baseline hook, which puts text on Chromium's baselines.
 
 use std::sync::{Arc, LazyLock};
 
@@ -108,6 +118,33 @@ pub fn family(face: Face, w: u16) -> FontFamily {
     FAMILIES.iter().find(|(f, fw, _)| *f == face && *fw == w).map(|(_, _, family)| family.clone()).expect("a registered weight")
 }
 
+/// The prefix of the families with Overpass's tabular figures.
+pub const TABULAR_PREFIX: &str = "ui-tnum";
+
+static TABULAR_FAMILIES: LazyLock<Vec<(u16, FontFamily)>> =
+    LazyLock::new(|| UI_WEIGHTS.iter().map(|&w| (w, FontFamily::Name(Arc::from(format!("{TABULAR_PREFIX}-{w}"))))).collect());
+
+/// `face` at `weight` with tabular figures (`font-variant-numeric: tabular-nums`): Overpass's
+/// `ui-tnum-*` family of that weight; Overpass Mono's own family, whose figures are tabular.
+pub fn tabular_family(face: Face, w: u16) -> FontFamily {
+    match face {
+        Face::Ui => {
+            let w = weight(face, w);
+            TABULAR_FAMILIES.iter().find(|(fw, _)| *fw == w).map(|(_, family)| family.clone()).expect("a registered weight")
+        }
+        Face::Mono => family(face, w),
+    }
+}
+
+/// The tabular family of an Overpass family (`ui-*`, or `Proportional`, which is `ui-400`);
+/// `None` for any other.
+pub fn tabular_of(family: &FontFamily) -> Option<FontFamily> {
+    if *family == FontFamily::Proportional {
+        return Some(tabular_family(Face::Ui, 400));
+    }
+    FAMILIES.iter().find(|(face, _, f)| *face == Face::Ui && f == family).map(|&(face, w, _)| tabular_family(face, w))
+}
+
 /// Overpass at `size` px and `weight`.
 pub fn ui(size: f32, weight: u16) -> FontId {
     FontId::new(size, family(Face::Ui, weight))
@@ -147,15 +184,28 @@ pub fn definitions() -> FontDefinitions {
     for (face, w, family) in FAMILIES.iter() {
         defs.families.insert(family.clone(), chain(*face, *w));
     }
+    // Overpass with tabular figures: its tnum latin file first, then the rest of Overpass's chain
+    for &(w, ref family) in TABULAR_FAMILIES.iter() {
+        let mut names = chain(Face::Ui, w);
+        for font in assets::fonts(FontFile::OverpassTabular) {
+            let name = format!("{TABULAR_PREFIX}-{}@{w}", font.subset);
+            let tweak = FontTweak { coords: VariationCoords::new([(b"wght", f32::from(w))]), ..Default::default() };
+            defs.font_data.insert(name.clone(), Arc::new(FontData::from_static(font.bytes).tweak(tweak)));
+            let at = names.iter().position(|n| *n == data_name(Face::Ui, font.subset, w)).expect("the subset in Overpass's chain");
+            names[at] = name;
+        }
+        defs.families.insert(family.clone(), names);
+    }
     defs.families.insert(FontFamily::Proportional, chain(Face::Ui, 400));
     defs.families.insert(FontFamily::Monospace, chain(Face::Mono, 400));
     defs
 }
 
 /// Gives `ctx` the fonts of [`definitions`] (from its next pass, as egui's `set_fonts` does:
-/// call it before the first pass).
+/// call it before the first pass) and `ui::text`'s baseline hook.
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(definitions());
+    super::text::install(ctx);
 }
 
 #[cfg(test)]
@@ -191,6 +241,16 @@ mod tests {
         let mono750 = &defs.families[&family(Face::Mono, 750)];
         assert_eq!(mono750[0], "mono-latin@700");
         assert_eq!(mono750[5], "ui-latin@700");
+        // Overpass with tabular figures: its tnum latin file, then the rest of Overpass's chain
+        let tnum550 = &defs.families[&tabular_family(Face::Ui, 550)];
+        assert_eq!(tnum550[0], "ui-tnum-latin@550");
+        assert_eq!(tnum550[1..], ui550[1..]);
+        assert_eq!(tabular_family(Face::Ui, 800), FontFamily::Name("ui-tnum-750".into()));
+        assert_eq!(tabular_family(Face::Mono, 400), family(Face::Mono, 400), "Mono's figures are tabular");
+        assert_eq!(tabular_of(&family(Face::Ui, 650)), Some(FontFamily::Name("ui-tnum-650".into())));
+        assert_eq!(tabular_of(&FontFamily::Proportional), Some(tabular_family(Face::Ui, 400)));
+        assert_eq!(tabular_of(&family(Face::Mono, 400)), None);
+        assert_eq!(tabular_of(&tabular_family(Face::Ui, 400)), None);
         assert_eq!(defs.families[&FontFamily::Proportional][0], "ui-latin@400");
         assert_eq!(defs.families[&FontFamily::Monospace][0], "mono-latin@400");
         for names in defs.families.values() {

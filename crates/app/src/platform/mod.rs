@@ -41,6 +41,14 @@ pub fn reveal(path: impl Into<std::path::PathBuf>) {
     log::info!("couldn't show {}: {NOT_ON_THIS_PLATFORM}", path.display());
 }
 
+/// The system's time zone as an IANA name, for times without a zone (today's app reads the
+/// browser's, `Intl.DateTimeFormat().resolvedOptions().timeZone`): jiff's system zone (`TZ`, then
+/// `/etc/localtime`, the Windows registry or Android's `persist.sys.timezone`), `UTC` when it
+/// cannot tell or the zone has no IANA name (item F1).
+pub fn time_zone() -> String {
+    jiff::tz::TimeZone::try_system().ok().and_then(|zone| zone.iana_name().map(str::to_owned)).unwrap_or_else(|| "UTC".to_owned())
+}
+
 /// The folders the backend reads and writes, resolved once at start (doc 07 §11.1).
 ///
 /// On the desktop: Tauri's own folders (`<cache>/com.felix.rustradar`, `<config>/com.felix.rustradar`,
@@ -67,6 +75,12 @@ pub fn dirs() -> Option<Dirs> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_system_zone_is_one_the_clocks_know() {
+        let zone = time_zone();
+        assert_eq!(rustradar_core::time::Clocks::new(&zone).own_zone(), zone, "an IANA name the tz database knows, or UTC");
+    }
 
     #[test]
     fn desktop_folders_are_tauris() {

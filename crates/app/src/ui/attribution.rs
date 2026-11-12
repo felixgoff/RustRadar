@@ -318,7 +318,7 @@ fn span(galley: &Galley, chars: &std::ops::Range<usize>) -> Option<(Rect, f32)> 
     let (first, last) = (glyphs.first()?, glyphs.last()?);
     let left = row.pos.x + first.pos.x;
     let right = row.pos.x + last.pos.x + last.advance_width;
-    Some((Rect::from_x_y_ranges(left..=right, row.pos.y..=row.pos.y + row.size.y), row.pos.y + first.pos.y))
+    Some((Rect::from_x_y_ranges(left..=right, row.pos.y..=row.pos.y + row.size.y), text::row_baseline(galley, 0)))
 }
 
 /// The strip's rectangle in `screen` for a line `text_w` wide whose line box is `line` high, its

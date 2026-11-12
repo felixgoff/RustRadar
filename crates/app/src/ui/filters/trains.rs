@@ -27,13 +27,13 @@
 //! **Checked** against Chromium's layout of today's component, server-rendered by Svelte with the
 //! same props and laid out with app.css at 1440 × 900 (a kind and an operator left out, one no
 //! longer running, an unknown operator; `tests/train_ui.rs`): every box, rule, chip, swatch,
-//! switch and button lands on Chromium's pixels or within one; text sits up to a pixel lower
-//! (egui's baseline).
+//! switch and button lands on Chromium's pixels or within one; text stands on Chromium's
+//! baselines (`ui::text`'s hook, F1).
 //!
 //! The card's content ends on a whole pixel below the height the sidebar solves (at most a pixel
 //! further): egui's debug builds mark a fractional edge in orange.
 //!
-//! Deviations: `tabular-nums` as in the shell (U6); text takes egui's baseline (U1).
+//! The count's `tabular-nums` is Overpass's tabular figures (`ui::text::tabular`, F1).
 
 use egui::{Color32, Frame, Id, Margin, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2};
 use rustradar_core::model::{Train, TrainKind, TrainSource};
@@ -196,7 +196,7 @@ fn header(ui: &mut Ui, pass: &mut Pass<'_>, filters: &mut TrainFilters) -> f32 {
     let now = pass.now_ms as i64;
     let trains = state.trains.trains();
     let shown = trains.iter().filter(|t| keep(t) && train_running(t, now)).count();
-    let shown = painter.layout_job(text::job(&shown_text(shown, trains.len()), &shown_style()));
+    let shown = painter.layout_job(text::tabular(text::job(&shown_text(shown, trains.len()), &shown_style())));
     painter.galley(Pos2::new(row.left() + title_w + HEADER_GAP, middle - shown.size().y / 2.0), shown, Color32::PLACEHOLDER);
     painter.hline(rect.x_range(), rect.bottom() - theme::BORDER / 2.0, Stroke::new(theme::BORDER, theme::LINE));
 

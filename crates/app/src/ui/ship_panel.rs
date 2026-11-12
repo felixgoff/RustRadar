@@ -377,7 +377,7 @@ pub fn show(ui: &mut Ui, pass: &mut Pass<'_>) {
         error: state.ships.card_error(),
         now: pass.now_ms,
         following: state.ships.following(),
-        clocks: Clocks::default(),
+        clocks: state.viewer_clocks.clone(),
     };
     let width = ui.available_width();
     let footer_height = footer_height(&ctx, &view, width);
@@ -710,7 +710,7 @@ fn report_heights(ctx: &Context, view: &View<'_>, room: f32) -> Vec<f32> {
     let Some((first, satellite, _)) = report(view) else { return Vec::new() };
     let first = match first {
         Report::Text(label) => {
-            let rows = ctx.fonts_mut(|f| f.layout_job(text::wrapped(&label, &status_style(), room))).rows.len().max(1);
+            let rows = ctx.fonts_mut(|f| f.layout_job(text::tabular(text::wrapped(&label, &status_style(), room)))).rows.len().max(1);
             status_style().line_px() * rows as f32
         }
         Report::Badge(badge) => badge.measure(ctx).y,
@@ -754,7 +754,7 @@ fn footer(ui: &mut Ui, rect: Rect, view: &View<'_>, actions: &mut Vec<Action>) {
         let first_rect = match first {
             Report::Text(label) => {
                 let style = status_style();
-                let galley = painter.layout_job(text::wrapped(&label, &style, room));
+                let galley = painter.layout_job(text::tabular(text::wrapped(&label, &style, room)));
                 let rows = galley.rows.len().max(1) as f32;
                 let at = Pos2::new(row.left(), y + (style.line_px() * rows - galley.size().y) / 2.0 / rows);
                 let r = Rect::from_min_size(Pos2::new(row.left(), y), Vec2::new(galley.size().x, style.line_px() * rows));

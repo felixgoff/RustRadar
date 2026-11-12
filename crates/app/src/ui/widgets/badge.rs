@@ -95,12 +95,14 @@ pub struct Badge {
     tone: Tone,
     size: f32,
     tooltip: Option<String>,
+    /// `font-variant-numeric: tabular-nums` inherited from the badge's parent (F1).
+    tabular: bool,
 }
 
 impl Badge {
     /// `text` in `tone` at 11 px.
     pub fn new(text: impl Into<String>, tone: Tone) -> Badge {
-        Badge { text: text.into(), tone, size: TEXT_SIZE, tooltip: None }
+        Badge { text: text.into(), tone, size: TEXT_SIZE, tooltip: None, tabular: false }
     }
 
     /// The text's size, px (12 where a component sets `font-size: var(--text-sm)`).
@@ -115,6 +117,18 @@ impl Badge {
         self
     }
 
+    /// Tabular figures, where the badge's parent asks for `tabular-nums` (`ui::text::tabular`).
+    pub fn tabular(mut self) -> Badge {
+        self.tabular = true;
+        self
+    }
+
+    /// The text's job.
+    fn job(&self, style: &Style) -> egui::text::LayoutJob {
+        let job = text::job(&self.text, style);
+        if self.tabular { text::tabular(job) } else { job }
+    }
+
     /// The text's style.
     pub fn style(&self) -> Style {
         Style::ui(self.size, theme::WEIGHT_BADGE, self.tone.colors().1).line_height(theme::LINE_HEIGHT_BADGE)
@@ -124,14 +138,14 @@ impl Badge {
     /// whole pixel) with the padding: 18.5 px high at 11 px, 20 at 12.
     pub fn measure(&self, ctx: &egui::Context) -> Vec2 {
         let style = self.style();
-        Vec2::new(text::measure(ctx, text::job(&self.text, &style)).x, style.line_px()) + 2.0 * PADDING
+        Vec2::new(text::measure(ctx, self.job(&style)).x, style.line_px()) + 2.0 * PADDING
     }
 
     /// Draws the badge with its top left corner at `at`, the text centred on its line box;
     /// answers its rectangle (the fill is snapped to whole pixels as it is drawn).
     pub fn paint(&self, painter: &Painter, at: Pos2) -> Rect {
         let style = self.style();
-        let galley = painter.layout_job(text::job(&self.text, &style));
+        let galley = painter.layout_job(self.job(&style));
         let rect = Rect::from_min_size(at, Vec2::new(galley.size().x, style.line_px()) + 2.0 * PADDING);
         let (fill, color) = self.tone.colors();
         painter.rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);

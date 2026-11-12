@@ -30,7 +30,7 @@
 //! (`tests/ship_ui.rs`): the header, the chips' rows, the movement group, the disabled size group
 //! and its hint, the switch land on Chromium's pixels or within one.
 //!
-//! Deviations: `tabular-nums` as in the shell (U6); text takes egui's baseline (U1).
+//! The count's `tabular-nums` is Overpass's tabular figures (`ui::text::tabular`, F1).
 
 use egui::{Color32, Frame, Id, Margin, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2};
 use rustradar_core::model::Ship;
@@ -177,7 +177,7 @@ fn header(ui: &mut Ui, pass: &mut Pass<'_>, filters: &mut ShipFilters) -> f32 {
     let title = painter.layout_job(text::job(TITLE, &title_style()));
     let title_w = title.size().x;
     painter.galley(Pos2::new(row.left(), middle - title.size().y / 2.0), title, Color32::PLACEHOLDER);
-    let shown = painter.layout_job(text::job(&shown_text(shown(ships, filters), ships.len()), &shown_style()));
+    let shown = painter.layout_job(text::tabular(text::job(&shown_text(shown(ships, filters), ships.len()), &shown_style())));
     painter.galley(Pos2::new(row.left() + title_w + HEADER_GAP, middle - shown.size().y / 2.0), shown, Color32::PLACEHOLDER);
     painter.hline(rect.x_range(), rect.bottom() - theme::BORDER / 2.0, Stroke::new(theme::BORDER, theme::LINE));
 

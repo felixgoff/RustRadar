@@ -7,4 +7,7 @@ They are variable fonts with a `wght` axis: Overpass 100 to 900 (default 400),
 Overpass Mono 300 to 700 (default 300).
 Subsets, in fallback order: latin, latin-ext, cyrillic, cyrillic-ext, vietnamese.
 
+`overpass-tnum-latin.ttf` is `overpass-latin.ttf` with its `tnum` feature renamed `rclt`, which shapers
+apply by default: Overpass with tabular figures, for `font-variant-numeric: tabular-nums`.
+
 Licensed under the SIL Open Font License 1.1, see `OFL.txt`.

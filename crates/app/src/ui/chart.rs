@@ -49,20 +49,17 @@
 //! hours, ended without a zone, the table, the menu by pointer and by keys, saved, empty): the
 //! grid rows, the area, the line, the dot and its ring, the box of the point read, the table's
 //! rules, the menu's border and the focus rings land on Chromium's pixels; the header's texts,
-//! the tick and end labels and the table's cells on its ink, or within a pixel (texts are placed
-//! on CSS's baselines, [`css_shift`]); a wrapped message's second row sits a pixel lower (egui
-//! puts each row on a whole pixel).
+//! the tick and end labels and the table's cells on its ink, or within a pixel (texts stand on
+//! Chromium's baselines, `ui::text`'s hook, a wrapped message's rows too).
 //!
 //! Deviations:
 //! - A click on the plot does not give it the keyboard (Chromium focuses it, showing the last
 //!   point until the pointer moves); Tab does.
 //! - The line's joins are egui's (mitred, cut at sharp corners) rather than round; the caps are
 //!   round.
-//! - Times without the departure airport's zone are in UTC (the app has no viewer time zone yet;
-//!   U6's note), so the note reads `Your time, UTC`.
 
 use egui::epaint::{Mesh, PathShape};
-use egui::{Color32, Context, CornerRadius, CursorIcon, Event, FocusDirection, Galley, Id, Key, Pos2, Rect, ScrollArea, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Color32, CornerRadius, CursorIcon, Event, FocusDirection, Id, Key, Pos2, Rect, ScrollArea, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
 use rustradar_core::export::ExportMeta;
 use rustradar_core::model::TrailPoint;
 use rustradar_core::num::{fixed_number, js_round};
@@ -447,31 +444,6 @@ pub struct Placed {
     pub menu: Option<Rect>,
 }
 
-/// The baseline's distance under the top of `style`'s line box as egui lays it out (on a whole
-/// pixel).
-fn baseline_of(ctx: &Context, style: &Style) -> f32 {
-    baseline_in(&ctx.fonts_mut(|f| f.layout_job(text::job("0", style))), style)
-}
-
-/// The baseline's distance under the top of `style`'s line box as CSS puts it: the font's ascent
-/// and descent centred in the line box (half-leading), unrounded.
-pub fn css_baseline(ctx: &Context, style: &Style) -> f32 {
-    let galley = ctx.fonts_mut(|f| f.layout_job(text::job("0", style)));
-    galley.rows.first().and_then(|r| r.glyphs.first()).map_or(style.line_px(), |g| (style.line_px() - g.font_height) / 2.0 + g.font_ascent)
-}
-
-/// How much lower CSS puts `style`'s text in its line box than egui does (negative: higher; egui
-/// rounds the baseline down to a whole pixel): add it to a galley's top to put its baseline where
-/// Chromium's is.
-pub fn css_shift(ctx: &Context, style: &Style) -> f32 {
-    css_baseline(ctx, style) - baseline_of(ctx, style)
-}
-
-/// The first row's baseline in `galley`, under its top.
-fn baseline_in(galley: &Galley, style: &Style) -> f32 {
-    galley.rows.first().map_or(style.line_px(), |r| r.pos.y + r.glyphs.first().map_or(0.0, |g| g.pos.y))
-}
-
 /// Where a text stands on its baseline point.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Anchor {
@@ -487,7 +459,8 @@ fn text_at(painter: &egui::Painter, text: &str, style: &Style, at: Pos2, anchor:
         Anchor::Middle => at.x - w / 2.0,
         Anchor::End => at.x - w,
     };
-    let top = at.y - baseline_in(&galley, style);
+    // `ui::text`'s hook puts the baseline `css_baseline` under the top, on the nearest pixel
+    let top = at.y - style.css_baseline();
     painter.galley(Pos2::new(x, top), galley, style.color);
 }
 
@@ -517,10 +490,9 @@ pub fn chart(ui: &mut Ui, id: Id, chart: &Chart<'_>, clocks: &Clocks) -> Placed 
     let line12 = small.line_px();
     let header_h = if trigger.is_some() { export_menu::BLOCK_LINE } else { line12 };
     // CSS's baselines (each box's top is the row's baseline less its own)
-    let b12 = css_baseline(&ctx, &small);
-    let b11 = css_baseline(&ctx, &zone_style());
-    let shift12 = css_shift(&ctx, &small);
-    let baseline_off = if trigger.is_some() { css_baseline(&ctx, &strut_style()) } else { b12 };
+    let b12 = small.css_baseline();
+    let b11 = zone_style().css_baseline();
+    let baseline_off = if trigger.is_some() { strut_style().css_baseline() } else { b12 };
 
     // what is under the header, and its height
     let table_rows = if drawable && kept.table { table_rows(profile.points.len()) } else { Vec::new() };
@@ -545,7 +517,7 @@ pub fn chart(ui: &mut Ui, id: Id, chart: &Chart<'_>, clocks: &Clocks) -> Placed 
     text::append(&mut job, HEADING, &heading_style());
     text::append(&mut job, UNIT, &heading_style().weight(theme::WEIGHT_REGULAR).color(theme::TEXT_3));
     let heading = painter.layout_job(job);
-    painter.galley(Pos2::new(header.left(), baseline - b12 + shift12), heading, theme::TEXT_2);
+    painter.galley(Pos2::new(header.left(), baseline - b12), heading, theme::TEXT_2);
 
     // the tools, placed from the right (the toggle, the export, the zone note), then made in the
     // page's order (the zone note, the export, the toggle: the order Tab takes them in)
@@ -568,7 +540,7 @@ pub fn chart(ui: &mut Ui, id: Id, chart: &Chart<'_>, clocks: &Clocks) -> Placed 
         let (note, title) = zone_note(chart.place, &clocks.zone_name(t0, zone));
         let zone_galley = painter.layout_job(text::job(&note, &zone_style()));
         let zone_rect = Rect::from_min_size(Pos2::new(right - zone_galley.size().x, baseline - b11), Vec2::new(zone_galley.size().x, zone_style().line_px()));
-        painter.galley(zone_rect.min + Vec2::new(0.0, css_shift(&ctx, &zone_style())), zone_galley, theme::TEXT_3);
+        painter.galley(zone_rect.min, zone_galley, theme::TEXT_3);
         tooltip::show(ui.interact(zone_rect, id.with("zone"), Sense::hover()), &title);
         placed.zone = Some(zone_rect);
         // the export trigger and its menu
@@ -578,7 +550,7 @@ pub fn chart(ui: &mut Ui, id: Id, chart: &Chart<'_>, clocks: &Clocks) -> Placed 
         let response = ui.interact(toggle, id.with("toggle"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
         response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, kept.table, toggle_text));
         let color = if response.hovered() { theme::TEXT_1 } else { theme::TEXT_3 };
-        painter.galley(toggle.min + Vec2::new(0.0, shift12), painter.layout_job(text::job(toggle_text, &small.color(color))), color);
+        painter.galley(toggle.min, painter.layout_job(text::job(toggle_text, &small.color(color))), color);
         if response.has_focus() {
             focus_ring(&painter, toggle, 0);
         }
@@ -590,7 +562,7 @@ pub fn chart(ui: &mut Ui, id: Id, chart: &Chart<'_>, clocks: &Clocks) -> Placed 
     // what is under the header
     let body = Rect::from_min_size(Pos2::new(rect.left(), header.bottom() + GAP), Vec2::new(width, body_h));
     if let Some(empty) = empty {
-        painter.galley(body.min + Vec2::new(0.0, shift12), empty, theme::TEXT_3);
+        painter.galley(body.min, empty, theme::TEXT_3);
     } else if drawable && kept.table {
         placed.table = Some(table(ui, id, body, &profile, &table_rows, clocks, zone));
     } else if drawable {
@@ -640,7 +612,6 @@ fn table(ui: &mut Ui, id: Id, rect: Rect, profile: &Profile, rows: &[usize], clo
         }
     }
     let widths = column_widths(widest, rect.width());
-    let (th_shift, td_shift) = (css_shift(&ctx, &th), css_shift(&ctx, &td));
     let natural = table_height(cells.len());
     panel::region(ui, "chart-table", rect, |ui| {
         let scroll = &mut ui.spacing_mut().scroll;
@@ -668,7 +639,7 @@ fn table(ui: &mut Ui, id: Id, rect: Rect, profile: &Profile, rows: &[usize], clo
                 painter.rect_filled(panel::snap_rect(rule, ppp), CornerRadius::ZERO, theme::LINE);
                 // the rule's half in the row is rounded down to nothing over the padding, as
                 // Chromium lays the collapsed border out
-                let text_top = top + TD_PAD + td_shift;
+                let text_top = top + TD_PAD;
                 for (c, s) in row.iter().enumerate() {
                     let galley = painter.layout_job(text::job(s, &td));
                     painter.galley(Pos2::new(place(c, galley.size().x), text_top), galley, theme::TEXT_1);
@@ -680,7 +651,7 @@ fn table(ui: &mut Ui, id: Id, rect: Rect, profile: &Profile, rows: &[usize], clo
             painter.rect_filled(panel::snap_rect(bg, ppp), CornerRadius::ZERO, theme::SURFACE);
             for (c, name) in COLUMNS.iter().enumerate() {
                 let galley = painter.layout_job(text::job(name, &th));
-                painter.galley(Pos2::new(place(c, galley.size().x), top + th_shift), galley, theme::TEXT_3);
+                painter.galley(Pos2::new(place(c, galley.size().x), top), galley, theme::TEXT_3);
             }
         });
     });
@@ -824,9 +795,8 @@ fn reading(painter: &egui::Painter, plot: Rect, x: f32, width: f32, p: &TrailPoi
     let line1 = value_style().line_px();
     let key = Rect::from_min_size(Pos2::new(inner.x, inner.y + (line1 - KEY.y) / 2.0), KEY);
     painter.rect_filled(panel::snap_rect(key, ppp), CornerRadius::same(1), theme::SERIES_1);
-    let ctx = painter.ctx();
-    painter.galley(Pos2::new(inner.x + KEY.x + KEY_GAP, inner.y + css_shift(ctx, &value_style())), value, theme::TEXT_1);
-    painter.galley(Pos2::new(inner.x, inner.y + line1 + TIP_GAP + css_shift(ctx, &style)), label, theme::TEXT_2);
+    painter.galley(Pos2::new(inner.x + KEY.x + KEY_GAP, inner.y), value, theme::TEXT_1);
+    painter.galley(Pos2::new(inner.x, inner.y + line1 + TIP_GAP), label, theme::TEXT_2);
     rect
 }
 

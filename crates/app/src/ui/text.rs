@@ -19,10 +19,35 @@
 //!   and [`append`] leaves it so.
 //! - **Truncation**: `white-space: nowrap; overflow: hidden; text-overflow: ellipsis` is
 //!   [`truncated`]: one row, cut at any character, `…` at the end, within the width.
+//! - **Baselines** (item F1): egui and Chromium centre a line's text in its line box differently.
+//!   Chromium rounds the font's ascent and descent to whole pixels, floors the half-leading
+//!   `(line-height − (ascent + descent)) / 2` (in `LayoutUnit`s, 1/64 px, `line-height` floored to
+//!   them) to a whole pixel and paints the baseline on the pixel nearest to the line's top plus the
+//!   half-leading and the ascent ([`css_baseline`]); each line box is `line-height` floored to
+//!   1/64 px under the one before. egui centres unrounded metrics and puts each row on a whole pixel, which drew text 0,
+//!   1 or 2 px lower than Chromium (1 px at 12, 14 and 17 px at the root's 1.4) and wrapped rows
+//!   up to a pixel off. [`install`] adds an egui plugin that, after every pass, moves each row of
+//!   every text shape whose format names a line height (all text built here) onto Chromium's
+//!   baseline for a line box whose top is the shape's position: the layout (galley sizes, rows,
+//!   hit boxes, cursors) stays egui's, only the drawing moves. Code that draws next to text
+//!   (underlines, swatches on the baseline, two texts on one baseline) reads the baseline from
+//!   [`row_baseline`]. Measured in Playwright's Chromium on every size from 7 to 24 px at line
+//!   heights 1 … 1.5, 20 px and 32 px, both faces, weights 400 and 700, at device scales 1 and 2,
+//!   tops on fractions of a pixel and six-line paragraphs: the rule gives Chromium's baselines in
+//!   all of them (at scale 2 Chromium also lays text out in CSS pixels and paints the baseline on a
+//!   whole CSS pixel, which the hook does too).
+//! - **Tabular figures**: `font-variant-numeric: tabular-nums` is [`tabular`]: the Overpass
+//!   sections of a job in the `ui-tnum-*` families ([`super::fonts::tabular_family`]), whose latin
+//!   file has Overpass's `tnum` lookup under a feature tag the shaper applies by default (`cargo
+//!   xtask vendor-fonts`). Overpass Mono's figures are tabular already.
 //!
 //! [`job`], [`append`], [`wrapped`] and [`truncated`] build jobs; [`label`] lays one out and
 //! paints it in the space it takes.
 
+use std::sync::Arc;
+
+use egui::epaint::text::ByteIndex;
+use egui::epaint::{Galley, Shape, TextShape};
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{Color32, FontFamily, FontId, Response, Sense, Ui, Vec2};
 
@@ -129,6 +154,196 @@ impl Style {
     pub fn dot_format(&self) -> TextFormat {
         TextFormat { font_id: FontId::new(self.size, dot_family()), extra_letter_spacing: 0.0, ..self.format() }
     }
+
+    /// Where Chromium puts this style's baseline under the top of its line box, px
+    /// ([`css_baseline`]).
+    pub fn css_baseline(&self) -> f32 {
+        css_baseline(self.size, self.line_px())
+    }
+}
+
+/// Overpass's and Overpass Mono's units per em.
+pub const UNITS_PER_EM: f32 = 2000.0;
+/// Their ascent and descent, font units: `hhea`'s, which `OS/2` repeats as its typo metrics
+/// (`USE_TYPO_METRICS` is set); the same in both faces, every subset and every weight (no `MVAR`).
+pub const ASCENT: f32 = 1766.0;
+pub const DESCENT: f32 = 766.0;
+
+/// `px` in Blink's `LayoutUnit`s (1/64 px), floored, as a `line-height` is.
+fn layout_units(px: f32) -> i32 {
+    // the small margin keeps a product like 12 × 1.25 that f32 puts a hair under 15 on 15
+    (px * 64.0 + 1e-3).floor() as i32
+}
+
+/// Where Chromium puts the baseline of Overpass text `size` px large in a line box `line_height`
+/// px high, px under the box's top, a whole number: the ascent and descent rounded
+/// (`SkScalarRoundToScalar`), the half-leading `(line_height − (ascent + descent)) / 2` taken in
+/// `LayoutUnit`s and floored to a whole pixel (`NGInlineBoxState::CalculateLeadingSpace`), plus
+/// the ascent. 13 px at 1.4 (18.1875 px): 11 + 5, ⌊1.09⌋ + 11 = 12; 12 px at 1.4: ⌊0.4⌋ + 11 = 11;
+/// 13 px at 1.2: ⌊−0.7⌋ + 11 = 10.
+pub fn css_baseline(size: f32, line_height: f32) -> f32 {
+    let ascent = (ASCENT / UNITS_PER_EM * size + 0.5).floor();
+    let descent = (DESCENT / UNITS_PER_EM * size + 0.5).floor();
+    let leading = layout_units(line_height) - 64 * (ascent + descent) as i32;
+    // `LayoutUnit / 2` truncates toward zero, `Floor()` then goes down to a whole pixel
+    (leading / 2).div_euclid(64) as f32 + ascent
+}
+
+/// The format of the first glyph of each row of `galley` whose face has the family's own metrics
+/// (Overpass or Overpass Mono, not a fallback font), with the glyph.
+fn primary_glyphs(galley: &Galley) -> Vec<Option<(&egui::epaint::text::Glyph, &TextFormat)>> {
+    let job = &galley.job;
+    let mut row_start = 0;
+    galley
+        .rows
+        .iter()
+        .map(|row| {
+            let start = row_start;
+            row_start += row.char_count_including_newline().0;
+            let at = row.glyphs.iter().position(|g| g.font_face_ascent == g.font_ascent && g.font_face_height == g.font_height)?;
+            if job.sections.is_empty() {
+                return None;
+            }
+            // a row has a glyph per character (the elision's `…` comes last)
+            let byte = job.text.char_indices().nth(start + at).map_or(job.text.len(), |(b, _)| b);
+            Some((&row.glyphs[at], job.format_at_byte(ByteIndex(byte))))
+        })
+        .collect()
+}
+
+/// One row as the baseline hook reads it: egui's baseline under the galley's top, and the line
+/// box's height and Chromium's baseline in it when the hook moves the row.
+struct RowLine {
+    egui: f32,
+    css: Option<(f32, f32)>,
+}
+
+fn row_lines(galley: &Galley) -> Vec<RowLine> {
+    let ppp = galley.pixels_per_point;
+    galley
+        .rows
+        .iter()
+        .zip(primary_glyphs(galley))
+        .map(|(row, primary)| {
+            let Some((glyph, format)) = primary else {
+                return RowLine { egui: row.pos.y + row.size.y, css: None };
+            };
+            let egui = row.pos.y + glyph.pos.y;
+            // a row egui made taller than its line box (a minimum height, mixed sizes) keeps its place
+            let css = format
+                .line_height
+                .filter(|&line| (row.size.y - (line * ppp).round() / ppp).abs() < 0.01)
+                .map(|line| (line, css_baseline(format.font_id.size, line)));
+            RowLine { egui, css }
+        })
+        .collect()
+}
+
+/// Where row `row` of `galley` has its baseline under the galley's top once [`install`]'s hook has
+/// moved it, before the hook rounds it to a pixel: Chromium's line top (the line boxes before it,
+/// each its `line-height` floored to 1/64 px) plus [`css_baseline`]; egui's own for a row the hook
+/// leaves where it is. For underlines, swatches and texts aligned on another text's baseline.
+pub fn row_baseline(galley: &Galley, row: usize) -> f32 {
+    let lines = row_lines(galley);
+    let tops = line_tops(galley, &lines);
+    match (lines.get(row), tops.get(row)) {
+        (Some(RowLine { css: Some((_, baseline)), .. }), Some(top)) => top + baseline,
+        (Some(line), _) => line.egui,
+        _ => lines.first().map_or(0.0, |l| l.egui),
+    }
+}
+
+/// Each row's line top under the galley's top as Chromium stacks the line boxes: the one before
+/// plus its `line-height` floored to 1/64 px; after a row the hook leaves alone, egui's next row.
+fn line_tops(galley: &Galley, lines: &[RowLine]) -> Vec<f32> {
+    let mut top = 0.0;
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let this = top;
+            top = match line.css {
+                Some((height, _)) => this + layout_units(height) as f32 / 64.0,
+                None => galley.rows.get(i + 1).map_or(this, |next| next.pos.y),
+            };
+            this
+        })
+        .collect()
+}
+
+/// How far each row of `galley` drawn at `top` moves (points) to stand on Chromium's baseline,
+/// with the tessellator putting the galley on a whole pixel when `round` (its
+/// `round_text_to_pixels`); `None` when none moves.
+fn row_shifts(galley: &Galley, top: f32, pixels_per_point: f32, round: bool) -> Option<Vec<f32>> {
+    let ppp = pixels_per_point;
+    let drawn_top = if round { (top * ppp).round() / ppp } else { top };
+    let lines = row_lines(galley);
+    let tops = line_tops(galley, &lines);
+    let shifts: Vec<f32> = lines
+        .iter()
+        .zip(tops)
+        .map(|(line, line_top)| match line.css {
+            // Chromium paints the baseline on the nearest whole CSS pixel (half up)
+            Some((_, baseline)) => ((top + line_top + baseline + 0.5).floor() * ppp).round() / ppp - (drawn_top + line.egui),
+            None => 0.0,
+        })
+        .collect();
+    shifts.iter().any(|&s| s != 0.0).then_some(shifts)
+}
+
+/// Moves `text`'s rows onto Chromium's baselines (see the module documentation).
+fn to_css_baselines(text: &mut TextShape, pixels_per_point: f32, round: bool) {
+    if text.angle != 0.0 {
+        return;
+    }
+    let Some(shifts) = row_shifts(&text.galley, text.pos.y, pixels_per_point, round) else { return };
+    let galley = Arc::make_mut(&mut text.galley);
+    for (row, dy) in galley.rows.iter_mut().zip(shifts) {
+        row.pos.y += dy;
+    }
+}
+
+fn shapes_to_css_baselines(shape: &mut Shape, pixels_per_point: f32, round: bool) {
+    match shape {
+        Shape::Vec(shapes) => shapes.iter_mut().for_each(|s| shapes_to_css_baselines(s, pixels_per_point, round)),
+        Shape::Text(text) => to_css_baselines(text, pixels_per_point, round),
+        _ => {}
+    }
+}
+
+/// The egui plugin of [`install`].
+struct CssBaselines;
+
+impl egui::Plugin for CssBaselines {
+    fn debug_name(&self) -> &'static str {
+        "rustradar::ui::text::CssBaselines"
+    }
+
+    fn output_hook(&mut self, ctx: &egui::Context, output: &mut egui::FullOutput) {
+        let round = ctx.tessellation_options(|o| o.round_text_to_pixels);
+        let ppp = output.pixels_per_point;
+        for clipped in &mut output.shapes {
+            shapes_to_css_baselines(&mut clipped.shape, ppp, round);
+        }
+    }
+}
+
+/// Has every text `ctx` draws from its next pass on stand on Chromium's baselines (see the module
+/// documentation); once per context ([`super::fonts::install`] calls it).
+pub fn install(ctx: &egui::Context) {
+    ctx.add_plugin(CssBaselines);
+}
+
+/// `font-variant-numeric: tabular-nums` on `job`: its Overpass sections in Overpass's tabular
+/// figures (the `ui-tnum-*` family of their weight); Overpass Mono's and the middle dots' sections
+/// stay as they are (Mono's figures are tabular).
+pub fn tabular(mut job: LayoutJob) -> LayoutJob {
+    for section in &mut job.sections {
+        if let Some(family) = fonts::tabular_of(&section.format.font_id.family) {
+            section.format.font_id.family = family;
+        }
+    }
+    job
 }
 
 /// Appends `text` in `style` to `job`, each [`MIDDLE_DOT`] of a `--font-ui` text as its own
@@ -349,5 +564,176 @@ mod tests {
             let first: String = galley.rows[0].row.glyphs.iter().map(|g| g.chr).collect();
             assert!(first.trim_end().ends_with(|c: char| c.is_alphabetic() || c == '.'), "{first:?}");
         });
+    }
+    /// The line heights of [`MEASURED`]: multiples of the size, then pixels.
+    const HEIGHTS: [&str; 9] = ["1", "1.2", "1.25", "1.3", "1.35", "1.4", "1.5", "20px", "32px"];
+
+    /// Where Chromium put the baseline, px under the line box's top, for Overpass 400 at each size
+    /// and each of [`HEIGHTS`] (Playwright's Chromium 1243 on Linux, the fonts as today's app loads
+    /// them: `getBoundingClientRect` of an empty inline-block on the baseline, which the ink of an
+    /// `H` agreed with on every row; Overpass Mono, weight 700 and device scale 2 gave the same).
+    const MEASURED: [(f32, [f32; 9]); 14] = [
+        (7.0, [5.0, 5.0, 5.0, 6.0, 6.0, 6.0, 6.0, 11.0, 17.0]),
+        (8.0, [6.0, 6.0, 7.0, 7.0, 7.0, 7.0, 8.0, 12.0, 18.0]),
+        (10.0, [7.0, 8.0, 8.0, 9.0, 9.0, 9.0, 10.0, 12.0, 18.0]),
+        (11.0, [8.0, 9.0, 9.0, 10.0, 10.0, 10.0, 11.0, 13.0, 19.0]),
+        (12.0, [9.0, 10.0, 10.0, 10.0, 11.0, 11.0, 12.0, 13.0, 19.0]),
+        (13.0, [9.0, 10.0, 11.0, 11.0, 11.0, 12.0, 12.0, 13.0, 19.0]),
+        (14.0, [10.0, 11.0, 12.0, 12.0, 12.0, 13.0, 14.0, 13.0, 19.0]),
+        (15.0, [11.0, 12.0, 12.0, 13.0, 13.0, 14.0, 14.0, 13.0, 19.0]),
+        (16.0, [12.0, 13.0, 14.0, 14.0, 14.0, 15.0, 16.0, 14.0, 20.0]),
+        (17.0, [12.0, 14.0, 14.0, 15.0, 15.0, 15.0, 16.0, 14.0, 20.0]),
+        (18.0, [13.0, 15.0, 15.0, 16.0, 16.0, 17.0, 18.0, 14.0, 20.0]),
+        (20.0, [15.0, 17.0, 17.0, 18.0, 18.0, 19.0, 20.0, 15.0, 21.0]),
+        (22.0, [16.0, 18.0, 19.0, 19.0, 20.0, 20.0, 22.0, 15.0, 21.0]),
+        (24.0, [18.0, 20.0, 21.0, 21.0, 22.0, 22.0, 24.0, 16.0, 22.0]),
+    ];
+
+    /// `line-height` `h` for text `size` px large, px.
+    fn line_px(h: &str, size: f32) -> f32 {
+        h.strip_suffix("px").map_or_else(|| h.parse::<f32>().unwrap() * size, |px| px.parse().unwrap())
+    }
+
+    #[test]
+    fn baselines_are_chromiums() {
+        for (size, row) in MEASURED {
+            for (h, want) in HEIGHTS.iter().zip(row) {
+                assert_eq!(css_baseline(size, line_px(h, size)), want, "{size} px at {h}");
+            }
+        }
+        assert_eq!(Style::ui(13.0, 400, theme::TEXT_1).css_baseline(), 12.0);
+        assert_eq!(Style::data(12.0, 600, theme::TEXT_1).line_height(1.25).css_baseline(), 10.0);
+    }
+
+    /// The text shapes of one pass at `pixels_per_point` that paints each `(text, style, top)` at
+    /// x 4, after the hook: each row's drawn baseline (whole galley pixel plus row and glyph).
+    fn drawn_baselines(pixels_per_point: f32, texts: &[(&str, Style, f32)]) -> Vec<Vec<f32>> {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        ctx.set_pixels_per_point(pixels_per_point);
+        let mut baselines = Vec::new();
+        for pass in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                for (text, style, top) in texts {
+                    let galley = ui.painter().layout_job(job(text, style));
+                    ui.painter().galley(egui::Pos2::new(4.0, *top), galley, Color32::WHITE);
+                }
+            });
+            output.textures_delta.clear();
+            if pass == 1 {
+                let ppp = output.pixels_per_point;
+                for clipped in &output.shapes {
+                    let Shape::Text(t) = &clipped.shape else { continue };
+                    let top = (t.pos.y * ppp).round() / ppp;
+                    baselines.push(t.galley.rows.iter().map(|r| top + r.pos.y + r.glyphs[0].pos.y).collect());
+                }
+            }
+        }
+        baselines
+    }
+
+    /// Six-line paragraphs on fractions of a pixel: each line's baseline where Chromium painted
+    /// the ink of its `H` (the line boxes 18.1875 and 16.796875 px apart, each baseline on the
+    /// nearest pixel), at device scales 1 and 2 (Chromium lays out in CSS pixels at both).
+    #[test]
+    fn the_hook_puts_every_row_on_chromiums_baseline() {
+        let six = "H\nH\nH\nH\nH\nH";
+        let s13 = Style::ui(13.0, 400, theme::TEXT_1);
+        let s12 = Style::ui(12.0, 400, theme::TEXT_1);
+        let texts = [(six, s13, 4.0), (six, s13, 4.25), (six, s13, 4.5), (six, s13, 4.9), (six, s12, 4.0), (six, s12, 4.6)];
+        let chromium: [[f32; 6]; 6] = [
+            [16.0, 34.0, 52.0, 71.0, 89.0, 107.0],
+            [16.0, 34.0, 53.0, 71.0, 89.0, 107.0],
+            [17.0, 35.0, 53.0, 71.0, 89.0, 107.0],
+            [17.0, 35.0, 53.0, 71.0, 90.0, 108.0],
+            [15.0, 32.0, 49.0, 65.0, 82.0, 99.0],
+            [16.0, 32.0, 49.0, 66.0, 83.0, 100.0],
+        ];
+        for ppp in [1.0, 2.0] {
+            let drawn = drawn_baselines(ppp, &texts);
+            assert_eq!(drawn.len(), texts.len());
+            for (i, (got, want)) in drawn.iter().zip(chromium).enumerate() {
+                assert_eq!(got.as_slice(), want.as_slice(), "paragraph {i} at scale {ppp}");
+            }
+        }
+        // one line of each measured size at 1.4 and 1.2, on a whole pixel
+        let mut texts = Vec::new();
+        for (size, _) in MEASURED {
+            for h in [1.4, 1.2] {
+                texts.push(("Hamburg 0123", Style::ui(size, 400, theme::TEXT_1).line_height(h), 10.0));
+            }
+        }
+        for ppp in [1.0, 2.0] {
+            let drawn = drawn_baselines(ppp, &texts);
+            for ((_, style, top), got) in texts.iter().zip(&drawn) {
+                assert_eq!(got[0], top + style.css_baseline(), "{} px at {} (scale {ppp})", style.size, style.line_height);
+            }
+        }
+    }
+
+    /// egui alone draws 12 px text at 1.4 a pixel lower than Chromium; the layout (the galley's
+    /// rows) is egui's, only the drawing moves; text without a line height is left alone.
+    #[test]
+    fn the_hook_moves_the_drawing_only() {
+        with_fonts(|ctx| {
+            let style = Style::ui(12.0, 400, theme::TEXT_1);
+            let galley = ctx.fonts_mut(|f| f.layout_job(job("Hamburg", &style)));
+            let egui_baseline = galley.rows[0].pos.y + galley.rows[0].glyphs[0].pos.y;
+            assert_eq!(egui_baseline, 12.0, "egui's own");
+            assert_eq!(row_baseline(&galley, 0), 11.0, "Chromium's");
+            let mut shape = TextShape::new(egui::Pos2::new(0.0, 20.0), galley.clone(), Color32::WHITE);
+            to_css_baselines(&mut shape, 1.0, true);
+            assert_eq!(shape.galley.rows[0].pos.y, galley.rows[0].pos.y - 1.0);
+            assert_eq!(shape.galley.size(), galley.size(), "the layout is egui's");
+            // no line height (egui's own widgets' text): not moved
+            let mut plain = LayoutJob::default();
+            plain.append("Hamburg", 0.0, TextFormat { line_height: None, ..style.format() });
+            let plain = ctx.fonts_mut(|f| f.layout_job(plain));
+            assert!(row_shifts(&plain, 20.0, 1.0, true).is_none());
+            // a row egui made taller than its line box keeps its place
+            let mut tall = job("Hamburg", &style);
+            tall.first_row_min_height = 30.0;
+            let tall = ctx.fonts_mut(|f| f.layout_job(tall));
+            assert!(row_shifts(&tall, 20.0, 1.0, true).is_none());
+            // a paragraph's rows: Chromium's line boxes, 16.796875 px apart
+            let three = ctx.fonts_mut(|f| f.layout_job(job("A\nB\nC", &style)));
+            assert_eq!([0, 1, 2].map(|r| row_baseline(&three, r)), [11.0, 11.0 + 16.796_875, 11.0 + 2.0 * 16.796_875]);
+        });
+    }
+
+    #[test]
+    fn tabular_figures_are_all_as_wide() {
+        with_fonts(|ctx| {
+            let style = Style::ui(12.0, 400, theme::TEXT_2);
+            let advances = |job: LayoutJob| -> Vec<f32> {
+                let galley = ctx.fonts_mut(|f| f.layout_job(job));
+                galley.rows[0].glyphs.iter().filter(|g| g.chr.is_ascii_digit()).map(|g| g.advance_width).collect()
+            };
+            let proportional = advances(job("0123456789", &style));
+            let tabular_ = advances(tabular(job("0123456789", &style)));
+            // Overpass's own figures differ (the 1 is 746 units, the 0 1284) …
+            assert!((proportional[1] - 746.0 / 2000.0 * 12.0).abs() < 0.01, "{proportional:?}");
+            assert!((proportional[0] - 1284.0 / 2000.0 * 12.0).abs() < 0.01, "{proportional:?}");
+            // … its tabular ones are 1232 units each, as Overpass Mono's
+            for a in &tabular_ {
+                assert!((a - 1232.0 / 2000.0 * 12.0).abs() < 0.01, "{tabular_:?}");
+            }
+            // letters stay Overpass's
+            assert_eq!(advances(tabular(job("1,234 of 5,678", &style))).len(), 8);
+            // as wide as Chromium sets the flight panel's distances with and without `tabular-nums`
+            // (12 px, the dots in DejaVu Sans: 222.55 and 213.47 px)
+            let distances = "312 km flown · 211 km to go · 52 min left";
+            let tab = measure(ctx, tabular(job(distances, &style))).x;
+            let own = measure(ctx, job(distances, &style)).x;
+            assert!((tab - 222.55).abs() < 0.1 && (own - 213.47).abs() < 0.1, "{tab} {own}");
+            let words = |j: LayoutJob| ctx.fonts_mut(|f| f.layout_job(j)).rows[0].glyphs.iter().filter(|g| g.chr == 'o').map(|g| g.advance_width).sum::<f32>();
+            assert_eq!(words(job("of", &style)), words(tabular(job("of", &style))));
+        });
+        // the families: Overpass's sections move, Mono's and the dots' stay
+        let mut j = job("12 · 34", &Style::ui(13.0, 650, theme::TEXT_1));
+        append(&mut j, " 56", &Style::data(13.0, 400, theme::TEXT_1));
+        let j = tabular(j);
+        let names: Vec<String> = sections(&j).into_iter().map(|(_, f)| f).collect();
+        assert_eq!(names, ["ui-tnum-650", DOT_FAMILY, "ui-tnum-650", "mono-400"]);
     }
 }

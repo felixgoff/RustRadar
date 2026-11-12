@@ -57,7 +57,6 @@ use rustradar_backend::Backend;
 use rustradar_core::export::{EXPORT_FORMATS, ExportFormat, ExportMeta, export_file_name, export_path, export_points};
 use rustradar_core::model::TrailPoint;
 
-use super::chart::css_shift;
 use super::keys_dialog::{NO_BACKEND, message};
 use super::panel;
 use super::text::{self, Style};
@@ -434,7 +433,7 @@ impl Trigger {
         let style = trigger_style().color(color);
         let galley = painter.layout_job(text::job(self.label, &style));
         let color = if enabled { color } else { color.gamma_multiply(DISABLED_OPACITY) };
-        painter.galley_with_override_text_color(button.min + Vec2::new(0.0, css_shift(&ctx, &style)), galley, color);
+        painter.galley_with_override_text_color(button.min, galley, color);
         if response.has_focus() && m.focus_visible {
             focus_ring(painter, button, 0);
         }
@@ -503,8 +502,8 @@ impl Trigger {
                     painter.rect_filled(panel::snap_rect(item, ppp), CornerRadius::same(ITEM_RADIUS), theme::SURFACE_HOVER);
                 }
                 let text_left = item.left() + ITEM_PAD;
-                painter.galley(Pos2::new(text_left, item.top() + ITEM_PAD + css_shift(ctx, &label_style())), label, theme::TEXT_1);
-                painter.galley(Pos2::new(text_left, item.top() + ITEM_PAD + label_style().line_px() + ITEM_GAP + css_shift(ctx, &hint_style())), hint, theme::TEXT_3);
+                painter.galley(Pos2::new(text_left, item.top() + ITEM_PAD), label, theme::TEXT_1);
+                painter.galley(Pos2::new(text_left, item.top() + ITEM_PAD + label_style().line_px() + ITEM_GAP), hint, theme::TEXT_3);
                 if keyed {
                     focus_ring(&painter, item, ITEM_RADIUS);
                 }
@@ -518,7 +517,7 @@ impl Trigger {
             let x = left + NOTE_MARGIN.x;
             panel::hrule(&painter, x..=x + MENU_WIDTH - 2.0 * NOTE_MARGIN.x, top);
             let note = painter.layout_job(text::wrapped(&note(count), &hint_style(), MENU_WIDTH - 2.0 * NOTE_MARGIN.x));
-            painter.galley(Pos2::new(x, top + theme::BORDER + NOTE_PAD + css_shift(ctx, &hint_style())), note, theme::TEXT_3);
+            painter.galley(Pos2::new(x, top + theme::BORDER + NOTE_PAD), note, theme::TEXT_3);
         });
         if let Some(format) = chosen {
             m.save(trail, meta, format);

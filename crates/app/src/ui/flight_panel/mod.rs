@@ -45,8 +45,8 @@
 //! **Checked** against Chromium's layout of today's component, server-rendered by Svelte with the
 //! same props and laid out with app.css at 1440 × 900 (the loading, live, ended, diverted and
 //! from-board states of `tests/flight_panel.rs`): every part's box, rule, badge, button and icon
-//! lands on Chromium's pixels, or within one; text sits up to a pixel lower (egui's baseline, as
-//! everywhere in the UI).
+//! lands on Chromium's pixels, or within one; text stands on Chromium's baselines (`ui::text`'s
+//! hook, F1).
 //!
 //! **For other items**: [`Parts`] is where U11 puts the Route, Aircraft and History tabs and U12
 //! the altitude chart with its export menu (each a [`Slot`] drawn from the [`View`] in the tab
@@ -56,9 +56,6 @@
 //! `--surface-raised` block and the logo is left out, as when they fail today.
 //!
 //! Deviations:
-//! - Times without a zone are in UTC: the app has no viewer time zone yet (U6's note).
-//! - Digits are Overpass's own proportional figures (`font-variant-numeric: tabular-nums` on the
-//!   distances needs OpenType features egui does not have; U6's note).
 //! - The tooltips are the app's own (`ui::widgets::tooltip`), not the system's.
 //! - In the phone's bottom sheet ([`super::sheet::in_sheet`], U19) the back row, the strip and the
 //!   route come first and with the footer are marked for its peek detent; the photo and the
@@ -238,7 +235,7 @@ impl<'a> View<'a> {
             back,
             airline,
             now_ms,
-            clocks: Clocks::default(),
+            clocks: state.viewer_clocks.clone(),
         })
     }
 
@@ -752,7 +749,7 @@ fn route(ui: &mut Ui, id: Id, view: &View<'_>) -> Option<bool> {
         let galley = painter.layout_job(text::job(shown, &code_style));
         let code_rect = Rect::from_min_size(Pos2::new(place(galley.size().x), y), Vec2::new(galley.size().x, code_style.line_px()));
         let text_top = y + (code_style.line_px() - galley.size().y) / 2.0;
-        let baseline = text_top + galley.rows.first().map_or(galley.size().y, |r| r.pos.y + r.glyphs.first().map_or(0.0, |g| g.pos.y));
+        let baseline = text_top + text::row_baseline(&galley, 0);
         painter.galley(Pos2::new(code_rect.left(), text_top), galley, theme::TEXT_1);
         if !code.is_empty() {
             let response = ui.interact(code_rect, id.with(("code", side.end)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
@@ -805,7 +802,7 @@ fn route(ui: &mut Ui, id: Id, view: &View<'_>) -> Option<bool> {
             icons::paint(&painter, Rect::from_center_size(at, Vec2::splat(MARKER)), Icon::Plane.at(MARKER, icons::STROKE_REGULAR).rotated(45f32.to_radians()), color);
             y += TRACK + TRACK_MARGIN.y + ROUTE_GAP;
             let style = small.color(if ended { theme::TEXT_3 } else { theme::TEXT_2 });
-            let galley = painter.layout_job(panel::fit(text::job(&distances(p), &style), Fit::Wrap, inner));
+            let galley = painter.layout_job(panel::fit(text::tabular(text::job(&distances(p), &style)), Fit::Wrap, inner));
             painter.galley(Pos2::new(rect.left() + ROUTE_PAD, y + (style.line_px() - galley.size().y) / 2.0), galley, style.color);
             y += style.line_px();
         }

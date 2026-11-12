@@ -40,7 +40,8 @@
 //!
 //! Deviations: the live counts behind the suggestions are counted again when the snapshot or the
 //! filters change, not on every change of the flights' array; Chromium's checkbox lightens its
-//! border under the pointer, this one keeps its colours; `tabular-nums` as in the shell (U6).
+//! border under the pointer, this one keeps its colours. The count's `tabular-nums` is Overpass's
+//! tabular figures (`ui::text::tabular`, F1).
 
 use std::cell::OnceCell;
 use std::collections::HashMap;
@@ -376,7 +377,7 @@ fn header(ui: &mut Ui, pass: &mut Pass<'_>, filters: &mut Filters) -> f32 {
     let title_w = title.size().x;
     painter.galley(Pos2::new(row.left(), middle - title.size().y / 2.0), title, Color32::PLACEHOLDER);
     let state = pass.state;
-    let shown = painter.layout_job(text::job(&shown_text(state.aircraft.filtered_len(), state.aircraft.flights().len()), &shown_style()));
+    let shown = painter.layout_job(text::tabular(text::job(&shown_text(state.aircraft.filtered_len(), state.aircraft.flights().len()), &shown_style())));
     painter.galley(Pos2::new(row.left() + title_w + HEADER_GAP, middle - shown.size().y / 2.0), shown, Color32::PLACEHOLDER);
     painter.hline(rect.x_range(), rect.bottom() - theme::BORDER / 2.0, Stroke::new(theme::BORDER, theme::LINE));
 

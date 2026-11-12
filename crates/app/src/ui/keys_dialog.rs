@@ -59,8 +59,8 @@
 //! with `showModal()`, laid out with app.css at 1440 × 900 and 390 × 844, signed out and in, with a
 //! status, busy; `tests/dialogs.rs`): signed out every edge (card, rules, fields, buttons, the
 //! checkbox) lands on Chromium's pixels, signed in or with a status within one (line boxes of
-//! 13 × 1.4 px here, floored to 1/64 px there); text sits a pixel lower (egui's baseline), two on a
-//! paragraph's second row, the link's underline with it.
+//! 13 × 1.4 px here, floored to 1/64 px there); text, a paragraph's rows and the link's underline
+//! stand on Chromium's baselines (`ui::text`'s hook, F1).
 //!
 //! Deviations:
 //! - The dialog's initial keyboard focus is nowhere (Chromium: the close button), except the email
@@ -888,14 +888,14 @@ fn note_with_link(ui: &mut Ui, width: f32) -> Rect {
     let mut link = Rect::NOTHING;
     let mut first = Rect::NOTHING;
     let mut offset = 0;
-    for row in &galley.rows {
+    for (i, row) in galley.rows.iter().enumerate() {
         let row_start = offset;
         offset += row.char_count_including_newline().0;
         let glyphs: Vec<_> = row.glyphs.iter().enumerate().filter(|(j, _)| chars.contains(&(row_start + j))).map(|(_, g)| g).collect();
         let (Some(a), Some(b)) = (glyphs.first(), glyphs.last()) else { continue };
         let left = rect.left() + row.pos.x + a.pos.x;
         let right = rect.left() + row.pos.x + b.pos.x + b.advance_width;
-        let baseline = rect.top() + row.pos.y + a.pos.y;
+        let baseline = rect.top() + text::row_baseline(&galley, i);
         let top = (baseline + UNDERLINE_OFFSET).round();
         ui.painter().rect_filled(Rect::from_x_y_ranges(left..=right, top..=top + UNDERLINE_WIDTH), CornerRadius::ZERO, theme::AMBER);
         let row_rect = Rect::from_x_y_ranges(left..=right, rect.top() + row.pos.y..=rect.top() + row.pos.y + row.size.y);

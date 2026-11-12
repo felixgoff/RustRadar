@@ -426,7 +426,9 @@ pub fn run_with(mut builder: EventLoopBuilder<UserEvent>, options: Options) -> R
     let backend = start_backend(platform::dirs(), rt.handle(), events, wake.clone());
     let requests = Requests::new(rt.handle().clone(), wake);
     let view = options.view.unwrap_or(ViewState::INITIAL);
-    let state = AppState::new(options.startup(), backend, Some(requests), Some(events_rx), view, WINDOW_SIZE);
+    let mut state = AppState::new(options.startup(), backend, Some(requests), Some(events_rx), view, WINDOW_SIZE);
+    // times without a zone in the system's (today: the browser's); shots keep UTC (item F1)
+    state.viewer_clocks = rustradar_core::time::Clocks::new(&platform::time_zone());
     let clock = options.now_ms.map_or_else(Clock::system, Clock::starting_at);
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App { options, clock, latch, state: Some(state), view: None, next: None, error: None };

@@ -468,9 +468,9 @@ fn paint_row(ui: &Ui, row: Rect, s: &Suggestion) {
     }
 }
 
-/// A galley's first baseline from its top.
+/// A galley's first baseline from its top (Chromium's, as `ui::text`'s hook draws it).
 fn baseline(galley: &Galley) -> f32 {
-    galley.rows.first().map_or(0.0, |r| r.pos.y + r.row.glyphs.first().map_or(0.0, |g| g.pos.y))
+    text::row_baseline(galley, 0)
 }
 
 #[cfg(test)]

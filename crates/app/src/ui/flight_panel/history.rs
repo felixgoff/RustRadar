@@ -32,12 +32,11 @@
 //! **Checked** against Chromium's layout of today's component, server-rendered by Svelte with the
 //! same props and laid out with app.css at 1440 × 900 (`tests/flight_panel_tabs.rs`: the rows, the
 //! loading lines, the failure): rows, columns, fills and skeletons on Chromium's pixels or within
-//! one; text up to a pixel lower (egui's baseline).
+//! one; text on Chromium's baselines (`ui::text`'s hook, F1).
 //!
 //! Deviations:
 //! - The tab's ask runs from the UI pass, as the component's effect does today (as the train
 //!   panel's, U14): no state file holds it.
-//! - Times without a known zone are in UTC (the app has no viewer time zone yet, U6's note).
 
 use std::collections::HashMap;
 use std::path::PathBuf;

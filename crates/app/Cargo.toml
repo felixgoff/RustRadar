@@ -25,6 +25,8 @@ serde_json = { workspace = true }
 resvg = { workspace = true }
 # platform::open_url: the system's browser (plan 1.3), the crate egui-winit's `links` opens with.
 webbrowser = { workspace = true }
+# platform::time_zone: the viewer's zone for times without one (item F1).
+jiff = { workspace = true, features = ["tz-system"] }
 # These five must move together: egui-wgpu 0.37 pins wgpu 30 and
 # egui-winit 0.37 pins winit 0.30 (winit 0.31 is still beta).
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }

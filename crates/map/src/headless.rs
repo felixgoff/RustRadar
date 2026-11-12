@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "sky", "earth", "terrain", "imagery", "ground", "land", "hillshade", "clouds", "vector-map", "rail", "radar", "night",
+                "sky", "earth", "terrain", "imagery", "ground-land", "ground", "land", "hillshade", "clouds", "vector-map", "rail", "radar", "night",
                 "buildings", "trees", "ships", "blocks", "trains", "labels", "route", "markers", "aircraft", "selection-ring"
             ]
         );

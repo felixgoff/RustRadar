@@ -302,7 +302,8 @@ impl Engine {
         }
         // Retry cleared the error: the map draws again in the next frame
         let retried = retry == Some(Retry::Redraw);
-        let now = self.state.controller.in_transition() || self.state.controller.is_dragging() || repaint_delay.is_zero() || retried || self.rebuild;
+        // (and while the rain over the realistic map falls, R11)
+        let now = self.state.controller.in_transition() || self.state.controller.is_dragging() || repaint_delay.is_zero() || retried || self.rebuild || self.map.animating();
         (platform_output, Next { now, at_ms })
     }
 

@@ -131,6 +131,8 @@ pub fn render_on_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppS
         state.radar = crate::state::radar::Radar::with_feeds(None);
         // nor EUMETSAT's cloud picture (R10)
         state.clouds = rustradar_backend::clouds::Feed::none();
+        // nor MET Norway's weather for the live sky (R11): a fine day
+        state.weather = crate::state::weather::Weather::with_feed(None);
     }
     // --mode: the focus as a saved settings file would give it
     if let Some(mode) = options.mode {

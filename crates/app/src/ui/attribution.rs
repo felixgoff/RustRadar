@@ -25,8 +25,6 @@
 //! [`ui`] draws both on the desktop; the window's UI pass calls it after the shell.
 //!
 //! Deviations:
-//! - "Weather: MET Norway" (row 17) needs the live weather, which `state::weather` does not hold
-//!   until item R11: [`Conditions::of`] reads it as not loaded, so the credit is not shown yet.
 //! - The readout's monospace is Overpass Mono (today's `var(--font-mono, ui-monospace, monospace)`
 //!   names no font the app has: the system's monospace), about 2 % wider.
 //! - Its frames a second count the frames the window draws: the app draws when something changes,
@@ -199,8 +197,8 @@ impl Conditions {
             zoom: state.controller.view().zoom,
             daylight: settings.daylight,
             sky: settings.sky,
-            // `state::weather` holds no weather until item R11 (see the module documentation)
-            live_weather: false,
+            // (R11: `liveWeather`, once MET Norway has answered)
+            live_weather: state.weather.loaded(),
         }
     }
 

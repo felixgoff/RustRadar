@@ -9,12 +9,14 @@
 //! the fixed afternoon sun). The map's sky and ground-land layers draw from it on the realistic
 //! basemap only; on the others it is handed over all the same and nothing reads it.
 //!
-//! The live weather is R11's (`state::weather`): until it hands its conditions here, *live* reads
-//! as none (a fine day), as today's does until MET Norway has answered.
+//! The live weather is R11's (`state::weather`): until MET Norway has answered, *live* reads as
+//! none (a fine day), as today's does. The *tilt-shift* setting goes to the map's post effects
+//! (R11: drawn on the realistic basemap only); the rain follows the light the map works out.
 
 use rustradar_core::weather::{Conditions, Sky};
 use rustradar_map::SceneInput;
 use rustradar_map::layers::{clouds, ground, sky};
+use rustradar_map::post;
 
 use crate::state::AppState;
 
@@ -36,8 +38,10 @@ impl Realistic {
     /// Fills its layers' inputs in `scene` from `state` (see [`super::SceneBuilder::build`]).
     pub fn build(&mut self, state: &AppState, scene: &mut SceneInput) {
         let settings = &state.persisted.settings;
-        // (live weather: R11 hands its conditions over here; none until then)
-        scene.sky = sky::Input { shown: true, weather: sky_conditions(settings.sky, None), daylight: settings.daylight };
+        // (live weather: `state::weather`'s, none until it has come)
+        scene.sky = sky::Input { shown: true, weather: sky_conditions(settings.sky, state.weather.conditions()), daylight: settings.daylight };
+        // the tilt-shift (R11; `tiltShift && basemap === "realistic"`: the map checks the basemap)
+        scene.post = post::Input { tilt_shift: settings.tilt_shift };
         // the ground's tiles and textures (R2; drawn on the realistic basemap only)
         scene.ground = ground::Input::SHOWN;
         // the latest cloud picture (R10; `cloudPicture`'s, the bytes shared): the map draws it on

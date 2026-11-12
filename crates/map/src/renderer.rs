@@ -45,6 +45,7 @@ use crate::io::{self, TileFetcher};
 use crate::jobs::{self, Pool, Wake};
 use crate::layers::{self, DrawCx, Init, Layer, Pass, PrepareCx};
 use crate::pipelines::mesh::LightRig;
+use crate::post::Post;
 use crate::state::SHADOW_STENCIL_REFERENCE;
 use crate::target::{CLEAR, Composite, MAP_FORMAT, MapTarget};
 use crate::textures::RealisticTextures;
@@ -90,6 +91,8 @@ pub struct SceneInput {
     pub route: layers::route::Input,
     pub markers: layers::markers::Input,
     pub aircraft: layers::aircraft::Input,
+    /// What is drawn over the map after its pass: the tilt-shift (R11; the rain follows the light).
+    pub post: crate::post::Input,
 }
 
 impl SceneInput {
@@ -123,6 +126,7 @@ impl SceneInput {
             route: Default::default(),
             markers: Default::default(),
             aircraft: Default::default(),
+            post: Default::default(),
         }
     }
 
@@ -364,6 +368,8 @@ pub struct MapRenderer {
     upload_budget: UploadBudget,
     /// What stopped the map drawing ([`Self::catch_errors`]).
     errors: ErrorWatch,
+    /// The tilt-shift and the rain over the map (R11).
+    post: Post,
 }
 
 impl MapRenderer {
@@ -390,6 +396,7 @@ impl MapRenderer {
             tiles,
             upload_budget: UploadBudget::per_frame(),
             errors: ErrorWatch::default(),
+            post: Post::new(&gpu.device, surface_format),
         }
     }
 
@@ -456,6 +463,7 @@ impl MapRenderer {
         self.target = target;
         self.composite = composite;
         self.layers = layers;
+        self.post = Post::new(&gpu.device, surface_format);
         log::info!("map rebuilt on {}", gpu.describe());
     }
 
@@ -582,6 +590,13 @@ impl MapRenderer {
         }
         self.frames.upload(&gpu.device, &gpu.queue, &self.bindings.frame_layout);
         self.bindings.write_globals(&gpu.queue, &self.view.globals);
+        self.post.prepare(&self.scene, &self.view, local_now_ms);
+    }
+
+    /// Whether the picture moves by itself (the rain falls, R11): the window should draw every
+    /// frame while it does.
+    pub fn animating(&self) -> bool {
+        !self.errors.stopped() && self.post.animating()
     }
 
     /// Records the map pass and the composite pass onto `surface` (`surface_size` pixels). While
@@ -612,7 +627,8 @@ impl MapRenderer {
                 layer.draw(&mut pass, &cx);
             }
         }
-        self.composite.draw(&gpu.device, &gpu.queue, encoder, &self.target, surface, surface_size);
+        // the composite, through the tilt-shift when it is on, and the rain over it (R11)
+        self.post.draw(gpu, encoder, &mut self.composite, &self.target, surface, surface_size);
     }
 
     /// [`Self::prepare`] and [`Self::draw`] in a command buffer of their own, submitted.

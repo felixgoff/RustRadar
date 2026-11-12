@@ -16,6 +16,7 @@ pub mod jobs;
 pub mod layers;
 pub mod look;
 pub mod pipelines;
+pub mod post;
 pub mod renderer;
 pub mod shaders;
 pub mod state;

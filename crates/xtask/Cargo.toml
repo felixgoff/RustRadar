@@ -23,8 +23,18 @@ serde_json = { workspace = true }
 # Lucide's iconData attributes, read in their source order.
 serde = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
+# Release tooling: the version files' patterns, latest.json's dates, updater signatures in the
+# Tauri CLI's format (the crate it signs with) and App Store Connect's ES256 tokens (the crypto
+# rustls already builds here).
+regex = { workspace = true }
+jiff = { workspace = true }
+base64 = "0.23"
+minisign = "0.10"
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
 
 [dev-dependencies]
 # The vendored fonts and icons are checked with the crates the app reads them with.
 epaint = { workspace = true }
 skrifa = { workspace = true }
+# Signatures are checked with the crate the app's updater verifies with.
+minisign-verify = { workspace = true }

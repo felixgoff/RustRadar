@@ -4,14 +4,17 @@
 # in which case the next patch after the latest release.
 #
 # Installed apps update only to a *newer* version. A merge to main that
-# forgets `bun run bump` would otherwise rebuild the existing release under
-# the same number, and nobody would get it.
+# forgets `cargo xtask bump` would otherwise rebuild the existing release
+# under the same number, and nobody would get it.
 #
 #   scripts/release-version.sh            uses the git tags on origin
 #   TAGS="v0.2.4 v0.2.5" scripts/...      uses these instead (tests)
+#
+# The files' version comes from `cargo xtask version`, which fails when the
+# version files disagree (crates/xtask/src/bump.rs); run from the repository.
 set -euo pipefail
 
-current="$(node -p 'require("./package.json").version')"
+current="$(cargo --quiet xtask version)"
 
 if [ -n "${TAGS+x}" ]; then
   tags="$TAGS"

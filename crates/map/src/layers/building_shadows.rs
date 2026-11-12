@@ -401,7 +401,8 @@ mod tests {
     use crate::headless::{FORMAT, render_with};
     use crate::io::{self, DirTiles};
     use crate::jobs::Cancel;
-    use crate::layers::buildings_realistic::decode;
+    // (as the layer decodes them: Streets GL's with the fixtures' Overture heights, R6)
+    use crate::layers::roofs::decode_from_fixtures as decode;
     use crate::layers::{buildings, earth, ground, sky};
     use crate::look::{RLight, frame_look, twin};
     use crate::renderer::{MapRenderer, SceneInput};
@@ -855,12 +856,18 @@ mod tests {
         let single = f64::from(shadow_color(BUILDING_SHADOW_ALPHA * sunlight(altitude.to_radians().sin()), shadow_strength(&look))[3]) / 255.0;
         let foot = f64::from(foot_color()[3]) / 255.0;
         let ground = Ground::new(&V5);
-        let cast = Quads::new(&near_tiles(&view), &ground, sun_direction(LOW_SUN));
+        let tiles = near_tiles(&view);
+        let cast = Quads::new(&tiles, &ground, sun_direction(LOW_SUN));
+        // (the pitched roofs, R6, are not the ground: a grey face can pass for a blend)
+        let roofs = crate::layers::roofs::roof_cover(&view, &tiles);
         let (mut shadows, mut blends, mut darker, mut darkest) = (0, 0, 0, f64::NEG_INFINITY);
         let (mut once, mut twice) = (0, 0);
         for y in 0..V5_SIZE[1] as u32 {
             for x in 0..V5_SIZE[0] as u32 {
                 let Some(a) = blended(bare.pixel(x, y), with.pixel(x, y)) else { continue };
+                if roofs(x, y) {
+                    continue;
+                }
                 let ll = view.viewport.unproject([f64::from(x) + 0.5, f64::from(y) + 0.5], 0.0);
                 let c = twin::clear(&look, &twin::vary(&light, &view, [ll[0], ll[1], 0.0]));
                 let is_single = (a - single * c).abs() <= 0.03;

@@ -31,9 +31,12 @@
 //!   every file is in, and the layer is pending meanwhile (the shots wait for them).
 //!
 //! For the items after this one: R5 (foot shade, shadows) draws each near tile's
-//! [`TileMeshes::footprints`] (cast heights) before its buildings, R6 (pitched roofs) each Streets
-//! GL tile's roof mesh after them, through `vs_roof` of the same shader; both go in [`Layer::draw`]'s
-//! loop below, tile by tile, in that order (`renderSubLayers`: `[...ground, buildings, ...over]`).
+//! [`TileMeshes::footprints`] (cast heights) before its buildings, R6 (pitched roofs,
+//! [`super::roofs`]) each Streets GL tile's roof mesh after them, through `vs_roof` and `fs_roof` of
+//! the same shader; both go in [`Layer::draw`]'s loop below, tile by tile, in that order
+//! (`renderSubLayers`: `[...ground, buildings, ...over]`). R6 also decodes the tiles
+//! ([`super::roofs::decode`]): Streets GL's with Overture's heights where they have none
+//! (`sglBuildingFetch`) and their roofs.
 //!
 //! How it is checked (the tests below): V5 from the fixtures at noon, each of the nearest walls
 //! facing the camera sampled along its top storey on the screen: its brightness repeats once a bay
@@ -52,6 +55,7 @@ use rustradar_scene::streets_gl::SGL_ZOOM;
 use rustradar_scene::tess::buildings::{self as tess, Footprints, RealisticTile, RealisticVertex};
 
 use super::building_shadows::BuildingShadows;
+use super::roofs::{self, Overture, Roofs};
 use super::{ByteSize, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::FrameSlot;
 use crate::io;
@@ -90,13 +94,10 @@ impl ByteSize for RealisticTile {
     }
 }
 
-/// The decode step, on the worker pool (`None` for a tile with no buildings).
+/// The decode step, on the worker pool (`None` for a tile with no buildings), without Overture's
+/// heights (the layer's own decode has them: [`roofs::decode`]).
 pub fn decode(tile: TileIndex, bytes: &[u8], cancel: &Cancel) -> Result<Option<RealisticTile>, String> {
-    match tess::tessellate_realistic(tile, bytes, tess::CITY_CLOSE_ZOOM, &|| cancel.is_cancelled()) {
-        Ok(decoded) if decoded.is_empty() => Ok(None),
-        Ok(decoded) => Ok(Some(decoded)),
-        Err(tess::Cancelled) => Err("cancelled".into()),
-    }
+    roofs::decode(tile, bytes, cancel, None)
 }
 
 /// A tile on the GPU.
@@ -108,6 +109,8 @@ pub struct TileMeshes {
     pub mesh: fill::Mesh<RealisticVertex>,
     /// What the tile's shadows and foot shade are cast from (R5).
     pub footprints: Footprints,
+    /// Its pitched roofs (R6), drawn after its buildings.
+    pub roofs: Option<fill::Mesh<RealisticVertex>>,
 }
 
 /// The upload step, on the main thread.
@@ -116,6 +119,7 @@ pub fn upload(device: &wgpu::Device, decoded: RealisticTile) -> TileMeshes {
         extruded: decoded.extruded,
         sgl: decoded.sgl,
         mesh: fill::Mesh::new(device, "realistic buildings", &decoded.vertices, &decoded.indices),
+        roofs: roofs::upload(device, &decoded.roofs),
         footprints: decoded.footprints,
     }
 }
@@ -238,21 +242,26 @@ pub struct BuildingsRealistic {
     drawn: Vec<(FrameSlot, TileIndex)>,
     /// The near tiles' foot shade and shadows (R5).
     shadows: BuildingShadows,
+    /// Streets GL's tiles' pitched roofs (R6).
+    roofs: Roofs,
 }
 
 impl BuildingsRealistic {
     pub fn new(init: &Init<'_>) -> Self {
+        // (Streets GL's tiles with Overture's heights where they have none: R6)
+        let overture = Overture::new(init.tiles);
         let tiles = init.tile_set(
             sources(),
             LodSelect::new(tess::city_lod(), TILE_SIZE),
             TileSetOptions { max_requests: tess::MAX_REQUESTS, refinement: Refinement::KeepCoarserUntilIn, ..Default::default() },
-            |tile, bytes, cancel| decode(tile, &bytes, cancel),
+            move |tile, bytes, cancel| roofs::decode(tile, &bytes, cancel, Some(&overture)),
         );
         let shader = BuildingShader::new(init, "realistic buildings");
         let walls = shader.pipeline(init, "realistic buildings", "vs_building", "fs_building", DrawState::NO_CULL);
         let flat = shader.pipeline(init, "realistic buildings, far", "vs_building", "fs_flat", DrawState::NO_CULL);
         let shadows = BuildingShadows::new(init);
-        BuildingsRealistic { tiles, shader, walls, flat, shown: false, textures_loading: false, look: None, drawn: Vec::new(), shadows }
+        let roofs = Roofs::new(init, &shader);
+        BuildingsRealistic { tiles, shader, walls, flat, shown: false, textures_loading: false, look: None, drawn: Vec::new(), shadows, roofs }
     }
 
     /// The tile set (tests).
@@ -314,7 +323,10 @@ impl Layer for BuildingsRealistic {
             self.shader.begin(pass, if meshes.extruded { &self.walls } else { &self.flat });
             cx.bind_frame(pass, slot);
             meshes.mesh.draw(pass);
-            // (R6: a Streets GL tile's pitched roofs over its buildings)
+            // a Streets GL tile's pitched roofs over its buildings (R6)
+            if let Some(roofs) = &meshes.roofs {
+                self.roofs.draw(pass, cx, &self.shader, slot, roofs);
+            }
         }
     }
 

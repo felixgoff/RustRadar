@@ -71,6 +71,7 @@ pub mod markers;
 pub mod night;
 pub mod radar;
 pub mod rail;
+pub mod roofs;
 pub mod route;
 pub mod ship_models;
 pub mod ships;

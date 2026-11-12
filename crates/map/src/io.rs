@@ -201,6 +201,15 @@ impl DirTiles {
 
     /// The answer for `tile` of `source` (see the type's list).
     pub fn read(&self, source: &str, tile: TileIndex) -> FetchResult {
+        // Overture's buildings (R6): the fixture folder's PMTiles archive, not a folder of tiles
+        // (a tile the archive lacks is nothing there)
+        if source == crate::layers::roofs::OVERTURE {
+            let Some(archive) = crate::layers::roofs::fixture_archive(&self.root) else {
+                self.misses.lock().unwrap_or_else(|e| e.into_inner()).push((source.to_owned(), tile));
+                return Ok(None);
+            };
+            return crate::layers::roofs::archive_tile(&archive, tile);
+        }
         match self.held(source, tile) {
             Held::Tile(path) => fs::read(&path).map(Some).map_err(|e| FetchError::Failed(format!("{}: {e}", path.display()))),
             // the 3D surface's stand-in (Z1, `terrainFetch` as `backend::terrain` has it): where

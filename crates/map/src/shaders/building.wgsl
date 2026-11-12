@@ -11,8 +11,9 @@
 // - `vs_building` + `fs_flat`: a far tile's footprints flat on the ground in each building's colour
 //   and alpha, unlit (deck's `extruded: false`, where the extension is off and `UNLIT` leaves
 //   `fillColors` as it is);
-// - `vs_roof` + `fs_building`: pitched roofs' meshes (item R6; `RoofExtension`'s `roofInject`):
-//   the same vertex, its tangent across the slope (`cross(up, n)`) and no foot shading (`rb_z` 10).
+// - `vs_roof` + `fs_roof`: pitched roofs' meshes (item R6; `RoofExtension`'s `roofInject`): the
+//   same vertex, its tangent across the slope (`cross(up, n)`) and no foot shading (`rb_z` 10), the
+//   same fragment not clipped to the tile (the roofs' SimpleMeshLayer has no `ClipExtension`).
 //
 // What differs from the GLSL, and why (doc 04 §16.2):
 // - deck's varyings `rb_uv`, `rb_n`, `rb_z` and `rb_info` are worked out on the CPU per vertex
@@ -125,6 +126,18 @@ fn outside_tile(tile: vec3<f32>) -> bool {
 
 @fragment
 fn fs_building(b: BuildingOut) -> @location(0) vec4<f32> {
+    return building_colour(b, true);
+}
+
+// A pitched roof's mesh (R6): drawn whole, over the tile's edge too.
+@fragment
+fn fs_roof(b: BuildingOut) -> @location(0) vec4<f32> {
+    return building_colour(b, false);
+}
+
+// The building shader's colour (`rbuildInject`'s fragment part), cut at the tile's square where
+// `clipped`.
+fn building_colour(b: BuildingOut, clipped: bool) -> vec4<f32> {
     let rl = RlVary(b.eye, b.sun, b.t, b.c);
     let facade = f32(b.style.x);
     let roof = f32(b.style.y);
@@ -235,7 +248,7 @@ fn fs_building(b: BuildingOut) -> @location(0) vec4<f32> {
         let evened = textureSampleLevel(building_glow, building_sampler, vec2<f32>(0.5, 0.5), index, 16.0).r * vec3<f32>(0.52, 0.355, 0.204);
         lit += mix(evened, each, near) * rlight.night * 0.28;
     }
-    if (outside_tile(b.tile)) {
+    if (clipped && outside_tile(b.tile)) {
         discard;
     }
     return vec4<f32>(rl_display(rl_aerial(rl, lit)), 1.0);

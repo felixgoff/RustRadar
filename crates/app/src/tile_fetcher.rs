@@ -157,6 +157,11 @@ impl TileFetcher for BackendTiles {
                 if &*source == rustradar_map::layers::rail::RAIL_TILES {
                     return rustradar_backend::rail::tile(tile.z, tile.x, tile.y).await.map(|t| t.map(|b| b.to_vec()));
                 }
+                // Overture's buildings (R6): its PMTiles archive, read with range requests by
+                // `backend::overture` (`--fixture` folders: `DirTiles` reads theirs)
+                if &*source == rustradar_map::layers::roofs::OVERTURE {
+                    return rustradar_backend::overture::tile(tile.z, tile.x, tile.y).await;
+                }
                 let source = sources.resolve(&tiles, &source).await?;
                 // Streets GL (R3): only its zoom 16 goes to its server (`sglFetch`)
                 if source.name == rustradar_backend::streets_gl::NAME {
@@ -496,5 +501,29 @@ mod tests {
         let offline = for_state(&state(None));
         let mut nothing = Fetch::start(&*offline, io::OPENFREEMAP.into(), TileIndex::ROOT);
         assert_eq!(answer(&mut nothing), Ok(None));
+    }
+
+    /// Overture's buildings (R6): a `--fixture` folder's archive answers through the state's
+    /// fetcher with the very bytes `backend::overture` reads from it (the map's own PMTiles reader
+    /// against the pmtiles crate's), a tile it lacks as nothing; the map's, the scene's and the
+    /// backend's names and constants are one.
+    #[test]
+    fn a_fixture_folder_s_overture_tiles_are_the_backend_s() {
+        use rustradar_backend::overture as backend;
+        use rustradar_map::layers::roofs;
+        use rustradar_scene::camera::ViewState;
+        use rustradar_scene::overture as scene;
+        assert_eq!(roofs::OVERTURE, backend::NAME);
+        assert_eq!(roofs::OVERTURE_FIXTURE, backend::FIXTURE);
+        assert_eq!((scene::CATALOG, scene::KNOWN_RELEASE, scene::ZOOM, scene::OVERTURE_ATTRIBUTION), (backend::CATALOG, backend::KNOWN_RELEASE, backend::ZOOM, backend::ATTRIBUTION));
+        assert_eq!(scene::archive_url(scene::KNOWN_RELEASE), backend::archive_url(backend::ARCHIVE, backend::KNOWN_RELEASE));
+        let data = io::fixture_tiles_dir().parent().unwrap().to_owned();
+        let archive = backend::Archive::fixture(&data).expect("the committed archive");
+        let startup = crate::state::Startup { basemap: None, fixture: Some(data), demo: false };
+        let fetcher = for_state(&AppState::new(startup, None, None, None, ViewState::INITIAL, [1100.0, 720.0]));
+        for (x, y) in [(9013, 4817), (9013, 4818), (9014, 4817), (9014, 4818), (9015, 4818)] {
+            let mut fetch = Fetch::start(&*fetcher, roofs::OVERTURE.into(), TileIndex::new(x, y, backend::ZOOM));
+            assert_eq!(answer(&mut fetch), archive.tile_now(x, y).map_err(FetchError::Failed), "{x}/{y}");
+        }
     }
 }

@@ -5227,12 +5227,14 @@ dependencies = [
  "basisu_c_sys",
  "bytemuck",
  "epaint",
+ "flate2",
  "glam",
  "image",
  "log",
  "pollster",
  "rustradar-core",
  "rustradar-scene",
+ "serde_json",
  "wgpu",
 ]
 

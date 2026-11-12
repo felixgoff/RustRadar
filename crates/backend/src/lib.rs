@@ -10,6 +10,7 @@
 pub mod adsblol;
 pub mod board;
 pub mod building_lod;
+pub mod canopy;
 pub mod clouds;
 pub mod convert;
 pub mod devlog;

@@ -17,6 +17,7 @@
 //! | [`earth::Earth`] | 1 `earth` | E5 |
 //! | [`terrain::Terrain`] | 2 `terrain-surface` | Z1, Z2 |
 //! | [`imagery::Imagery`] | 3a `imagery` | B6 |
+//! | [`ground::land::GroundLand`] | 3 `ground-land` (realistic) | R1 |
 //! | [`ground::Ground`] | 3c–3f realistic land, land cover, city ground or ground, rail ground | R1–R3, R8–R10 |
 //! | [`earth::Land`] | 3i `land` | E5 |
 //! | [`hillshade::Hillshade`] | 3b, 3g, 3j shaded relief | R12 |
@@ -238,6 +239,7 @@ pub fn ordered(init: &Init<'_>) -> Vec<Box<dyn Layer>> {
         Box::new(earth::Earth::new(init)),
         Box::new(terrain::Terrain::new(init)),
         Box::new(imagery::Imagery::new(init)),
+        Box::new(ground::land::GroundLand::new(init)),
         Box::new(ground::Ground::new(init)),
         Box::new(earth::Land::new(init)),
         Box::new(hillshade::Hillshade::new(init)),

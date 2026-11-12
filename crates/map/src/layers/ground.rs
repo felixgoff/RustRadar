@@ -4,6 +4,8 @@
 //! Stage 2 stub (E4): draws nothing until R1–R3, R8–R10 fill it; keep `new(&Init) -> Self` and
 //! the row in `layers::ordered`.
 
+pub mod land;
+
 use super::{DrawCx, Init, Layer, PrepareCx};
 
 /// What the scene builder hands this layer (`SceneInput`'s field of the same name).

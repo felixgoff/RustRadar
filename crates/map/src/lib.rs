@@ -14,6 +14,7 @@ pub mod headless;
 pub mod io;
 pub mod jobs;
 pub mod layers;
+pub mod look;
 pub mod pipelines;
 pub mod renderer;
 pub mod shaders;

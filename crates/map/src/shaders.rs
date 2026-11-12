@@ -22,11 +22,15 @@ pub const INCLUDE: &str = "//!include ";
 /// `lib/project.wgsl`: the projection (plan 1.4.2), `globals` at group 0, `frame` at group 1.
 pub const PROJECT: &str = include_str!("shaders/lib/project.wgsl");
 
+/// `lib/rlight.wgsl`: the realistic map's light (doc 04 §4), `rlight` at group 2; includes
+/// `lib/project.wgsl`.
+pub const RLIGHT: &str = include_str!("shaders/lib/rlight.wgsl");
+
 /// `composite.wgsl`: the map texture onto the surface.
 pub const COMPOSITE: &str = include_str!("shaders/composite.wgsl");
 
 /// Every library a shader may include, by its path under `shaders/`.
-pub const LIBRARIES: &[(&str, &str)] = &[("lib/project.wgsl", PROJECT)];
+pub const LIBRARIES: &[(&str, &str)] = &[("lib/project.wgsl", PROJECT), ("lib/rlight.wgsl", RLIGHT)];
 
 /// A shader that names a library nobody has.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -27,6 +27,7 @@ pub mod osm_platforms;
 pub mod radar;
 pub mod rail;
 pub mod rail_motion;
+pub mod rainviewer;
 pub mod reference;
 pub mod roads;
 pub mod runways;

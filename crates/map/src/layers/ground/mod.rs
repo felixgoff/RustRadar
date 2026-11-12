@@ -35,6 +35,7 @@
 //! `ground-flat` is never drawn today (the flat map takes the city ground).
 
 pub mod city;
+pub mod earth_picture;
 pub mod land;
 pub mod vector;
 

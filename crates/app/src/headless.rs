@@ -129,6 +129,8 @@ pub fn render_on_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppS
         state.airport = Airport::with_feeds(None);
         // nor RainViewer's frame list and the measured volumes (W5)
         state.radar = crate::state::radar::Radar::with_feeds(None);
+        // nor EUMETSAT's cloud picture (R10)
+        state.clouds = rustradar_backend::clouds::Feed::none();
     }
     // --mode: the focus as a saved settings file would give it
     if let Some(mode) = options.mode {

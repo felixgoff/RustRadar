@@ -36,8 +36,8 @@
 //!   joints and caps, at least 0.6 px wide on OpenMapTiles' tiles and as wide as they are on
 //!   Streets GL's (`renderCityGround`: `lineWidthMinPixels: z >= 16 ? 0 : 0.6`; [`line_width`]).
 //! - **Clipped to the tile's square** (MVTLayer's `ClipExtension` on the flat map, every pass):
-//!   with the stencil, as the vector map does ([`vector_map::CLIP_MARK`], [`vector_map::CLIPPED`],
-//!   [`vector_map::CLIP_RESET`]: the square raises the stencil, the passes draw where it is
+//!   with the stencil, as the vector map does ([`CLIP_MARK`], [`CLIPPED`], [`CLIP_RESET`]
+//!   of `vector_map`: the square raises the stencil, the passes draw where it is
 //!   raised, the square sets it back to 0), so a tile's buffer never shows.
 //!
 //! Not here: the survey's road widths (`withSurvey`, item R9), the land cover under it (R8), the
@@ -53,6 +53,24 @@
 //! [`TileOverlay`] draws each tile drawn as a square in a colour of its own (its zoom, its column
 //! and row), half see-through, instead of the ground: a debug view (tests check with it that the
 //! tiles meet without a gap and never overlap).
+//!
+//! How it is checked (the tests below):
+//! - V5 from the fixtures through the overlay: every pixel covered exactly once, by the tile the
+//!   CPU finds on the ground under it, every selected tile in, none missing from the fixtures.
+//!   At V5 (zoom 15.5, pitched 60°) **every** tile is Streets GL's zoom 16, today as here: the
+//!   farthest ground in view is 3.7 view heights from the camera, where the LOD wants 15.5, and
+//!   16 is the next level. Plan R3's "far ones from coarser levels" is seen at V5 tilted to the
+//!   realistic map's 75°: zoom 16 near, 14 and 13 further up, each level no finer than the one
+//!   below it, nothing past deck's far plane (10 camera heights, 15 view heights out: there the
+//!   LOD wants 13); every tile there from a stand-in fetcher, as the fixtures hold V5's only.
+//! - Zooming in from 13 to 15.5 with Streets GL's tiles held back: the coarser tiles stand in for
+//!   each zoom-16 tile wanted, none twice, the view a level further in is asked for ahead; once
+//!   they come, only zoom 16 is drawn.
+//! - V5 on the realistic map against `realistic-v5-1440x900.png`: what today's picture shows of
+//!   the ground between its buildings and trees (water, gardens, pavements) within 6 levels at the
+//!   same pixels. The app's V4 and V5 shots match today's ground but for the buildings, trees and
+//!   today's own railway lines (a plain browser draws the map's rails; the app OpenRailwayMap's,
+//!   R9).
 
 use std::collections::HashMap;
 
@@ -414,6 +432,9 @@ mod tests {
         selected: Vec<TileIndex>,
         /// Selected tiles still on their way.
         loading: Vec<TileIndex>,
+        /// Tiles cached, and those of them loading ahead.
+        cached: usize,
+        ahead: usize,
     }
 
     /// A layer of its own for the tests: the city ground's tiles (shown on the flat map whatever
@@ -444,7 +465,9 @@ mod tests {
             let tiles = self.city.tiles();
             let selected = tiles.selected().to_vec();
             let loading = selected.iter().copied().filter(|&t| matches!(tiles.state(t), Some(s) if !matches!(s, crate::tiles::TileState::Loaded | crate::tiles::TileState::Empty | crate::tiles::TileState::Failed))).collect();
-            *self.seen.lock().unwrap() = Seen { drawn: self.city.drawn().collect(), selected, loading };
+            let cached = tiles.len();
+            let ahead = tiles.cached().filter(|&t| tiles.is_ahead(t)).count();
+            *self.seen.lock().unwrap() = Seen { drawn: self.city.drawn().collect(), selected, loading, cached, ahead };
         }
 
         fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
@@ -716,6 +739,10 @@ mod tests {
         for frame in 0..30 {
             renderer.prepare(&gpu, MIDSUMMER);
             let now = seen.lock().unwrap().clone();
+            if frame == 0 {
+                // (the view a level further in, zoom 16.5, asked for ahead: §13.3)
+                assert!(now.ahead > 0, "nothing loads ahead while zooming in");
+            }
             let fine: Vec<TileIndex> = now.selected.iter().copied().filter(|t| t.z == SGL_ZOOM).collect();
             assert!(!fine.is_empty() && fine.iter().all(|t| now.loading.contains(t)), "zoom 16's tiles are held back");
             assert!(now.drawn.iter().all(|t| t.z <= 14), "a zoom-16 tile drawn while held: {:?}", by_zoom(&now.drawn));
@@ -733,6 +760,21 @@ mod tests {
         assert!(after.drawn.iter().all(|t| t.z == SGL_ZOOM), "{:?}", by_zoom(&after.drawn));
         partition(&after.drawn, &after.selected).expect("covered once");
         assert_eq!(after.drawn.len(), after.selected.len());
+    }
+
+    /// The city ground is the flat map's: on the globe (zoom 12 and under) it asks for nothing and
+    /// drops its tiles, as deck drops `ground-city` from the layer list there.
+    #[test]
+    fn on_the_globe_the_city_ground_drops_its_tiles() {
+        let Some(gpu) = gpu() else { return };
+        let (mut renderer, seen) = overlay_renderer(&gpu, Everywhere::new(false));
+        render_with(&gpu, &mut renderer, &bare(ViewState { zoom: 12.1, ..V5 }), 1.0).expect("rendered");
+        let flat = seen.lock().unwrap().clone();
+        assert!(flat.cached > 0 && !flat.drawn.is_empty());
+        render_with(&gpu, &mut renderer, &bare(ViewState { zoom: 11.9, ..V5 }), 1.0).expect("rendered");
+        let globe = seen.lock().unwrap().clone();
+        assert_eq!((globe.cached, globe.drawn.len(), globe.selected.len()), (0, 0, 0));
+        assert!(!renderer.pending());
     }
 
     /// A pixel no area of the drawn tiles covers (the land under them), and one near a line.

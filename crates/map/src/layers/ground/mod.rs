@@ -37,6 +37,7 @@
 pub mod city;
 pub mod earth_picture;
 pub mod land;
+pub mod landcover;
 pub mod vector;
 
 use std::borrow::Cow;

@@ -248,6 +248,7 @@ pub fn ordered(init: &Init<'_>) -> Vec<Box<dyn Layer>> {
         Box::new(terrain::Terrain::new(init)),
         Box::new(imagery::Imagery::new(init)),
         Box::new(ground::land::GroundLand::new(init)),
+        Box::new(ground::landcover::GroundLandCover::new(init)),
         Box::new(ground::Ground::new(init)),
         Box::new(earth::Land::new(init)),
         Box::new(hillshade::Hillshade::new(init)),

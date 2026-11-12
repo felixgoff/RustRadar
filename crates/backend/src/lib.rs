@@ -20,6 +20,7 @@ pub mod flow;
 pub mod geocode;
 pub mod images;
 pub mod keys;
+pub mod landcover;
 pub mod lines;
 pub mod liveries;
 pub mod mobile_update;

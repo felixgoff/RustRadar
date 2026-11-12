@@ -167,6 +167,11 @@ impl TileFetcher for BackendTiles {
                 if &*source == rustradar_map::layers::trees::CANOPY {
                     return rustradar_backend::canopy::tile(tile.z, tile.x, tile.y).await;
                 }
+                // the land cover (R8): a tile's classes, NMD's and WorldCover's pictures put
+                // together by `backend::landcover` (`--fixture` folders: `DirTiles` puts theirs)
+                if &*source == rustradar_map::layers::ground::landcover::LAND_COVER {
+                    return rustradar_backend::landcover::tile(&tiles, tile.z, tile.x, tile.y).await;
+                }
                 let source = sources.resolve(&tiles, &source).await?;
                 // Streets GL (R3): only its zoom 16 goes to its server (`sglFetch`)
                 if source.name == rustradar_backend::streets_gl::NAME {
@@ -529,6 +534,59 @@ mod tests {
         for (x, y) in [(9013, 4817), (9013, 4818), (9014, 4817), (9014, 4818), (9015, 4818)] {
             let mut fetch = Fetch::start(&*fetcher, roofs::OVERTURE.into(), TileIndex::new(x, y, backend::ZOOM));
             assert_eq!(answer(&mut fetch), archive.tile_now(x, y).map_err(FetchError::Failed), "{x}/{y}");
+        }
+    }
+
+    /// The land cover (R8): the backend's tables and rules are the scene's (`backend::landcover`
+    /// cannot see `scene::landcover`, so they are kept equal by hand), its decode of every fixture
+    /// picture the map's, and a `--fixture` folder's land cover through the state's fetcher the
+    /// backend's put together from the same pictures.
+    #[test]
+    fn a_fixture_folder_s_land_cover_is_the_backend_s() {
+        use rustradar_backend::landcover as backend;
+        use rustradar_map::layers::ground::landcover as map;
+        use rustradar_scene::camera::ViewState;
+        use rustradar_scene::landcover as scene;
+        assert_eq!((map::LAND_COVER, map::NMD, map::WORLDCOVER), (backend::NAME, backend::NMD, backend::WORLDCOVER));
+        assert_eq!((scene::SIZE, scene::MAX_CACHED, scene::WORLD_COVER_MIN_ZOOM), (backend::SIZE, backend::MAX_CACHED, backend::WORLD_COVER_MIN_ZOOM));
+        assert_eq!((scene::LANDCOVER_ATTRIBUTION, scene::WORLD_COVER_SEARCH), (backend::ATTRIBUTION, backend::WORLD_COVER_SEARCH));
+        assert_eq!(scene::WORLD_COVER_REGISTER, backend::register_url(backend::PC));
+        for z in [6, 10, 14] {
+            let n = 1u32 << z;
+            for (x, y) in (0..40).map(|i| ((i * 7919 + 13) % n, (i * 104_729 + 7) % n)).chain([(n * 35 / 64, n * 18 / 64), (n / 2, n / 2)]) {
+                assert_eq!(scene::in_sweden(x, y, z), backend::in_sweden(x, y, z), "{z}/{x}/{y}");
+                assert_eq!(scene::bbox(x, y, z), backend::bbox(x, y, z));
+                assert_eq!(scene::nmd_url(x, y, z), backend::nmd_url(x, y, z));
+                assert_eq!(scene::world_cover_url("pc1.id", x, y, z), backend::world_cover_url("pc1.id", x, y, z));
+            }
+        }
+        // the colours: every legend colour and its neighbours, and a spread of all the others
+        let colours = (0..200_000u32).map(|i| i.wrapping_mul(2_654_435_761) >> 8).chain([0x6E8C05, 0x6E8C04, 0x6E8C06, 0xC500FF, 0x8ACCFA, 0xFFFFBE]);
+        for colour in colours {
+            let [_, r, g, b] = colour.to_be_bytes();
+            assert_eq!(scene::nmd_classes(&[r, g, b, 255]), [backend::nmd_class(colour)], "#{colour:06X}");
+        }
+        for code in 0..=255u8 {
+            assert_eq!(scene::world_cover_classes(&[code, code, code, 255]), backend::world_cover_classes(&[code, code, code, 255]), "{code}");
+        }
+        assert_eq!(scene::combine(Some(vec![0, 1, 0]), Some(vec![13, 4, 7])).map(|g| g.classes), backend::combine(Some(vec![0, 1, 0]), Some(vec![13, 4, 7])));
+        // every fixture picture decoded alike, and the fixture folder's land cover the backend's
+        let data = io::fixture_tiles_dir().parent().unwrap().to_owned();
+        let dir = DirTiles::at(fixture_tiles(&data));
+        let startup = crate::state::Startup { basemap: None, fixture: Some(data), demo: false };
+        let fetcher = for_state(&AppState::new(startup, None, None, None, ViewState::INITIAL, [1100.0, 720.0]));
+        for tile in dir.tiles(map::NMD) {
+            let read = |source: &str| std::fs::read(dir.root().join(format!("{source}/{}/{}/{}.png", tile.z, tile.x, tile.y))).ok();
+            let nmd = read(map::NMD).expect("NMD's picture");
+            let theirs = backend::pixels(&nmd).map(|px| backend::nmd_classes(&px));
+            assert_eq!(map::land_classes(&nmd, true), theirs, "{tile:?}");
+            let world = read(map::WORLDCOVER).map(|png| (map::land_classes(&png, false), backend::pixels(&png).map(|px| backend::world_cover_classes(&px))));
+            if let Some((ours, theirs)) = &world {
+                assert_eq!(ours, theirs, "{tile:?}");
+            }
+            let want = if backend::wants_world_cover(theirs.as_deref()) { backend::combine(theirs, world.and_then(|(_, w)| w)) } else { theirs };
+            let mut fetch = Fetch::start(&*fetcher, map::LAND_COVER.into(), tile);
+            assert_eq!(answer(&mut fetch), Ok(want), "{tile:?}");
         }
     }
 }

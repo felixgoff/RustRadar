@@ -201,6 +201,11 @@ impl DirTiles {
 
     /// The answer for `tile` of `source` (see the type's list).
     pub fn read(&self, source: &str, tile: TileIndex) -> FetchResult {
+        // the land cover's classes (R8): the folder's NMD and WorldCover pictures put together
+        // as `backend::landcover` puts the servers' together
+        if source == crate::layers::ground::landcover::LAND_COVER {
+            return crate::layers::ground::landcover::fixture_land_cover(self, tile);
+        }
         // Overture's buildings (R6): the fixture folder's PMTiles archive, not a folder of tiles
         // (a tile the archive lacks is nothing there)
         if source == crate::layers::roofs::OVERTURE {

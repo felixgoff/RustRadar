@@ -34,6 +34,7 @@ pub mod runways;
 pub mod session;
 pub mod ships;
 pub mod sth;
+pub mod streets_gl;
 pub mod taxiways;
 pub mod tiles;
 pub mod trafikverket;

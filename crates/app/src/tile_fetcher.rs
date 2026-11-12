@@ -158,6 +158,10 @@ impl TileFetcher for BackendTiles {
                     return rustradar_backend::rail::tile(tile.z, tile.x, tile.y).await.map(|t| t.map(|b| b.to_vec()));
                 }
                 let source = sources.resolve(&tiles, &source).await?;
+                // Streets GL (R3): only its zoom 16 goes to its server (`sglFetch`)
+                if source.name == rustradar_backend::streets_gl::NAME {
+                    return rustradar_backend::streets_gl::tile(&tiles, &source, tile.z, tile.x, tile.y).await;
+                }
                 tiles.tile(&source, tile.z, tile.x, tile.y).await
             };
             let result = tokio::select! {
@@ -352,6 +356,21 @@ mod tests {
         let mut unknown = Fetch::start(&tiles, "nowhere".into(), TileIndex::ROOT);
         assert_eq!(answer(&mut unknown), Err(FetchError::Failed("no tile source named \"nowhere\"".into())));
         assert_eq!(server.paths(), ["/t/3/4/5.pbf", "/t/3/0/0.pbf"]);
+    }
+
+    /// Streets GL (R3, `sglFetch`): only its zoom 16 goes to its server; another zoom is nothing.
+    #[test]
+    fn streets_gl_is_asked_for_its_zoom_only() {
+        let server = Server::start(|path| (200, path.as_bytes().to_vec(), Duration::ZERO));
+        let cache = TempCache::new("streets-gl");
+        let sources = TileSources::default();
+        sources.set_template(io::STREETS_GL, &server.url("/vector/{z}/{x}/{y}"));
+        let (tiles, _) = fetcher(&cache, sources);
+        let mut near = Fetch::start(&tiles, io::STREETS_GL.into(), TileIndex::new(36057, 19273, 16));
+        assert_eq!(answer(&mut near), Ok(Some(b"/vector/16/36057/19273".to_vec())));
+        let mut coarser = Fetch::start(&tiles, io::STREETS_GL.into(), TileIndex::new(9014, 4818, 14));
+        assert_eq!(answer(&mut coarser), Ok(None));
+        assert_eq!(server.paths(), ["/vector/16/36057/19273"]);
     }
 
     #[test]

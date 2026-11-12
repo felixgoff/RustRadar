@@ -4,8 +4,9 @@
 //! - [`land`] (row 3, `ground-land`, R1): the land under everything, one rectangle in the paint
 //!   `LAND` (unmapped land in Streets GL's temperate green).
 //! - [`Ground`] (rows 3c–3f): on the globe [`vector::GroundGlobe`] (`ground-globe`: OpenMapTiles
-//!   z0–14 by deck's own selection, R2); on the flat map the city ground (R3), and the land cover
-//!   (R8) and ground rails and platforms (R9) on both.
+//!   z0–14 by deck's own selection, R2); on the flat map [`city::GroundCity`] (`ground-city`:
+//!   OpenMapTiles z9–14 and Streets GL z16 by distance, R3), and the land cover (R8) and ground
+//!   rails and platforms (R9) on both.
 //!
 //! **The shader** (doc 04 §6.8, §16): [`GroundShader`] holds what every ground draw shares: the
 //! light (`lib/rlight.wgsl`, group 2, [`look::LightUniform`]), and group 3 ([`GROUND_GROUP`]): the
@@ -30,9 +31,10 @@
 //!
 //! **When** (G:2650-2663): on the realistic basemap when the scene builder shows the ground
 //! ([`Input::shown`], `app::scene_builder::realistic`), the globe's tiles (`ground-globe`) while
-//! the view is the globe (zoom ≤ 12). `ground-flat` is never drawn today (the flat map takes the
-//! city ground), so the flat map waits for R3.
+//! the view is the globe (zoom ≤ 12), the city ground's (`ground-city`) on the flat map.
+//! `ground-flat` is never drawn today (the flat map takes the city ground).
 
+pub mod city;
 pub mod land;
 pub mod vector;
 
@@ -412,13 +414,15 @@ impl GroundShader {
 
 // ------------------------------------------------------------------ the layer
 
-/// Rows 3c–3f (realistic basemap): the globe's ground tiles (R2); the city ground, land cover,
-/// ground rails and platforms come with R3, R8 and R9.
+/// Rows 3c–3f (realistic basemap): the globe's ground tiles (R2), the city ground (R3); the land
+/// cover, ground rails and platforms come with R8 and R9.
 pub struct Ground {
     shader: GroundShader,
     areas: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
     globe: vector::GroundGlobe,
+    /// The flat map's tiles by distance (R3).
+    city: city::GroundCity,
     /// Whether this frame draws, and whether the textures were still loading.
     shown: bool,
     textures_loading: bool,
@@ -431,12 +435,18 @@ impl Ground {
         let shader = GroundShader::new(init, "ground");
         let areas = shader.areas(init, "ground areas", DrawState::SURFACE_NO_CULL);
         let lines = shader.lines(init, "ground lines", DrawState::SURFACE_NO_CULL);
-        Ground { shader, areas, lines, globe: vector::GroundGlobe::new(init), shown: false, textures_loading: false, look: None }
+        let city = city::GroundCity::new(init, &shader);
+        Ground { shader, areas, lines, globe: vector::GroundGlobe::new(init), city, shown: false, textures_loading: false, look: None }
     }
 
     /// The globe's tiles (tests).
     pub fn globe(&self) -> &vector::GroundGlobe {
         &self.globe
+    }
+
+    /// The flat map's tiles (tests).
+    pub fn city(&self) -> &city::GroundCity {
+        &self.city
     }
 
     /// The light of the last frame drawn.
@@ -455,6 +465,8 @@ impl Layer for Ground {
         let globe = self.shown && cx.view.is_globe();
         // `ground-globe` leaves deck's list off the globe, its tiles with it
         self.globe.prepare(cx, globe);
+        // `ground-city` on the flat map in its place (R3)
+        self.city.prepare(cx, self.shown && !globe);
         if !self.shown {
             self.look = None;
             return;
@@ -469,6 +481,7 @@ impl Layer for Ground {
             return;
         }
         self.globe.draw(pass, cx, &self.shader, &self.areas, &self.lines);
+        self.city.draw(pass, cx, &self.shader);
     }
 
     fn drape(&self) -> super::Drape {
@@ -476,7 +489,7 @@ impl Layer for Ground {
     }
 
     fn pending(&self) -> bool {
-        self.shown && (self.textures_loading || self.globe.pending())
+        self.shown && (self.textures_loading || self.globe.pending() || self.city.pending())
     }
 }
 

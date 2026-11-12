@@ -607,16 +607,27 @@ mod tests {
         let viewport = viewport_for(&v4(), size);
         let wanted: Vec<TileIndex> = distance_tile_indices(&viewport, &tess::city_lod(), None, 0.0);
         assert!(wanted.iter().any(|t| t.z == 13) && wanted.iter().any(|t| t.z == 14) && wanted.iter().all(|t| t.z != 16), "{wanted:?}");
+        let mut on_dark = Vec::new();
         for basemap in [Basemap::Dark, Basemap::Satellite] {
             // (the satellite map's imagery asks for Esri's tiles: only OpenFreeMap's are the buildings')
             let asked: Vec<_> = asked(&gpu, &only(v4(), basemap, true)).into_iter().filter(|(source, _)| source == io::OPENFREEMAP).collect();
+            if basemap == Basemap::Dark {
+                on_dark = asked.iter().map(|&(_, t)| t).collect();
+            }
             assert!(asked.iter().all(|(_, t)| tess::SOURCE_ZOOMS.contains(&t.z)), "{asked:?}");
             for tile in &wanted {
                 assert!(asked.iter().any(|(_, t)| t == tile), "{basemap:?}: {tile:?} not asked");
             }
         }
         let openfreemap = |scene: &SceneInput| asked(&gpu, scene).into_iter().filter(|(source, _)| source == io::OPENFREEMAP).count();
-        assert_eq!(openfreemap(&only(v4(), Basemap::Realistic, true)), 0);
+        // on the realistic map these draw nothing: what OpenFreeMap is asked for there is the
+        // realistic buildings' (`buildings_realistic`, R4), the same tiles once each, not twice
+        let mut on_realistic: Vec<TileIndex> =
+            asked(&gpu, &only(v4(), Basemap::Realistic, true)).into_iter().filter(|(source, _)| source == io::OPENFREEMAP).map(|(_, t)| t).collect();
+        let key = |t: &TileIndex| (t.z, t.x, t.y);
+        on_dark.sort_by_key(key);
+        on_realistic.sort_by_key(key);
+        assert_eq!(on_realistic, on_dark);
         assert_eq!(openfreemap(&only(v4(), Basemap::Dark, false)), 0);
         // on the globe, none
         assert_eq!(openfreemap(&only(ViewState { zoom: 12.0, ..v4() }, Basemap::Dark, true)), 0);

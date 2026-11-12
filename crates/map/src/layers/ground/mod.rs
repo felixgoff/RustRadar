@@ -19,9 +19,10 @@
 //! (`scene::tess::ground::explicit`).
 //!
 //! **Textures** (doc 04 §5.3, plan 1.4.13): the realistic map's thirteen KTX2 files are embedded
-//! ([`texture_bytes`]) and transcoded on the worker pool into the renderer's
-//! [`crate::textures::RealisticTextures`] ([`PrepareCx::textures`]), started by the first realistic layer that
-//! draws with them ([`load_textures`]: the ground, when the scene shows it) and swapped in at once
+//! ([`texture_bytes`]) and transcoded on the worker pool into the renderer's shared
+//! [`crate::textures::RealisticTextures`] ([`PrepareCx::textures`]), started by the first
+//! realistic layer that draws with them ([`load_textures`]: the ground, when the scene shows it,
+//! today's `realisticTextures(device)` on a realistic layer's first draw) and swapped in at once
 //! when the last file is in; until then the 1×1 stand-ins (white, flat, the Earth of alpha 0:
 //! "not loaded") are bound, as today's `realisticTextures` does. A layer's bind group is made again
 //! when they swap ([`GroundShader::prepare`]), and a layer that draws with them is pending until

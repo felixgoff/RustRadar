@@ -183,7 +183,8 @@ pub fn render_on_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppS
         engine.frame(gpu, target.view(), surface, scale, input(0.0), clock.now_ms());
         poll(gpu)?;
         frames += 1;
-        if !engine.map.pending() {
+        // (and the camera's aim on the ground under it, with the terrain on: Z4)
+        if !engine.map.pending() && !engine.state.camera.aiming() {
             log::info!("the map settled after {} ms ({frames} frames)", started.elapsed().as_millis());
             break;
         }

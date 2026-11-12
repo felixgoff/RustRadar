@@ -123,14 +123,18 @@ pub struct Engine {
 impl Engine {
     /// An engine drawing onto surfaces of `surface_format` (prefer a non-sRGB one: the map's and
     /// egui's colours are gamma-space values).
-    pub fn new(gpu: &Gpu, surface_format: wgpu::TextureFormat, state: AppState) -> Self {
+    pub fn new(gpu: &Gpu, surface_format: wgpu::TextureFormat, mut state: AppState) -> Self {
         let egui = egui::Context::default();
         theme::apply(&egui);
+        let map = MapRenderer::new(gpu, surface_format);
+        // the ground under the camera with the terrain on: Mapterhorn's tiles through the map's
+        // fetcher (whichever it is handed later) and worker pool (Z4)
+        state.camera.set_ground_tiles(map.tiles().clone());
         Engine {
             state,
             scene: SceneBuilder::default(),
             pacer: Pacer::default(),
-            map: MapRenderer::new(gpu, surface_format),
+            map,
             input: MapInput::default(),
             // egui feathers its own edges; it draws after the map's MSAA resolve
             egui_renderer: egui_wgpu::Renderer::new(&gpu.device, surface_format, egui_wgpu::RendererOptions::default()),

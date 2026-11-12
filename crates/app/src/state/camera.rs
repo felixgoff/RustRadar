@@ -14,10 +14,20 @@
 //!    it is handed with it, so the view is back at its first frame, and the 600 ms only keep the
 //!    app's other moves (a new lock, the terrain aim) off, as today.
 //!
+//! 5. **The terrain aim** (item Z4; doc 04 §14.4, doc 01 §3.11; G:3204-3212): unless the camera is
+//!    locked on an aircraft, the ground under the view's centre is `groundHeight(lon, lat)` with
+//!    the terrain on and closer than zoom 12, else the sea (0 m); once it is known (its tile has
+//!    come), further than 0.5 m from the target's height and no move of the app's runs, the
+//!    target's height (`position[2]`) moves [`GROUND_EASE`] (30 %) of the way to it, handed over
+//!    with the free limits. So the camera looks at the hills and not at the sea inside them, and
+//!    comes back down when the terrain goes off or the view leaves the flat map. The heights come
+//!    from Mapterhorn's zoom-12 tile under the centre, its nearest pixel, never below the sea, the
+//!    last 16 tiles kept ([`GroundHeights`], ported in stage 1): [`Ground`] fetches them through
+//!    the map's tile runtime and decodes them on its worker pool, and a tile that comes rebuilds
+//!    the scene (`onLoad`: `render`).
+//!
 //! Step 2 (centring on a followed train or ship) is [`Camera::follow_vehicle`], which the frame
-//! runs before the transition step with where the scene builders last drew the vehicle; step 5
-//! (the camera's aim easing to the ground's height under it, G:3204-3212) belongs to item Z4,
-//! between steps 4 and 6.
+//! runs before the transition step with where the scene builders last drew the vehicle.
 //!
 //! The scene is rebuilt every frame while locked close in (zoom above 7, no move of the app's
 //! running): [`super::AppState::locked_steady`] reads the controller's mode this step sets, and
@@ -42,20 +52,47 @@
 //!   `LIMITS`) or the view eases back (`limits()`), so deck keeps the locked ones (up to 85° and
 //!   zoom 23) until the app's next own move re-sends `limits()`. The port's own moves do not
 //!   re-send them, so the free camera's limits are handed over at once when the lock ends.
+//! - The terrain aim moves at each frame drawn, as the lock does: when nothing else draws, that is
+//!   the scene refresh's 50 ms at these zooms (today's `renderFrame` at the loop's interval, every
+//!   frame while a train or ship is followed); during a gesture it moves at the display's rate, so
+//!   it reaches the ground in fewer milliseconds than today's.
+//! - The ground's tiles are asked of the map's fetcher as source `mapterhorn`, which stands Mapzen's
+//!   terrarium tile of the same `z/x/y` in where Mapterhorn has none (`terrainFetch`, item Z1);
+//!   today's `groundHeight` asks Mapterhorn alone. Mapterhorn has zoom 12 everywhere, so the two
+//!   never differ. The tiles share the map's disk cache, and a `--fixture` folder serves them as it
+//!   serves the map's (a shot never touches the network).
+//! - A ground tile is decoded on the map's worker pool, where the browser decoded it
+//!   asynchronously; one that fails is never asked again until it is evicted, as today.
+
+use std::sync::Arc;
 
 use rustradar_core::geo::Basemap;
 use rustradar_core::model::{LiveFlight, f32_as_js};
+use rustradar_map::io::{self, Fetch};
+use rustradar_map::jobs::{Job, JobPoll};
 use rustradar_map::layers::aircraft::assets;
+use rustradar_map::tiles::TileRuntime;
 use rustradar_scene::aircraft_models::size_of;
-use rustradar_scene::camera::{self as cam, FOLLOW_MAX_PITCH, FollowLock, LIMITS, Limits, ViewState};
+use rustradar_scene::camera::{self as cam, FLAT_ABOVE_ZOOM, FOLLOW_MAX_PITCH, FollowLock, LIMITS, Limits, ViewState};
 use rustradar_scene::controller::{EASE_BACK_MS, locked_view, released_ease_back};
+use rustradar_scene::hillshade::{GroundHeights, GroundTile, decode_terrarium};
+use rustradar_scene::tiles::TileIndex;
 
 #[cfg(doc)]
 use rustradar_scene::controller::Controller;
 
 use super::Cx;
+use crate::scene_builder::refresh_interval_ms;
 
-/// The camera lock on an aircraft (and, from item Z4, the ground height under the camera).
+/// How far the camera's aim moves to the ground's height under it each frame (`GROUND_EASE`).
+pub const GROUND_EASE: f64 = 0.3;
+/// The aim moves only while the ground is further than this from it, metres (G:3208).
+pub const GROUND_SLACK_M: f64 = 0.5;
+/// Where a ground tile's decoding queues on the worker pool: ahead of the map's tiles (theirs
+/// are their distances), as a camera waiting for it looks at the wrong place.
+const GROUND_DECODE_PRIORITY: f64 = 0.0;
+
+/// The camera lock on an aircraft, and the ground height under the camera.
 #[derive(Debug)]
 pub struct Camera {
     /// The camera follows the selected aircraft (the page's `following`, the globe's `follow`).
@@ -75,6 +112,8 @@ pub struct Camera {
     raised: bool,
     /// `follow` at the last step, to rebuild the scene when it changes.
     follow_seen: bool,
+    /// The ground's height under the camera (step 5).
+    ground: Ground,
 }
 
 impl Default for Camera {
@@ -88,6 +127,7 @@ impl Default for Camera {
             was_locked: false,
             raised: false,
             follow_seen: false,
+            ground: Ground::default(),
         }
     }
 }
@@ -206,6 +246,25 @@ impl Camera {
         cam::max_zoom_now(self.follow_lock(height_px).map(|lock| lock.max_zoom))
     }
 
+    /// Where the ground's tiles come from: the map's tile runtime (its fetcher, which a later
+    /// `set_tiles` on the map changes for this too, and its worker pool). The engine hands it
+    /// over when it makes the map; without it the ground stays unknown and the aim stays where it
+    /// is (unit tests of other parts).
+    pub fn set_ground_tiles(&mut self, tiles: TileRuntime) {
+        self.ground = Ground { generation: tiles.generation(), runtime: Some(tiles), ..Ground::default() };
+    }
+
+    /// The ground under the camera as it is known (item Z4).
+    pub fn ground(&self) -> &Ground {
+        &self.ground
+    }
+
+    /// Whether the camera's aim is still on its way to the ground under it: the last step moved
+    /// it, or the ground's tile is on its way. A shot waits for it to settle.
+    pub fn aiming(&self) -> bool {
+        self.ground.moved || self.ground.waiting()
+    }
+
     /// Each frame after the controller's transition step ([`super::AppState::advance_camera`]):
     /// `renderFrame`'s steps 3, 4 and 6 (see the module documentation).
     pub fn poll(&mut self, cx: &mut Cx<'_>) {
@@ -247,7 +306,31 @@ impl Camera {
             cx.controller.set_view(ViewState { position: Some([0.0, 0.0, 0.0]), ..cx.controller.view() });
         }
 
-        // 5: the terrain aim (item Z4) goes here
+        // 5: with the ground in 3D the camera aims at it, not at the sea under it (inside the hills)
+        self.ground.moved = false;
+        if self.ground.poll() {
+            // a ground tile came (`onLoad`: `render`)
+            cx.wants.scene = true;
+        }
+        if !locked {
+            let view = cx.controller.view();
+            let ground = if cx.persisted.settings.terrain && view.zoom > FLAT_ABOVE_ZOOM {
+                self.ground.height(view.longitude, view.latitude)
+            } else {
+                Some(0.0)
+            };
+            let at = view.position.map_or(0.0, |p| p[2]);
+            if let Some(ground) = ground
+                && (ground - at).abs() > GROUND_SLACK_M
+                && now > cx.controller.transition_until()
+            {
+                cx.controller.set_limits(self.limits(basemap, height), self.max_zoom_now(height));
+                cx.controller.set_view(ViewState { position: Some([0.0, 0.0, at + (ground - at) * GROUND_EASE]), ..view });
+                self.ground.moved = true;
+                // the next step at the scene refresh's interval, as today's loop renders
+                cx.wants.wake_at(now + refresh_interval_ms(view.zoom, cx.controller.locked()));
+            }
+        }
 
         // 6: released from a lock closer or flatter than the free camera allows: ease back within
         // its limits. deck starts that transition from the view under the limits it held, and
@@ -268,6 +351,123 @@ impl Camera {
     }
 }
 
+/// A ground tile on its way: asked of the fetcher, then decoded on the worker pool.
+#[derive(Debug)]
+enum Arriving {
+    Fetching(Fetch),
+    Decoding(Job<Result<Vec<f32>, String>>),
+}
+
+/// The ground's height under the camera (`groundHeight`, `TR:216-249`): [`GroundHeights`]' tiles
+/// and choice of pixel, with the fetching. A tile [`GroundHeights::height`] asks for is asked of
+/// the map's fetcher (source [`io::MAPTERHORN`], zoom 12) and decoded on its worker pool
+/// (`decodeTerrarium` of the picture's exact pixels); one that fails, or has nothing there, stays
+/// missing until it is evicted, as today's `.catch(() => {})` leaves it.
+#[derive(Debug, Default)]
+pub struct Ground {
+    heights: GroundHeights,
+    /// The map's tile runtime; none: the ground is never known.
+    runtime: Option<TileRuntime>,
+    /// The runtime's fetcher generation the tiles came from: a new fetcher starts over, as the
+    /// map's tile sets do.
+    generation: u64,
+    arriving: Vec<(GroundTile, Arriving)>,
+    /// The last step moved the camera's aim.
+    moved: bool,
+}
+
+impl Ground {
+    /// The ground's height at a place, metres, never below the sea; `None` until its tile has
+    /// come (asking for it the first time, or again after it was evicted).
+    pub fn height(&mut self, lon: f64, lat: f64) -> Option<f64> {
+        let mut wanted = None;
+        let height = self.heights.height(lon, lat, |tile| wanted = Some(tile));
+        if let Some(tile) = wanted {
+            self.request(tile);
+        }
+        height
+    }
+
+    /// Whether a ground tile is on its way.
+    pub fn waiting(&self) -> bool {
+        !self.arriving.is_empty()
+    }
+
+    /// How many tiles are kept, loaded or not (at most 16 but for one that came after it was
+    /// evicted).
+    pub fn kept(&self) -> usize {
+        self.heights.len()
+    }
+
+    /// Asks the fetcher for `tile` (a tile outside the world's columns and rows, which only a
+    /// longitude beyond ±180 gives, is never there, as today's URL for it is not).
+    fn request(&mut self, tile: GroundTile) {
+        let Some(runtime) = &self.runtime else { return };
+        let (Ok(x), Ok(y)) = (u32::try_from(tile.x), u32::try_from(tile.y)) else { return };
+        let fetch = Fetch::start(runtime.fetcher().as_ref(), Arc::from(io::MAPTERHORN), TileIndex::new(x, y, tile.z));
+        self.arriving.push((tile, Arriving::Fetching(fetch)));
+        // a folder answers at once: decode it now
+        self.poll();
+    }
+
+    /// Takes in what has come: a fetched tile goes to the worker pool, a decoded one is kept.
+    /// Returns whether a tile's heights came (today's `onLoad`).
+    fn poll(&mut self) -> bool {
+        let Some(runtime) = &self.runtime else { return false };
+        if runtime.generation() != self.generation {
+            self.generation = runtime.generation();
+            self.heights = GroundHeights::new();
+            self.arriving.clear();
+        }
+        let mut loaded = false;
+        let mut i = 0;
+        while i < self.arriving.len() {
+            let (tile, arriving) = &mut self.arriving[i];
+            let done = match arriving {
+                Arriving::Fetching(fetch) => match fetch.poll() {
+                    None => false,
+                    Some(Ok(Some(bytes))) => {
+                        *arriving = Arriving::Decoding(runtime.pool.spawn(GROUND_DECODE_PRIORITY, move |_| decode(&bytes)));
+                        false
+                    }
+                    Some(Ok(None)) => true,
+                    Some(Err(e)) => {
+                        log::debug!("ground tile {}/{}/{}: {e:?}", tile.z, tile.x, tile.y);
+                        true
+                    }
+                },
+                Arriving::Decoding(job) => match job.poll() {
+                    JobPoll::Pending => false,
+                    JobPoll::Done(Ok(heights)) => {
+                        self.heights.loaded(*tile, heights);
+                        loaded = true;
+                        true
+                    }
+                    JobPoll::Done(Err(e)) => {
+                        log::warn!("ground tile {}/{}/{}: {e}", tile.z, tile.x, tile.y);
+                        true
+                    }
+                    JobPoll::Cancelled | JobPoll::Lost => true,
+                },
+            };
+            if done {
+                self.arriving.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        loaded
+    }
+}
+
+/// A height tile's bytes (Mapterhorn's WebP, or Mapzen's PNG standing in) to its heights, row by
+/// row from the north-west corner: the picture's exact pixels (the backend's decoder, no colour
+/// management) through `decodeTerrarium`.
+fn decode(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    let picture = rustradar_backend::images::decode(bytes)?;
+    Ok(decode_terrarium(&picture.rgba, None))
+}
+
 #[cfg(test)]
 mod tests {
     use rustradar_core::geo::{effective_exaggeration, elevation};
@@ -275,8 +475,12 @@ mod tests {
     use rustradar_scene::camera::{REALISTIC_LIMITS, viewport_for};
     use rustradar_scene::controller::ZOOM_BY_MS;
 
+    use std::sync::Mutex;
+
+    use rustradar_map::io::{FetchError, FetchResult, FnFetcher};
+    use rustradar_map::jobs::Pool;
+
     use super::*;
-    use crate::scene_builder::refresh_interval_ms;
     use crate::state::{AppState, Startup};
 
     /// The tests' canvas, CSS pixels.
@@ -566,5 +770,255 @@ mod tests {
         // the next frame asks for no refresh of its own
         let (_, wants) = s.advance_camera(T0 + 16.0);
         assert!(!wants.scene);
+    }
+
+    // ---- step 5: the terrain aim (Z4) ----
+
+    /// Zermatt (`TERRAIN_VIEWS`): zoom 16, pitched 60°, looking north down the valley.
+    const ZERMATT: ViewState = ViewState { longitude: 7.7491, latitude: 46.0207, zoom: 16.0, bearing: 0.0, pitch: 60.0, position: None };
+    /// Zermatt's zoom-12 tile (`ground_tile` in xtask's fixtures).
+    const ZERMATT_TILE: TileIndex = TileIndex::new(2136, 1456, 12);
+
+    /// A terrarium PNG `size` px square of `metres(x, y)` (to 1/256 m).
+    fn terrarium_png(size: u32, metres: impl Fn(u32, u32) -> f64) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity((size * size * 3) as usize);
+        for y in 0..size {
+            for x in 0..size {
+                let v = ((metres(x, y) + 32768.0) * 256.0).round() as u32;
+                rgb.extend([(v >> 16) as u8, (v >> 8) as u8, v as u8]);
+            }
+        }
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, size, size);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&rgb).unwrap();
+        writer.finish().unwrap();
+        out
+    }
+
+    /// The tiles the ground's fetcher was asked for, with their sources.
+    type Asked = Arc<Mutex<Vec<(String, TileIndex)>>>;
+
+    /// [`state`] with the terrain on and the ground's tiles from `answer` (each ask noted), decoded
+    /// on a pool of one worker.
+    fn on_terrain(v: ViewState, answer: impl Fn(TileIndex) -> FetchResult + Send + Sync + 'static) -> (AppState, Asked, TileRuntime) {
+        let mut s = state(v);
+        s.persisted.settings.terrain = true;
+        let asked: Asked = Arc::default();
+        let noted = asked.clone();
+        let fetcher = FnFetcher(move |source: &str, tile: TileIndex| {
+            noted.lock().unwrap().push((source.to_owned(), tile));
+            answer(tile)
+        });
+        let runtime = TileRuntime::new(Arc::new(fetcher), Arc::new(Pool::new(1)));
+        s.camera.set_ground_tiles(runtime.clone());
+        (s, asked, runtime)
+    }
+
+    /// Everywhere `metres` high.
+    fn level(metres: f64) -> impl Fn(TileIndex) -> FetchResult + Send + Sync + 'static {
+        let png = terrarium_png(512, move |_, _| metres);
+        move |_| Ok(Some(png.clone()))
+    }
+
+    /// Frames 16 ms apart from `t`, the pool done before each, until the aim rests; the time of
+    /// the last frame and how many moved it.
+    fn settle(s: &mut AppState, runtime: &TileRuntime, mut t: f64) -> (f64, usize) {
+        let mut moves = 0;
+        loop {
+            runtime.pool.wait_idle();
+            let (moved, _) = s.advance_camera(t);
+            moves += usize::from(moved);
+            if !s.camera.aiming() {
+                return (t, moves);
+            }
+            t += 16.0;
+            assert!(moves < 1000, "the aim never rests");
+        }
+    }
+
+    fn target(s: &AppState) -> Option<f64> {
+        s.controller.view().position.map(|p| p[2])
+    }
+
+    #[test]
+    fn the_aim_eases_thirty_percent_a_frame_to_the_ground_under_it() {
+        let (mut s, asked, runtime) = on_terrain(ZERMATT, level(1608.0));
+        // the first frame asks Mapterhorn for the zoom-12 tile under the centre, and waits for it
+        let (moved, wants) = s.advance_camera(T0);
+        assert!(!moved && target(&s).is_none());
+        assert!(s.camera.aiming() && s.camera.ground().waiting() && !wants.scene && wants.wake_at.is_none());
+        assert_eq!(*asked.lock().unwrap(), [(io::MAPTERHORN.to_owned(), ZERMATT_TILE)]);
+        runtime.pool.wait_idle();
+        // once it has come (the scene rebuilt, `onLoad`), the target's height moves 30 % of the way
+        // each frame, the next frame asked for at the scene refresh's interval, until it is within
+        // half a metre
+        let (mut t, mut at, mut frames) = (T0, 0.0_f64, 0);
+        loop {
+            t += 16.0;
+            let (moved, wants) = s.advance_camera(t);
+            assert_eq!(wants.scene, frames == 0, "frame {frames}");
+            if (1608.0 - at).abs() <= GROUND_SLACK_M {
+                assert!(!moved && !s.camera.aiming() && wants.wake_at.is_none(), "it rests");
+                break;
+            }
+            at += (1608.0 - at) * GROUND_EASE;
+            frames += 1;
+            assert!(moved && s.camera.aiming());
+            assert_eq!(s.controller.view(), ViewState { position: Some([0.0, 0.0, at]), ..ZERMATT });
+            assert_eq!(wants.wake_at, Some(t + 50.0));
+        }
+        assert_eq!(frames, 23);
+        assert!((at - 1608.0).abs() <= 0.5 && at < 1608.0, "{at}");
+        assert_eq!(asked.lock().unwrap().len(), 1, "asked once");
+        assert_eq!(s.camera.ground().kept(), 1);
+        assert_eq!(s.controller.limits(), LIMITS, "with the free limits");
+    }
+
+    #[test]
+    fn the_ground_is_the_nearest_pixel_of_its_tile_and_never_below_the_sea() {
+        // a slope: each pixel its own height
+        let metres = |x: u32, y: u32| 1000.0 + f64::from(x) + 0.25 * f64::from(y);
+        let png = terrarium_png(512, metres);
+        let (mut s, _, runtime) = on_terrain(ZERMATT, move |_| Ok(Some(png.clone())));
+        settle(&mut s, &runtime, T0);
+        // the pixel under the centre as `groundHeight` finds it
+        let n = 4096.0_f64;
+        let r = ZERMATT.latitude.to_radians();
+        let x = ((ZERMATT.longitude + 180.0) / 360.0 % 1.0) * n;
+        let y = ((1.0 - (r.tan() + 1.0 / r.cos()).ln() / std::f64::consts::PI) / 2.0) * n;
+        assert_eq!((x.floor(), y.floor()), (2136.0, 1456.0));
+        let (px, py) = (((x % 1.0) * 512.0).floor() as u32, ((y % 1.0) * 512.0).floor() as u32);
+        let ground = metres(px, py);
+        let at = target(&s).expect("raised");
+        assert!((at - ground).abs() <= 0.5, "{at} against {ground} at pixel {px}, {py}");
+        // under the sea the target stays on it
+        let (mut s, asked, runtime) = on_terrain(ZERMATT, level(-50.0));
+        let (_, moves) = settle(&mut s, &runtime, T0);
+        assert_eq!((moves, target(&s)), (0, None));
+        assert_eq!(asked.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_aim_comes_back_to_the_sea_with_the_terrain_off_or_on_the_globe() {
+        let (mut s, asked, runtime) = on_terrain(ZERMATT, level(1608.0));
+        let (t, _) = settle(&mut s, &runtime, T0);
+        let high = target(&s).unwrap();
+        // the terrain off: back down, 30 % a frame
+        s.persisted.settings.terrain = false;
+        let (moved, _) = s.advance_camera(t + 16.0);
+        assert!(moved);
+        assert_eq!(target(&s), Some(high + (0.0 - high) * GROUND_EASE));
+        let (t, moves) = settle(&mut s, &runtime, t + 32.0);
+        assert!(target(&s).unwrap().abs() <= 0.5 && moves == 22, "{:?} in {moves}", target(&s));
+        // on again: up again from the tile it kept
+        s.persisted.settings.terrain = true;
+        let (t, _) = settle(&mut s, &runtime, t + 16.0);
+        assert!((target(&s).unwrap() - 1608.0).abs() <= 0.5);
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        // out to zoom 12, the globe: back down
+        s.controller.set_view(ViewState { zoom: 12.0, ..s.controller.view() });
+        settle(&mut s, &runtime, t + 16.0);
+        assert!(target(&s).unwrap().abs() <= 0.5);
+        assert_eq!(s.controller.view().zoom, 12.0);
+    }
+
+    #[test]
+    fn the_aim_waits_for_the_apps_own_moves() {
+        let (mut s, _, runtime) = on_terrain(ZERMATT, level(1608.0));
+        let (t, _) = settle(&mut s, &runtime, T0);
+        let high = target(&s).unwrap();
+        // a zoom of the app's runs: its frames keep the target where it was
+        s.controller.zoom_by(0.5, t + 16.0);
+        s.persisted.settings.terrain = false;
+        let mut frame = t + 32.0;
+        while frame <= s.controller.transition_until() {
+            s.advance_camera(frame);
+            assert_eq!(target(&s), Some(high), "at {}", frame - t);
+            frame += 16.0;
+        }
+        assert!(!s.camera.aiming());
+        // and once it is over, the aim goes
+        let (moved, _) = s.advance_camera(frame);
+        assert!(moved);
+        assert_eq!(target(&s), Some(high * (1.0 - GROUND_EASE)));
+        assert_eq!(s.controller.view().zoom, 16.5);
+    }
+
+    #[test]
+    fn locked_on_an_aircraft_the_ground_is_neither_asked_for_nor_aimed_at() {
+        let v = view(18.0, 59.6, 14.0, 300.0, 50.0);
+        let (mut s, asked, runtime) = on_terrain(v, level(1608.0));
+        s.camera.set_selected(Some(flight(3000, T0)));
+        s.camera.set_follow(true);
+        s.advance_camera(T0);
+        let raised = target(&s).expect("raised to the aircraft");
+        assert!(s.camera.raised() && raised > 900.0, "{raised}");
+        for frame in 1..30 {
+            let t = T0 + f64::from(frame) * 16.0;
+            runtime.pool.wait_idle();
+            s.advance_camera(t);
+            let pose = s.motion.pose(s.camera.selected().unwrap(), s.clocks(t).feed_ms);
+            assert_eq!(target(&s), Some(elevation(pose.alt_ft, 1.0)), "the aircraft's height");
+        }
+        assert!(asked.lock().unwrap().is_empty() && !s.camera.aiming());
+        // let go: the target back on the sea, the ground's tile asked for, and once it has come the
+        // aim rises to it
+        s.camera.set_follow(false);
+        let t = T0 + 1000.0;
+        s.advance_camera(t);
+        assert_eq!(target(&s), Some(0.0));
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        assert!(s.camera.aiming());
+        runtime.pool.wait_idle();
+        s.advance_camera(t + 16.0);
+        assert_eq!(target(&s), Some(1608.0 * GROUND_EASE));
+    }
+
+    #[test]
+    fn following_a_train_the_aim_moves_every_frame() {
+        let (mut s, _, runtime) = on_terrain(ZERMATT, level(1608.0));
+        s.camera.set_vehicle_locked(true);
+        s.advance_camera(T0);
+        runtime.pool.wait_idle();
+        let (moved, wants) = s.advance_camera(T0 + 16.0);
+        assert!(moved && s.controller.locked());
+        assert_eq!(wants.wake_at, Some(T0 + 16.0), "locked close in: the next frame at once");
+    }
+
+    #[test]
+    fn a_ground_tile_that_fails_leaves_the_aim_alone_and_is_not_asked_again() {
+        for answer in [Err(FetchError::Failed("503".into())), Ok(None), Ok(Some(b"no picture".to_vec()))] {
+            let (mut s, asked, runtime) = on_terrain(ZERMATT, move |_| answer.clone());
+            let (t, moves) = settle(&mut s, &runtime, T0);
+            assert_eq!((moves, target(&s)), (0, None));
+            s.advance_camera(t + 16.0);
+            assert!(!s.camera.aiming() && target(&s).is_none());
+            assert_eq!(asked.lock().unwrap().len(), 1, "never asked again while it is kept");
+        }
+        // without a tile runtime (unit tests of other parts) the ground is never known
+        let mut s = state(ZERMATT);
+        s.persisted.settings.terrain = true;
+        s.advance_camera(T0);
+        assert!(!s.camera.aiming() && target(&s).is_none());
+    }
+
+    #[test]
+    fn a_new_fetcher_starts_the_ground_over() {
+        let (mut s, asked, runtime) = on_terrain(ZERMATT, level(1608.0));
+        let (t, _) = settle(&mut s, &runtime, T0);
+        let again: Asked = Arc::default();
+        let noted = again.clone();
+        let png = terrarium_png(512, |_, _| 2000.0);
+        runtime.set_fetcher(Arc::new(FnFetcher(move |source: &str, tile: TileIndex| {
+            noted.lock().unwrap().push((source.to_owned(), tile));
+            Ok(Some(png.clone()))
+        })));
+        settle(&mut s, &runtime, t + 16.0);
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        assert_eq!(*again.lock().unwrap(), [(io::MAPTERHORN.to_owned(), ZERMATT_TILE)]);
+        assert!((target(&s).unwrap() - 2000.0).abs() <= 0.5);
     }
 }

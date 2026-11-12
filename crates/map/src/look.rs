@@ -539,4 +539,173 @@ mod tests {
             assert!((rl.sun - sun).length() < 1e-6, "{v:?}: {:?} vs {sun:?}", rl.sun);
         }
     }
+
+    /// A test layer: points at the centres of chosen pixels, each drawn with `lib/rlight.wgsl`'s
+    /// varyings `rl_t` and `rl_c` as its colour (their fractions: where it is within a texture and
+    /// a cloud period), so the GPU's vertex part can be read back point by point.
+    struct Varyings {
+        pipeline: wgpu::RenderPipeline,
+        light: LightUniform,
+        mesh: crate::pipelines::fill::Mesh<crate::pipelines::fill::Vertex>,
+        /// The points' frame: world Mercator from `anchor`, `scale` units to the local unit.
+        anchor: DVec2,
+        scale: f64,
+        slot: Option<crate::frame::FrameSlot>,
+    }
+
+    /// The probe's shader: `which` 0 shows (fract t.x, fract t.y, fract c.x), 1 shows fract c.y.
+    fn varyings_shader(which: u32) -> String {
+        format!(
+            r#"
+//!include lib/rlight.wgsl
+
+struct Out {{
+    @builtin(position) clip: vec4<f32>,
+    @location(0) t: vec2<f32>,
+    @location(1) c: vec2<f32>,
+}}
+
+@vertex
+fn vs(@location(0) position: vec3<f32>, @location(1) color: vec4<f32>) -> Out {{
+    let p = project_local(position);
+    let rl = rl_vertex(p.rel, rl_mercator(local_offset(position.xy)));
+    return Out(p.clip, rl.t, rl.c);
+}}
+
+@fragment
+fn fs(o: Out) -> @location(0) vec4<f32> {{
+    if ({which}u == 0u) {{
+        return vec4<f32>(fract(o.t), fract(o.c.x), 1.0);
+    }}
+    return vec4<f32>(fract(o.c.y), 0.0, 0.0, 1.0);
+}}
+"#
+        )
+    }
+
+    impl crate::layers::Layer for Varyings {
+        fn name(&self) -> &'static str {
+            "r1 rlight varyings"
+        }
+
+        fn prepare(&mut self, cx: &mut crate::layers::PrepareCx<'_>) {
+            self.light.prepare(cx);
+            self.slot = Some(cx.frames.push(&cx.view.local(self.anchor, self.scale, 0.0)));
+        }
+
+        fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &crate::layers::DrawCx<'_>) {
+            let Some(slot) = self.slot else { return };
+            if cx.pass != crate::layers::Pass::Map {
+                return;
+            }
+            pass.set_pipeline(&self.pipeline);
+            self.light.bind(pass);
+            cx.bind_frame(pass, slot);
+            self.mesh.draw(pass);
+        }
+    }
+
+    /// The fraction `v` is past a whole number, and how far (circularly) `got` (a byte) is from it,
+    /// in bytes.
+    fn fraction_off(got: u8, v: f64) -> f64 {
+        let d = (f64::from(got) / 255.0 - v.rem_euclid(1.0)).abs();
+        d.min(1.0 - d) * 255.0
+    }
+
+    /// The GPU's `rl_t` and `rl_c` (deck's `rl_t`, `rl_c`: where a point is in texture and cloud
+    /// periods, from the view centre's place in them) at points over the screen, against the twin,
+    /// which works them out in deck's own frames: on the globe (web mercator's units from the view's
+    /// centre, flattened there), far out and close in, tilted, and on the flat map (common space
+    /// from the view centre), tilted, at two latitudes. Each within 1.5 levels of a byte of the
+    /// fraction (a period is about 1223 m · cos φ: a level is under 5 m).
+    #[test]
+    fn the_gpus_texture_places_are_decks() {
+        use crate::gpu::testing::gpu;
+        use crate::headless::{FORMAT, render_with};
+        use crate::renderer::{MapRenderer, SceneInput};
+        use rustradar_core::geo::Basemap;
+
+        let size = [1100.0, 720.0];
+        let views = [
+            view(52.0, 10.0, 4.5, 0.0),
+            ViewState { latitude: 61.0, longitude: 14.0, zoom: 9.0, pitch: 40.0, bearing: 30.0, position: None },
+            ViewState { latitude: 59.3293, longitude: 18.0686, zoom: 15.5, pitch: 60.0, bearing: 20.0, position: None },
+            ViewState { latitude: -33.86, longitude: 151.2, zoom: 13.5, pitch: 45.0, bearing: 300.0, position: None },
+        ];
+        let Some(gpu) = gpu() else { return };
+        for v in views {
+            let vf = ViewFrame::new(&v, size, 1.0, 0.0);
+            let anchor = light_origin(&vf);
+            // a frame fine enough to put each point on its pixel's centre
+            let scale = 1.0 / 1024.0;
+            let mut pixels = Vec::new();
+            let mut vertices = Vec::new();
+            for y in (9..720).step_by(23) {
+                for x in (7..1100).step_by(29) {
+                    let xy = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+                    if vf.viewport.globe().is_some_and(|g| g.ray_distance_to_globe_center_ratio(xy) > 0.97) {
+                        continue;
+                    }
+                    let [lon, lat] = vf.viewport.unproject(xy, 0.0);
+                    if !(lon.is_finite() && lat.is_finite()) || lat.abs() > 85.0 {
+                        continue;
+                    }
+                    let [wx, wy] = lng_lat_to_world([lon, lat]);
+                    let mut dx = wx - anchor.x;
+                    dx -= 512.0 * (dx / 512.0).round();
+                    let local = [(dx / scale) as f32, (-(wy - anchor.y) / scale) as f32, 0.0];
+                    vertices.push(crate::pipelines::fill::Vertex { position: local, color: [255; 4] });
+                    pixels.push((x, y, [lon, lat]));
+                }
+            }
+            assert!(pixels.len() > 300, "{v:?}: {} points", pixels.len());
+            let indices: Vec<u32> = (0..vertices.len() as u32).collect();
+            let mut images = Vec::new();
+            for which in 0..2 {
+                let mut renderer = MapRenderer::new(&gpu, FORMAT);
+                let probe = {
+                    let init = renderer.init(&gpu);
+                    let light = LightUniform::new(&init.gpu.device);
+                    let source = varyings_shader(which);
+                    let module = shaders::module(&init.gpu.device, "r1 varyings", &source);
+                    let pipeline = crate::pipelines::build(
+                        &init,
+                        &crate::pipelines::Desc {
+                            label: "r1 varyings",
+                            module: &module,
+                            vertex_entry: "vs",
+                            fragment_entry: "fs",
+                            buffers: &[Some(crate::pipelines::fill::Vertex::LAYOUT)],
+                            topology: wgpu::PrimitiveTopology::PointList,
+                            state: crate::state::DrawState::LABEL,
+                            groups: &[light.layout()],
+                        },
+                    );
+                    let mesh = crate::pipelines::fill::Mesh::new(&init.gpu.device, "r1 varyings", &vertices, &indices);
+                    Varyings { pipeline, light, mesh, anchor, scale, slot: None }
+                };
+                renderer.add_layer(Box::new(probe));
+                let scene = SceneInput::new(v, size, 1.0, Basemap::Realistic);
+                images.push(render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered"));
+            }
+            // the light as the probe had it (the scene's: daylight off, no weather; the places
+            // depend on the view alone)
+            let look = frame_look(&sky::Input::default(), &v, size, 0.0);
+            let light = RLight::new(&look, &vf, 0.0);
+            let mut worst = (0.0, 0, 0, "");
+            for &(x, y, [lon, lat]) in &pixels {
+                let rl = twin::vary(&light, &vf, [lon, lat, 0.0]);
+                let [a, b] = [images[0].pixel(x, y), images[1].pixel(x, y)];
+                for (got, expected, name) in [(a[0], rl.t.x, "t.x"), (a[1], rl.t.y, "t.y"), (a[2], rl.c.x, "c.x"), (b[0], rl.c.y, "c.y")] {
+                    let off = fraction_off(got, expected);
+                    if off > worst.0 {
+                        worst = (off, x, y, name);
+                    }
+                }
+            }
+            let (off, x, y, name) = worst;
+            eprintln!("{v:?}: {} points, worst {name} {off:.2} levels at {x},{y}", pixels.len());
+            assert!(off <= 1.5, "{v:?}: {name} {off:.2} levels off at {x},{y}");
+        }
+    }
 }

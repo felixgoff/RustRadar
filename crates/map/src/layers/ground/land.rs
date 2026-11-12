@@ -332,4 +332,25 @@ mod tests {
         assert!(rain[1] < sunny[1], "rain {rain:?} sunny {sunny:?}");
         assert!(snow[..3].iter().all(|&c| c > 150), "snow {snow:?}");
     }
+
+    /// Close in at night (the sun 7° below the horizon at midwinter) the land is dim but there to
+    /// see, as `lookFor` means it (the sky's little light taken brighter by the night's exposure),
+    /// within 4 levels of the CPU's light, well below the day's.
+    #[test]
+    fn close_in_at_night_the_land_is_dim() {
+        let v5 = ViewState { latitude: 59.3293, longitude: 18.0686, zoom: 15.5, pitch: 60.0, bearing: 20.0, position: None };
+        let input = sky::Input { shown: true, weather: Some(PRESETS.sunny), daylight: true };
+        let Some((image, view, look)) = land_shot(v5, 1_797_890_400_000.0, input) else {
+            return;
+        };
+        save(&image, "r1-land-v5-night.png");
+        assert!(look.night > 0.99 && look.sun_up < 0.0, "{look:?}");
+        compare(&image, &view, &look, 29);
+        let Some((day, _, _)) = land_shot(v5, MIDSUMMER, input) else {
+            return;
+        };
+        let [night, day] = [image.pixel(550, 500), day.pixel(550, 500)];
+        eprintln!("night {night:?}, day {day:?}");
+        assert!(night[1] > 30 && night[1] + 30 < day[1], "night {night:?}, day {day:?}");
+    }
 }

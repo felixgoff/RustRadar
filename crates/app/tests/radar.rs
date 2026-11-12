@@ -10,6 +10,10 @@
 //!   ground layer). RainViewer's fixture tiles do not reach there, so only the measured layer
 //!   draws.
 //! - With the weather off neither changes a pixel of the map.
+//! - V2 with a measured volume over England and Wales that sees the north-west quarter of its
+//!   bounds (a 2 × 2 coverage mask, north row first) and no echo there: RainViewer stands back in
+//!   that quarter alone (`setRadarCoverage`, doc 02 §14.2 item 1), and tiles far from it are drawn
+//!   as without the volume.
 //!
 //! The night is off in these shots: drawn over the radar (row 6 after rows 5a and 5b) it would
 //! tint the bands. There is no reference picture with the radar on; the map under it is
@@ -19,13 +23,21 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use common::shots::{V2, gpu, save};
 use common::{app_shot_with, options};
 use rustradar_app::Options;
-use rustradar_core::geo::Basemap;
+use rustradar_app::state::AppState;
+use rustradar_app::state::aircraft::Answer;
+use rustradar_app::state::radar::{Arrived, FixtureFeeds, Radar, RadarFeeds};
+use rustradar_backend::rainviewer::Frame;
+use rustradar_core::geo::{Area, Basemap};
+use rustradar_core::model::{RadarBounds, RadarVolume};
 use rustradar_map::headless::Image;
 use rustradar_map::io;
-use rustradar_scene::camera::ViewState;
+use rustradar_map::layers::radar::measured::{Volume, VolumeKey};
+use rustradar_scene::camera::{ViewState, viewport_for};
 use rustradar_scene::radar::{BAND_COUNT, band_color};
 
 const SIZE: [u32; 2] = [1100, 720];
@@ -38,11 +50,53 @@ fn fixtures() -> Options {
 /// The app's shot at `view` from the committed fixtures with the weather `on` or off, the night
 /// off.
 fn shot(gpu: &rustradar_map::Gpu, view: ViewState, on: bool) -> Image {
+    shot_with(gpu, view, on, |_| {})
+}
+
+/// [`shot`] with `setup` given the app's state after the weather and the night are set.
+fn shot_with(gpu: &rustradar_map::Gpu, view: ViewState, on: bool, setup: impl FnOnce(&mut AppState)) -> Image {
     let options = Options { fixture: fixtures().fixture, ..options(view, Basemap::Dark, SIZE, 1.0) };
     app_shot_with(gpu, &options, |state| {
         state.persisted.settings.weather = on;
         state.persisted.settings.daylight = false;
+        setup(state);
     })
+}
+
+/// The bounds of [`Covered`]'s volume, `[west, south, east, north]`: England and Wales.
+const COVERED: [f64; 4] = [-6.0, 50.0, 2.0, 54.0];
+
+/// The `--fixture` folder's RainViewer frame, and as the measured volumes one volume over
+/// [`COVERED`] that sees its north-west quarter (mask `[1, 0, 0, 0]`, north row first) and no echo
+/// in it.
+struct Covered(FixtureFeeds);
+
+impl RadarFeeds for Covered {
+    fn frame(&mut self) -> Answer<Result<Option<Frame>, String>> {
+        self.0.frame()
+    }
+
+    fn measures(&self) -> bool {
+        true
+    }
+
+    fn volumes(&mut self, _: Option<Area>, held: Vec<VolumeKey>) -> Answer<Result<Vec<Arrived>, String>> {
+        let [west, south, east, north] = COVERED;
+        let volume = Volume {
+            frame: RadarVolume {
+                source: "test".into(),
+                time: 1_794_446_561,
+                bounds: RadarBounds { west, south, east, north },
+                levels: vec![],
+                coverage_width: 2,
+                coverage_height: 2,
+            },
+            coverage: vec![1, 0, 0, 0],
+            ..Default::default()
+        };
+        let key = volume.key();
+        Answer::ready(Ok(vec![if held.contains(&key) { Arrived::Held(key) } else { Arrived::New(Arc::new(volume)) }]))
+    }
 }
 
 /// `[r, g, b, a]` drawn at `opacity` over `under`.
@@ -139,4 +193,64 @@ fn the_ohio_valley_draws_the_recorded_mrms_scan() {
     // (W4 found places today's meshing covers twice: those show stacked bands)
     assert!((c.one_band + c.stacked) * 100 >= c.inside * 97, "{} + {} of {} inside are bands at 70 %", c.one_band, c.stacked, c.inside);
     assert!(c.bands.iter().filter(|&&n| n > 0).count() >= 5, "several bands: {:?}", c.bands);
+}
+
+/// V2 with [`Covered`]'s volume: in the quarter it sees RainViewer stands back (not a pixel of
+/// radar where the plain V2 shot has plenty), in the three it does not see RainViewer is drawn as
+/// before, and far from it (east of 22.5° E, past every tile it could touch from zoom 4 up) the
+/// picture is the plain shot's.
+#[test]
+fn rainviewer_stands_back_where_a_measured_volume_sees() {
+    let Some(gpu) = gpu() else { return };
+    let view = V2.view();
+    let base = shot(&gpu, view, false);
+    let plain = shot(&gpu, view, true);
+    let dir = fixtures().fixture.expect("the fixture folder");
+    let covered = shot_with(&gpu, view, true, |state| state.radar = Radar::with_feeds(Some(Box::new(Covered(FixtureFeeds::new(dir))))));
+    save(&covered, "w5-v2-covered.png");
+    let viewport = viewport_for(&view, SIZE.map(f64::from));
+    let [west, south, east, north] = COVERED;
+    let (middle_lon, middle_lat) = ((west + east) / 2.0, (south + north) / 2.0);
+    // clear of the mask's cell edges by more than the blur and the contours reach (5 or more of a
+    // tile's pixels from zoom 4 up)
+    const MARGIN: f64 = 0.5;
+    let within = |low: f64, high: f64, v: f64| v > low + MARGIN && v < high - MARGIN;
+    // `[seen in the plain shot, drawn now, drawn now as in the plain shot]`, radar pixels each
+    let (mut seen, mut unseen, mut far) = ([0usize; 3], [0usize; 3], [0usize; 3]);
+    for y in 0..covered.height {
+        for x in 0..covered.width {
+            let [lon, lat] = viewport.unproject([f64::from(x) + 0.5, f64::from(y) + 0.5], 0.0);
+            let under = base.pixel(x, y);
+            let (was, now) = (plain.pixel(x, y), covered.pixel(x, y));
+            let west_half = within(west, middle_lon, lon);
+            let east_half = within(middle_lon, east, lon);
+            let north_half = within(middle_lat, north, lat);
+            let south_half = within(south, middle_lat, lat);
+            let count = if west_half && north_half {
+                &mut seen
+            } else if (west_half || east_half) && (north_half || south_half) {
+                &mut unseen
+            } else if lon > 22.5 {
+                &mut far
+            } else {
+                continue;
+            };
+            if was != under {
+                count[0] += 1;
+            }
+            if now != under {
+                count[1] += 1;
+                if now == was {
+                    count[2] += 1;
+                }
+            }
+        }
+    }
+    eprintln!("covered: the quarter seen {seen:?}, the three unseen {unseen:?}, far east {far:?} ([radar before, radar now, as before])");
+    assert!(seen[0] > 2_000, "the plain shot has RainViewer in the quarter seen: {seen:?}");
+    assert_eq!(seen[1], 0, "no RainViewer where the volume sees");
+    assert!(unseen[0] > 5_000, "the plain shot has RainViewer in the quarters not seen: {unseen:?}");
+    assert!(unseen[2] * 100 >= unseen[0] * 99 && unseen[1] <= unseen[0] + unseen[0] / 100, "RainViewer as before where the volume does not see: {unseen:?}");
+    assert!(far[0] > 5_000, "{far:?}");
+    assert_eq!((far[1], far[2]), (far[0], far[0]), "far from the volume nothing changes");
 }

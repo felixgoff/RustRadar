@@ -15,8 +15,10 @@
 //! - The tiles themselves are decoded and kept by the map (`map::layers::roofs`: their buildings
 //!   with a height or floors, `scene::overture::TILES_CACHED` tiles, as `tileBuildings` keeps its
 //!   promises), which asks for them through the app's tile fetcher as the source [`NAME`]; the
-//!   fetcher hands those asks to [`tile`] (the network, [`global`]) or, for a `--fixture` folder,
-//!   to an [`Archive::file`] of its [`FIXTURE`].
+//!   app's network fetcher hands those asks to [`tile`] ([`global`]). A `--fixture` folder's
+//!   [`FIXTURE`] is read by the map's own fixture reader (`map::io::DirTiles`, through
+//!   `map::layers::roofs::archive_tile`); the app's tests check that it hands out the very bytes
+//!   [`Archive::file`] reads.
 //!
 //! `scene::overture` has the same constants and the same rule for the release, ported with
 //! `overture.ts` in stage 1; this module cannot see it (the backend depends on `core` only), so

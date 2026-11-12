@@ -102,6 +102,102 @@ mod tests {
         assert_eq!(scene.ground, ground::Input::SHOWN);
     }
 
+    /// The committed fixture folder, which holds a cloud picture (`clouds/`, item X1).
+    fn fixture_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../map/tests/data")
+    }
+
+    /// The scene hands the map the state's cloud picture (R10): none until one has come, then the
+    /// feed's own bytes (shared, not copied).
+    #[test]
+    fn the_scene_hands_the_map_the_cloud_picture() {
+        let mut state = AppState::new(Startup { basemap: Some(Basemap::Realistic), ..Default::default() }, None, None, None, V1, [1100.0, 720.0]);
+        let clocks = Clocks { local_ms: MIDSUMMER, feed_ms: MIDSUMMER };
+        let scene = SceneBuilder::default().build(&mut state, clocks, 1.0);
+        assert!(scene.clouds.picture.is_none());
+        state.clouds = rustradar_backend::clouds::Feed::fixture(fixture_dir());
+        assert!(state.clouds.poll(MIDSUMMER, true), "the fixture's picture is in at the ask");
+        let scene = SceneBuilder::default().build(&mut state, clocks, 1.0);
+        let picture = scene.clouds.picture.expect("the picture handed over");
+        assert!(std::sync::Arc::ptr_eq(&picture.0, &state.clouds.picture().expect("the feed's").jpeg));
+    }
+
+    /// V1 (plan section 8): the whole globe.
+    const V1: ViewState = ViewState { latitude: 35.0, longitude: 10.0, zoom: 1.9, pitch: 0.0, bearing: 0.0, position: None };
+    /// 2026-06-21 10:00 UTC: the reference pictures' summer morning.
+    const MIDSUMMER: f64 = 1_782_036_000_000.0;
+
+    /// R10's acceptance through the whole app (`--screenshot --view 35,10,1.9 --basemap realistic
+    /// --fixture crates/map/tests/data`): the --fixture folder's cloud picture reaches the map and
+    /// is drawn over the globe. Where the picture is clear all round the place a pixel sees at the
+    /// clouds' height, the globe is as without the folder; where it is thick all round and the sun
+    /// is up there, the cloud is white; and many pixels change.
+    #[test]
+    fn v1_shows_the_fixture_clouds_through_the_app() {
+        let Some(gpu) = gpu() else { return };
+        let options = Options {
+            view: Some(V1),
+            basemap: Some(Basemap::Realistic),
+            size: Some(SIZE),
+            scale: Some(1.0),
+            now_ms: Some(MIDSUMMER),
+            ..Default::default()
+        };
+        let labels_off = |state: &mut AppState| state.persisted.settings.labels = false;
+        let bare = headless::render_on_with(&gpu, &options, labels_off).expect("the shot without clouds").image;
+        let with_folder = Options { fixture: Some(fixture_dir()), ..options.clone() };
+        let clouded = headless::render_on_with(&gpu, &with_folder, labels_off).expect("the shot with clouds").image;
+        let jpeg = std::fs::read(fixture_dir().join(rustradar_backend::clouds::FIXTURE)).expect("the fixture's picture");
+        let picture = clouds::decode(&jpeg, 8192, &rustradar_map::jobs::Cancel::new()).expect("decoded");
+        let (w, h) = (i64::from(picture.width), i64::from(picture.height));
+        // the picture's least and most grey (0–1) within 3 texels of `[lon, lat]`
+        let grey = |[lon, lat]: [f64; 2]| {
+            let (x, y) = (((lon + 180.0) / 360.0 * w as f64) as i64, ((85.0 - lat) / 170.0 * h as f64) as i64);
+            let (mut low, mut high) = (255u8, 0u8);
+            for dy in -3..=3 {
+                for dx in -3..=3 {
+                    let g = picture.levels[0][((y + dy).clamp(0, h - 1) * w + (x + dx).rem_euclid(w)) as usize];
+                    (low, high) = (low.min(g), high.max(g));
+                }
+            }
+            (f64::from(low) / 255.0, f64::from(high) / 255.0)
+        };
+        let size = [f64::from(SIZE[0]), f64::from(SIZE[1])];
+        let view = ViewFrame::new(&V1, size, 1.0, 0.0);
+        let look = look::frame_look(&sky::Input { shown: true, weather: None, daylight: true }, &V1, size, MIDSUMMER);
+        let globe = view.viewport.globe().expect("V1 is the globe");
+        let (mut clear, mut thick, mut changed, mut on_globe) = (0, 0, 0, 0);
+        for y in (4..SIZE[1]).step_by(8) {
+            for x in (4..SIZE[0]).step_by(8) {
+                let xy = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+                if globe.ray_distance_to_globe_center_ratio(xy) >= 0.75 {
+                    continue;
+                }
+                let [lon, lat] = view.viewport.unproject(xy, clouds::CLOUD_HEIGHT_M);
+                if lat.abs() > 84.0 {
+                    continue;
+                }
+                on_globe += 1;
+                let (under, over) = (bare.pixel(x, y), clouded.pixel(x, y));
+                if under != over {
+                    changed += 1;
+                }
+                let (low, high) = grey([lon, lat]);
+                let sun = look::twin::vary(&look::RLight::new(&look, &view, 0.0), &view, [lon, lat, clouds::CLOUD_HEIGHT_M]).sun.normalize().z;
+                if high <= 0.33 {
+                    clear += 1;
+                    assert_eq!(over, under, "clear sky at {x},{y}");
+                } else if low >= 0.62 && sun > 0.3 {
+                    thick += 1;
+                    assert!(over[..3].iter().all(|&c| c >= 190), "thick cloud at {x},{y}: {over:?} over {under:?}");
+                }
+            }
+        }
+        eprintln!("V1 through the app: {on_globe} pixels on the globe, {changed} changed, {clear} clear, {thick} thick");
+        assert!(clear > 100 && thick >= 20, "{clear} clear, {thick} thick");
+        assert!(changed * 5 > on_globe, "{changed} of {on_globe} changed");
+    }
+
     fn gpu() -> Option<Gpu> {
         match Gpu::headless() {
             Ok(gpu) => Some(gpu),

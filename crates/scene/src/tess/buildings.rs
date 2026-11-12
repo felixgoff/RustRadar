@@ -855,17 +855,21 @@ pub struct RealisticTile {
     /// What its shadows and foot shade are cast from (extruded tiles only): each polygon's
     /// [`cast_height`] (OpenFreeMap's: its drawn height).
     pub footprints: Footprints,
+    /// Its pitched roofs and their gables (Streets GL's tiles; item R6, `rustradar_map`'s
+    /// `layers::roofs`): triangles, three vertices each, drawn after the buildings through
+    /// `vs_roof`.
+    pub roofs: Vec<RealisticVertex>,
 }
 
 impl RealisticTile {
     /// Whether it draws nothing.
     pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
+        self.indices.is_empty() && self.roofs.is_empty()
     }
 
     /// The bytes it holds (for the tile cache's budget).
     pub fn byte_size(&self) -> usize {
-        size_of_val(self.vertices.as_slice()) + size_of_val(self.indices.as_slice()) + self.footprints.byte_size()
+        size_of_val(self.vertices.as_slice()) + size_of_val(self.indices.as_slice()) + self.footprints.byte_size() + size_of_val(self.roofs.as_slice())
     }
 }
 
@@ -971,12 +975,25 @@ impl RealisticBuilder {
 /// zoom is at least `close_from_zoom` ([`CITY_CLOSE_ZOOM`]), flat otherwise. `cancelled` is asked
 /// between features; once it says so the work stops.
 pub fn tessellate_realistic(tile: TileIndex, bytes: &[u8], close_from_zoom: u32, cancelled: &dyn Fn() -> bool) -> Result<RealisticTile, Cancelled> {
+    tessellate_realistic_with(tile, bytes, close_from_zoom, cancelled, &|_, _| {})
+}
+
+/// [`tessellate_realistic`], with each Streets GL building's properties handed to `adjust` before
+/// they are read, with the building's place among its layer's features (item R6: Overture's
+/// heights, `sglBuildingFetch`).
+pub fn tessellate_realistic_with(
+    tile: TileIndex,
+    bytes: &[u8],
+    close_from_zoom: u32,
+    cancelled: &dyn Fn() -> bool,
+    adjust: &dyn Fn(usize, &mut Properties),
+) -> Result<RealisticTile, Cancelled> {
     let sgl = tile.z >= crate::streets_gl::SGL_ZOOM;
     let mut b = RealisticBuilder::new(tile, tile.z >= close_from_zoom, sgl);
     let name = if sgl { SGL_SOURCE_LAYER } else { SOURCE_LAYER };
     for layer in mvt::layers_named(bytes, &[name]) {
         let heights = Heights::of(&layer);
-        for feature in layer.features() {
+        for (index, feature) in layer.features().enumerate() {
             if cancelled() {
                 return Err(Cancelled);
             }
@@ -987,6 +1004,7 @@ pub fn tessellate_realistic(tile: TileIndex, bytes: &[u8], close_from_zoom: u32,
             if sgl {
                 let mut p = feature.json_properties();
                 p.insert("layerName".into(), serde_json::Value::from(SGL_SOURCE_LAYER));
+                adjust(index, &mut p);
                 let sgl = sgl_building(&p);
                 let height = realistic_height(&p, &sgl);
                 for rings in &polygons {

@@ -53,7 +53,9 @@
 //! Deviations, invisible: the foot shade's path is `rustradar_scene::geom::path`'s segments of
 //! each ring (deck's PathLayer tessellation, made on the main thread when the tile is first drawn,
 //! as deck makes its attributes); a tile's shadow colour is a uniform of its own (deck's constant
-//! `getFillColor`), written again only when it changes.
+//! `getFillColor`), written again only when it changes; the real sun is held by this layer alone
+//! (today's `buildingSun` is one for the dark map's buildings and these, so after a switch of
+//! basemap it may be up to a quarter of a degree older there).
 //!
 //! Cost (K8): V5's 65 Streets GL tiles hold 34 516 foot-shade segments (2.9 MB of instances) and
 //! 17 252 shadow parallelograms at the low sun (1 MB); making all of them takes 18 ms and 10 ms in a

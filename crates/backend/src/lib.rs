@@ -37,6 +37,7 @@ pub mod ships;
 pub mod sth;
 pub mod streets_gl;
 pub mod taxiways;
+pub mod terrain;
 pub mod tiles;
 pub mod trafikverket;
 pub mod train_class;

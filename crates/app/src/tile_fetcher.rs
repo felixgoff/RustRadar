@@ -162,6 +162,11 @@ impl TileFetcher for BackendTiles {
                 if source.name == rustradar_backend::streets_gl::NAME {
                     return rustradar_backend::streets_gl::tile(&tiles, &source, tile.z, tile.x, tile.y).await;
                 }
+                // the 3D surface (Z1): Mapzen's terrarium where Mapterhorn has nothing (`terrainFetch`)
+                if source.name == rustradar_backend::terrain::MAPTERHORN {
+                    let mapzen = sources.resolve(&tiles, io::TERRARIUM).await?;
+                    return rustradar_backend::terrain::tile(&tiles, &source, &mapzen, tile.z, tile.x, tile.y).await;
+                }
                 tiles.tile(&source, tile.z, tile.x, tile.y).await
             };
             let result = tokio::select! {
@@ -371,6 +376,27 @@ mod tests {
         let mut coarser = Fetch::start(&tiles, io::STREETS_GL.into(), TileIndex::new(9014, 4818, 14));
         assert_eq!(answer(&mut coarser), Ok(None));
         assert_eq!(server.paths(), ["/vector/16/36057/19273"]);
+    }
+
+    /// The 3D surface (Z1, `terrainFetch`): a Mapterhorn tile it has nothing for is Mapzen's
+    /// terrarium tile of the same `z/x/y`.
+    #[test]
+    fn mapterhorn_falls_back_to_mapzen() {
+        let server = Server::start(|path| match path {
+            "/mt/16/1/2.webp" => (200, b"webp".to_vec(), Duration::ZERO),
+            "/mz/16/3/4.png" => (200, b"png".to_vec(), Duration::ZERO),
+            _ => (404, Vec::new(), Duration::ZERO),
+        });
+        let cache = TempCache::new("terrain");
+        let sources = TileSources::default();
+        sources.set_template(io::MAPTERHORN, &server.url("/mt/{z}/{x}/{y}.webp"));
+        sources.set_template(io::TERRARIUM, &server.url("/mz/{z}/{x}/{y}.png"));
+        let (tiles, _) = fetcher(&cache, sources);
+        let mut there = Fetch::start(&tiles, io::MAPTERHORN.into(), TileIndex::new(1, 2, 16));
+        assert_eq!(answer(&mut there), Ok(Some(b"webp".to_vec())));
+        let mut stand_in = Fetch::start(&tiles, io::MAPTERHORN.into(), TileIndex::new(3, 4, 16));
+        assert_eq!(answer(&mut stand_in), Ok(Some(b"png".to_vec())));
+        assert_eq!(server.paths(), ["/mt/16/1/2.webp", "/mt/16/3/4.webp", "/mz/16/3/4.png"]);
     }
 
     #[test]

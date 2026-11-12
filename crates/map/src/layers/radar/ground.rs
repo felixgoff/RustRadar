@@ -129,12 +129,19 @@ mod tests {
         let mut scene = SceneInput::new(view, size, 1.0, Basemap::Dark);
         scene.earth = earth::Input::SHOWN;
         scene.vector_map = vector_map::Input::SHOWN;
-        if radar {
-            scene.radar.tiles = tiles::Input { url: Some(FRAME.into()), ..Default::default() };
-        }
         let mut renderer = MapRenderer::new(gpu, FORMAT);
         let tiles: Arc<dyn TileFetcher> = Arc::new(DirTiles::fixtures());
         renderer.set_tiles(tiles, None);
+        let input = tiles::Input { url: Some(FRAME.into()), ..Default::default() };
+        if radar && super::super::lifted::lift_for(view.pitch) > 0.0 {
+            // tilted, the radar layer stands its stack up over the ground too (W3, tested in
+            // `lifted.rs`): the ground layer alone here, last over the map as the radar row is
+            let mut probe = Probe::new(&renderer.init(gpu));
+            probe.input = input;
+            renderer.add_layer(Box::new(probe));
+        } else if radar {
+            scene.radar.tiles = input;
+        }
         let image = render_with(gpu, &mut renderer, &scene, 1.0).expect("rendered");
         assert!(!renderer.pending(), "still loading: {:?}", renderer.pending_layers());
         if let Some(name) = name {

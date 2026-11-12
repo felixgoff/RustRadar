@@ -1048,4 +1048,76 @@ mod tests {
         assert!(road_wet[0] < road_dry[0] - 3.0, "wet asphalt is darker: {road_wet:?} vs {road_dry:?}");
         assert!((rain[0].x - road_wet[0]).abs() <= 3.0 && rain[0].x < road_dry[0] - 3.0);
     }
+
+    /// Doc 04 §6.8's snow: under the snow preset the land lies white (grass in the land's green,
+    /// its `GS_SNOW` 1: the snow's own colour) and the roads take slush (a marked road, its
+    /// `GS_SNOW` 0.5: half way to a greyer white), while ice (id 14) is snow in any weather. Close
+    /// in on the flat map (V5's centre from straight above, under the clouds) at noon, each patch
+    /// within 3 levels of the CPU's twin; and under the same light the snow's ground is whiter
+    /// than the bare ground the twin gives without it.
+    #[test]
+    fn snow_lies_on_the_land_and_slush_on_the_roads() {
+        use rustradar_scene::ground::{ICE, paint};
+        use rustradar_scene::tess::ground::explicit;
+        let Some(gpu) = gpu() else { return };
+        let view = ViewState { latitude: 59.3293, longitude: 18.0686, zoom: 15.5, pitch: 0.0, bearing: 0.0, position: None };
+        let anchor = DVec2::from_array(lng_lat_to_world([view.longitude, view.latitude]));
+        let green = [58, 81, 29];
+        let grass = paint(4, green);
+        let road = paint(32, [255, 255, 255]);
+        let ice = paint(ICE, [255, 255, 255]);
+        let luma = |c: [f64; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let spread = |c: [f64; 3]| c.iter().copied().fold(f64::NEG_INFINITY, f64::max) - c.iter().copied().fold(f64::INFINITY, f64::min);
+        for (name, weather, left, right) in [("snow", PRESETS.snow, grass, road), ("ice", PRESETS.sunny, ice, grass)] {
+            let mut renderer = MapRenderer::new(&gpu, FORMAT);
+            let patches = Patches::new(&renderer.init(&gpu), anchor, explicit(left), explicit(right));
+            renderer.add_layer(Box::new(patches));
+            let mut scene = SceneInput::new(view, SIZE, 1.0, Basemap::Realistic);
+            scene.local_now_ms = MIDSUMMER;
+            scene.sky = sky::Input { shown: true, weather: Some(weather), daylight: true };
+            let image = render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered");
+            save(&image, &format!("r2-ground-snow-{name}.png"));
+            let frame = ViewFrame::new(&view, SIZE, 1.0, 0.0);
+            let look = crate::look::frame_look(&scene.sky, &view, SIZE, MIDSUMMER);
+            assert_eq!(look.snow, weather.snow, "under the clouds: the preset's own weather");
+            let bare = Look { snow: 0.0, ..look };
+            let light = RLight::new(&look, &frame, 0.0);
+            let mut drawn = Vec::new();
+            for (x0, p) in [(400, left), (700, right)] {
+                let id = usize::from(255 - p[3]);
+                let fragment = Fragment::stand_in(id, [p[0], p[1], p[2]]);
+                let mut sum = [0.0; 3];
+                let mut without = [0.0; 3];
+                for (x, y) in [(x0 - 60, 300), (x0, 360), (x0 + 60, 420)] {
+                    let [lon, lat] = frame.viewport.unproject([f64::from(x) + 0.5, f64::from(y) + 0.5], 0.0);
+                    let rl = light::vary(&light, &frame, [lon, lat, 0.0]);
+                    let expected = twin::colour(&look, &rl, &fragment);
+                    let got = image.pixel(x, y);
+                    eprintln!("{name} surface {id} at {x},{y}: {got:?}, CPU {expected:?}");
+                    assert!((0..3).all(|i| (f64::from(got[i]) - expected[i]).abs() <= 3.0), "{name} {id}: {got:?} vs {expected:?}");
+                    let bare = twin::colour(&bare, &rl, &fragment);
+                    for i in 0..3 {
+                        sum[i] += f64::from(got[i]) / 3.0;
+                        without[i] += bare[i] / 3.0;
+                    }
+                }
+                eprintln!("{name} surface {id}: drawn {sum:?}, bare {without:?}");
+                drawn.push((id, sum, without));
+            }
+            if name == "snow" {
+                // the green land white under the snow: brighter and nearly grey; the road's asphalt
+                // lighter with slush, but not as white as the land's snow
+                let (_, grass, bare_grass) = drawn[0];
+                let (_, road, bare_road) = drawn[1];
+                assert!(luma(grass) > luma(bare_grass) + 40.0 && spread(grass) < 0.5 * spread(bare_grass), "{grass:?} against {bare_grass:?}");
+                assert!(luma(road) > luma(bare_road) + 20.0 && luma(road) < luma(grass) - 10.0, "{road:?} against {bare_road:?} and {grass:?}");
+            } else {
+                // in the sun, ice is snow and the grass beside it green
+                let (_, ice, _) = drawn[0];
+                let (_, grass, bare_grass) = drawn[1];
+                assert!((0..3).all(|i| (grass[i] - bare_grass[i]).abs() <= 3.0), "no snow on the grass: {grass:?} vs {bare_grass:?}");
+                assert!(luma(ice) > luma(grass) + 40.0 && spread(ice) < 0.5 * spread(grass), "{ice:?} beside {grass:?}");
+            }
+        }
+    }
 }

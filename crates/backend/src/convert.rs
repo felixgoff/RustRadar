@@ -452,8 +452,8 @@ mod tests {
             time: 1_791_566_100,
             fetched: Instant::now(),
             bounds: dwd,
-            ground: vec![0; 4],
-            levels: vec![(1.0, Some(vec![1])), (1.5, None), (3.0, Some(vec![2])), (12.25, None)],
+            ground: Vec::new(),
+            levels: vec![(1.0, Some(Vec::new())), (1.5, None), (3.0, Some(Vec::new())), (12.25, None)],
             coverage: vec![1, 0],
             coverage_size: (900, 1100),
         };

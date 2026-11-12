@@ -45,7 +45,7 @@ struct Reduced {
     /// 1 where this height has data, for the coverage mask.
     seen: (usize, usize, Vec<u8>),
     /// The layer's isobands, or `None` where nothing reached [`LIFTED_MIN_DBZ`].
-    shapes: Option<Vec<u8>>,
+    shapes: Option<Vec<radar::Polygon>>,
 }
 
 /// A reduced height, or why it couldn't be loaded.
@@ -361,10 +361,10 @@ mod tests {
         let frame = fetch(&reqwest::Client::new()).await.unwrap();
         let info = frame.info();
         println!(
-            "time {} heights {:?} ground {} KB coverage {}x{} in {:?}",
+            "time {} heights {:?} ground {} polygons coverage {}x{} in {:?}",
             info.time,
             info.levels,
-            frame.ground.len() / 1024,
+            frame.ground.len(),
             info.coverage_width,
             info.coverage_height,
             started.elapsed()

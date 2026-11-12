@@ -8,12 +8,22 @@
 //! heights, like RainViewer's everywhere else, are estimated from intensity.
 //!
 //! Layers travel as smooth isobands rather than coloured pixels, so a storm
-//! keeps clean edges however far the globe zooms in. See [`contour`] for the
-//! binary format.
+//! keeps clean edges however far the globe zooms in: [`Polygon`]s in longitude
+//! and latitude, made by [`contour`].
+//!
+//! The native app takes them as they are ([`crate::Backend::radar_volumes`]:
+//! each volume shared, nothing encoded); it triangulates them off the UI thread
+//! (`map::layers::radar::measured`, item W4). Today's frontend gets each layer
+//! as a blob instead ([`Volume::image`], `radar_image`; [`encode`] describes the
+//! format), which is also how the test fixtures record a volume ([`read`]
+//! reads one back; [`decode`] is the blob's inverse).
 
+use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use contour::ContourBuilder;
+use fr24::grpc::BoundingBox;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -31,6 +41,18 @@ pub const LIFTED_MIN_DBZ: f32 = 25.0;
 // A source's region, degrees, and what the globe is told of its volume: `rustradar_core::model`.
 pub use rustradar_core::model::{RadarBounds as Bounds, RadarVolume as VolumeInfo};
 
+/// One filled isoband polygon, in degrees.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Polygon {
+    /// The isoband: [`PALETTE`] index, `[5 + 5·band, 10 + 5·band)` dBZ.
+    pub band: u8,
+    /// `[lon, lat]` rings. Ring 0 is the outer ring and runs counter-clockwise;
+    /// the rest are holes and run clockwise (where the next stronger band sits,
+    /// so the bands never overlap). Closed implicitly: the first point is not
+    /// repeated.
+    pub rings: Vec<Vec<[f32; 2]>>,
+}
+
 /// One source's current scan, reduced to what the globe draws.
 pub struct Volume {
     /// Short name the frontend asks for layers by, e.g. `mrms`.
@@ -39,12 +61,12 @@ pub struct Volume {
     pub time: i64,
     pub fetched: Instant,
     pub bounds: Bounds,
-    /// Isoband shapes ([`contour`]) of the strongest echo at any height, for
-    /// the ground; holds no polygons when nothing reaches [`GROUND_MIN_DBZ`].
-    pub ground: Vec<u8>,
-    /// Isoband shapes per height (km), lowest first; `None` where nothing
-    /// reaches [`LIFTED_MIN_DBZ`].
-    pub levels: Vec<(f32, Option<Vec<u8>>)>,
+    /// Isobands ([`contour`]) of the strongest echo at any height, for the
+    /// ground; empty when nothing reaches [`GROUND_MIN_DBZ`].
+    pub ground: Vec<Polygon>,
+    /// Isobands per height (km), lowest first; `None` where nothing reaches
+    /// [`LIFTED_MIN_DBZ`].
+    pub levels: Vec<(f32, Option<Vec<Polygon>>)>,
     /// One byte per coverage cell, north row first: 1 where a radar sees.
     pub coverage: Vec<u8>,
     pub coverage_size: (u32, u32),
@@ -67,18 +89,28 @@ impl Volume {
         }
     }
 
-    /// `ground`, `coverage`, or a height in km such as `3`.
+    /// The isobands of each height [`Volume::info`] names, in that order.
+    pub fn drawn_levels(&self) -> impl Iterator<Item = (f32, &[Polygon])> {
+        self.levels
+            .iter()
+            .filter_map(|(km, shapes)| shapes.as_deref().map(|s| (*km, s)))
+    }
+
+    /// The isobands of the height `km`, if it has any.
+    pub fn level(&self, km: f32) -> Option<&[Polygon]> {
+        self.levels
+            .iter()
+            .find(|(k, _)| (*k - km).abs() < 0.01)
+            .and_then(|(_, shapes)| shapes.as_deref())
+    }
+
+    /// `ground`, `coverage`, or a height in km such as `3`, as today's
+    /// frontend reads it (`radar_image`): the isobands [`encode`]d, or the mask.
     pub fn image(&self, name: &str) -> Option<Vec<u8>> {
         match name {
-            "ground" => Some(self.ground.clone()),
+            "ground" => Some(encode(&self.ground)),
             "coverage" => Some(self.coverage.clone()),
-            km => {
-                let km: f32 = km.parse().ok()?;
-                self.levels
-                    .iter()
-                    .find(|(k, _)| (*k - km).abs() < 0.01)
-                    .and_then(|(_, shapes)| shapes.clone())
-            }
+            km => self.level(km.parse().ok()?).map(encode),
         }
     }
 }
@@ -92,15 +124,64 @@ impl Volume {
                 .iter()
                 .map(|(km, s)| (format!("{km} km"), s.as_ref())),
         );
-        for (name, blob) in layers {
-            match blob {
-                Some(b) => {
-                    let polygons = u32::from_le_bytes(b[..4].try_into().unwrap());
-                    println!("{name:>8}: {polygons} polygons, {} KB", b.len() / 1024);
-                }
+        for (name, shapes) in layers {
+            match shapes {
+                Some(s) => println!("{name:>8}: {} polygons, {} KB", s.len(), encode(s).len() / 1024),
                 None => println!("{name:>8}: nothing"),
             }
         }
+    }
+}
+
+/// A volume as the test fixtures record it (`cargo xtask fixtures`, item X1):
+/// in `dir`, `volume.json` ([`VolumeInfo`]) and the blobs [`Volume::image`]
+/// serves, `ground.bin`, `coverage.bin` and `<km>.bin` for each height it
+/// names. Blocking file I/O. A source this backend does not know is refused.
+pub fn read(dir: &Path) -> Result<Volume, Error> {
+    let file = |name: &str| {
+        std::fs::read(dir.join(name)).map_err(|e| -> Error { format!("{}: {e}", dir.join(name).display()).into() })
+    };
+    let info: VolumeInfo = serde_json::from_slice(&file("volume.json")?)?;
+    let source = crate::RADAR_SOURCES
+        .iter()
+        .map(|(source, _)| *source)
+        .find(|s| *s == info.source)
+        .ok_or_else(|| format!("no radar source {:?}", info.source))?;
+    let coverage = file("coverage.bin")?;
+    if coverage.len() as u64 != u64::from(info.coverage_width) * u64::from(info.coverage_height) {
+        return Err(format!("{source}'s coverage is not {}x{}", info.coverage_width, info.coverage_height).into());
+    }
+    let levels = info
+        .levels
+        .iter()
+        .map(|&km| Ok((km, Some(decode(&file(&format!("{km}.bin"))?)?))))
+        .collect::<Result<_, Error>>()?;
+    Ok(Volume {
+        source,
+        time: info.time,
+        fetched: Instant::now(),
+        bounds: info.bounds,
+        ground: decode(&file("ground.bin")?)?,
+        levels,
+        coverage,
+        coverage_size: (info.coverage_width, info.coverage_height),
+    })
+}
+
+impl crate::Backend {
+    /// The newest 3D radar volumes for the sources visible in `area` (or
+    /// everywhere, when it is `None`), whole: what [`crate::Backend::radar_frame`]
+    /// describes, fetched as it fetches them, with each layer's isobands as
+    /// [`Polygon`]s instead of `radar_image`'s blobs. The volumes are shared
+    /// with the backend's cache, not copied.
+    pub async fn radar_volumes(&self, area: Option<BoundingBox>) -> crate::CmdResult<Vec<Arc<Volume>>> {
+        let frames = self.radar_frame(area).await?;
+        let held = self.inner.radar.lock().await;
+        // (a refresh that landed since is as good: it is newer)
+        Ok(frames
+            .iter()
+            .filter_map(|frame| held.get(frame.source.as_str()).cloned())
+            .collect())
     }
 }
 
@@ -153,16 +234,55 @@ const MIN_AREA_CELLS: f64 = 2.0;
 /// Side of the buckets holes look their enclosing ring up in, in cells.
 const BUCKET_CELLS: usize = 32;
 
-/// Filled isobands of a dBZ grid, encoded for the frontend, or `None` when
+/// Filled isobands of a dBZ grid in longitude and latitude, or `None` when
 /// no band at or above `min_dbz` survives.
 ///
 /// `values` is `w`×`h`, north row first, on plain latitude and longitude
 /// spanning `bounds` (each value the centre of its cell). Anything not finite
 /// counts as no echo. Bands start at the one holding `min_dbz` and are
 /// disjoint: each has holes punched where the next stronger band sits, so
-/// translucent fills never overlap.
-///
-/// The blob is little-endian:
+/// translucent fills never overlap. Rings run as [`Polygon`] says.
+pub fn contour(
+    w: usize,
+    h: usize,
+    values: &[f32],
+    bounds: Bounds,
+    min_dbz: f32,
+) -> Option<Vec<Polygon>> {
+    let shapes = isobands(w, h, values, min_dbz);
+    if shapes.is_empty() {
+        return None;
+    }
+    let sx = (bounds.east - bounds.west) / w as f64;
+    let sy = (bounds.north - bounds.south) / h as f64;
+    let to_lonlat = |[x, y]: [f32; 2]| {
+        [
+            (bounds.west + f64::from(x) * sx) as f32,
+            (bounds.south + f64::from(y) * sy) as f32,
+        ]
+    };
+    Some(
+        shapes
+            .into_iter()
+            .map(|shape| Polygon {
+                band: shape.band,
+                rings: shape
+                    .rings
+                    .into_iter()
+                    .map(|ring| ring.into_iter().map(to_lonlat).collect())
+                    .collect(),
+            })
+            .collect(),
+    )
+}
+
+/// A layer with nothing to draw.
+pub fn no_shapes() -> Vec<Polygon> {
+    Vec::new()
+}
+
+/// Isobands as the blob today's frontend reads (`radar_image`,
+/// `parseVolumePolygons`), little-endian:
 ///
 /// ```text
 /// u32 polygon_count
@@ -171,33 +291,74 @@ const BUCKET_CELLS: usize = 32;
 ///   per ring:  u32 point_count, then point_count × (f32 lon, f32 lat)
 /// ```
 ///
-/// Ring 0 is the outer ring and runs counter-clockwise in lon/lat; the rest
-/// are holes and run clockwise. Rings are closed implicitly: the first point
-/// is not repeated.
-pub fn contour(
-    w: usize,
-    h: usize,
-    values: &[f32],
-    bounds: Bounds,
-    min_dbz: f32,
-) -> Option<Vec<u8>> {
-    let shapes = isobands(w, h, values, min_dbz);
-    if shapes.is_empty() {
-        return None;
+/// Rings as in [`Polygon`]. No polygons is the count 0 alone.
+pub fn encode(polygons: &[Polygon]) -> Vec<u8> {
+    let points: usize = polygons
+        .iter()
+        .flat_map(|s| &s.rings)
+        .map(|r| 4 + r.len() * 8)
+        .sum();
+    let mut out = Vec::with_capacity(4 + polygons.len() * 8 + points);
+    out.extend_from_slice(&(polygons.len() as u32).to_le_bytes());
+    for polygon in polygons {
+        out.push(polygon.band);
+        out.push(0);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(polygon.rings.len() as u32).to_le_bytes());
+        for ring in &polygon.rings {
+            out.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+            for &[lon, lat] in ring {
+                out.extend_from_slice(&lon.to_le_bytes());
+                out.extend_from_slice(&lat.to_le_bytes());
+            }
+        }
     }
-    let sx = (bounds.east - bounds.west) / w as f64;
-    let sy = (bounds.north - bounds.south) / h as f64;
-    Some(encode_shapes(&shapes, |[x, y]| {
-        [
-            (bounds.west + f64::from(x) * sx) as f32,
-            (bounds.south + f64::from(y) * sy) as f32,
-        ]
-    }))
+    out
 }
 
-/// A layer with nothing to draw.
-pub fn no_shapes() -> Vec<u8> {
-    0u32.to_le_bytes().to_vec()
+/// The polygons of an [`encode`]d blob, exactly as they went in. An error
+/// for a blob that ends before its counts say, or carries bytes past them.
+pub fn decode(blob: &[u8]) -> Result<Vec<Polygon>, Error> {
+    /// The next `n` bytes of `blob` from `at`, moving `at` past them.
+    fn take<'a>(blob: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8], Error> {
+        let bytes = at
+            .checked_add(n)
+            .and_then(|end| blob.get(*at..end))
+            .ok_or_else(|| format!("radar shapes end at byte {}, before {at} + {n}", blob.len()))?;
+        *at += n;
+        Ok(bytes)
+    }
+    let word = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    let mut at = 0;
+    let count = word(take(blob, &mut at, 4)?);
+    // every polygon takes 8 bytes at least: a count past that is no blob of ours
+    let mut polygons = Vec::with_capacity((count as usize).min(blob.len() / 8));
+    for _ in 0..count {
+        let head = take(blob, &mut at, 8)?;
+        let (band, rings) = (head[0], word(&head[4..8]));
+        let mut out = Vec::with_capacity((rings as usize).min(blob.len() / 4));
+        for _ in 0..rings {
+            let points = word(take(blob, &mut at, 4)?) as usize;
+            let n = points.checked_mul(8).ok_or("radar shapes: too many points")?;
+            let bytes = take(blob, &mut at, n)?;
+            out.push(
+                bytes
+                    .chunks_exact(8)
+                    .map(|p| {
+                        [
+                            f32::from_le_bytes([p[0], p[1], p[2], p[3]]),
+                            f32::from_le_bytes([p[4], p[5], p[6], p[7]]),
+                        ]
+                    })
+                    .collect(),
+            );
+        }
+        polygons.push(Polygon { band, rings: out });
+    }
+    if at != blob.len() {
+        return Err(format!("radar shapes: {} bytes past the last polygon", blob.len() - at).into());
+    }
+    Ok(polygons)
 }
 
 /// One isoband polygon in grid coordinates: x eastward and y northward, in
@@ -206,31 +367,6 @@ struct Shape {
     band: u8,
     /// Outer ring first (counter-clockwise), then holes (clockwise).
     rings: Vec<Vec<[f32; 2]>>,
-}
-
-fn encode_shapes(shapes: &[Shape], to_lonlat: impl Fn([f32; 2]) -> [f32; 2]) -> Vec<u8> {
-    let points: usize = shapes
-        .iter()
-        .flat_map(|s| &s.rings)
-        .map(|r| 4 + r.len() * 8)
-        .sum();
-    let mut out = Vec::with_capacity(4 + shapes.len() * 4 + points);
-    out.extend_from_slice(&(shapes.len() as u32).to_le_bytes());
-    for shape in shapes {
-        out.push(shape.band);
-        out.push(0);
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&(shape.rings.len() as u32).to_le_bytes());
-        for ring in &shape.rings {
-            out.extend_from_slice(&(ring.len() as u32).to_le_bytes());
-            for &p in ring {
-                let [lon, lat] = to_lonlat(p);
-                out.extend_from_slice(&lon.to_le_bytes());
-                out.extend_from_slice(&lat.to_le_bytes());
-            }
-        }
-    }
-    out
 }
 
 /// A closed contour ring in grid coordinates (see [`Shape`]).
@@ -508,10 +644,11 @@ fn simplify(points: &[[f32; 2]], epsilon: f32) -> Vec<[f32; 2]> {
 mod tests {
     use super::*;
 
-    type Polygon = (u8, Vec<Vec<[f32; 2]>>);
+    /// An isoband as the blob today's frontend reads carries it: band and rings.
+    type Shape = (u8, Vec<Vec<[f32; 2]>>);
 
     /// Reads a blob back, checking it is consumed exactly.
-    fn parse(blob: &[u8]) -> Vec<Polygon> {
+    fn parse(blob: &[u8]) -> Vec<Shape> {
         let mut at = 0;
         let mut take = |n: usize| {
             let s = &blob[at..at + n];
@@ -546,6 +683,11 @@ mod tests {
         out
     }
 
+    /// The isobands as the frontend would read them: through the blob.
+    fn wire(polygons: &[Polygon]) -> Vec<Shape> {
+        parse(&encode(polygons))
+    }
+
     const BOX: Bounds = Bounds {
         west: 0.0,
         south: 50.0,
@@ -569,7 +711,7 @@ mod tests {
         grid
     }
 
-    fn inside(polygon: &Polygon, p: [f32; 2]) -> bool {
+    fn inside(polygon: &Shape, p: [f32; 2]) -> bool {
         point_in_ring(&polygon.1[0], p) && !polygon.1[1..].iter().any(|h| point_in_ring(h, p))
     }
 
@@ -586,13 +728,13 @@ mod tests {
         assert!(contour(4, 4, &quiet, BOX, LIFTED_MIN_DBZ).is_none());
         let unseen = vec![f32::NEG_INFINITY; 16];
         assert!(contour(4, 4, &unseen, BOX, GROUND_MIN_DBZ).is_none());
-        assert_eq!(parse(&no_shapes()).len(), 0);
+        assert_eq!(parse(&encode(&no_shapes())).len(), 0);
+        assert_eq!(encode(&no_shapes()), 0u32.to_le_bytes());
     }
 
     #[test]
     fn a_round_storm_makes_nested_disjoint_bands() {
-        let blob = contour(80, 80, &storm(), BOX, GROUND_MIN_DBZ).unwrap();
-        let polygons = parse(&blob);
+        let polygons = wire(&contour(80, 80, &storm(), BOX, GROUND_MIN_DBZ).unwrap());
         let bands: Vec<u8> = polygons.iter().map(|p| p.0).collect();
         // one ring of each band from 5 dBZ up to the core
         let top = *bands.iter().max().unwrap();
@@ -650,8 +792,7 @@ mod tests {
 
     #[test]
     fn lifted_layers_start_at_their_minimum() {
-        let blob = contour(80, 80, &storm(), BOX, LIFTED_MIN_DBZ).unwrap();
-        let polygons = parse(&blob);
+        let polygons = wire(&contour(80, 80, &storm(), BOX, LIFTED_MIN_DBZ).unwrap());
         assert!(
             polygons
                 .iter()
@@ -695,11 +836,189 @@ mod tests {
                 }
             }
         }
-        let polygons = parse(&contour(w, h, &grid, BOX, GROUND_MIN_DBZ).unwrap());
+        let polygons = wire(&contour(w, h, &grid, BOX, GROUND_MIN_DBZ).unwrap());
         let light: Vec<_> = polygons.iter().filter(|p| p.0 == 0).collect();
         assert_eq!(light.len(), 1);
         // 19 × 19 showers, each punched out of the light rain
         assert_eq!(light[0].1.len(), 1 + 19 * 19);
+    }
+
+    /// The structs are what the blob carries, value for value, and come back
+    /// out of it unchanged.
+    #[test]
+    fn polygons_are_the_blob_s_shapes() {
+        let polygons = contour(80, 80, &storm(), BOX, GROUND_MIN_DBZ).unwrap();
+        let shapes: Vec<Shape> = polygons.iter().map(|p| (p.band, p.rings.clone())).collect();
+        assert_eq!(wire(&polygons), shapes);
+        assert_eq!(decode(&encode(&polygons)).unwrap(), polygons);
+        assert_eq!(decode(&encode(&no_shapes())).unwrap(), no_shapes());
+    }
+
+    /// A blob that ends early, or runs on past its last polygon, is refused.
+    #[test]
+    fn broken_blobs_are_refused() {
+        let blob = encode(&contour(80, 80, &storm(), BOX, GROUND_MIN_DBZ).unwrap());
+        for end in [0, 3, 4 + 7, blob.len() / 2, blob.len() - 1] {
+            assert!(decode(&blob[..end]).is_err(), "cut at {end}");
+        }
+        let mut longer = blob.clone();
+        longer.push(0);
+        assert!(decode(&longer).is_err());
+        // a count no blob of this size could hold
+        let mut huge = u32::MAX.to_le_bytes().to_vec();
+        huge.extend_from_slice(&[1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+        assert!(decode(&huge).is_err());
+    }
+
+    fn recorded() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../map/tests/data/radar/mrms")
+    }
+
+    /// The committed MRMS volume (X1) reads back into the volume the backend
+    /// had, and serves its blobs byte for byte as they were recorded.
+    #[test]
+    fn a_recorded_volume_reads_back() {
+        let dir = recorded();
+        let volume = read(&dir).unwrap();
+        let info: VolumeInfo =
+            serde_json::from_slice(&std::fs::read(dir.join("volume.json")).unwrap()).unwrap();
+        assert_eq!(volume.info(), info);
+        assert_eq!((volume.source, volume.bounds), ("mrms", crate::mrms::BOUNDS));
+        assert_eq!(volume.coverage_size, (700, 350));
+        assert!(volume.coverage.contains(&1) && volume.coverage.contains(&0));
+        assert_eq!(volume.drawn_levels().map(|(km, _)| km).collect::<Vec<_>>(), crate::mrms::LEVELS_KM);
+        for name in ["ground".to_owned(), "coverage".to_owned()]
+            .into_iter()
+            .chain(info.levels.iter().map(|km| km.to_string()))
+        {
+            let file = std::fs::read(dir.join(format!("{name}.bin"))).unwrap();
+            assert_eq!(volume.image(&name).unwrap(), file, "{name}");
+        }
+        assert!(volume.image("13").is_none() && volume.image("radar").is_none());
+        // the shapes are the contouring's: every band in the palette, rings of
+        // three points at least, in the source's bounds
+        let b = volume.bounds;
+        for polygon in volume.ground.iter().chain(volume.drawn_levels().flat_map(|(_, s)| s)) {
+            assert!(usize::from(polygon.band) < PALETTE.len());
+            for ring in &polygon.rings {
+                assert!(ring.len() >= 3);
+                for &[lon, lat] in ring {
+                    let (lon, lat) = (f64::from(lon), f64::from(lat));
+                    assert!(lon >= b.west - 1e-3 && lon <= b.east + 1e-3 && lat >= b.south - 1e-3 && lat <= b.north + 1e-3);
+                }
+            }
+        }
+        // aloft only moderate rain and stronger
+        let lifted = band_of(LIFTED_MIN_DBZ) as u8;
+        assert!(volume.drawn_levels().all(|(_, s)| s.iter().all(|p| p.band >= lifted)));
+        assert_eq!(volume.level(2.0), volume.drawn_levels().nth(1).map(|(_, s)| s));
+    }
+
+    #[test]
+    fn a_recorded_volume_needs_its_files() {
+        let temp = std::env::temp_dir().join(format!("rustradar-radar-recorded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        for file in ["volume.json", "ground.bin", "coverage.bin"] {
+            std::fs::copy(recorded().join(file), temp.join(file)).unwrap();
+        }
+        // a height it names is missing
+        assert!(read(&temp).is_err());
+        let json = std::fs::read_to_string(recorded().join("volume.json")).unwrap();
+        let no_heights = json.replace(
+            &json[json.find("\"levels\"").unwrap()..json.find("\"coverageWidth\"").unwrap()],
+            "\"levels\": [],\n  ",
+        );
+        std::fs::write(temp.join("volume.json"), &no_heights).unwrap();
+        let volume = read(&temp).unwrap();
+        assert!(volume.levels.is_empty() && !volume.ground.is_empty());
+        // nor a source the backend does not know, or a mask of the wrong size
+        std::fs::write(temp.join("volume.json"), no_heights.replace("\"mrms\"", "\"nexrad\"")).unwrap();
+        assert!(read(&temp).is_err());
+        std::fs::write(temp.join("volume.json"), no_heights.replace("700", "701")).unwrap();
+        assert!(read(&temp).is_err());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The native app's ask hands over the volumes held, shared and whole,
+    /// for the sources in view; a fresh one is not fetched again.
+    #[test]
+    fn volumes_are_handed_over_as_held() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let root = std::env::temp_dir().join(format!("rustradar-radar-volumes-{}", std::process::id()));
+        let dirs = crate::Dirs { cache: root.join("cache"), config: root.join("config"), downloads: None };
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let backend = crate::Backend::with(fr24::Fr24::new().unwrap(), dirs, rt.handle().clone(), crate::Notifier::new(tx, Arc::new(|| {})));
+        let volume = Arc::new(read(&recorded()).unwrap());
+        rt.block_on(async {
+            backend.inner.radar.lock().await.insert("mrms", Arc::clone(&volume));
+            // the plains: MRMS, held and fresh, so nothing goes out
+            let plains = BoundingBox { north: 45.0, south: 35.0, west: -105.0, east: -95.0 };
+            let given = backend.radar_volumes(Some(plains)).await.unwrap();
+            assert_eq!(given.len(), 1);
+            assert!(Arc::ptr_eq(&given[0], &volume));
+            assert_eq!(backend.radar_frame(Some(plains)).await.unwrap(), vec![volume.info()]);
+            assert_eq!(backend.radar_image("mrms", "ground").await.unwrap(), encode(&volume.ground));
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// DWD's composite can no longer be fetched (its folder holds ODIM HDF5
+    /// now, X1), so its volume is built here the way `dwd::fetch` builds one
+    /// from a decoded grid: the ground, then each height keeping the echoes
+    /// whose estimated top reaches it. It is handed over for a view of
+    /// central Europe.
+    #[test]
+    fn a_dwd_volume_built_from_a_grid_is_handed_over_for_europe() {
+        let bounds = crate::RADAR_SOURCES[1].1;
+        let (w, h) = (80, 80);
+        let grid = storm();
+        let echo_top = |dbz: f32| (2.0 + (dbz - 10.0) * 0.22).clamp(1.0, 12.0);
+        let levels: Vec<(f32, Option<Vec<Polygon>>)> = [1.5f32, 3.0, 4.5, 6.0, 8.0, 10.0, 12.0]
+            .into_iter()
+            .map(|km| {
+                let aloft: Vec<f32> = grid
+                    .iter()
+                    .map(|&v| if v.is_finite() && echo_top(v) >= km { v } else { f32::NEG_INFINITY })
+                    .collect();
+                (km, contour(w, h, &aloft, bounds, LIFTED_MIN_DBZ))
+            })
+            .collect();
+        let volume = Arc::new(Volume {
+            source: "dwd",
+            time: 1_794_446_400,
+            fetched: Instant::now(),
+            bounds,
+            ground: contour(w, h, &grid, bounds, GROUND_MIN_DBZ).unwrap_or_else(no_shapes),
+            levels,
+            coverage: grid.iter().step_by(8).map(|v| u8::from(v.is_finite())).collect(),
+            coverage_size: (10, 80),
+        });
+        // the storm's 62 dBZ core reaches 13 km by the fit (12 at most), its
+        // 25 dBZ edge only 5.3: the stack narrows with height and every level
+        // has something
+        let info = volume.info();
+        assert_eq!(info.levels, [1.5, 3.0, 4.5, 6.0, 8.0, 10.0, 12.0]);
+        let widths: Vec<f32> = volume
+            .drawn_levels()
+            .map(|(_, shapes)| shapes.iter().flat_map(|p| &p.rings[0]).map(|p| p[0]).fold(f32::MIN, f32::max))
+            .collect();
+        assert!(widths.windows(2).all(|w| w[1] <= w[0]), "{widths:?}");
+        assert!(volume.ground.len() > volume.level(12.0).unwrap().len());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let root = std::env::temp_dir().join(format!("rustradar-radar-dwd-{}", std::process::id()));
+        let dirs = crate::Dirs { cache: root.join("cache"), config: root.join("config"), downloads: None };
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let backend = crate::Backend::with(fr24::Fr24::new().unwrap(), dirs, rt.handle().clone(), crate::Notifier::new(tx, Arc::new(|| {})));
+        rt.block_on(async {
+            backend.inner.radar.lock().await.insert("dwd", Arc::clone(&volume));
+            let europe = BoundingBox { north: 54.0, south: 47.0, west: 5.0, east: 15.0 };
+            let given = backend.radar_volumes(Some(europe)).await.unwrap();
+            assert_eq!(given.len(), 1);
+            assert!(Arc::ptr_eq(&given[0], &volume));
+            assert_eq!(decode(&backend.radar_image("dwd", "4.5").await.unwrap()).unwrap(), volume.level(4.5).unwrap());
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

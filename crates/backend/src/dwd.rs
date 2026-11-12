@@ -497,14 +497,14 @@ mod tests {
         let volume = fetch(&reqwest::Client::new()).await.unwrap();
         let info = volume.info();
         println!(
-            "time {} heights {:?}\nbounds {:.2}..{:.2}E {:.2}..{:.2}N  ground {} KB  coverage {}x{}  in {:?}",
+            "time {} heights {:?}\nbounds {:.2}..{:.2}E {:.2}..{:.2}N  ground {} polygons  coverage {}x{}  in {:?}",
             info.time,
             info.levels,
             info.bounds.west,
             info.bounds.east,
             info.bounds.south,
             info.bounds.north,
-            volume.ground.len() / 1024,
+            volume.ground.len(),
             info.coverage_width,
             info.coverage_height,
             started.elapsed()

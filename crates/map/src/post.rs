@@ -14,7 +14,7 @@
 //!   is the composite's picture, texel for texel.
 //! - **Rain** (`RainOverlay.svelte`, shown by `updateLook`'s `showRain`, G:3640-3660; [`Rain`]), in a
 //!   scene that has the overlay ([`Input::rain`]: the app's always does): while it rains where the
-//!   camera is (the weather under the clouds' `rain`, [`look::weather_here`]),
+//!   camera is (the weather under the clouds' `rain`, [`crate::look::weather_here`]),
 //!   at least [`MIN_AMOUNT`], streaks in three depths ([`DEPTHS`]), their number by the canvas's
 //!   area and the rain, slanting [`SLANT`] in the wind, shorter as the camera looks down
 //!   (`lengthen`), dimmer at night. The rain, the tilt and the night are taken in steps
@@ -601,6 +601,10 @@ impl Post {
     /// fall since the last frame.
     pub fn prepare(&mut self, scene: &SceneInput, view: &ViewFrame, now_ms: f64) {
         self.tilt_shift = scene.basemap == Basemap::Realistic && scene.post.tilt_shift;
+        if !self.tilt_shift {
+            // its two map-sized textures go with it
+            self.blurs = None;
+        }
         self.css_size = view.size;
         let shown = if scene.post.rain { rain_shown(scene.basemap, &scene.sky, &view.view, view.size, now_ms) } else { RainShown::NONE };
         self.rain.show(shown, view.size, now_ms);

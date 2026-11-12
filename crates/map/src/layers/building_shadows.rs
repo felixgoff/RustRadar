@@ -45,7 +45,8 @@
 //! on the ground (every azimuth tried against the footprints) lies within 3° of the real one
 //! (0.08° here), the opposite sun holding far fewer; where two or more of the CPU's
 //! parallelograms overlap the picture is darkened once, and nowhere is it darker than one layer of
-//! shade. Close in, the foot shade's alpha falls from 0.42 at the wall to nothing 2.5 m out as
+//! shade. Over the whole city ground (whose tile clips use the stencil and leave it at 0) the
+//! same holds. Close in, the foot shade's alpha falls from 0.42 at the wall to nothing 2.5 m out as
 //! `FootShadeExtension` has it. With *daylight* off the shadows are the afternoon sun's (215°);
 //! when the sun moves the tiles are recast to exactly what a fresh cast draws; at night the
 //! strength is 0 and no tile casts.
@@ -825,6 +826,62 @@ mod tests {
         eprintln!("under two or more parallelograms: {once} px darkened once, {twice} twice");
         assert!(once > 2_000, "{once}");
         assert_eq!(twice, 0);
+    }
+
+    /// The same sun over the whole realistic ground (the city ground's tiles, whose passes clip
+    /// each tile with the stencil and must leave it at 0, then the buildings): the shadows still
+    /// lie on the roads, water and gardens at the tile's alpha times `rl_clear`, darkened once
+    /// where parallelograms overlap, nowhere darker than one layer of shade (but for a stray
+    /// pixel of a wall's foot whose colour happens to fit a blend).
+    #[test]
+    fn v5_over_the_city_ground_the_shadows_lie_on_it_once() {
+        let Some(gpu) = gpu() else { return };
+        let fixtures = Arc::new(DirTiles::fixtures());
+        let mut renderer = MapRenderer::new(&gpu, FORMAT);
+        renderer.set_tiles(fixtures.clone(), None);
+        let mut shot = |buildings: bool| {
+            let image = render_with(&gpu, &mut renderer, &realistic(V5, V5_SIZE, LOW_SUN, buildings, true), 1.0).expect("rendered");
+            assert!(!renderer.pending(), "{:?}", renderer.pending_layers());
+            image
+        };
+        let (with, bare) = (shot(true), shot(false));
+        assert!(fixtures.misses().is_empty(), "the fixtures lack {:?}", fixtures.misses());
+        with.save_png(&shots_dir().join("r5-v5-low-sun-ground.png")).expect("png");
+
+        let view = ViewFrame::new(&V5, V5_SIZE, 1.0, 0.0);
+        let look = frame_look(&realistic(V5, V5_SIZE, LOW_SUN, true, true).sky, &V5, V5_SIZE, LOW_SUN);
+        let light = RLight::new(&look, &view, 0.0);
+        let (_, altitude) = sun_at(&V5, LOW_SUN);
+        let single = f64::from(shadow_color(BUILDING_SHADOW_ALPHA * sunlight(altitude.to_radians().sin()), shadow_strength(&look))[3]) / 255.0;
+        let foot = f64::from(foot_color()[3]) / 255.0;
+        let ground = Ground::new(&V5);
+        let cast = Quads::new(&near_tiles(&view), &ground, sun_direction(LOW_SUN));
+        let (mut shadows, mut blends, mut darker, mut darkest) = (0, 0, 0, f64::NEG_INFINITY);
+        let (mut once, mut twice) = (0, 0);
+        for y in 0..V5_SIZE[1] as u32 {
+            for x in 0..V5_SIZE[0] as u32 {
+                let Some(a) = blended(bare.pixel(x, y), with.pixel(x, y)) else { continue };
+                let ll = view.viewport.unproject([f64::from(x) + 0.5, f64::from(y) + 0.5], 0.0);
+                let c = twin::clear(&look, &twin::vary(&light, &view, [ll[0], ll[1], 0.0]));
+                let is_single = (a - single * c).abs() <= 0.03;
+                blends += 1;
+                shadows += usize::from(is_single);
+                darkest = darkest.max(a - foot * c);
+                darker += usize::from(a - foot * c > 0.03);
+                if cast.count(ground.lng_lat(ll)) >= 2 {
+                    once += usize::from(is_single);
+                    twice += usize::from((a - (1.0 - (1.0 - single * c).powi(2))).abs() <= 0.03);
+                }
+            }
+        }
+        eprintln!(
+            "over the city ground: {blends} px blended once with the shadow colour, {shadows} at the shadows' {single:.4} × rl_clear; under two or more parallelograms {once} once, {twice} twice; {darker} darker than the foot shade (the darkest {darkest:+.4} past it)"
+        );
+        assert!(shadows > 30_000, "{shadows}");
+        assert!(once > 2_000, "{once}");
+        assert_eq!(twice, 0);
+        // (a wall's antialiased foot over a road can pass for a blend now and then)
+        assert!(darker * 10_000 < blends, "{darker} of {blends}");
     }
 
     /// The walls of `tiles`' buildings on the ground, metres about the view's centre: each ring's

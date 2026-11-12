@@ -4,10 +4,11 @@
 //! faces culled, depth-tested against the earth sphere, no depth written), lit by the realistic
 //! light (`lib/rlight.wgsl`). The sea and everything else is drawn over it.
 //!
-//! Drawn when the scene asks for the realistic map (`SceneInput::sky`'s `shown`, which the app's
-//! realistic scene builder sets) on the realistic basemap. The rectangle is cut as deck cuts it on
-//! the globe (the earth layer's [`land_mesh`]: math.gl's
-//! 5° grid, earcut per part), in one local Mercator frame for the world; on the flat map the world's
+//! Drawn on the realistic basemap when the scene asks for the realistic map (`SceneInput::sky`'s
+//! `shown`, which the app's realistic scene builder sets) and for the earth and its land
+//! (`SceneInput::earth`'s `shown`, as the dark map's land; so a test can draw the sky alone). The
+//! rectangle is cut as deck cuts it on the globe (the earth layer's [`land_mesh`]: math.gl's 5°
+//! grid, earcut per part), in one local Mercator frame for the world; on the flat map the world's
 //! copies west and east are drawn too, as the dark map's land does.
 //!
 //! **Untextured until R2.** This is doc 04 §16.4's first step, "flat untextured ground": the
@@ -153,7 +154,7 @@ impl Layer for GroundLand {
 
     fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
         self.slots.clear();
-        if !cx.scene.sky.shown || cx.scene.basemap != Basemap::Realistic {
+        if !cx.scene.sky.shown || !cx.scene.earth.shown || cx.scene.basemap != Basemap::Realistic {
             return;
         }
         self.light.prepare(cx);

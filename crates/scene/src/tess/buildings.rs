@@ -569,8 +569,10 @@ impl ShadowSun {
 //   normal), and its texture coordinates worked out here as `rbuildInject`'s vertex part does on
 //   the GPU: whole 4 m bays to the wall (`round(length / 4)`, the wall's own length in metres;
 //   none: the plain wall, `length / 4` across), whole 3.3 m storeys to the building (at least
-//   one), `uv = (along · bays, up · storeys)`. Roofs flat at the height, earcut's triangles as the
-//   plain buildings'; their texture lies fixed to the world (the shader's `rl_t`).
+//   one), `uv = (along · bays, up · storeys)`, `along` from the edge's end to its start as deck's
+//   side of a counter-clockwise ring runs (so the façade reads left to right from outside, and
+//   the same windows are lit at night). Roofs flat at the height, earcut's triangles as the plain
+//   buildings'; their texture lies fixed to the world (the shader's `rl_t`).
 // - **Far tiles** (zoom 13, under [`CITY_CLOSE_ZOOM`]): the footprints flat on the ground in the
 //   building's colour, alpha `255 − code` as deck's `fillColors` has it, no walls, unlit (the
 //   building shader needs `extruded`): what the plan's section 7 decided ("as today").
@@ -932,11 +934,15 @@ impl RealisticBuilder {
                         let normal = [dv, du, 0.0];
                         let style = [facade, roof, ROOF_WORLD, STYLE_WALL | if bays > 0.5 { STYLE_BAYS } else { 0 }];
                         let base = out.vertices.len() as u32;
+                        // deck's side of a counter-clockwise ring (`RING_WINDING_ORDER_CW` 0) runs
+                        // from the edge's end back to its start (`pos` is the next vertex), so its
+                        // `positions.x`, and the texture's u, grows from there: along
+                        // `cross(up, normal)`, left to right seen from outside
                         for ([u, v, h], uv) in [
-                            ([u0, v0, 0.0], [0.0, 0.0]),
-                            ([u1, v1, 0.0], [across, 0.0]),
-                            ([u1, v1, height], [across, levels]),
-                            ([u0, v0, height], [0.0, levels]),
+                            ([u1, v1, 0.0], [0.0, 0.0]),
+                            ([u0, v0, 0.0], [across, 0.0]),
+                            ([u0, v0, height], [across, levels]),
+                            ([u1, v1, height], [0.0, levels]),
                         ] {
                             out.vertices.push(RealisticVertex { position: [u, v, h], normal, uv, tint, style });
                         }
@@ -1511,7 +1517,15 @@ mod tests {
             let mid = [(wall[0].position[0] + wall[1].position[0]) / 2.0, (wall[0].position[1] + wall[1].position[1]) / 2.0];
             let n = wall[0].normal;
             assert!(n[0] * (mid[0] - 0.375) - n[1] * (mid[1] - 0.375) > 0.0);
+            // u grows as deck's side of a counter-clockwise ring runs, from the edge's end back to
+            // its start: along `cross(up, n)` (east, north), left to right seen from outside
+            let along = [wall[1].position[0] - wall[0].position[0], wall[0].position[1] - wall[1].position[1]];
+            let tangent = [-n[1], n[0]];
+            assert!(along[0] * tangent[0] + along[1] * tangent[1] > 0.0, "{along:?} against {tangent:?}");
         }
+        // the first wall is the outline's first edge, from its second corner back to its first
+        let ring = [SQUARE[0], SQUARE[1]].map(|(x, y)| [x as f32 / 4096.0, y as f32 / 4096.0]);
+        assert_eq!([walls[0].position, walls[1].position].map(|p| [p[0], p[1]]), [ring[1], ring[0]]);
         let roof = &out.vertices[16..21];
         assert!(roof.iter().all(|v| v.position[2] == 20.0 && v.normal == [0.0, 0.0, 1.0] && v.uv == [0.0, 0.0] && v.style[3] == 0 && v.tint == tint));
         // the sliver's short walls: no bay, the plain wall a fraction across

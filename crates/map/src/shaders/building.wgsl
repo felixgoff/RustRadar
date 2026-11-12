@@ -18,8 +18,9 @@
 // - deck's varyings `rb_uv`, `rb_n`, `rb_z` and `rb_info` are worked out on the CPU per vertex
 //   (`RealisticVertex`: the wall's bays and storeys in `uv`, the façade, roof and kind in `style`,
 //   the building's `fillColors` in `tint`), so the vertex shader only passes them on; a wall's
-//   tangent (`rb_along / |rb_along|`) is its normal turned a quarter (`(n.y, −n.x)`), the same
-//   direction;
+//   tangent (`rb_along / |rb_along|`) is its normal turned a quarter, `cross(up, n)` =
+//   `(−n.y, n.x)`: deck's side of a counter-clockwise ring runs from its edge's end back to its
+//   start (`pos` the next vertex), and `RealisticVertex::uv` grows the same way;
 // - WGSL takes derivatives and implicit-LOD samples only in uniform control flow, and the GLSL
 //   samples its window and plain-wall layers inside a branch on the fragment's façade. So the
 //   texture coordinates' derivatives are taken once, after the wall and roof branches have joined
@@ -99,13 +100,13 @@ fn building_out(v: BuildingIn, tangent: vec3<f32>, z: f32) -> BuildingOut {
     return out;
 }
 
-// A wall: along it, the way round its outline goes (deck's `rb_along`), and its height above the
-// ground; a roof: east, at the roof's height.
+// A wall: along it, against the way round its outline goes (deck's `rb_along`, from the next
+// corner to this one), and its height above the ground; a roof: east, at the roof's height.
 @vertex
 fn vs_building(v: BuildingIn) -> BuildingOut {
     var tangent = vec3<f32>(1.0, 0.0, 0.0);
     if ((v.style.w & STYLE_WALL) != 0u) {
-        tangent = vec3<f32>(v.normal.y, -v.normal.x, 0.0) / max(length(v.normal.xy), 1e-6);
+        tangent = vec3<f32>(-v.normal.y, v.normal.x, 0.0) / max(length(v.normal.xy), 1e-6);
     }
     return building_out(v, tangent, v.position.z);
 }

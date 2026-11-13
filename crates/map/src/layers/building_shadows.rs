@@ -318,6 +318,8 @@ impl BuildingShadows {
                         Shadows { mesh, alpha: s.alpha, color, buffer, group }
                     });
                     shade.cast = Some(Cast { sun, shadows });
+                    // (draped over the 3D terrain, stage 9: the covers under it are drawn again)
+                    crate::layers::note_drawn_changes([tile]);
                 }
             }
             // the weather's say, this frame

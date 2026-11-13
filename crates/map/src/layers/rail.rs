@@ -507,16 +507,19 @@ impl Layer for Rail {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if cx.pass != Pass::Map || !self.shown {
+        if !cx.pass.draws(self.drape()) || !self.shown {
             return;
         }
-        if let (Some(slot), Overview::Ready(mesh)) = (self.overview_slot, &self.overview) {
+        // stage 9: the lines (deck's PathLayers) draped over the 3D terrain, the labels and the
+        // stations (a TextLayer, a ScatterplotLayer) standing in the map pass
+        let (draped, standing) = (cx.draws_draped(), cx.pass == Pass::Map);
+        if let (true, Some(slot), Overview::Ready(mesh)) = (draped, self.overview_slot, &self.overview) {
             self.globe.draw(pass, cx, slot, &self.overview_style, mesh);
         }
         let set = if self.speeds_drawn { &self.speed } else { &self.network };
         for (k, &(slot, tile)) in self.drawn.iter().enumerate() {
             let Some(t) = set.get(tile) else { continue };
-            if self.flat {
+            if draped && self.flat {
                 // a tile with bridges: its lines on the ground, then `-bridges` raised (T7)
                 let ground = t.bridges.as_ref().map_or(&t.lines, |b| &b.ground);
                 if !ground.is_empty() {
@@ -528,18 +531,25 @@ impl Layer for Rail {
                 if let Some(b) = &t.bridges {
                     self.raised.draw(pass, cx, slot, &self.raised_lines, &b.raised);
                 }
-            } else if !t.lines.is_empty() {
+            } else if draped && !t.lines.is_empty() {
                 self.globe.draw(pass, cx, slot, &self.globe_lines, &t.lines);
             }
             // the tile's speed labels, after its lines and before the next tile's
-            if self.labels_drawn
+            if standing
+                && self.labels_drawn
                 && let Some(batch) = self.batches.get(k)
                 && !batch.is_empty()
             {
                 self.text.draw(pass, batch);
             }
         }
-        self.circles.draw(pass, &self.circle_style, &self.station_instances);
+        if standing {
+            self.circles.draw(pass, &self.circle_style, &self.station_instances);
+        }
+    }
+
+    fn drape(&self) -> super::Drape {
+        super::Drape::Part
     }
 
     fn pending(&self) -> bool {

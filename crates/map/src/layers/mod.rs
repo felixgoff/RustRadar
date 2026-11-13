@@ -42,8 +42,10 @@
 //! The terrain-draping hooks (stage 9): [`Layer::drape`] says how a layer stands on the 3D terrain;
 //! while the terrain is drawn the renderer leaves the [`Drape::Cover`] layers out of the map pass
 //! and draws them into the terrain tiles' covers instead ([`Pass::Cover`], `terrain::cover`), whose
-//! bookkeeping the terrain layer hands it ([`Layer::covers`]); the tiles a cover layer draws
-//! differently each frame reach it through [`PrepareCx::update_tiles`] ([`drawn_changes`]).
+//! bookkeeping the terrain layer hands it ([`Layer::covers`]); a [`Drape::Part`] layer is drawn in
+//! both, its flat parts where [`DrawCx::draws_draped`] says. The tiles a cover layer draws
+//! differently each frame reach the covers through [`PrepareCx::update_tiles`], and what it redraws
+//! otherwise through [`note_drawn_changes`] ([`drawn_changes`]).
 //!
 //! Tiles (plan 1.4.8; the renderer owns the runtime, item T1). A layer with tiles keeps a
 //! [`TileSet`] made in `new` with [`Init::tile_set`]: its sources (names of [`crate::io`]), its
@@ -107,6 +109,9 @@ pub enum Drape {
     /// Drawn top-down into the terrain tiles' cover textures (ground, hillshade, rail map, radar
     /// ground, shadows, foot shade, night).
     Cover,
+    /// Its flat parts (lines, shadows on the ground) drawn into the covers, the rest standing in
+    /// the map pass: deck drapes a sublayer of a composite layer, or offsets it, by its own kind.
+    Part,
     /// Raised on the CPU by the terrain height where its instances are built (buildings, trees,
     /// vehicles, labels, markers).
     Offset,
@@ -119,16 +124,23 @@ pub enum Pass {
     Map,
     /// A terrain cover pass (stage 9, `terrain::cover`): one terrain tile's square seen from
     /// straight above, into a texture of the same format, sample count and depth/stencil as the map
-    /// pass's; only [`Drape::Cover`] layers are drawn into it.
+    /// pass's; only [`Drape::Cover`] and [`Drape::Part`] layers are drawn into it.
     Cover,
 }
 
 impl Pass {
     /// Whether a layer that stands on the terrain as `drape` draws in this pass: every layer in the
     /// map pass (the renderer leaves the cover layers out of it while the terrain is drawn), the
-    /// cover layers in a cover pass too.
+    /// cover layers and those draped in part in a cover pass too.
     pub fn draws(self, drape: Drape) -> bool {
-        self == Pass::Map || drape == Drape::Cover
+        self == Pass::Map || drape.into_covers()
+    }
+}
+
+impl Drape {
+    /// Whether some of what the layer draws goes into the terrain's covers.
+    pub fn into_covers(self) -> bool {
+        matches!(self, Drape::Cover | Drape::Part)
     }
 }
 
@@ -148,6 +160,17 @@ pub fn listen_for_drawn_changes() {
 /// The tiles noted since [`listen_for_drawn_changes`]; it stops listening.
 pub fn drawn_changes() -> Vec<TileIndex> {
     DRAWN_CHANGES.with(|c| c.borrow_mut().take()).unwrap_or_default()
+}
+
+/// What a layer draws into the terrain's covers changed in `tiles` other than through
+/// [`PrepareCx::update_tiles`] (shadows recast for a new sun, say): the covers they meet are drawn
+/// again. Nothing while the renderer does not listen (the terrain not drawn).
+pub fn note_drawn_changes(tiles: impl IntoIterator<Item = TileIndex>) {
+    DRAWN_CHANGES.with(|c| {
+        if let Some(log) = c.borrow_mut().as_mut() {
+            log.extend(tiles);
+        }
+    });
 }
 
 /// What a layer is made with.
@@ -266,6 +289,12 @@ impl DrawCx<'_> {
     pub fn bind_frame(&self, pass: &mut wgpu::RenderPass<'_>, slot: FrameSlot) {
         self.frames.bind(pass, slot);
     }
+
+    /// Whether a [`Drape::Part`] layer draws its flat parts in this pass: into the covers, or in
+    /// the map pass while the 3D terrain is not drawn.
+    pub fn draws_draped(&self) -> bool {
+        self.pass == Pass::Cover || !self.scene.terrain.shown
+    }
 }
 
 /// One row group of doc 03 §3.
@@ -282,7 +311,7 @@ pub trait Layer {
         Drape::None
     }
     /// The terrain's covers while it is drawn (the terrain layer's, stage 9): the renderer draws
-    /// the [`Drape::Cover`] layers into them.
+    /// the [`Drape::Cover`] and [`Drape::Part`] layers into them.
     fn covers(&mut self) -> Option<&mut terrain::cover::Covers> {
         None
     }

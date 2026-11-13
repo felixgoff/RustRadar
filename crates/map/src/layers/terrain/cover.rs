@@ -10,32 +10,48 @@
 //! `always`), skips them in the frame itself (`TERRAIN_MODE_SKIP`), and the tile's mesh samples its
 //! cover (`TERRAIN_MODE_USE_COVER`). Here:
 //!
-//! - **Which layers** ([`Drape::Cover`](crate::layers::Drape::Cover)): the renderer leaves the
-//!   cover layers out of the map pass while the terrain is drawn, and draws them in each cover pass
-//!   ([`Pass::Cover`](crate::layers::Pass::Cover)) with the [`Globals`] of [`cover_globals`]: the
-//!   frames the layers pushed for the map's camera are measured from the view centre, which these
-//!   globals keep, so the same frames land in the tile's square. In a cover pass `globals.mode` is
-//!   the flat map's, `globals.mercator.y` is 1 (`rl_clear` then gives 1: the draped ground takes no
-//!   air, as `rlight.cover` does in deck's pass), and `globals.camera_render` is the map's own
-//!   camera (`aimMapEye`, `rlight.eye`), so what the realistic ground lights by the view (water's
-//!   sheen) is lit from where the map is seen. Pixels are the cover's texels (deck draws the pass at
-//!   `devicePixelRatio` 1), so lines given in pixels are that many texels wide.
+//! - **Which layers** ([`Drape`](crate::layers::Drape)): the renderer leaves the
+//!   [`Drape::Cover`](crate::layers::Drape::Cover) layers (the realistic land, land cover, ground and
+//!   ground rails, the dark map's land and vector map, the imagery, the relief, the night) out of
+//!   the map pass while the terrain is drawn, and draws them in each cover pass
+//!   ([`Pass::Cover`](crate::layers::Pass::Cover)); a [`Drape::Part`](crate::layers::Drape::Part)
+//!   layer draws its flat parts there and the rest in the map pass
+//!   ([`DrawCx::draws_draped`](crate::layers::DrawCx::draws_draped)): the rail map's lines (its
+//!   labels and stations stand), both building layers' shadows and the realistic one's foot shade
+//!   (the buildings stand). A pass draws with the [`Globals`] of [`cover_globals`]: the frames the
+//!   layers pushed for the map's camera are measured from the view centre, which these globals keep,
+//!   so the same frames land in the tile's square. In a cover pass `globals.mode` is the flat map's,
+//!   `globals.mercator.y` is 1 (`rl_clear` then gives 1: the draped ground takes no air, as
+//!   `rlight.cover` does in deck's pass), and `globals.camera_render` is the map's own camera
+//!   (`aimMapEye`, `rlight.eye`), so what the realistic ground lights by the view (water's sheen) is
+//!   lit from where the map is seen. Pixels are the cover's texels (deck draws the pass at
+//!   `devicePixelRatio` 1), so lines given in pixels are that many texels wide: at a tile's zoom
+//!   plus one, thinner on the screen close in, as today.
 //! - **The covers** ([`Covers`], `scene::terrain::cover`): one `Rgba8Unorm` texture a terrain tile
 //!   drawn, its size by today's patched rule (1024 texels; the deepest tiles with the view's zoom,
 //!   to 2048), kept within [`BUDGET`], drawn at most [`COVERS_PER_FRAME`] a frame, never-drawn
 //!   first. A cover is drawn again when a cover layer's tiles drawn change within its square
-//!   ([`crate::layers::drawn_changes`]), and every cover when what the cover layers draw changes
-//!   everywhere ([`CoverLook`]: the basemap, the projection, the weather and *daylight*, the
-//!   ground's and the relief's settings and the relief's zoom-stepped opacity, the dark map's land,
-//!   roads and runways, the night's minute, the realistic textures arriving). Animated effects
-//!   (water, the clouds' shadows) stay as they were when the cover was drawn, as today.
+//!   ([`crate::layers::drawn_changes`]: `update_tiles`, and `note_drawn_changes` for shadows recast
+//!   under a new sun), and every cover when what the cover layers draw changes everywhere
+//!   ([`CoverLook`]: the basemap, the projection, the weather and *daylight*, the ground's and the
+//!   relief's settings and the relief's zoom-stepped opacity, the dark map's land, roads and
+//!   runways, the night's minute, the realistic textures arriving). Animated effects (water, the
+//!   clouds' shadows) stay as they were when the cover was drawn, as today. Textures are made when
+//!   their first pass is due, so a terrain layer nobody draws holds none.
 //! - **The passes** ([`CoverJob`]): encoded and submitted in the renderer's `prepare` (so a shot,
 //!   which only prepares while it waits, has its covers), each into a [`CHUNK`]-sized scratch with
 //!   the map pass's sample count and depth and stencil (the layers' pipelines are the map pass's),
 //!   resolved and copied into the cover; a 2048 cover is four chunks. The stencil is cleared to 0,
 //!   so the ground's tile clips and the shadows' rule work as in the map pass.
 //! - **The surface** ([`TerrainPipeline`]): `terrain.wgsl`: the cover over `MESH_COLOR` and lit as
-//!   the bare mesh is (Z1), with the realistic map's air over it (`TERRAIN_AIR`, `fs_air`).
+//!   the bare mesh is (Z1: deck's `material: false` lights the draped colour too), with the
+//!   realistic map's air over it (`TERRAIN_AIR`, `fs_air`).
+//!
+//! As today (seen at Zermatt, `TERRAIN_VIEWS`): the draped layers pick their tiles for the map's
+//! camera against the sea (deck's tile layers get no `zRange`; nor does `distanceTileIndices`), so
+//! with the camera raised over high ground the 2D map's tiles round the camera are not asked for and
+//! the covers there show what is drawn everywhere (the land) until the camera's view of the sea
+//! reaches them. Giving those selections the terrain's range would be a change from today's app.
 //!
 //! Deviations, each with its reason:
 //! - Budget and pace: deck keeps a cover for every cached terrain tile and draws all that need it
@@ -46,14 +62,17 @@
 //! - deck's cover framebuffer has no depth or stencil attachment, so its shadows darken twice where
 //!   they overlap; here the stencil keeps the shadows' rule (plan 1.4.12). Depth is constant in a
 //!   cover pass, so depth-tested and depth-writing draws all land, in order, as with `always`.
-//! - Layers that drape part of what they draw (the rail map's lines, the signal blocks' lines, the
-//!   train route, the radar's ground, the buildings' shadows and foot shade) are not cover layers
-//!   yet: they draw as they are, at sea level under the surface. The selected flight's trail and
-//!   route keep their true altitude (plan 1.4.12). The platforms (an extruded area, deck: offset)
-//!   are drawn flat into the cover with the rest of the ground rails.
-//! - What changes a cover layer's picture without changing its tiles or its settings (a tile's
-//!   content decoded again with the same index set is caught; a style a layer works out from the
-//!   zoom other than the relief's opacity is not) shows at the cover's next drawing.
+//! - Every cover layer draws all of its tiles in each cover pass (the pass's viewport clips them);
+//!   deck hands a cover only the tile sublayers whose bounds meet it (`getIntersectingLayers`).
+//! - Not draped yet (they draw as they are, at sea level under the surface): the signal blocks'
+//!   lines, the selected train's route and the weather radar's flat layers (deck drapes them; their
+//!   content changes as trains move and radar frames arrive, so draping them means drawing every
+//!   cover again each time, `layerNeedsRedraw`). The selected flight's trail and route keep their
+//!   true altitude (plan 1.4.12). The platforms (an extruded area, deck: offset) are drawn flat into the cover with the
+//!   rest of the ground rails.
+//! - What changes a cover layer's picture without changing its tiles or its settings (a style a
+//!   layer works out from the zoom other than the relief's opacity) shows at the cover's next
+//!   drawing.
 
 use std::collections::HashMap;
 
@@ -1077,5 +1096,56 @@ mod tests {
         let close = full.rgba.chunks_exact(4).zip(small.rgba.chunks_exact(4)).filter(|(a, b)| (0..3).all(|c| a[c].abs_diff(b[c]) <= 12)).count();
         eprintln!("{close} of {} px within 12 levels", full.rgba.len() / 4);
         assert!(close * 10 >= full.rgba.len() / 4 * 8, "{close} px");
+    }
+
+    /// A layer draped in part ([`crate::layers::Drape::Part`]): over a surface at sea level the
+    /// dark map's buildings at V4 (Arlanda, zoom 13.5, pitched 45°) stand as they do on the flat
+    /// map and their shadows lie on the ground as there, drawn into the covers once (not again in
+    /// the map pass, not left out).
+    #[test]
+    fn the_buildings_stand_and_their_shadows_are_draped() {
+        let Some(gpu) = gpu() else { return };
+        let v4 = ViewState { latitude: 59.6519, longitude: 17.9186, zoom: 13.5, pitch: 45.0, bearing: 30.0, position: None };
+        // 2026-06-21 05:20 UTC: a low sun over Stockholm, long shadows
+        let low_sun = 1_782_019_200_000.0;
+        let scene = |terrain: bool| {
+            let mut scene = dark(v4, [1440.0, 900.0], terrain);
+            scene.local_now_ms = low_sun;
+            scene.feed_now_ms = low_sun;
+            scene.vector_map = vector_map::Input::default();
+            scene.buildings = crate::layers::buildings::Input::SHOWN;
+            scene.lights = neutral();
+            scene
+        };
+        let fixtures: Arc<dyn TileFetcher> = Arc::new(DirTiles::fixtures());
+        let off = render_with(&gpu, &mut renderer_on(&gpu, Arc::clone(&fixtures)), &scene(false), 1.0).expect("rendered");
+        let on = render_with(&gpu, &mut renderer_on(&gpu, fixtures_on(|_| 0.0)), &scene(true), 1.0).expect("rendered");
+        off.save_png(&shots_dir().join("z2-v4-buildings-off.png")).expect("saved");
+        on.save_png(&shots_dir().join("z2-v4-buildings-on.png")).expect("saved");
+        let land = rustradar_scene::tess::vector::LAND;
+        let near = |a: [u8; 4], b: [u8; 4], d: u8| (0..3).all(|c| a[c].abs_diff(b[c]) <= d);
+        // the shadows on the land: darker than it in every channel
+        let shadowed = |p: [u8; 4]| (0..3).all(|c| p[c] + 6 < land[c]);
+        let darkest = off.rgba.chunks_exact(4).filter(|p| shadowed([p[0], p[1], p[2], p[3]])).map(|p| p[0]).min().expect("shadows");
+        let (mut shadow, mut kept, mut twice, mut lost, mut same) = (0, 0, 0, 0, 0);
+        for y in 0..off.height {
+            for x in 0..off.width {
+                let (a, b) = (off.pixel(x, y), on.pixel(x, y));
+                same += usize::from(near(a, b, 3));
+                if shadowed(a) {
+                    shadow += 1;
+                    kept += usize::from(near(a, b, 4));
+                    // darker than any single shadow: darkened again in the map pass
+                    twice += usize::from(b[0] + 3 < darkest);
+                    // back to the land: left out
+                    lost += usize::from(!shadowed(b));
+                }
+            }
+        }
+        let total = (off.width * off.height) as usize;
+        eprintln!("{same} of {total} px alike; of {shadow} shadow px {kept} kept, {twice} darker than one shadow ({darkest}), {lost} lost");
+        assert!(shadow > 5000, "shadows on the land: {shadow} px");
+        assert!(kept * 100 >= shadow * 95 && twice == 0 && lost * 100 <= shadow, "{kept}, {twice} and {lost} of {shadow}");
+        assert!(same * 100 >= total * 97, "{same} of {total}");
     }
 }

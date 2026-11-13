@@ -378,6 +378,8 @@ impl Buildings {
             let mesh = tess::tile_shadows(tile, &meshes.footprints, sun)
                 .map(|s| fill::Mesh::new(device, "building shadows", &shadow_vertices(&s), &s.indices));
             self.casts.insert(tile, Cast { serial: meshes.serial, sun, mesh });
+            // (draped over the 3D terrain, stage 9: the covers under it are drawn again)
+            crate::layers::note_drawn_changes([tile]);
         }
         // (deck's are keyed by content: gone with it)
         let tiles = &self.tiles;
@@ -416,22 +418,32 @@ impl Layer for Buildings {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if cx.pass != Pass::Map {
+        if !cx.pass.draws(self.drape()) {
             return;
         }
+        // stage 9: the shadows draped over the 3D terrain, the buildings standing
+        let (draped, standing) = (cx.draws_draped(), cx.pass == Pass::Map);
         for &(slot, tile) in &self.drawn {
             let Some(meshes) = self.tiles.get(tile) else { continue };
             if !meshes.extruded {
                 // far off, flat: only the roofs show from there
-                self.pipeline.draw(pass, cx, slot, &self.flat, &meshes.mesh);
+                if standing {
+                    self.pipeline.draw(pass, cx, slot, &self.flat, &meshes.mesh);
+                }
                 continue;
             }
             // under the tile's buildings, on the ground; not clipped to the tile
-            if let Some(shadows) = self.casts.get(&tile).filter(|c| c.serial == meshes.serial).and_then(|c| c.mesh.as_ref()) {
+            if draped && let Some(shadows) = self.casts.get(&tile).filter(|c| c.serial == meshes.serial).and_then(|c| c.mesh.as_ref()) {
                 self.shadows.draw(pass, cx, slot, &self.shadow_style, shadows);
             }
-            self.pipeline.draw(pass, cx, slot, &self.lit, &meshes.mesh);
+            if standing {
+                self.pipeline.draw(pass, cx, slot, &self.lit, &meshes.mesh);
+            }
         }
+    }
+
+    fn drape(&self) -> super::Drape {
+        super::Drape::Part
     }
 
     fn pending(&self) -> bool {

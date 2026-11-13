@@ -11,7 +11,8 @@
 //!
 //! The 3D terrain (stage 9, plan 1.4.4 step 1, `layers::terrain::cover`): while the scene shows it,
 //! the [`Drape::Cover`] layers are left out of the map pass and drawn into the terrain tiles' covers
-//! instead. `prepare` notes the tiles each of them draws differently this frame
+//! instead ([`Drape::Part`] layers in both, their flat parts into the covers). `prepare` notes the
+//! tiles each of them draws differently this frame
 //! ([`layers::drawn_changes`]), hands the terrain's covers those and what they draw everywhere
 //! ([`cover::cover_look`]), and records and submits the passes of the covers due (at most
 //! [`cover::COVERS_PER_FRAME`]) in a command buffer of their own, so a shot, which only prepares
@@ -605,7 +606,7 @@ impl MapRenderer {
         let draping = self.scene.terrain.shown;
         let mut changed = Vec::new();
         for layer in &mut self.layers {
-            let cover = draping && layer.drape() == Drape::Cover;
+            let cover = draping && layer.drape().into_covers();
             if cover {
                 layers::listen_for_drawn_changes();
             }
@@ -641,7 +642,7 @@ impl MapRenderer {
                 pass.set_bind_group(GLOBALS_GROUP, globals, &[]);
                 frames.bind(pass, FrameArena::DEFAULT);
                 let cx = DrawCx { scene, view, frames, globals, pass: Pass::Cover };
-                for layer in layers.iter().filter(|l| l.drape() == Drape::Cover) {
+                for layer in layers.iter().filter(|l| l.drape().into_covers()) {
                     layer.draw(pass, &cx);
                 }
             });

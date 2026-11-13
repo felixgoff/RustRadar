@@ -309,16 +309,23 @@ impl Layer for BuildingsRealistic {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if !self.shown || cx.pass != Pass::Map {
+        if !self.shown || !cx.pass.draws(self.drape()) {
             return;
         }
+        // stage 9: the foot shade and the shadows draped over the 3D terrain, the buildings standing
+        let (draped, standing) = (cx.draws_draped(), cx.pass == Pass::Map);
         for &(slot, tile) in &self.drawn {
             let Some(meshes) = self.tiles.get(tile) else { continue };
             if meshes.mesh.index_count() == 0 {
                 continue;
             }
             // a near tile's foot shade, then its shadows, on the ground under its buildings
-            self.shadows.draw_tile(pass, cx, slot, tile);
+            if draped {
+                self.shadows.draw_tile(pass, cx, slot, tile);
+            }
+            if !standing {
+                continue;
+            }
             // far off, flat: only the roofs show from there
             self.shader.begin(pass, if meshes.extruded { &self.walls } else { &self.flat });
             cx.bind_frame(pass, slot);
@@ -331,7 +338,7 @@ impl Layer for BuildingsRealistic {
     }
 
     fn drape(&self) -> super::Drape {
-        super::Drape::Offset
+        super::Drape::Part
     }
 
     fn pending(&self) -> bool {

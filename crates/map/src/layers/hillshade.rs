@@ -778,7 +778,10 @@ mod tests {
             let base = render_with(&gpu, &mut renderer, &scene(ALPS, SIZE, basemap, false, terrain), 1.0).expect("rendered");
             let over = render_with(&gpu, &mut renderer, &scene(ALPS, SIZE, basemap, true, terrain), 1.0).expect("rendered");
             assert!(!renderer.pending(), "{:?}", renderer.pending_layers());
-            assert!(fixtures.tiles.misses().is_empty(), "the fixtures lack {:?}", fixtures.tiles.misses());
+            // (the fixtures hold OpenRailwayMap's tiles at the realistic views only: here the
+            // realistic map's ground rails, R9, are drawn as nothing)
+            let misses: Vec<_> = fixtures.tiles.misses().into_iter().filter(|(source, _)| source != crate::layers::ground::rails::RAIL_SOURCE).collect();
+            assert!(misses.is_empty(), "the fixtures lack {misses:?}");
             let mut asked = fixtures.terrarium();
             asked.sort_by_key(|t| (t.z, t.x, t.y));
             asked.dedup();

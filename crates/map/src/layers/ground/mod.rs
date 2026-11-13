@@ -5,8 +5,9 @@
 //!   `LAND` (unmapped land in Streets GL's temperate green).
 //! - [`Ground`] (rows 3c–3f): on the globe [`vector::GroundGlobe`] (`ground-globe`: OpenMapTiles
 //!   z0–14 by deck's own selection, R2); on the flat map [`city::GroundCity`] (`ground-city`:
-//!   OpenMapTiles z9–14 and Streets GL z16 by distance, R3), and the land cover (R8) and ground
-//!   rails and platforms (R9) on both.
+//!   OpenMapTiles z9–14 and Streets GL z16 by distance, R3, its roads as wide as the survey has
+//!   them from zoom 14, [`roads`], R9). The land cover ([`landcover`], R8) is its own layer before
+//!   it, the ground rails and platforms ([`rails::GroundRails`], R9) their own after it.
 //!
 //! **The shader** (doc 04 §6.8, §16): [`GroundShader`] holds what every ground draw shares: the
 //! light (`lib/rlight.wgsl`, group 2, [`look::LightUniform`]), and group 3 ([`GROUND_GROUP`]): the
@@ -38,6 +39,8 @@ pub mod city;
 pub mod earth_picture;
 pub mod land;
 pub mod landcover;
+pub mod rails;
+pub mod roads;
 pub mod vector;
 
 use std::borrow::Cow;
@@ -327,6 +330,12 @@ impl GroundShader {
         self.pipeline(init, label, "vs_line", "fs_line", &[Some(CORNER_LAYOUT), Some(SEGMENT_LAYOUT)], state)
     }
 
+    /// The standing areas' pipeline (`vs_platform`, `fs_area`; [`rails::PLATFORM_LAYOUT`]: the
+    /// platforms, item R9) with `state`.
+    pub fn platforms(&self, init: &Init<'_>, label: &str, state: DrawState) -> wgpu::RenderPipeline {
+        self.pipeline(init, label, "vs_platform", "fs_area", &[Some(rails::PLATFORM_LAYOUT)], state)
+    }
+
     fn pipeline(
         &self,
         init: &Init<'_>,
@@ -416,8 +425,9 @@ impl GroundShader {
 
 // ------------------------------------------------------------------ the layer
 
-/// Rows 3c–3f (realistic basemap): the globe's ground tiles (R2), the city ground (R3); the land
-/// cover, ground rails and platforms come with R8 and R9.
+/// Rows 3c–3f (realistic basemap): the globe's ground tiles (R2), the city ground (R3, with the
+/// survey's road widths, R9); the land cover and the ground rails and platforms are layers of their
+/// own (R8, R9).
 pub struct Ground {
     shader: GroundShader,
     areas: wgpu::RenderPipeline,

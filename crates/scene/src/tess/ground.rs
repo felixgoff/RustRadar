@@ -46,9 +46,10 @@
 //!   each segment from its start in half widths), which the railway's and the pier's textures are
 //!   laid by, is worked out by the shader from the segment: nothing more is stored here.
 //!
-//! Not here: the survey's road widths (`withSurvey`, Trafikverket's NVDB on the flat map, item R9)
-//! set `nvdbWidth` and `nvdbGravel` on a road's properties before [`crate::ground::line_of`] reads
-//! them; this module reads the tile's own.
+//! The survey's road widths (`withSurvey`, Trafikverket's NVDB on the flat map, item R9) come in
+//! through [`tessellate_surveyed`]: the flat map's lines get `nvdbWidth` and `nvdbGravel` columns
+//! before [`crate::ground::line_of`] reads them (`rustradar_map`'s `layers::ground::roads` makes
+//! them); [`tessellate`] reads the tile's own.
 //!
 //! Deviations, none visible:
 //! - a feature of unknown geometry type is skipped (loaders.gl throws and loses the tile), points
@@ -155,6 +156,21 @@ impl GroundTile {
 /// globe's layer draws them (`flat` false) or the flat map's (`flat` true, bridges raised). See
 /// the module notes. `cancelled` is asked between features; once it says so the work stops.
 pub fn tessellate(tile: TileIndex, bytes: &[u8], layers: &[&str], flat: bool, cancelled: &dyn Fn() -> bool) -> Result<GroundTile, Cancelled> {
+    tessellate_surveyed(tile, bytes, layers, flat, &|_, _| {}, cancelled)
+}
+
+/// [`tessellate`], the flat map's lines first handed to `survey` (`withSurvey`, item R9: the
+/// survey's road widths as the numeric columns `nvdbWidth` and `nvdbGravel`, a value a vertex,
+/// which each line reads at its first vertex with its feature's tags, as loaders.gl's binary
+/// accessors do), before their bridges are split off. The globe's lines are not handed over.
+pub fn tessellate_surveyed(
+    tile: TileIndex,
+    bytes: &[u8],
+    layers: &[&str],
+    flat: bool,
+    survey: &dyn Fn(TileIndex, &mut Lines),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<GroundTile, Cancelled> {
     let mut b = Builder::new(tile, flat);
     // the flat map's lines, gathered as loaders.gl's binary tile holds them, for the bridges
     let mut binary = Lines { kind: "LineString".into(), size: 2, path_indices: vec![0], ..Lines::default() };
@@ -207,6 +223,7 @@ pub fn tessellate(tile: TileIndex, bytes: &[u8], layers: &[&str], flat: bool, ca
         }
     }
     if flat {
+        survey(tile, &mut binary);
         b.flat_lines(tile, &binary);
     }
     Ok(b.finish())
@@ -477,13 +494,27 @@ fn push_painted(out: &mut PathBuilder, path: &[[f64; 3]], paint: Rgba, width: f6
     }
 }
 
-/// Each path of `lines` with its feature's properties, as `[u, v, metres]`.
+/// Each path of `lines` with its feature's properties, as `[u, v, metres]` (and the numeric
+/// columns' values at its first vertex, as loaders.gl's binary accessors read them: the survey's).
 fn each_path(lines: &Lines, mut f: impl FnMut(&Properties, Vec<[f64; 3]>)) {
     let empty = Properties::new();
     let size = lines.size;
     for w in lines.path_indices.windows(2) {
         let (start, end) = (w[0] as usize, w[1] as usize);
-        let p = lines.feature_ids.get(start).and_then(|&i| lines.properties.get(i as usize)).unwrap_or(&empty);
+        let own = lines.feature_ids.get(start).and_then(|&i| lines.properties.get(i as usize)).unwrap_or(&empty);
+        let with_columns;
+        let p = if lines.numeric_props.is_empty() {
+            own
+        } else {
+            let mut p = own.clone();
+            for (name, column) in &lines.numeric_props {
+                if let Some(value) = column.get(start).copied().and_then(serde_json::Number::from_f64) {
+                    p.insert(name.clone(), Value::Number(value));
+                }
+            }
+            with_columns = p;
+            &with_columns
+        };
         let path = (start..end)
             .map(|i| {
                 let at = |k: usize| lines.positions.get(i * size + k).copied().unwrap_or(f64::NAN);

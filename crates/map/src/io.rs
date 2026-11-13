@@ -215,6 +215,11 @@ impl DirTiles {
             };
             return crate::layers::roofs::archive_tile(&archive, tile);
         }
+        // the survey's road widths (R9): Trafikverket's answer needs the user's own key, which a
+        // fixture folder never holds, so it has none (as today's app without a key), not a miss
+        if source == crate::layers::ground::roads::ROAD_WIDTHS {
+            return Ok(None);
+        }
         // the trees' canopy heights (R7): the fixture folder's recorded ranges of the canopy
         // files, read as `backend::canopy` reads the network (a tile they do not hold is a miss)
         if source == crate::layers::trees::CANOPY {

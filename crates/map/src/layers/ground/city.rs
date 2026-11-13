@@ -40,8 +40,10 @@
 //!   of `vector_map`: the square raises the stencil, the passes draw where it is
 //!   raised, the square sets it back to 0), so a tile's buffer never shows.
 //!
-//! Not here: the survey's road widths (`withSurvey`, item R9), the land cover under it (R8), the
-//! ground rails and platforms over it (R9).
+//! The survey's road widths (`withSurvey`, item R9) are [`super::roads`]': from zoom 14 the layer
+//! asks for them round the view's centre ([`Roads::prepare`]), decodes its tiles with them
+//! ([`decode_surveyed`]) and, as more come, decodes its selected tiles again. Not here: the land
+//! cover under it (R8), the ground rails and platforms over it (R9, `super::rails`).
 //!
 //! Deviations, invisible:
 //! - deck's clip discards by the fragment's own map position, the stencil by where the tile's
@@ -79,6 +81,7 @@ use rustradar_scene::lod::{Lod, TILE_SIZE};
 use rustradar_scene::streets_gl::SGL_ZOOM;
 use rustradar_scene::tess::ground::{self as tess, GroundTile};
 
+use super::roads::{Roads, Survey};
 use super::vector::Decoded;
 use super::{GroundShader, GroundVertex, LineMesh, LineWidth};
 use crate::frame::FrameSlot;
@@ -118,7 +121,12 @@ pub fn layers(tile: TileIndex) -> &'static [&'static str] {
 /// The decode step, on the worker pool: the flat map's tessellation of the tile's source layers
 /// (`None` for a tile with nothing to draw).
 pub fn decode(tile: TileIndex, bytes: &[u8], cancel: &Cancel) -> Result<Option<Decoded>, String> {
-    match tess::tessellate(tile, bytes, layers(tile), true, &|| cancel.is_cancelled()) {
+    decode_surveyed(tile, bytes, &Survey::default(), cancel)
+}
+
+/// [`decode`] with the survey's road widths (`withSurvey`, item R9: [`super::roads`]).
+pub fn decode_surveyed(tile: TileIndex, bytes: &[u8], survey: &Survey, cancel: &Cancel) -> Result<Option<Decoded>, String> {
+    match tess::tessellate_surveyed(tile, bytes, layers(tile), true, &|tile, lines| survey.apply(tile, lines), &|| cancel.is_cancelled()) {
         Ok(decoded) if decoded.is_empty() => Ok(None),
         Ok(decoded) => Ok(Some(Decoded(decoded))),
         Err(tess::Cancelled) => Err("cancelled".into()),
@@ -203,6 +211,8 @@ pub struct GroundCity {
     decks: Path,
     deck_styles: [path::Style; 2],
     clip: Clip,
+    /// The survey's road widths the tiles are decoded with (item R9).
+    roads: Roads,
     shown: bool,
     /// This frame's tiles in draw order, each with its frame.
     drawn: Vec<(FrameSlot, TileIndex)>,
@@ -212,11 +222,13 @@ impl GroundCity {
     /// The layer, its ground pipelines made with `shader`.
     pub fn new(init: &Init<'_>, shader: &GroundShader) -> Self {
         let device = &init.gpu.device;
+        let roads = Roads::new();
+        let survey = roads.survey();
         let tiles = init.tile_set(
             sources(),
             LodSelect::new(ground_lod(), TILE_SIZE),
             TileSetOptions { max_requests: MAX_REQUESTS, refinement: Refinement::KeepCoarserUntilIn, ..Default::default() },
-            |tile, bytes, cancel| decode(tile, &bytes, cancel),
+            move |tile, bytes, cancel| decode_surveyed(tile, &bytes, &survey, cancel),
         );
         let shade = Path::new(init, "city ground bridge shade", CLIPPED);
         let decks = Path::new(init, "city ground bridge decks", DECKS);
@@ -230,9 +242,15 @@ impl GroundCity {
             shade,
             decks,
             clip: Clip::new(init),
+            roads,
             shown: false,
             drawn: Vec::new(),
         }
+    }
+
+    /// The survey's road widths (item R9; tests).
+    pub fn roads(&self) -> &Roads {
+        &self.roads
     }
 
     /// The tile set (tests, the overlay).
@@ -255,6 +273,10 @@ impl GroundCity {
                 self.tiles.clear();
             }
             return;
+        }
+        // the survey's roads close in (G:2658); as more come, the tiles take them (`roadsVersion`)
+        if self.roads.prepare(cx) {
+            self.tiles.reload_all();
         }
         cx.update_tiles(&mut self.tiles, |gpu, _tile, decoded| upload(&gpu.device, &decoded.0));
         for (tile, _) in self.tiles.visible() {
@@ -294,9 +316,9 @@ impl GroundCity {
         }
     }
 
-    /// Whether tiles in view are still to come.
+    /// Whether tiles in view (or the survey's roads) are still to come.
     pub fn pending(&self) -> bool {
-        self.shown && self.tiles.loading()
+        self.shown && (self.tiles.loading() || self.roads.pending())
     }
 }
 
@@ -571,6 +593,9 @@ mod tests {
                     return rx;
                 }
                 let _ = tx.send(Ok(Some(self.sgl.clone())));
+            } else if [super::super::rails::RAIL_SOURCE, super::super::roads::ROAD_WIDTHS].contains(&&*request.source) {
+                // the ground rails' tiles and the survey's road widths (R9): nothing
+                let _ = tx.send(Ok(None));
             } else {
                 assert_eq!(&*request.source, io::OPENFREEMAP);
                 let _ = tx.send(Ok(Some(self.omt.clone())));

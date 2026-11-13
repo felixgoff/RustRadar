@@ -172,6 +172,13 @@ impl TileFetcher for BackendTiles {
                 if &*source == rustradar_map::layers::ground::landcover::LAND_COVER {
                     return rustradar_backend::landcover::tile(&tiles, tile.z, tile.x, tile.y).await;
                 }
+                // the survey's road widths (R9): a square's stretches from Trafikverket's NVDB with
+                // the user's key (`backend::roads`), as JSON; none without a key
+                if &*source == rustradar_map::layers::ground::roads::ROAD_WIDTHS {
+                    let [lon, lat] = rustradar_map::layers::ground::roads::centre_of(tile);
+                    let pieces = rustradar_backend::roads::widths(lon, lat).await?;
+                    return serde_json::to_vec(&*pieces).map(Some).map_err(|e| e.to_string());
+                }
                 let source = sources.resolve(&tiles, &source).await?;
                 // Streets GL (R3): only its zoom 16 goes to its server (`sglFetch`)
                 if source.name == rustradar_backend::streets_gl::NAME {

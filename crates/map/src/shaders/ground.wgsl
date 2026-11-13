@@ -6,7 +6,8 @@
 // `scene::tess::ground`.
 //
 // Entry points: `vs_area`/`fs_area` for filled areas (deck's SolidPolygonLayer: the ground-land
-// rectangle, the tiles' polygons), `vs_line`/`fs_line` for lines (deck's PathLayer with widths in
+// rectangle, the tiles' polygons; `vs_platform`/`fs_area` for extruded ones whose sides face their
+// own way, the platforms), `vs_line`/`fs_line` for lines (deck's PathLayer with widths in
 // metres, round joints and caps, `geometry.uv` for the textures laid along a line; GLSL's
 // `RL_LINE`: a line's sides lie a way out from its middle, and lines take no town lights).
 //
@@ -105,6 +106,30 @@ fn vs_area(@location(0) position: vec3<f32>, @location(1) paint: vec4<u32>) -> G
     out.e = earth_place(d);
     out.paint = paint;
     out.wall = vec3<f32>(0.0);
+    out.uv = vec2<f32>(0.0);
+    out.corner_offset = vec2<f32>(0.0);
+    out.path_length = 0.0;
+    return out;
+}
+
+// A station's platform standing up (item R9, `layers::ground::rails`; `railGroundLayers`' extruded
+// SolidPolygonLayer, `material: false`): an area whose sides face their own way. deck sets
+// `rg_wall = geometry.normal` on a side's vertices (`IS_SIDE_VERTEX`) and leaves it 0 on the top;
+// here a side's normal is level (east, north) and the top's up, so its level part is `rg_wall`.
+@vertex
+fn vs_platform(@location(0) position: vec3<f32>, @location(1) paint: vec4<u32>, @location(2) normal: vec3<f32>) -> GroundOut {
+    let p = project_local(position);
+    let d = local_offset(position.xy);
+    let rl = rl_vertex(p.rel, rl_mercator(d));
+    var out: GroundOut;
+    out.clip = p.clip;
+    out.eye = rl.eye;
+    out.sun = rl.sun;
+    out.t = rl.t;
+    out.c = rl.c;
+    out.e = earth_place(d);
+    out.paint = paint;
+    out.wall = vec3<f32>(normal.xy, 0.0);
     out.uv = vec2<f32>(0.0);
     out.corner_offset = vec2<f32>(0.0);
     out.path_length = 0.0;

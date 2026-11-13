@@ -38,6 +38,13 @@
 //! ([`super::roofs::decode`]): Streets GL's with Overture's heights where they have none
 //! (`sglBuildingFetch`) and their roofs.
 //!
+//! - **On the 3D terrain** (item Z3, `terrain::ground`; deck's `TerrainExtension`): a near tile's
+//!   buildings and pitched roofs stand on the ground vertex by vertex (an extruded layer is *offset*: each vertex is
+//!   raised by the ground under it; the walls' foot shading keeps its own height), through a vertex buffer of the ground's heights under them
+//!   ([`Standing`]) raised again where the terrain tiles under the tile change, within
+//!   `STAND_BUDGET_MS` a frame; a far tile's flat footprints (`extruded: false`, no anchors) and the
+//!   foot shade and shadows are draped into the terrain's covers.
+//!
 //! How it is checked (the tests below): V5 from the fixtures at noon, each of the nearest walls
 //! facing the camera sampled along its top storey on the screen: its brightness repeats once a bay
 //! (a window to each bay, `textures::BUILDING_TEXTURES`' window layers); at midwinter night the
@@ -127,14 +134,16 @@ pub struct TileMeshes {
 
 /// The upload step, on the main thread.
 pub fn upload(device: &wgpu::Device, decoded: RealisticTile) -> TileMeshes {
-    let stands = |vertices| if decoded.extruded { vertices } else { &[][..] };
+    let stands = |vertices: &[RealisticVertex]| {
+        if decoded.extruded { Standing::new(device, vertices, |v| v.position) } else { Standing::at_sea(device, vertices.len()) }
+    };
     TileMeshes {
         extruded: decoded.extruded,
         sgl: decoded.sgl,
         mesh: fill::Mesh::new(device, "realistic buildings", &decoded.vertices, &decoded.indices),
         roofs: roofs::upload(device, &decoded.roofs),
-        standing: Standing::new(device, stands(&decoded.vertices), |v| v.position),
-        roofs_standing: Standing::new(device, stands(&decoded.roofs), |v| v.position),
+        standing: stands(&decoded.vertices),
+        roofs_standing: stands(&decoded.roofs),
         footprints: decoded.footprints,
     }
 }

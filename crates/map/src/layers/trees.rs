@@ -36,6 +36,11 @@
 //! - **Textures** (doc 04 §5.3): the realistic map's set; until it is in, the trees' mask is the
 //!   stand-in of none, so no tree shows, and the layer is pending.
 //!
+//! - **On the 3D terrain** (item Z3, `terrain::ground`; deck's offset mode for a mesh layer's
+//!   instances): each tree, and its shadow, stands on the ground under it, through an instance
+//!   buffer of the ground's heights ([`Standing`]) raised again where the terrain tiles under the
+//!   tile change.
+//!
 //! How it is checked (the tests below): a fixture tile planted by this layer holds as many trees
 //! as `plant_tile` plants from the same tile and surroundings, and as many as `tree-layer.ts`'s
 //! `plantTile` plants under bun; the land cover and canopy read from the fixtures; at Humlegården

@@ -214,6 +214,18 @@ impl Standing {
         Standing { places, buffer, footing: Footing::default() }
     }
 
+    /// A mesh of `vertices` vertices that stays at sea level (a far tile drawn flat, which is
+    /// draped): a buffer of zeros for its pipeline to read, and no places to raise.
+    pub fn at_sea(device: &wgpu::Device, vertices: usize) -> Self {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ground under the vertices (the sea)"),
+            size: (vertices * size_of::<f32>()).max(16) as u64,
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        });
+        Standing { places: Vec::new(), buffer, footing: Footing::default() }
+    }
+
     /// Whether the mesh of `tile` needs raising again for `ground`.
     pub fn stale(&self, tile: TileIndex, ground: &Ground) -> bool {
         ground.footing(tile) != self.footing

@@ -31,7 +31,8 @@
 //! The terrain items after Z1: the 2D layers draped over the surface into its tiles' covers and
 //! the realistic map's air over it (Z2, [`cover`]: while the surface is drawn the renderer draws the
 //! cover layers into the covers and leaves them out of the map pass, as deck's `TERRAIN_MODE_SKIP`
-//! does); the 3D layers raised onto it (Z3); the camera's target raised to the ground (Z4).
+//! does); the 3D layers raised onto it (Z3, [`ground`]: this layer's drawn tiles' heights are the ground
+//! they stand on, [`Layer::ground`]); the camera's target raised to the ground (Z4).
 //!
 //! Deviations: on the globe the meshes are in their Web Mercator frames (deck: degrees, rows evenly
 //! in latitude; [`mesh`]); tiles neither source has are nothing there and settle (deck: a failed

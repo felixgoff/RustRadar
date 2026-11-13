@@ -411,6 +411,44 @@ mod tests {
         assert_eq!((c.alpha, c.color[3]), (0.25, 64));
     }
 
+    /// On the 3D terrain (item Z3; deck's offset mode raises a mesh layer's instances by the ground
+    /// under their anchors): the scene's aircraft stand on the ground, and each shadow lies on the
+    /// ground under its aircraft, cast from the aircraft's height above that ground, so it is the
+    /// shadow of the same aircraft over the sea moved up by the ground.
+    #[test]
+    fn on_the_terrain_a_shadow_lies_on_the_ground_under_its_aircraft() {
+        use crate::layers::terrain::ground::{Ground, stand};
+        use rustradar_scene::terrain::heights::{GRID_SIDE, HeightGrid, Heights};
+        use rustradar_scene::tiles::TileIndex;
+        let flat = aircraft(&FLAT, &ROWS);
+        // one zoom-10 tile under every aircraft, sloping 400 m a tile from 1200 m
+        let [lon, lat] = [flat.groups[0].instances[0].position[0], flat.groups[0].instances[0].position[1]];
+        let n = 2f64.powi(10);
+        let x = ((lon + 180.0) / 360.0 * n) as u32;
+        let r = lat.to_radians();
+        let y = ((1.0 - (r.tan() + 1.0 / r.cos()).ln() / std::f64::consts::PI) / 2.0 * n) as u32;
+        let grid = HeightGrid::from_fn(GRID_SIDE, |u, v| 1200.0 + 400.0 * u - 100.0 * v);
+        let ground = Ground::new(Heights::new([(TileIndex::new(x, y, 10), std::sync::Arc::new(grid))]));
+        let mut scene = SceneInput::new(FLAT, SIZE, SCALE, Basemap::Dark);
+        scene.aircraft.scene = flat.clone();
+        stand(&mut scene, &ground);
+        let sun = sun_at(NOON_MS);
+        for (group, raised) in flat.groups.iter().zip(&scene.aircraft.scene.groups) {
+            let on_sea = casts(group, sun, 1.0);
+            let on_ground = casts_on(raised, sun, 1.0, &ground);
+            assert_eq!(on_sea.len(), on_ground.len());
+            for (sea, land) in on_sea.iter().zip(&on_ground) {
+                let a = &raised.instances[land.instance];
+                let under = ground.at([a.position[0], a.position[1]]);
+                assert!(under > 1100.0, "{under} m under the aircraft");
+                assert!((a.position[2] - group.instances[sea.instance].position[2] - under).abs() < 1e-6, "the aircraft stands on the ground");
+                assert_eq!(land.position, [sea.position[0], sea.position[1], under]);
+                assert!(land.transform.iter().zip(&sea.transform).all(|(a, b)| (a - b).abs() < 1e-6), "the same shadow: {:?} against {:?}", land.transform, sea.transform);
+                assert_eq!((land.alpha, land.color), (sea.alpha, sea.color));
+            }
+        }
+    }
+
     /// The colour's alpha rounds from the opacity as a `Float32Array` holds it: just under 13.5 / 255
     /// in a double, the nearest `f32` is just over, and today's app draws 14, not 13.
     #[test]

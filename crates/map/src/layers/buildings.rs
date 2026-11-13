@@ -45,6 +45,13 @@
 //!   the rest keeping their old shadows meanwhile (`renderLayers`' recasting budget). The layer is
 //!   [`Layer::pending`] while any is left to recast, so a shot waits for them.
 //!
+//! - **On the 3D terrain** (item Z3, `terrain::ground`; deck's `TerrainExtension`): a near tile's
+//!   buildings stand on the ground vertex by vertex (an extruded layer is *offset*: each vertex is
+//!   raised by the ground under it), through a vertex buffer of the ground's heights under them
+//!   ([`Standing`]) raised again where the terrain tiles under the tile change, within
+//!   `STAND_BUDGET_MS` a frame; a far tile's flat footprints (`extruded: false`, no anchors) and the
+//!   shadows are draped into the terrain's covers.
+//!
 //! How it is checked: V4 against today's picture (97.7 % of today's building pixels are buildings
 //! here and 98.9 % the other way, 0.7 levels apart on average); V5 for the lit faces and the
 //! shadows (each darkens the land or the water exactly once); the far tiles at zoom 12.1; the cut
@@ -186,7 +193,11 @@ pub fn upload(device: &wgpu::Device, decoded: BuildingTile, serial: u64) -> Tile
     TileMeshes {
         extruded: decoded.extruded,
         mesh: fill::Mesh::new(device, "buildings", &decoded.vertices, &decoded.indices),
-        standing: Standing::new(device, if decoded.extruded { &decoded.vertices } else { &[] }, |v| v.position),
+        standing: if decoded.extruded {
+            Standing::new(device, &decoded.vertices, |v| v.position)
+        } else {
+            Standing::at_sea(device, decoded.vertices.len())
+        },
         footprints: decoded.footprints,
         serial,
     }

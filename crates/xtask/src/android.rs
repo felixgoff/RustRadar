@@ -23,9 +23,11 @@
 //!    and the key's password; `ANDROID_KEY_ALIAS`), materialised as that job does: the keystore
 //!    decoded to `$RUNNER_TEMP/release.jks`, and `keystore.properties` (`storeFile`, `password`,
 //!    `keyAlias`, [`keystore_properties`]) written into the Gradle project, which signs the release
-//!    build type with it. Both files are removed again once Gradle is done. With none of the secrets
-//!    (forks, pull requests) an existing `platform/android/keystore.properties` is used, else the APK
-//!    is unsigned; with only some of them, a warning and an unsigned APK. A signed APK must be signed
+//!    build type with it. Both files are written only after the Rust build and removed again once
+//!    Gradle is done, and no child process gets the secrets in its environment ([`without_secrets`]:
+//!    build scripts and Gradle plugins are third-party code). With none of the secrets (forks, pull
+//!    requests) an existing `platform/android/keystore.properties` is used, else the APK is
+//!    unsigned; with only some of them, a warning and an unsigned APK. A signed APK must be signed
 //!    with today's key ([`RELEASE_CERT_SHA256`], the certificate of v0.3.16's APK): Android installs an
 //!    update only over a copy signed with the same key, so another key is refused unless `--any-key`.
 //! 4. **Native libraries**: `platform/android/build-rust.sh --release --locked <ABI>...` (cargo-ndk 4,
@@ -261,9 +263,9 @@ pub fn signer_digest(text: &str) -> Result<String, String> {
 }
 
 /// The Android SDK: `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or `sdk.dir` in the project's `local.properties`.
-fn sdk_root(project: &Path) -> Option<PathBuf> {
+fn sdk_root(project: &Path, env: &Env) -> Option<PathBuf> {
     for var in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
-        if let Some(dir) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+        if let Some(dir) = env(var) {
             return Some(PathBuf::from(dir));
         }
     }
@@ -339,8 +341,8 @@ fn release_version(root: &Path, wanted: Option<&str>) -> Result<String, String> 
 }
 
 /// A warning, as a GitHub Actions annotation there.
-fn warn(message: &str) {
-    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+fn warn(env: &Env, message: &str) {
+    if env("GITHUB_ACTIONS").is_some() {
         println!("::warning::{message}");
     } else {
         eprintln!("warning: {message}");
@@ -372,11 +374,20 @@ impl Drop for Materialised {
 }
 
 /// Where the keystore goes: `$RUNNER_TEMP/release.jks` as today, else the system's temporary folder.
-fn keystore_path() -> PathBuf {
-    match std::env::var_os("RUNNER_TEMP").filter(|v| !v.is_empty()) {
+fn keystore_path(env: &Env) -> PathBuf {
+    match env("RUNNER_TEMP") {
         Some(dir) => PathBuf::from(dir).join("release.jks"),
         None => std::env::temp_dir().join(format!("rustradar-release-{}.jks", std::process::id())),
     }
+}
+
+/// `command` with the signing secrets taken out of its environment: the builds run third-party code
+/// (build scripts, Gradle plugins), which has no business with them.
+fn without_secrets(mut command: Command) -> Command {
+    for name in SECRETS {
+        command.env_remove(name);
+    }
+    command
 }
 
 fn run_command(mut command: Command, what: &str) -> Result<(), String> {
@@ -393,40 +404,41 @@ fn output(mut command: Command, what: &str) -> Result<String, String> {
 }
 
 /// Appends `lines` to the file a GitHub Actions variable names, when it is set.
-fn github_file(var: &str, lines: &str) -> Result<(), String> {
-    let Some(path) = std::env::var_os(var).filter(|v| !v.is_empty()) else { return Ok(()) };
+fn github_file(env: &Env, var: &str, lines: &str) -> Result<(), String> {
+    let Some(path) = env(var) else { return Ok(()) };
     let mut file = fs::OpenOptions::new().append(true).create(true).open(&path).map_err(|e| format!("{var}: {e}"))?;
     file.write_all(lines.as_bytes()).map_err(|e| format!("{var}: {e}"))
 }
 
+/// What the release reads from its environment: a variable's value, `None` when unset or empty (the
+/// process's own in [`run`], a made-up one in the tests).
+type Env = dyn Fn(&str) -> Option<String>;
+
 pub fn run(list: &[String]) -> Result<(), String> {
     let args = args(list)?;
-    let root = bump::repo_root();
+    release(&bump::repo_root(), &args, &|name| std::env::var(name).ok().filter(|v| !v.is_empty())).map(|_| ())
+}
+
+/// The release under `root`: the APK's path, or `None` for a dry run.
+fn release(root: &Path, args: &Args, env: &Env) -> Result<Option<PathBuf>, String> {
     let project = root.join(PROJECT);
-    let version = release_version(&root, args.version.as_deref())?;
+    let version = release_version(root, args.version.as_deref())?;
     let code = version_code(&version)?;
     let abis: Vec<&str> = if args.abis.is_empty() { ABIS.to_vec() } else { args.abis.iter().map(String::as_str).collect() };
-    let signing = signing(|name| std::env::var(name).ok(), project.join("keystore.properties").is_file())?;
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
+    let signing = signing(env, project.join("keystore.properties").is_file())?;
+    let target_dir = env("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
     let out = args.out.clone().unwrap_or_else(|| target_dir.join("android"));
     let name = apk_name(&version, signing.signed());
     println!("Android release {version} (versionCode {code}), {}", abis.join(", "));
     match &signing {
         Signing::Secrets { .. } => println!("signing with the release keystore from {}", SECRETS.join(", ")),
         Signing::File => println!("signing with {PROJECT}/keystore.properties"),
-        Signing::Unsigned { why, warning: true } => warn(&format!("{why}: the APK is unsigned")),
+        Signing::Unsigned { why, warning: true } => warn(env, &format!("{why}: the APK is unsigned")),
         Signing::Unsigned { why, warning: false } => println!("{why}: the APK is unsigned"),
     }
     println!("-> {}", out.join(&name).display());
     if args.dry_run {
-        return Ok(());
-    }
-
-    let mut materialised = Materialised(Vec::new());
-    if let Signing::Secrets { keystore, password, alias } = &signing {
-        let jks = keystore_path();
-        materialised.write(jks.clone(), keystore)?;
-        materialised.write(project.join("keystore.properties"), keystore_properties(&jks, password, alias).as_bytes())?;
+        return Ok(None);
     }
 
     // a library of another build or ABI must not ride along
@@ -441,8 +453,8 @@ pub fn run(list: &[String]) -> Result<(), String> {
         }
     }
     let mut rust = Command::new("bash");
-    rust.arg(project.join("build-rust.sh")).args(["--release", "--locked"]).args(&abis).current_dir(&root);
-    run_command(rust, "build-rust.sh")?;
+    rust.arg(project.join("build-rust.sh")).args(["--release", "--locked"]).args(&abis).current_dir(root);
+    run_command(without_secrets(rust), "build-rust.sh")?;
     for abi in &abis {
         let lib = libs.join(abi).join(LIBRARY);
         let size = fs::metadata(&lib).map_err(|e| format!("{}: {e}", lib.display()))?.len();
@@ -456,19 +468,26 @@ pub fn run(list: &[String]) -> Result<(), String> {
             fs::remove_file(stale).map_err(|e| format!("{}: {e}", stale.display()))?;
         }
     }
+    // only now, and only for Gradle, which signs with them: no build script of the Rust build saw them
+    let mut materialised = Materialised(Vec::new());
+    if let Signing::Secrets { keystore, password, alias } = &signing {
+        let jks = keystore_path(env);
+        materialised.write(jks.clone(), keystore)?;
+        materialised.write(project.join("keystore.properties"), keystore_properties(&jks, password, alias).as_bytes())?;
+    }
     let mut gradle = Command::new(project.join("gradlew"));
     gradle.args(["assembleRelease", "--no-daemon", &format!("-PversionName={version}")]).current_dir(&project);
-    run_command(gradle, "gradlew assembleRelease")?;
+    run_command(without_secrets(gradle), "gradlew assembleRelease")?;
     drop(materialised);
 
     let apk = if signing.signed() { signed_apk } else { unsigned_apk };
     if !apk.is_file() {
         return Err(format!("Gradle made no {}", apk.display()));
     }
-    let sdk = sdk_root(&project).ok_or("no Android SDK: set ANDROID_HOME")?;
+    let sdk = sdk_root(&project, env).ok_or("no Android SDK: set ANDROID_HOME")?;
     let mut aapt2 = Command::new(build_tool(&sdk, "aapt2")?);
     aapt2.args(["dump", "badging"]).arg(&apk);
-    let badging_text = output(aapt2, "aapt2 dump badging")?;
+    let badging_text = output(without_secrets(aapt2), "aapt2 dump badging")?;
     for line in badging_text.lines() {
         let key = line.split(':').next().unwrap_or_default();
         if ["package", "minSdkVersion", "sdkVersion", "targetSdkVersion", "uses-permission", "launchable-activity", "native-code"]
@@ -481,7 +500,7 @@ pub fn run(list: &[String]) -> Result<(), String> {
     if signing.signed() {
         let mut apksigner = Command::new(build_tool(&sdk, "apksigner")?);
         apksigner.args(["verify", "--print-certs"]).arg(&apk);
-        let digest = signer_digest(&output(apksigner, "apksigner verify")?)?;
+        let digest = signer_digest(&output(without_secrets(apksigner), "apksigner verify")?)?;
         if digest != RELEASE_CERT_SHA256 && !args.any_key {
             return Err(format!(
                 "the APK is signed with the certificate {digest}, not today's {RELEASE_CERT_SHA256}: Android would not \
@@ -496,11 +515,13 @@ pub fn run(list: &[String]) -> Result<(), String> {
     fs::copy(&apk, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
     let mb = fs::metadata(&dest).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0);
     println!("{} ({mb:.1} MB)", dest.display());
-    github_file("GITHUB_OUTPUT", &format!("apk={}\nname={name}\nsigned={}\n", dest.display(), signing.signed()))?;
+    github_file(env, "GITHUB_OUTPUT", &format!("apk={}\nname={name}\nsigned={}\n", dest.display(), signing.signed()))?;
     github_file(
+        env,
         "GITHUB_STEP_SUMMARY",
         &format!("Android: `{name}`, versionCode {code}, {}, {mb:.1} MB\n", if signing.signed() { "signed" } else { "unsigned" }),
-    )
+    )?;
+    Ok(Some(dest))
 }
 
 #[cfg(test)]
@@ -722,6 +743,154 @@ Signer #1 certificate SHA-1 digest: 0000000000000000000000000000000000000000
         assert_eq!(v.last(), Some(&"36.0.0-rc1"));
         assert!(version_key("36.0.0") > version_key("35.0.1"));
         assert!(version_key("10.0.0") > version_key("9.0.0"));
+    }
+
+    /// A repository in a fresh folder: version files at 0.3.17, a library a debug build left in
+    /// `jniLibs`, and stand-ins for `build-rust.sh`, `gradlew` and the SDK's `aapt2` and `apksigner`
+    /// that log what they see to `log` (the keys of `keystore.properties`, never its values).
+    #[cfg(unix)]
+    fn stage(name: &str, badging: &str, apksigner: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("xtask-android-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let write = |path: &str, text: &str| {
+            let path = dir.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, text).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write("Cargo.toml", "[workspace]\nmembers = [\"crates/app\"]\n");
+        write("crates/app/Cargo.toml", "[package]\nname = \"rustradar\"\nversion = \"0.3.17\"\n");
+        write("Cargo.lock", "[[package]]\nname = \"rustradar\"\nversion = \"0.3.17\"\n");
+        write("runner/.keep", "");
+        write("platform/android/app/src/main/jniLibs/arm64-v8a/libold.so", "old");
+        write(
+            "platform/android/build-rust.sh",
+            r#"here="$(cd "$(dirname "$0")" && pwd)"
+echo "rust $*" >> "$here/../../log"
+if [ -e "$here/keystore.properties" ] || [ -e "$here/../../runner/release.jks" ]; then echo "rust saw the keystore" >> "$here/../../log"; fi
+shift 2
+for abi in "$@"; do mkdir -p "$here/app/src/main/jniLibs/$abi"; echo lib > "$here/app/src/main/jniLibs/$abi/librustradar_app.so"; done
+"#,
+        );
+        write(
+            "platform/android/gradlew",
+            r#"#!/bin/sh
+here="$(cd "$(dirname "$0")" && pwd)"
+echo "gradle $*" >> "$here/../../log"
+out="$here/app/build/outputs/apk/release"
+mkdir -p "$out"
+if [ -e "$here/keystore.properties" ]; then
+  echo "keys $(sed 's/=.*//' "$here/keystore.properties" | tr '\n' ' ')" >> "$here/../../log"
+  echo "keystore of $(wc -c < "$(sed -n 's/^storeFile=//p' "$here/keystore.properties")") bytes" >> "$here/../../log"
+  echo apk > "$out/app-release.apk"
+else
+  echo apk > "$out/app-release-unsigned.apk"
+fi
+"#,
+        );
+        write("sdk/build-tools/36.0.0/badging.txt", badging);
+        write("sdk/build-tools/36.0.0/aapt2", "#!/bin/sh\ncat \"$(dirname \"$0\")/badging.txt\"\n");
+        write("sdk/build-tools/36.0.0/apksigner", &format!("#!/bin/sh\n{apksigner}\n"));
+        dir
+    }
+
+    #[cfg(unix)]
+    fn staged_env(dir: &Path, secrets: bool) -> impl Fn(&str) -> Option<String> + use<> {
+        let dir = dir.to_path_buf();
+        move |name| {
+            let value = match name {
+                "ANDROID_HOME" => dir.join("sdk").display().to_string(),
+                "RUNNER_TEMP" => dir.join("runner").display().to_string(),
+                "GITHUB_OUTPUT" => dir.join("github_output").display().to_string(),
+                "ANDROID_KEYSTORE" if secrets => "AQID".into(),
+                "ANDROID_KEYSTORE_PASSWORD" if secrets => "pw".into(),
+                "ANDROID_KEY_ALIAS" if secrets => "key0".into(),
+                _ => return None,
+            };
+            Some(value)
+        }
+    }
+
+    #[cfg(unix)]
+    fn release_args(dir: &Path) -> Args {
+        Args { version: Some("0.3.17".into()), out: Some(dir.join("out")), ..Args::default() }
+    }
+
+    #[cfg(unix)]
+    fn badging_0317() -> String {
+        BADGING.replace("3016", "3017").replace("0.3.16", "0.3.17")
+    }
+
+    #[cfg(unix)]
+    const TODAYS_SIGNER: &str = "echo 'Signer #1 certificate SHA-256 digest: a77966fb7f61d9465bf7c7d63918b13bf270cfb7d2d973b4b4f18b68b23c63a4'";
+
+    #[cfg(unix)]
+    #[test]
+    fn a_signed_release_keeps_the_keystore_from_the_rust_build_and_removes_it() {
+        let dir = stage("signed", &badging_0317(), TODAYS_SIGNER);
+        let apk = release(&dir, &release_args(&dir), &staged_env(&dir, true)).unwrap().unwrap();
+        assert_eq!(apk, dir.join("out/RustRadar_0.3.17.apk"));
+        assert!(apk.is_file());
+        let log = fs::read_to_string(dir.join("log")).unwrap();
+        assert_eq!(
+            log,
+            "rust --release --locked arm64-v8a armeabi-v7a x86 x86_64\n\
+             gradle assembleRelease --no-daemon -PversionName=0.3.17\n\
+             keys storeFile password keyAlias \n\
+             keystore of 3 bytes\n"
+        );
+        // gone again, and the debug build's library with them
+        assert!(!dir.join("platform/android/keystore.properties").exists());
+        assert!(!dir.join("runner/release.jks").exists());
+        assert!(!dir.join("platform/android/app/src/main/jniLibs/arm64-v8a/libold.so").exists());
+        let output = fs::read_to_string(dir.join("github_output")).unwrap();
+        assert_eq!(output, format!("apk={}\nname=RustRadar_0.3.17.apk\nsigned=true\n", apk.display()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn without_secrets_the_release_is_unsigned_and_says_so() {
+        // apksigner fails: an unsigned APK must not be asked about its signer
+        let dir = stage("unsigned", &badging_0317(), "exit 1");
+        let apk = release(&dir, &release_args(&dir), &staged_env(&dir, false)).unwrap().unwrap();
+        assert_eq!(apk, dir.join("out/RustRadar_0.3.17_unsigned.apk"));
+        let log = fs::read_to_string(dir.join("log")).unwrap();
+        assert!(!log.contains("keys"), "{log}");
+        assert!(fs::read_to_string(dir.join("github_output")).unwrap().ends_with("signed=false\n"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_release_that_is_not_todays_app_is_refused() {
+        // another key
+        let other = format!("echo 'Signer #1 certificate SHA-256 digest: {}'", "ab".repeat(32));
+        let dir = stage("other-key", &badging_0317(), &other);
+        let err = release(&dir, &release_args(&dir), &staged_env(&dir, true)).unwrap_err();
+        assert!(err.contains("not today's"), "{err}");
+        assert!(!dir.join("out").exists());
+        let any = Args { any_key: true, ..release_args(&dir) };
+        assert!(release(&dir, &any, &staged_env(&dir, true)).is_ok());
+        fs::remove_dir_all(&dir).unwrap();
+
+        // Gradle's versionCode not the rule's
+        let dir = stage("code", &badging_0317().replace("versionCode='3017'", "versionCode='1'"), TODAYS_SIGNER);
+        let err = release(&dir, &release_args(&dir), &staged_env(&dir, true)).unwrap_err();
+        assert!(err.contains("versionCode is '1', not '3017'"), "{err}");
+        fs::remove_dir_all(&dir).unwrap();
+
+        // a release version the files do not carry: nothing is built
+        let dir = stage("version", &badging_0317(), TODAYS_SIGNER);
+        let wrong = Args { version: Some("0.3.18".into()), ..release_args(&dir) };
+        assert!(release(&dir, &wrong, &staged_env(&dir, true)).unwrap_err().contains("cargo xtask bump 0.3.18"));
+        assert!(!dir.join("log").exists());
+        // a dry run builds nothing either
+        let dry = Args { dry_run: true, ..release_args(&dir) };
+        assert_eq!(release(&dir, &dry, &staged_env(&dir, true)), Ok(None));
+        assert!(!dir.join("log").exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     // The project against today's Tauri project (src-tauri/gen/android) while it exists: what must

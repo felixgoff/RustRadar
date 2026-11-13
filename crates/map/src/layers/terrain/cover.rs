@@ -11,18 +11,18 @@
 //! cover (`TERRAIN_MODE_USE_COVER`). Here:
 //!
 //! - **Which layers** ([`Drape`](crate::layers::Drape)): the renderer leaves the
-//!   [`Drape::Cover`](crate::layers::Drape::Cover) layers (the realistic land, land cover, ground and
-//!   ground rails, the dark map's land and vector map, the imagery, the relief, the night) out of
+//!   [`Drape::Cover`](crate::layers::Drape::Cover) layers (the realistic land, land cover and
+//!   ground, the dark map's land and vector map, the imagery, the relief, the night) out of
 //!   the map pass while the terrain is drawn, and draws them in each cover pass
 //!   ([`Pass::Cover`](crate::layers::Pass::Cover)); a [`Drape::Part`](crate::layers::Drape::Part)
 //!   layer draws its flat parts there and the rest in the map pass
 //!   ([`DrawCx::draws_draped`](crate::layers::DrawCx::draws_draped)): the rail map's lines (its
 //!   labels and stations stand), both building layers' shadows and the realistic one's foot shade
-//!   (the buildings stand); and since item G3 the radar's ground layers (RainViewer's and the
-//!   measured volumes' grounds; the lifted stack stands), the signal blocks' lines (their signals
-//!   and texts stand), the selected train's route dashes and its way to the stop (its stops
-//!   stand), the trail's shadow and the filed plan (the waypoints stand). A pass draws with the
-//!   [`Globals`] of [`cover_globals`]: the frames the
+//!   (the buildings stand); and since item G3 the ground rails (their platforms stand), the
+//!   radar's ground layers (RainViewer's and the measured volumes' grounds; the lifted stack
+//!   stands), the signal blocks' lines (their signals and texts stand), the selected train's route
+//!   dashes and its way to the stop (its stops stand), the trail's shadow and the filed plan (the
+//!   waypoints stand). A pass draws with the [`Globals`] of [`cover_globals`]: the frames the
 //!   layers pushed for the map's camera are measured from the view centre, which these globals keep,
 //!   so the same frames land in the tile's square. In a cover pass `globals.mode` is the flat map's,
 //!   `globals.mercator.y` is 1 (`rl_clear` then gives 1: the draped ground takes no air, as
@@ -76,8 +76,7 @@
 //!   such a layer costs a cover or two a scene refresh, within [`COVERS_PER_FRAME`] (item G3).
 //! - Not draped (deck drapes them): the selected flight's trail and its route's estimates keep
 //!   their true heights (plan section 6, item 3), and so do the radar's lifted layers and walls
-//!   (deck would flatten the stack onto the ground, `terrain::ground`). The platforms (an extruded
-//!   area, deck: offset) are drawn flat into the cover with the rest of the ground rails.
+//!   (deck would flatten the stack onto the ground, `terrain::ground`).
 //! - What changes a cover layer's picture without changing its tiles or its settings (a style a
 //!   layer works out from the zoom other than the relief's opacity) shows at the cover's next
 //!   drawing.

@@ -116,9 +116,11 @@ fn vs_area(@location(0) position: vec3<f32>, @location(1) paint: vec4<u32>) -> G
 // SolidPolygonLayer, `material: false`): an area whose sides face their own way. deck sets
 // `rg_wall = geometry.normal` on a side's vertices (`IS_SIDE_VERTEX`) and leaves it 0 on the top;
 // here a side's normal is level (east, north) and the top's up, so its level part is `rg_wall`.
+// On the 3D terrain each vertex stands on the ground under it (`ground`, metres; 0 at sea level:
+// deck's offset mode for an extruded layer, item G3).
 @vertex
-fn vs_platform(@location(0) position: vec3<f32>, @location(1) paint: vec4<u32>, @location(2) normal: vec3<f32>) -> GroundOut {
-    let p = project_local(position);
+fn vs_platform(@location(0) position: vec3<f32>, @location(1) paint: vec4<u32>, @location(2) normal: vec3<f32>, @location(3) ground: f32) -> GroundOut {
+    let p = project_local(position + vec3<f32>(0.0, 0.0, ground));
     let d = local_offset(position.xy);
     let rl = rl_vertex(p.rel, rl_mercator(d));
     var out: GroundOut;

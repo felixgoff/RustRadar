@@ -16,7 +16,7 @@
 //! | ship and train halos and rings, the train route's stops, signals and their names, the markers, sightings, the filed plan's waypoints (G3) | their layers, by [`Ground::at`] where they place them; the signals' picks too (G3) |
 //! | aircraft shadows | on the ground under the aircraft, cast from its height above it |
 //! | place labels, the rail map's stations and speed labels | their layers, by [`Ground::at`] |
-//! | buildings' walls and roofs (both maps), pitched roofs | per vertex, [`Standing`] |
+//! | buildings' walls and roofs (both maps), pitched roofs, the realistic map's platforms (G3) | per vertex, [`Standing`] |
 //! | trees and their shadows | each tree by the ground under it |
 //!
 //! Draped instead (Z2's covers): everything flat, including the far building tiles drawn flat
@@ -33,7 +33,6 @@
 //!   ground, are draped, item G3), and so do the lifted radar layers and their walls (deck drapes
 //!   every radar layer, which flattens the stack onto the ground or loses it beyond the cover's
 //!   near plane); the radar's ground layers are draped (G3).
-//! - The ground platforms of the realistic map stay flat in the covers (Z2).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

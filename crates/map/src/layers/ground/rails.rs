@@ -48,9 +48,17 @@
 //! than the tracks beside them; only the realistic map asks for the tiles, the platforms only on
 //! the flat map from zoom 15.
 //!
+//! On the 3D terrain (item G3; deck's `TerrainExtension`): the tracks, their ballast and bridges
+//! and the platforms' lines (PathLayers) are draped into the terrain's covers
+//! ([`crate::layers::Drape::Part`]); the platforms' areas (an extruded layer: deck's offset mode)
+//! stand on it in the map pass, each vertex raised by the ground under it ([`Standing`], as the
+//! buildings), through `vs_platform`'s ground attribute.
+//!
 //! Deviations, invisible: as the city ground's (the stencil clips where the tile's square is
 //! seen at the ground, so a platform's top 0.6 m up is cut where the square's edge is seen, not
-//! where the top crosses it; both tiles hold the platform, so it shows once and whole).
+//! where the top crosses it; both tiles hold the platform, so it shows once and whole). On the 3D
+//! terrain the standing platforms are not clipped (the stencil's square lies at sea level; deck
+//! clips by position): a platform over a tile's edge is in both tiles and drawn the same twice.
 
 use bytemuck::{Pod, Zeroable};
 use rustradar_core::geo::Basemap;
@@ -64,7 +72,8 @@ use super::{GroundShader, LineMesh, LineWidth, load_textures};
 use crate::frame::FrameSlot;
 use crate::jobs::Cancel;
 use crate::layers::vector_map::{CLIP_MARK, CLIP_RESET, CLIPPED, MAX_REQUESTS};
-use crate::layers::{ByteSize, DeckSelect, DrawCx, Init, Layer, LodSelect, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
+use crate::layers::terrain::ground::{StandBudget, Standing};
+use crate::layers::{ByteSize, DeckSelect, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::pipelines::fill;
 use crate::pipelines::path::{self, Path, Segment as PathSegment};
 use crate::state::DrawState;
@@ -107,6 +116,14 @@ pub const PLATFORM_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBuffe
     array_stride: size_of::<PlatformVertex>() as u64,
     step_mode: wgpu::VertexStepMode::Vertex,
     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint8x4, 2 => Float32x3],
+};
+
+/// The ground under each platform vertex on the 3D terrain (item G3, [`Standing`]): metres at
+/// location 3, 0 at sea level.
+pub const PLATFORM_GROUND_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<f32>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![3 => Float32],
 };
 
 /// A platform tile, decoded: the standing platforms and the lines.
@@ -218,6 +235,8 @@ impl LineMeshes {
 pub struct PlatformMeshes {
     pub platforms: fill::Mesh<PlatformVertex>,
     pub lines: LineMeshes,
+    /// The ground under each of the platforms' vertices on the 3D terrain (item G3).
+    pub standing: Standing,
 }
 
 /// What one set of line passes is drawn with: the ground shader's lines pipeline, the plain
@@ -315,6 +334,9 @@ pub struct GroundRails {
     deck_styles: [path::Style; 2],
     /// The platforms standing and their lines, in [`SOLID`].
     platform_areas: wgpu::RenderPipeline,
+    /// The platforms standing on the 3D terrain, unclipped (`NO_CULL`, item G3): the stencil's
+    /// square lies at sea level.
+    platform_areas_on_terrain: wgpu::RenderPipeline,
     platform_lines: wgpu::RenderPipeline,
     clip: Clip,
     flat: TileSet<Rails, LineMeshes>,
@@ -324,6 +346,8 @@ pub struct GroundRails {
     /// This frame's rail and platform tiles in draw order, each with its frame.
     rails_drawn: Vec<(FrameSlot, TileIndex)>,
     platforms_drawn: Vec<(FrameSlot, TileIndex)>,
+    /// Platform tiles left to stand on the 3D terrain's ground again (the frame's time ran out).
+    unstood: usize,
 }
 
 impl GroundRails {
@@ -357,6 +381,7 @@ impl GroundRails {
             shade,
             decks,
             platform_areas: shader.platforms(init, "ground-platforms", SOLID),
+            platform_areas_on_terrain: shader.platforms(init, "ground-platforms on the terrain", DrawState::NO_CULL),
             platform_lines: shader.lines(init, "ground-platforms lines", SOLID),
             shader,
             clip: Clip::new(init),
@@ -366,6 +391,7 @@ impl GroundRails {
             shown: None,
             rails_drawn: Vec::new(),
             platforms_drawn: Vec::new(),
+            unstood: 0,
         }
     }
 
@@ -405,6 +431,7 @@ impl Layer for GroundRails {
     fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
         self.rails_drawn.clear();
         self.platforms_drawn.clear();
+        self.unstood = 0;
         let realistic = cx.scene.ground.shown && cx.scene.basemap == Basemap::Realistic;
         self.shown = realistic.then(|| if cx.view.is_globe() { Shown::Globe } else { Shown::Flat });
         match self.shown {
@@ -432,7 +459,21 @@ impl Layer for GroundRails {
             cx.update_tiles(&mut self.platforms, |gpu, _tile, decoded| PlatformMeshes {
                 platforms: fill::Mesh::new(&gpu.device, "ground-platforms", &decoded.vertices, &decoded.indices),
                 lines: LineMeshes::new(&gpu.device, "ground-platforms lines", &decoded.lines),
+                standing: Standing::new(&gpu.device, &decoded.vertices, |v| v.position),
             });
+            // the platforms (deck's extruded layer: offset) standing on the 3D terrain, each vertex on
+            // the ground under it, as the buildings do (item G3)
+            let mut budget = StandBudget::default();
+            let visible: Vec<TileIndex> = self.platforms.visible().map(|(t, _)| t).collect();
+            for tile in visible {
+                if let Some(m) = self.platforms.get_mut(tile)
+                    && m.standing.stale(tile, &cx.scene.stands_on)
+                    && budget.take()
+                {
+                    m.standing.stand(&cx.gpu.queue, tile, &cx.scene.stands_on);
+                }
+            }
+            self.unstood = budget.left;
             for (tile, _) in self.platforms.visible() {
                 self.platforms_drawn.push((cx.tile_frame(tile, 0.0), tile));
             }
@@ -444,9 +485,14 @@ impl Layer for GroundRails {
         if !cx.pass.draws(self.drape()) {
             return;
         }
+        // on the 3D terrain the rails and the platforms' lines (deck's PathLayers) are draped into
+        // the covers, the platforms' areas (an extruded layer: deck's offset mode) stand on it in the
+        // map pass (item G3)
+        let (draped, standing) = (cx.draws_draped(), cx.pass == Pass::Map);
         let shader = &self.shader;
         let rails_width = width_index(RAILS_WIDTH);
         match shown {
+            Shown::Globe if !draped => {}
             Shown::Globe => {
                 // (GeoJSON on the globe: nothing raised, nothing clipped)
                 let p = LinePipelines {
@@ -469,7 +515,7 @@ impl Layer for GroundRails {
                     width: RAILS_WIDTH,
                 };
                 for &(slot, tile) in &self.rails_drawn {
-                    let Some(m) = self.flat.get(tile) else { continue };
+                    let Some(m) = self.flat.get(tile).filter(|_| draped) else { continue };
                     self.clip.mark(pass, cx, slot);
                     draw_passes(pass, cx, shader, slot, m, &p);
                     self.clip.reset(pass, cx, slot);
@@ -484,28 +530,36 @@ impl Layer for GroundRails {
                 };
                 for &(slot, tile) in &self.platforms_drawn {
                     let Some(m) = self.platforms.get(tile) else { continue };
-                    self.clip.mark(pass, cx, slot);
-                    if m.platforms.index_count() > 0 {
-                        shader.begin(pass, &self.platform_areas, PLATFORMS_WIDTH);
+                    // (standing on the terrain they are not clipped: the stencil's square lies at
+                    // sea level; a platform over a tile's edge is in both tiles and drawn the same)
+                    if draped {
+                        self.clip.mark(pass, cx, slot);
+                    }
+                    if standing && m.platforms.index_count() > 0 {
+                        let areas = if draped { &self.platform_areas } else { &self.platform_areas_on_terrain };
+                        shader.begin(pass, areas, PLATFORMS_WIDTH);
                         cx.bind_frame(pass, slot);
+                        m.standing.bind(pass, 1);
                         m.platforms.draw(pass);
                     }
-                    draw_passes(pass, cx, shader, slot, &m.lines, &p);
-                    self.clip.reset(pass, cx, slot);
+                    if draped {
+                        draw_passes(pass, cx, shader, slot, &m.lines, &p);
+                        self.clip.reset(pass, cx, slot);
+                    }
                 }
             }
         }
     }
 
     fn drape(&self) -> crate::layers::Drape {
-        crate::layers::Drape::Cover
+        crate::layers::Drape::Part
     }
 
     fn pending(&self) -> bool {
         match self.shown {
             None => false,
             Some(Shown::Globe) => self.globe.loading(),
-            Some(Shown::Flat) => self.flat.loading() || self.platforms.loading(),
+            Some(Shown::Flat) => self.flat.loading() || self.platforms.loading() || self.unstood > 0,
         }
     }
 }
@@ -861,6 +915,84 @@ mod tests {
         assert!(luma(p) > luma(t) + 10.0, "the platforms {p:?} against the tracks {t:?}");
         // and the rest of the ground as it was
         assert!(f64::from(elsewhere.1) < 0.03 * f64::from(elsewhere.0), "{elsewhere:?}");
+    }
+
+    /// On the 3D terrain (item G3): over a plateau 40 m up, the camera's target on it, Stockholm C's
+    /// platforms stand on the ground (each vertex raised by the ground under it, deck's offset mode
+    /// for their extruded layer) where the CPU puts their tops 40.6 m up, lighter than the tracks
+    /// draped beside them; nothing is left waiting to stand.
+    #[test]
+    fn on_the_terrain_stockholm_c_s_platforms_stand_on_the_ground() {
+        let Some(gpu) = gpu() else { return };
+        const PLATEAU_M: f64 = 40.0;
+        let plateau = {
+            let v = ((PLATEAU_M + 32768.0) * 256.0).round() as u32;
+            let image = image::RgbImage::from_pixel(256, 256, image::Rgb([(v >> 16) as u8, (v >> 8) as u8, v as u8]));
+            let mut png = Vec::new();
+            image.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).expect("a PNG");
+            png
+        };
+        let on = |rails: bool| -> Arc<dyn TileFetcher> {
+            let dir = DirTiles::fixtures();
+            let plateau = plateau.clone();
+            Arc::new(FnFetcher(move |source: &str, tile: TileIndex| -> FetchResult {
+                match source {
+                    s if s == crate::io::MAPTERHORN => Ok(Some(plateau.clone())),
+                    s if s == RAIL_SOURCE && !rails => Ok(None),
+                    _ => dir.read(source, tile),
+                }
+            }))
+        };
+        let view = ViewState { position: Some([0.0, 0.0, PLATEAU_M]), ..STOCKHOLM_C };
+        let mut scene = realistic(view);
+        scene.terrain = crate::layers::terrain::Input { shown: true };
+        let shoot_on = |rails: bool| {
+            let mut renderer = MapRenderer::new(&gpu, FORMAT);
+            renderer.set_tiles(on(rails), None);
+            let image = render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered");
+            assert!(!renderer.pending(), "{:?}", renderer.pending_layers());
+            assert!(!renderer.ground().is_none(), "the scene stands on the terrain");
+            image
+        };
+        let (with, without) = (shoot_on(true), shoot_on(false));
+        with.save_png(&shots_dir().join("g3-stockholm-c-on-a-plateau.png")).expect("png");
+        let never = Cancel::new();
+        let platforms = decode_platforms(PLATFORMS_AT_C, &fixture(RAIL_SOURCE, PLATFORMS_AT_C), &never).unwrap().unwrap();
+        let tops: Vec<[DVec2; 3]> = platforms
+            .indices
+            .chunks_exact(3)
+            .filter(|t| platforms.vertices[t[0] as usize].normal[2] == 1.0)
+            .map(|t| [t[0], t[1], t[2]].map(|i| DVec2::new(f64::from(platforms.vertices[i as usize].position[0]), f64::from(platforms.vertices[i as usize].position[1]))))
+            .collect();
+        let in_top = |p: DVec2| {
+            tops.iter().any(|&[a, b, c]| {
+                let s = |p1: DVec2, p2: DVec2| (p2 - p1).perp_dot(p - p1);
+                let (d1, d2, d3) = (s(a, b), s(b, c), s(c, a));
+                !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+            })
+        };
+        let frame = ViewFrame::new(&view, SIZE, 1.0, 0.0);
+        let platforms_frame = LocalMercator::tile(PLATFORMS_AT_C);
+        let top_at = |pixel: [f64; 2], h: f64| {
+            let [x, y] = rustradar_scene::camera::lng_lat_to_world(frame.viewport.unproject(pixel, h));
+            let [u, v] = platforms_frame.from_world(DVec2::new(x, y));
+            in_top(DVec2::new(u, v))
+        };
+        let mut tops_seen: Vec<(bool, [u8; 3])> = Vec::new();
+        for y in (240..720).step_by(2) {
+            for x in (0..1100).step_by(2) {
+                let pixel = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+                if top_at(pixel, PLATEAU_M + PLATFORM_M) {
+                    let (a, b) = (with.pixel(x, y), without.pixel(x, y));
+                    tops_seen.push(((0..3).any(|c| a[c].abs_diff(b[c]) > 6), [a[0], a[1], a[2]]));
+                }
+            }
+        }
+        let changed = tops_seen.iter().filter(|(c, _)| *c).count();
+        let mut colours: Vec<[u8; 3]> = tops_seen.iter().map(|&(_, c)| c).collect();
+        let top = median(&mut colours);
+        eprintln!("on a 40 m plateau: {} platform-top px, {changed} drawn, median {top:?}", tops_seen.len());
+        assert!(tops_seen.len() > 3000 && changed * 4 > tops_seen.len() * 3, "{changed} of {}", tops_seen.len());
     }
 
     /// Only the realistic map asks for the rail tiles: by deck's rule at zooms 7 to 12 on either

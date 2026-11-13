@@ -331,9 +331,10 @@ impl GroundShader {
     }
 
     /// The standing areas' pipeline (`vs_platform`, `fs_area`; [`rails::PLATFORM_LAYOUT`]: the
-    /// platforms, item R9) with `state`.
+    /// platforms, item R9; with [`rails::PLATFORM_GROUND_LAYOUT`] the ground under each vertex on
+    /// the 3D terrain, item G3) with `state`.
     pub fn platforms(&self, init: &Init<'_>, label: &str, state: DrawState) -> wgpu::RenderPipeline {
-        self.pipeline(init, label, "vs_platform", "fs_area", &[Some(rails::PLATFORM_LAYOUT)], state)
+        self.pipeline(init, label, "vs_platform", "fs_area", &[Some(rails::PLATFORM_LAYOUT), Some(rails::PLATFORM_GROUND_LAYOUT)], state)
     }
 
     fn pipeline(

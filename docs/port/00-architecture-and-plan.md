@@ -2146,3 +2146,263 @@ terrain's `zRange` once loaded): the 2D layers are covered from both cameras, th
   OpenRailwayMap's tiles and the MRMS volume are fetched through the backend's own code, and PMTiles
   directories are gzip'd.
 - `cargo xtask fixtures` keeps OpenFreeMap's build; `--missing` lists what the set lacks, tiles and data alike.
+
+---
+
+## Stages 8-10 status
+
+Checked on 2026-11-13 on `rust-port` (from `b54bbfb`) by the stages 8-10 review (the item that owns no files),
+after every stage 8, 9 and 10 item, the stage 11 rows P1–P4 (run as Pk1–Pk4 so as not to clash with "Performance
+(P1)"), the fixtures item X1 and the stages 5-7 follow-ups F1 and F2 had reported, and after a visual review of the
+realistic map, the terrain and the radar against `docs/port/reference/`. A first run of this review was cut off by
+a container restart; its two fixes and the first ticks of section 4 are in checkpoint `b54bbfb`, which this run
+checked again (both hold) before finishing the rest. This section is in the commit after it.
+
+**In short.**
+- Stages 8, 9 and 10 are done: every row's acceptance holds in its tests (the rows restated below follow today's
+  app where the plan's wording did not). The window draws the realistic map (light, sky, textured ground, land
+  cover, city ground by distance LOD, buildings with windows and night glow, pitched roofs with Overture's
+  heights, foot shade and shadows, trees, ground rails and platforms, Earth picture, night lights and clouds on the
+  globe, live weather, rain, tilt-shift, relief), the 3D terrain (surface, draped covers, things standing on it,
+  the camera's ground aim) and the weather radar (RainViewer on the ground and lifted, MRMS volumes). Every one is
+  reachable: the basemap switch (layers menu, keys 1–3); Weather (six presets) and Tilt-shift in the layers menu
+  on the realistic map; Terrain (E), 3D buildings (B), Weather radar (W); the scene builder hands each layer its
+  setting (trees have no setting, as today: on the realistic flat map from zoom 14).
+- Stage 11's P1–P4 are done as code and tests; their person checks (real installs) are pending, and two version
+  traps keep the updater from being usable before stage 12's D2 and the packaging rows (gap 6).
+- 12 lines of section 4 are ticked by stages 8-10 (2 radar, 10 realistic): 63 in all. Not ticked: measured volumes
+  (DWD loads nothing, today's app neither; gap 2), the 3D terrain line (four flat layers not draped yet, gap 3),
+  the updater lines (person checks and the version traps, gap 6).
+- Four fixes by this review: in `b54bbfb` a race in `crates/app/tests/airport_panel.rs` that turned the CI's
+  required step red (fix 1) and the city ground's bridges, which stood 6 m up where today's lie flat (fix 2); in
+  the commit after it a timing race in R10's `backend::clouds` test that turned CI run 303 red (fix 3) and the
+  port job's 90-minute limit, which stages 8-10's GPU tests outgrew so that Clippy no longer ran on CI (fix 4,
+  `.github/workflows/rust.yml`, outside `crates/`).
+- The frame budget (K8) is measured below for V5 realistic in a debug build on SwiftShader; it says nothing about
+  a GPU, so the budget itself is still a person check on real hardware.
+
+**Checks**
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | clean (no warnings), from an empty `target/` |
+| `cargo test --workspace` (SwiftShader) | 2940 passed, 0 failed, 25 ignored (the backend's 22 of stages 1–2, 2 in the app, 1 doc block in the map), run crate by crate, the app's 46 integration files in four batches (binaries deleted between batches for disk); about 1 h 40 min on this container's 4 vCPUs, the map crate's GPU tests 61 min of it; no GPU test skipped (the CI's adapter check, and a GPU test run here with `--nocapture`). Fix 3's test then passed 30 runs in a row |
+| `cargo clippy --workspace --all-targets` | no warnings |
+| `cargo check -p rustradar` (shim) | passes (its 2 tests pass) |
+| `bun run check` | 0 errors, 0 warnings (5589 files) |
+| `bun test src` | 394 pass |
+| CI "Build" on `rust-port` | run 303 (`b54bbfb`, the first push since 295): the Windows, macOS, iOS and Android checks green; the required SwiftShader step red on one test only, `backend::clouds::tests::the_network_is_asked_while_wanted_and_one_ask_at_a_time` (fix 3), every other test green, the step taking 85 min; the job then hit its 90-minute limit inside the lavapipe run, so Clippy, the step after it, never ran (fix 4). Before it: 273, 277 and 284 red on fix 1's race, 295 on a compile error Z2 fixed in `0fef5a0`, every other run since 284 cancelled by a newer push. This commit starts a new run |
+
+The passing tests, by crate:
+
+| Crate | Passed | Ignored | Since the stages 5-7 review |
+|---|---|---|---|
+| core | 603 unit + 2 in `tests/motion.rs` | 0 | – |
+| scene | 646 | 0 | +34 (stages 8-10) |
+| map | 467 unit + 9 + 2 | 1 doc block (an example) | +157 unit (stages 8-10) |
+| backend | 270 | 22 (as in stage 2) | +49 (the new sources: RainViewer, radar volumes, Streets GL, Overture, canopy, land cover, clouds, terrain; F2) |
+| app | 682 unit + 171 in 46 integration files | 2 (P2's network test, P3's window test) | +111 unit, +19 integration (7 new files: ground_aim, hillshade, radar, standing, trees, weather_effects, shot_photos) |
+| xtask | 68 | 0 | +37 (X1, P1, F1) |
+| fr24 | 17 + 1 doc-test | 0 | – |
+| shim | 2 | 0 | – |
+
+Ignored, each with its reason: the backend's 22 of stages 1–2 and two new ones in the app, P2's
+`update::tests::a_published_release_verifies_with_the_compiled_in_key` (needs the network; P2 ran it once and it
+passed) and P3's `update::splash::tests::the_splash_in_a_window` (opens windows; P3 ran it under `xvfb-run`). No GPU
+test skipped. Tests changed by stages 8-10 were read in the diff from `a3f4f84~1` (two assertions
+removed, both replaced by stronger ones: W4's radar blob and B7's gating test, which now checks the realistic map
+asks OpenFreeMap for the dark map's building tiles once each). Changed but not loosened: Z2's two app tests (R12's
+`tests/hillshade.rs` now draws the app's own scene through the map with the 3D surface left out, as the fixtures
+hold no surface for the Alps view, every assertion as before; Z4's whole-app shot in `tests/ground_aim.rs` ignores
+only Mapterhorn misses of the surface's passing selections while the camera rises, its settled selection checked
+by Z4's other test), F1's +1 px for DejaVu's baseline in `tests/modebar.rs`, and fix 2's expected bridge heights.
+
+**Frame budget (K8).** Measured here for the first time, with P1's `perf frame` (`cargo run -p rustradar-app --example
+perf -- frame --basemap realistic --view 59.3293,18.0686,15.5,60,20 --aircraft 0`) in a **debug** build at V5
+realistic, 1440 × 900, from the committed fixtures, on SwiftShader with this container's 4 vCPUs (nothing else
+running): the view settles in 3.1 s (229 undrawn frames). With the scene refresh forced every frame, the whole frame's
+CPU (`Engine::frame`: poll, scene builders, egui, map prepare, encoding, submit) is **17.8 ms** mean (17.1 median,
+26.3 worst; 10 drawn frames) with the camera still and **21.9 ms** (21.5 median, 24.6 worst; 8 frames) panning; of it
+the scene builders take 0.11 / 0.16 ms (20 rounds each) and the map's update and prepare 1.85 / 10.9 ms (panning
+selects tiles and places labels anew every frame), the rest is egui and command encoding in an unoptimised build.
+SwiftShader then rasterises each frame in 8.5 s, which says nothing about a GPU. So the CPU side of a debug build is
+2–6 ms over the desktop's 16 ms and within the phone's 33 ms; a release build's CPU side is smaller (P1 measured 6–10
+ms per whole frame in release with 2000 aircraft on the dark map). Not measured: a release build (not built here,
+disk), the GPU time on real hardware (the budget's real test: person check below), 2000 aircraft over V5.
+
+**What was looked at.** The visual review rendered every realistic reference view through the app (`--ui
+--fixture crates/map/tests/data --now 1782036000000`, sunny sky; sky, tilt-shift, terrain and weather through
+`headless::render_on_with` in a throwaway test, as the binary has no flags for them) and compared crops at 2–12×
+with measured means and offsets: V4 matches today's phone picture to 0.48 levels on average (desktop 2.05, the
+reference's 256-colour dither), V5 to 2.4 (desktop 5.1), V1 without clouds 124.5 against 124.3 in the north,
+dark V2 under the radar at 0 px. This review read its pictures again (`phone-v5` side by side: same buildings,
+roofs, trees, water and labels; Zermatt with the terrain off and on: gap 4), checked the bridges of V5 in 3× crops
+beside `realistic-v5-1440x900.png` (fix 2 changes nothing visible at V5, whose z16 tiles carry no OpenMapTiles
+bridges; the raised decks were in the coarser tiles further out) and read the item shots each report names.
+
+**Per item**
+
+| Item | Verdict | Evidence, and what differs from the row |
+|---|---|---|
+| X1 | done | 76.9 MB of the 80 MB budget; xtask's fixture tests and 9 `fixture_tiles`. Gap 1. |
+| F1 | done | text on Chromium's baselines (all 420 grid cases), tabular figures, the viewer's time zone: stages 5-7 gaps 1–3 closed. |
+| F2 | done | photos in shots from `--fixture DIR/images`, the readout inside the safe area, earcut's empty hole kept as earcut.js (no triangles), the adsb.lol spacing test on a fixed clock: stages 5-7 gaps 6–8 and stages 3-4 gap 8 closed. |
+| R1 | done | V2 noon land within 1.2 levels of the CPU twin (4 allowed), sky stops within 4, night sky (75,84,111) as today's; rl_t/rl_c read back from the GPU within 0.54 levels. |
+| R2 | done | V3 surfaces' medians within 2 levels of `realistic-v3` (woods, farmland, gardens, water, bare land); rain: asphalt 0.80×, dirt 0.64×; snow tested. |
+| R3 | done; row restated | the tile-id overlay covers V5 once, no gap. V5 is all Streets GL z16, today as here; the coarser levels are shown at V5 tilted to 75°. |
+| R4 | done | V5 by day 61.5 % buildings with windows; at night walls 142.7 luma against the ground's 87–89; a wall-texture direction bug found and fixed by R4's review (`1c6be5a`). |
+| R5 | done | low sun: fitted azimuth 0.08° from the real one (3° allowed), 0 px darkened twice, also over the city ground. |
+| R6 | done; row restated | roofs and Overture heights equal today's `tileRoofs`/`withOvertureHeights` under bun on 5 tiles; roofs drawn as today draws them: deck's SimpleMeshLayer drops `rr_info`, so every face is plain plaster in its corners' colour (doc 04 §7.5 describes the intended look, not today's). |
+| R7 | done | Humlegården: 665 trees, cards cut, shadows darken once; 4 fixture tiles plant tree for tree as tree-layer.ts under bun. Visual difference 1. |
+| R8 | done | 66 NMD + 66 WorldCover fixture pictures decode; V4's unmapped forest (125,138,101) against today's (124,138,101). |
+| R9 | done | Stockholm C: tracks 100 % on ballast, platforms standing; NVDB widths only through tests (no key may be in fixtures; shots draw roads as today without one). Its note on the city ground's bridges is fix 2. |
+| R10 | done | V1 continents within 4 levels of the twin, ≥ 8 of 10 towns lit at night, the fixture's clouds; the Earth picture and night lights are terms of R2's ground shader (no separate layer), as today. Its backend test's race is fix 3. |
+| R11 | done | 6 state tests on a fake clock; rain streaks and a live forecast's rain through the app; tilt-shift keeps its middle rows to the pixel at 1× and 2×, the edges blurred; MET Norway credited. |
+| R12 | done | Alps relief on all three basemaps; satellite/dark contrast 0.452 (table 0.45); the table on a slope within 0.015 for each basemap, with and without the terrain (1.4 on realistic). |
+| Z1 | done; row restated | martini bit for bit with loaders.gl under bun; the skyline at **pitch 75** (pitch 60 cannot show the sky: deck's top ray is 11.6° below the horizon, X1): ground above a plain's horizon in all 800 columns, the ridge against the sky down the valley. Visual difference 4 (seams). |
+| Z2 | done | over a sea-level surface 18601 of 18616 plain pixels equal the flat map; over ridges 2309 of 2311 moved pixels follow the relief; terrain off → on → off: 0 px differ; 65 covers in 254 MB of 256; globe V3 64953 of 64953. Gaps 3 and 4. |
+| Z3 | done; check restated | on a synthetic 17° hillside (the fixtures' Zermatt is checked only through the app: 517 roof pixels on the mountainside, 4 without buildings) three buildings end within 0.26–0.99 px of their CPU feet (1.5 allowed); bilinear lookup unit tests. Gaps 3–5. |
+| Z4 | done; check restated | 23 frames of 30 % to within 0.5 m of the z12 pixel (1603 m). "The same ground point on and off within 3 px" is checked by casting the centre pixel's ray from the raised camera onto the drawn tile's own RTIN triangles: 0.25 px (30 m off misses by 27–33 px), not by comparing two draped pictures (gap 4 makes the draped picture at the centre bare). |
+| W1 | done | 4 fixture tiles mesh value for value as `processTile` under bun; the seams of 6/35/22 east and south closed. |
+| W2 | done | V2 at 1100×720, 1440×900 and pitched: ≥ 97 % of inner band pixels one NWS colour at 55 % over the map. |
+| W3 | done | V2 at pitch 45: all 14 heights, slices then walls, matching a CPU copy; at pitch 10 the ground layer's picture to the pixel, arenas freed. |
+| W4 | done; one source dead | backend tests unchanged in meaning; the recorded MRMS scan meshes as `process_volume` and draws at 70 %. DWD loads nothing (gap 2). Its Lake Erie patch is today's (gap 9). |
+| W5 | done | 12 state tests on a fake clock; RainViewer blanked under a synthetic volume's quarter through the whole app (2701 → 0 px there, the rest identical). Layers menu and W already wired (U16). |
+| P1 (Pk1) | done | 22 tests; `bump` byte-identical to `scripts/version.mjs`, `latest-json` reads v0.3.15's manifest back, `sign` verified against the real Tauri CLI's keys; `release-version.sh` through `cargo xtask version`. |
+| P2 (Pk2) | done | 19 tests against a local listener with a throwaway key (signed verifies, tampered refused, other key refused); the ignored network test passed once. |
+| P3 (Pk3) | done; **person check pending** | 32 tests: macOS swap and rollback, AppImage replace, NSIS/MSI command lines on temp folders; every failure path ends in Open; splash shot against Chromium's `updater.html`. Real installs are P11's. |
+| P4 (Pk4) | done; **person check pending** | `finds_a_newer_apk` and 5 more; the Android wiring built in the Phone shells CI (run 43140925366). Opening the APK link on a device is a person check. |
+
+**Fixes made by this review** (1 and 2 in `b54bbfb`, 3 and 4 in the commit that adds this section)
+1. **CI red on a test race** (U13's `tests/airport_panel.rs`, failing the required step of runs 273, 277 and 284):
+   three tests built their fixture folder at one shared path, each clearing it first, so one test's
+   `remove_dir_all` could pull the folder from under another ("the fixture folder: NotFound"). Each call now gets
+   its own folder (`{name}-{pid}-{n}`).
+2. **City ground bridges at today's height** (R2/R3's `scene::tess::ground`, R9's note): `bridgeParts` writes its
+   decks in deck's common units (`× 512 / (C cos φ)`), and the city ground's tiles on the flat map are MVTLayer's
+   CARTESIAN tiles (model matrix z scale 1), whose z deck reads as metres (`viewport-uniforms.js`:
+   `commonUnitsPerWorldUnit = [1, 1, unitsPerMeter[2]]`), so today's road and rail bridges there stand 0.15 mm up,
+   flat to the eye, as T7 found for the rail map and R9 for the ground rails. The port raised them 6 m (a deck per
+   `layer`) with their depth-writing decks. `flat_lines` now multiplies the raised paths' heights by
+   `bridges::rail_map_lift`, as the rail map and the ground rails do; `the_flat_maps_bridges_are_raised` checks the
+   decks at 6 m, 12 m and 6 m times that lift.
+3. **CI red on a timing race** (R10's `backend::clouds::tests::the_network_is_asked_while_wanted_and_one_ask_at_a_time`,
+   the only failure of run 303's required step, and once before in run 284's lavapipe step): the local test server
+   could answer before the first `poll` looked, so `poll` took the answer at once and `loading()` was already
+   false; the wake comes after the answer is sent, so the wake count could also lag. The test's server now holds
+   its answer until a semaphore opens (`serve_held`; `serve` is it with the gate open), the test checks the ask is
+   out and no second ask goes while it is, then opens the gate, and waits up to 5 s for the wake. Same assertions,
+   one more (`!poll` while held); 30 runs in a row pass.
+4. **The port job's time limit** (`.github/workflows/rust.yml`, T4's job; a CI file, not `crates/`, changed
+   because this review is asked to fix what broke CI): the SwiftShader step now takes about 85 min (the map crate's
+   GPU tests an hour, on CI as here), so the 90-minute job was cancelled inside the optional lavapipe run and the
+   required Clippy step after it was skipped. Clippy now runs before the lavapipe run, and the job may take 240 min.
+   Whether to keep running every test a second time on lavapipe is P10's call (gap 8).
+
+**Gaps** (each with the item that has it, and who should take it)
+1. **Fixtures (X1).** No OpenRailwayMap z9 tiles (V3 realistic draws no rails; today's reference shows OpenMapTiles'
+   web-only railways there, so V3 differs either way); no 3D surface for the Alps relief view; no surface tiles for
+   the camera's first frames at Zermatt (shots log misses); canopy and land cover only for the close-up tree tiles
+   (V5's far courtyards are sparser than today's); no NVDB widths by design.
+2. **DWD measured volumes (W4; needs a new item).** DWD now publishes `composite_wn_<date>_<time>.tar` of ODIM
+   HDF5 members, not the `WN*.tar.bz2` RADOLAN runs `backend::dwd` reads; today's Tauri app fails the same way.
+   `crates/map/tests/data/radar/dwd/` keeps one member for whoever writes the decoder.
+3. **Not draped over the 3D terrain (Z2/Z3).** The radar's flat layers, the signal blocks' lines, the selected
+   train's route dashes and the aircraft trail's shadow still draw at sea level, under raised ground; today's app
+   drapes them. To drape one: `Drape::Part`, guard the flat draws with `cx.draws_draped()`, `note_drawn_changes`
+   when the content changes (their content changes each refresh, so each would redraw covers often). Signal picks
+   project at height 0 (Z3).
+4. **Tile selection against sea level (Z2/Z3, owner's call).** Draped tile layers and the building, tree and
+   platform layers pick their tiles without the terrain's z range, as deck's tile layers do today (`TileLayer`'s
+   `zRange` defaults to null and neither Globe.svelte nor `LodMVTLayer` passes one; the camera is raised through
+   the view state's `position`), so from a camera raised over Zermatt the near tiles fall outside the frustum at
+   sea level: a bare slope at the centre, the village up the valley. This follows deck's code; no reference picture
+   shows it. Passing the terrain's range to `LodSelect`/`DeckSelect` would fix it, as a deviation from today.
+5. **Z3's grid.** Each terrain tile's heights on a 129² grid (about 3 m at zoom 16 in the Alps); deck uses one
+   view-wide height map. Covered tiles are raised again only when their footing changes.
+6. **Updater versions (P2, P3, P4; D2 and P5–P7 must act).** The app crate is `0.1.0`: P2's `current_version()`
+   and P4's `update::android::VERSION` read it, so a release build before D2 treats every published release as
+   newer (P3's desktop flow reads `src-tauri/tauri.conf.json` instead, which D2 deletes: switch it then). The
+   installer kind is read from a `__TAURI_BUNDLE_TYPE` marker the packaging must patch per package (`_NSS`, `_MSI`,
+   `_APP`, `_DEB`, `_RPM`); an unpatched desktop build checks nothing.
+7. **latest.json URLs (P1, P11).** The new manifest links the releases' download URLs where tauri-action wrote
+   `api.github.com/.../releases/assets/<id>`; P11 must confirm installed Tauri copies follow them.
+8. **CI's lavapipe step (not required).** Run 284's lavapipe step failed 10 map tests (exact colours and counts,
+   stages 3-4 gap 7, now also `ground::snow…`, `hillshade::v3…`, `radar::arena…`, `train_cars…`, `blocks…`) and 4
+   app tests (`phone`, `search`); run 303 never reached it (fix 4). Owners: the GPU tests' items. It doubles the
+   job's time (about 85 min each run): P10 should decide whether it stays on every push.
+9. **After parity.** W4's Lake Erie patch (the ground triangles of one 4° cell cover it 1.05 times; today's
+   `buildMesh` makes the same) belongs in `scene::geom::grid_cut` or `radar::mesh`; the radar palette is still
+   defined twice (stage 1 #6).
+10. **Headless shots have no flags for the sky, tilt-shift, terrain or radar**: reviews go through
+    `headless::render_on_with`; a `--set key=value` for the settings would make them binary shots.
+11. Stages 5-7 gaps: 1–3 closed by F1; 6–8 closed by F2; 9 closed (R11's weather credit, P3's `Updater`, P4's APK
+    link); 4 partly (X1 committed the first OpenRailwayMap tiles, at the realistic views); 5 (P1's archipelago
+    tile) stands. Stages 3-4 gaps 4, 5 and 7 stand; 8 closed by F2.
+
+**Visual differences still open** (from the visual review; none had a small, clearly correct fix)
+1. **Trees (R7)**: sunlit crown tops about 5 % brighter than today's (Humlegården median foliage luma 180.6 against
+   171.3, 90th percentile 228.5 against 216.7; the lower quartile equal). `tree.wgsl` matches realistic.ts line by
+   line; suspects are the leaf textures' transcoded format in the reference browser on SwiftShader, or mip/anisotropy
+   selection: check on a real GPU. The tree sets also differ in places (Strömsborg's island, one crown on the phone
+   V5 shot).
+2. **V3 placement (T1's gap 5)**: the map sits 4–5 px lower than today's picture at V3 on phone and desktop; V2, V4
+   and V5 align at 0 px, so it is not the capture: it appears on the globe at zoom 9 only. Owner: camera/globe.
+3. **V1**: Greenland's ice slightly more clipped to white (91 % of ice pixels at 255 against 63 %, about +2 levels).
+   R10/R1. (The clouds themselves show from the fixture where today's reference had none: expected.)
+4. **Terrain seams (Z1)**: dotted one-pixel dark lines along terrain tiles' edges (skirts at RTIN edge mismatches);
+   deck draws the same geometry; no reference shows terrain.
+5. No reference exists for V5 at night or at a low sun, rain with tilt-shift, the radar, the terrain, or V5 at
+   pitch 80: all plausible.
+
+**Plan text superseded by stages 8-10** (rows left as written; the code follows today's app):
+- Z1 row: the silhouette is checked at the realistic map's pitch 75 (X1).
+- R3 row: at V5 every tile is z16, today as here; the coarser levels show when tilted further.
+- R6 row and doc 04 §7.5: roofs are plain plaster in their corners' colour, as deck draws today's.
+- R10 row: no separate Earth-picture layer; picture and lights are terms of the ground shader.
+- Z3 row: the base pixels are checked on a synthetic hillside; Zermatt through the app counts roofs.
+- Z4 row: the 3 px check is a ray cast onto the drawn surface (above).
+- 1.4.4 and 1.4.12: covers are 1024 texels (deepest tiles up to 2048, today's patched TerrainCover), at most two
+  drawn a frame within 256 MB on desktop and 96 MB on phones, with 4× MSAA resolved; the cover layers are land,
+  land cover, realistic ground and rails, dark land and vector map, imagery, relief and night, plus `Drape::Part`
+  layers drawn in part (the rail map's lines, both building layers' shadows and the foot shade); a cover pass draws
+  all of a layer's tiles; the radar's flat layers, signal blocks and the train route are not draped yet (gap 3).
+- 1.4.12 `Drape::Offset`: heights come from each drawn terrain tile's RTIN surface on a 129² grid; buildings, roofs
+  and trees are raised on the GPU through a per-vertex or per-instance ground buffer, the app's vehicles, icons and
+  labels on the CPU (`layers::terrain::ground::stand`).
+- 1.1: `xtask` depends on `rustradar-backend`, tokio, reqwest and flate2 (X1); the app depends on `fr24` directly
+  for `client_builder()` (P2).
+
+**Pending for the owner (person checks)**
+- The realistic map and the terrain on a real GPU with Metal, DX12 and Vulkan (K9): the shots here are SwiftShader
+  only; look at the trees' brightness there (visual difference 1), and at the terrain at a mountain village with
+  the terrain on (gap 4).
+- The frame budget (K8: 16 ms on a desktop GPU, 33 ms on a phone) at V5 realistic in release builds: only the CPU
+  side is measured here.
+- The updater (P11's rehearsal): a real NSIS and MSI update on Windows, the `.app` swap and the administrator prompt
+  on macOS, an AppImage update, a deb through pkexec, the hidden-then-shown main window (Wayland ignores the hide).
+- Android: the update notice's APK link opening in the browser.
+- Everything under "Pending for the owner" in the stages 5-7, 3-4 and stage 2 status.
+
+**What stage 11's remaining rows and stage 12 need**
+- **P5–P7 (packages)**: no `Packager.toml` or `crates/app/build.rs` exists yet. Each package must patch the
+  `__TAURI_BUNDLE_TYPE_VAR_UNK` marker in place (same length) before packing (gap 6); keep Tauri's identity
+  (product name, per-user location, uninstall key) so the old updater upgrades in place (K10); P7's deb, rpm and
+  AppImage must depend on or bundle `libxkbcommon-x11` (and `libxcb-xkb1`): winit panics without it (stage 2 gap 7).
+- **P8–P9 (phones)**: the Phone shells workflow builds a debug APK and the simulator app; the release builds,
+  signing and the `versionCode` rule are still to do. Phones also need K8's knobs measured on a device (MSAA off,
+  tree radius halved, `map_scale` 1.0, top mips skipped) before a tree LOD is considered.
+- **P10 (workflows)**: P1's replacements (`cargo xtask bump --check`, `cargo xtask bump <v>`, `cargo xtask version`,
+  `cargo xtask testflight-age`), rust-cache on the jobs that now compile xtask, the macOS `.app.tar.gz` renamed per
+  architecture before `latest-json`, `sign` after `bump`; fold `phone-shells.yml` into `rust.yml`; decide what to do
+  with the lavapipe step (gap 8); keep the port job's limit (now 240 min, fix 4) above its tests' time, which
+  stages 8-10 doubled.
+- **P11**: the upgrade rehearsal, including gap 7's URLs and gap 6's markers.
+- **Stage 12**: D2 must carry the release version into the app crate and switch P3's `release_version()` off
+  `tauri.conf.json` (gap 6); D1 moves `static/` (the tests read `static/…` through `CARGO_MANIFEST_DIR`, stage 1
+  #9); D4's audit should start from the visual differences above and gaps 3 and 4.
+
+**Disk.** `target/` was emptied by the container restart and rebuilt here from nothing; with the last batch's test
+binaries it held 23 GB, 16 GB left free on `/`. The app's integration binaries were deleted after each batch and the
+map crate's test binary after its run; no release or cross build was made. The review's logs and scripts are in the
+scratchpad only.

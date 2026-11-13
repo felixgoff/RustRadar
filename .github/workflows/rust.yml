@@ -80,7 +80,9 @@ jobs:
   native:
     name: Native port (test & clippy)
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # the SwiftShader step alone takes about 85 min since stages 8-10 (the map crate's GPU tests
+    # an hour), and lavapipe runs them all once more
+    timeout-minutes: 240
     env:
       # line tables only: stack traces with lines, and a target folder that fits the runner's disk
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -148,6 +150,11 @@ jobs:
           path: target/shots
           if-no-files-found: warn
 
+      # (before the lavapipe run, so a slow or cut-off lavapipe run cannot skip it)
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --all-targets -p rustradar-core -p rustradar-backend -p rustradar-scene -p rustradar-map -p rustradar-app -p xtask -- -D warnings
+
       # A second rasteriser, as every real GPU is one: a failure here (an annotation; the
       # job stays green) is a test that holds on SwiftShader only, for its owner to
       # loosen to what section 8 asks (properties that hold across rasterisers).
@@ -155,10 +162,6 @@ jobs:
         if: ${{ !cancelled() }}
         continue-on-error: true
         run: VK_ICD_FILENAMES="$LAVAPIPE_ICD" cargo test --workspace --exclude rustradar --locked --no-fail-fast
-
-      - name: Clippy
-        if: ${{ !cancelled() }}
-        run: cargo clippy --locked --all-targets -p rustradar-core -p rustradar-backend -p rustradar-scene -p rustradar-map -p rustradar-app -p xtask -- -D warnings
 
   # The native app keeps compiling for the other platforms it will ship on, each
   # on a runner with that platform's C and C++ compilers: the build scripts of

@@ -275,6 +275,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::sync::Semaphore;
 
     const T0: f64 = 1_794_446_629_000.0;
 
@@ -366,6 +367,12 @@ mod tests {
     /// An HTTP/1.1 server on 127.0.0.1 answering every request with `status` and `body`, counting
     /// the requests.
     async fn serve(status: u16, body: Vec<u8>) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        serve_held(status, body, Arc::new(Semaphore::new(Semaphore::MAX_PERMITS))).await
+    }
+
+    /// [`serve`], each answer held until `gate` has a permit for it (the request counted when it
+    /// comes): a test can look at the feed while its ask is out, however fast the server is.
+    async fn serve_held(status: u16, body: Vec<u8>, gate: Arc<Semaphore>) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let hits = Arc::new(AtomicUsize::new(0));
@@ -373,7 +380,7 @@ mod tests {
         let body: Arc<[u8]> = body.into();
         let task = tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
-                let (h, body) = (h.clone(), body.clone());
+                let (h, body, gate) = (h.clone(), body.clone(), gate.clone());
                 tokio::spawn(async move {
                     let (mut head, mut buf) = (Vec::new(), [0u8; 1024]);
                     while !head.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -383,6 +390,7 @@ mod tests {
                         }
                     }
                     h.fetch_add(1, Ordering::SeqCst);
+                    let Ok(_open) = gate.acquire().await else { return };
                     let out = format!("HTTP/1.1 {status} Test\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                     let _ = socket.write_all(out.as_bytes()).await;
                     let _ = socket.write_all(&body).await;
@@ -433,7 +441,10 @@ mod tests {
     #[test]
     fn the_network_is_asked_while_wanted_and_one_ask_at_a_time() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let (base, hits, task) = rt.block_on(serve(200, jpeg()));
+        // (the answer held until the test has seen the ask out: on a busy machine the server
+        // could answer before the first poll looked)
+        let gate = Arc::new(Semaphore::new(0));
+        let (base, hits, task) = rt.block_on(serve_held(200, jpeg(), gate.clone()));
         let wakes = Arc::new(AtomicUsize::new(0));
         let w = wakes.clone();
         let wake: Wake = Arc::new(move || {
@@ -442,10 +453,18 @@ mod tests {
         let mut feed = Feed::network_from(rt.handle().clone(), wake, local_client(), base.clone());
         assert!(!feed.poll(T0, false));
         assert_eq!(hits.load(Ordering::SeqCst), 0);
-        feed.poll(T0, true);
+        assert!(!feed.poll(T0, true));
         assert!(feed.loading());
         // while it is out no second ask, though five minutes have passed
+        assert!(!feed.poll(T0 + RETRY_MS + 1.0, true));
+        assert!(feed.loading());
+        gate.add_permits(16);
         assert!(settle(&mut feed, T0 + RETRY_MS + 1.0, true));
+        // (the wake comes right after the answer is sent)
+        let start = std::time::Instant::now();
+        while wakes.load(Ordering::SeqCst) == 0 && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!((hits.load(Ordering::SeqCst), wakes.load(Ordering::SeqCst)), (1, 1));
         assert_eq!(feed.picture().map(|p| p.width), Some(16));
         assert_eq!(feed.asked_at_ms(), Some(T0));

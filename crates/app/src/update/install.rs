@@ -40,9 +40,13 @@
 //! (the window's event loop, so the settings not yet written are flushed); before a download it
 //! answers `No update is waiting`.
 //!
-//! **The version compared** ([`release_version`]): `src-tauri/tauri.conf.json`'s, the release
-//! version CI writes into the version files before it builds (`app.package_info().version` in
-//! today's app), not this crate's `0.1.0`, which would find every release newer.
+//! **The version compared** ([`super::current_version`], which [`Updater::new`] takes): this
+//! crate's `CARGO_PKG_VERSION`. It is the release version: `cargo xtask bump` writes it into
+//! `crates/app/Cargo.toml` with today's version files (item F5), so it equals
+//! `src-tauri/tauri.conf.json`'s, which today's app compares (`app.package_info().version`). A
+//! release build carries the release it is built as when CI sets it with `cargo xtask bump
+//! <version>` before building (P10: today's workflows run `scripts/version.mjs`, which leaves
+//! `crates/app` alone, so a native build there would find its own release newer).
 //!
 //! Deviations:
 //! - Only builds an installer made update themselves: an unpatched bundle-type marker on Windows
@@ -57,10 +61,6 @@
 //! - The AppImage's backup is put back also when the `.tar.gz` cannot be read at all (the plugin
 //!   returns early and loses it with its temp folder).
 //! - Messages go to the log (`update download failed: {e}` at `warn`), not `eprintln!`.
-//!
-//! Trap for D2: [`release_version`] reads `src-tauri/tauri.conf.json` with `include_str!`; when
-//! stage 12 deletes it and the package carries the release version, it becomes
-//! [`super::current_version`].
 
 use std::ffi::OsString;
 use std::fmt;
@@ -73,7 +73,6 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError, mpsc};
 use std::time::Duration;
 
 use rustradar_backend::{BackendEvent, Notifier};
-use semver::Version;
 use tokio::runtime::Handle;
 
 use super::manifest::Installer;
@@ -93,21 +92,7 @@ pub const CHECKS: bool = !cfg!(debug_assertions);
 pub const NOTHING_WAITING: &str = "No update is waiting";
 
 // ------------------------------------------------------------------------------------------------
-// the version and the binary
-
-const TAURI_CONF: &str = include_str!("../../../../src-tauri/tauri.conf.json");
-
-/// The version installed copies compare with the manifest's: `src-tauri/tauri.conf.json`'s
-/// `version` (written by `cargo xtask bump` and by CI before a release build), else this crate's.
-pub fn release_version() -> Version {
-    static VERSION: LazyLock<Version> = LazyLock::new(|| conf_version(TAURI_CONF).unwrap_or_else(super::current_version));
-    VERSION.clone()
-}
-
-fn conf_version(conf: &str) -> Option<Version> {
-    let json: serde_json::Value = serde_json::from_str(conf).ok()?;
-    Version::parse(json.get("version")?.as_str()?).ok()
-}
+// the binary
 
 /// The binary this process started from, canonicalised, as `tauri-utils`' `STARTING_BINARY`.
 static STARTING_BINARY: LazyLock<Result<PathBuf, String>> = LazyLock::new(starting_binary);
@@ -1020,8 +1005,8 @@ pub async fn watch(ready: Ready, notifier: Notifier, every: Duration, updater: U
     }
 }
 
-/// Starts [`watch`] on `rt` with the app's updater and the release version, every
-/// [`WATCH_EVERY`]. Nothing in debug builds, or when this build updates nothing
+/// Starts [`watch`] on `rt` with the app's updater (it compares this build's version, the
+/// release's), every [`WATCH_EVERY`]. Nothing in debug builds, or when this build updates nothing
 /// ([`Target::current`]). Returns whether it started.
 pub fn start_watch(rt: &Handle, notifier: Notifier) -> bool {
     if !CHECKS {
@@ -1033,7 +1018,7 @@ pub fn start_watch(rt: &Handle, notifier: Notifier) -> bool {
         return false;
     }
     let updater = match Updater::new() {
-        Ok(updater) => updater.current_version(release_version()),
+        Ok(updater) => updater,
         Err(e) => {
             log::warn!("no update watch: {e}");
             return false;
@@ -1134,24 +1119,13 @@ pub(super) mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use reqwest::Url;
+    use semver::Version;
 
     use super::*;
 
     /// A temp folder for one test, removed afterwards.
     fn scratch() -> TempDir {
         TempDir::new_in(&std::env::temp_dir(), "rustradar-pk3-test-").unwrap()
-    }
-
-    #[test]
-    fn the_release_version_is_the_tauri_configs() {
-        let conf = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/tauri.conf.json")).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&conf).unwrap();
-        let version = json["version"].as_str().unwrap();
-        assert_eq!(release_version(), Version::parse(version).unwrap());
-        assert_ne!(release_version(), super::super::current_version(), "not this crate's 0.1.0");
-        assert_eq!(conf_version(r#"{"productName":"RustRadar","version":"0.4.2"}"#), Some(Version::new(0, 4, 2)));
-        assert_eq!(conf_version(r#"{"version":"four"}"#), None);
-        assert_eq!(conf_version("not json"), None);
     }
 
     #[test]

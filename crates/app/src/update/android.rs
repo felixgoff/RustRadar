@@ -39,9 +39,9 @@
 //! - Without a backend (no folders or no HTTP client; the app then runs without feeds) there is no
 //!   check: today's app always had its backend.
 //!
-//! Trap (as in [`super`]): the running version is this crate's `CARGO_PKG_VERSION` ([`VERSION`]),
-//! and `rustradar-app` is `0.1.0` until stage 12 (D2) carries the release version over, so until
-//! then a release build finds every published release newer. Debug builds never check.
+//! The running version is this crate's `CARGO_PKG_VERSION` ([`VERSION`]), the release version,
+//! which `cargo xtask bump` keeps with `tauri.conf.json`'s (item F5; [`super`]): the same text as
+//! today's `app.package_info().version.to_string()`. Debug builds never check.
 
 use std::future::Future;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -57,7 +57,8 @@ use crate::ui::toast;
 
 pub use rustradar_backend::mobile_update::{CHECK_EVERY, LATEST};
 
-/// The running app's version, compared with the release's tag (`app.package_info().version`).
+/// The running app's version, compared with the release's tag (`app.package_info().version`): the
+/// release version `crates/app/Cargo.toml` carries.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Whether this build looks for releases: not in debug builds, not on iOS (TestFlight updates it).

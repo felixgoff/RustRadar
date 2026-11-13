@@ -597,7 +597,7 @@ impl Launch {
             }
         };
         let updater = match Updater::new() {
-            Ok(updater) => updater.current_version(install::release_version()),
+            Ok(updater) => updater,
             Err(e) => {
                 log::warn!("update skipped: {e}");
                 return None;

@@ -43,10 +43,13 @@
 //! updater is built; downloads have no time limit unless [`Updater::timeout`] sets one (the
 //! plugin's default).
 //!
-//! Trap for P3 and D2: the current version is this crate's `CARGO_PKG_VERSION`, and `rustradar-app`
-//! is still `0.1.0` while the Tauri app carries the release version. Until D2 carries the version
-//! over (or P3 passes the right one to [`Updater::current_version`]), every published release looks
-//! newer.
+//! The current version ([`current_version`]) is this crate's `CARGO_PKG_VERSION`, the release
+//! version: `cargo xtask bump` writes `crates/app/Cargo.toml` and its `Cargo.lock` entry with the
+//! Tauri app's version files (item F5), so it is `tauri.conf.json`'s, the version today's app
+//! compares (`app.package_info().version`), and the same text for the Android check
+//! ([`android::VERSION`]). A release build carries the release's version only if CI writes it with
+//! `cargo xtask bump <version>`: `scripts/version.mjs`, which today's workflows still run, does not
+//! write `crates/app` (P10 switches them).
 
 pub mod android;
 pub mod install;
@@ -156,7 +159,8 @@ pub fn client_builder() -> reqwest::ClientBuilder {
     fr24::client_builder().user_agent(USER_AGENT)
 }
 
-/// The version of this build.
+/// The version of this build, the release version (`crates/app/Cargo.toml`, kept with
+/// `tauri.conf.json`'s by `cargo xtask bump`).
 pub fn current_version() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).expect("cargo checks that the package version is semver")
 }
@@ -759,6 +763,28 @@ mod tests {
         assert_eq!(updater.endpoints, [Url::parse(ENDPOINT).unwrap()]);
         assert_eq!(updater.pubkey, PUBKEY);
         assert_eq!(updater.installer, Installer::current());
+        assert_eq!(updater.current_version, current_version());
+    }
+
+    #[test]
+    fn the_version_compared_is_the_tauri_apps() {
+        // today's app compares tauri.conf.json's version (`app.package_info().version`); this crate
+        // carries the same (F5), so the desktop check, the Android check and the user agent read the
+        // release version as today. While src-tauri is in the tree: D2 removes it, and with it this
+        // comparison (`cargo xtask bump --check` keeps the crate and Cargo.lock together after it).
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if root.join("src-tauri").is_dir() {
+            let conf = std::fs::read_to_string(root.join("src-tauri/tauri.conf.json")).unwrap();
+            let conf: serde_json::Value = serde_json::from_str(&conf).unwrap();
+            let version = conf["version"].as_str().unwrap();
+            assert_eq!(env!("CARGO_PKG_VERSION"), version);
+            assert_eq!(current_version(), Version::parse(version).unwrap());
+            assert_eq!(Updater::new().unwrap().current_version, Version::parse(version).unwrap(), "the desktop check");
+        }
+        // the strings compared are today's: the Android check passes `package_info().version` as text
+        assert_eq!(android::VERSION, current_version().to_string());
+        assert_eq!(USER_AGENT, format!("RustRadar/{} (+https://github.com/felixgoff/RustRadar)", current_version()));
+        assert_ne!(current_version(), Version::new(0, 1, 0), "not the crate's first version: every release would look newer");
     }
 
     #[tokio::test]

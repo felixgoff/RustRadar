@@ -64,6 +64,7 @@ use rustradar_scene::radar::{BAND_COUNT, BandPolygon, Coverage, RadarMesh, Volum
 
 use crate::frame::{FrameSlot, power_of_two_scale};
 use crate::jobs::{Job, JobPoll};
+use crate::layers::terrain::cover::DrawnArea;
 use crate::layers::{DrawCx, Init, PrepareCx};
 use crate::pipelines::fill::{self, uniform_group, uniform_layout};
 use crate::pipelines::{Desc, build};
@@ -641,9 +642,28 @@ impl Measured {
         }
     }
 
+    /// Where the drawn volumes' ground composites lie (item G3: what is draped over the 3D terrain),
+    /// world Mercator: the union of their frames, none without a ground.
+    pub fn ground_area(&self) -> Option<DrawnArea> {
+        self.drawn.iter().filter(|d| d.ground.is_some()).fold(None, |area, d| {
+            let frame = DrawnArea::world([d.anchor.x, d.anchor.y - d.scale], [d.anchor.x + d.scale, d.anchor.y], 1.0);
+            DrawnArea::either(area, Some(frame))
+        })
+    }
+
     /// Records this frame's draws.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
+        self.draw_parts(pass, cx, true, true);
+    }
+
+    /// Records this frame's draws of the ground composites when `ground`, of the heights above
+    /// them when `lifted` (on the 3D terrain deck drapes the grounds into the covers, item G3).
+    pub fn draw_parts(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>, ground: bool, lifted: bool) {
         for draw in &self.draws {
+            let wanted = if draw.lifted { lifted } else { ground };
+            if !wanted {
+                continue;
+            }
             let Some(mesh) = self.drawn.get(draw.volume).and_then(|d| d.mesh(draw.what)) else { continue };
             self.pipelines.bind(pass, draw.lifted, &self.styles[draw.style]);
             cx.bind_frame(pass, draw.frame);

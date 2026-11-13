@@ -13,7 +13,7 @@
 //! | Raised | How, here |
 //! |---|---|
 //! | aircraft (models, gear, icons, labels, the selection ring), ships (icons, models), trains (icons, cars) | [`stand`]: the scene's positions are raised as the renderer takes the scene in, so the pick records read the same places |
-//! | ship and train halos and rings, the train route's stops, signals and their names, the markers, sightings | their layers, by [`Ground::at`] where they place them |
+//! | ship and train halos and rings, the train route's stops, signals and their names, the markers, sightings, the filed plan's waypoints (G3) | their layers, by [`Ground::at`] where they place them; the signals' picks too (G3) |
 //! | aircraft shadows | on the ground under the aircraft, cast from its height above it |
 //! | place labels, the rail map's stations and speed labels | their layers, by [`Ground::at`] |
 //! | buildings' walls and roofs (both maps), pitched roofs | per vertex, [`Standing`] |
@@ -28,10 +28,11 @@
 //! changed ([`Footing`]).
 //!
 //! Deviations:
-//! - The trail and the route of the selected flight keep their true heights (plan section 6, item
-//!   3: today they would be draped), and so do the lifted radar layers and their walls (deck drapes
+//! - The trail and the route's estimates of the selected flight keep their true heights (plan
+//!   section 6, item 3: today they would be draped; the trail's shadow and the filed plan, on the
+//!   ground, are draped, item G3), and so do the lifted radar layers and their walls (deck drapes
 //!   every radar layer, which flattens the stack onto the ground or loses it beyond the cover's
-//!   near plane); the radar's ground layer is not draped (as Z2 left it).
+//!   near plane); the radar's ground layers are draped (G3).
 //! - The ground platforms of the realistic map stay flat in the covers (Z2).
 
 use std::sync::Arc;

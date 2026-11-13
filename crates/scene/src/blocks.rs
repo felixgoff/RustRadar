@@ -352,9 +352,15 @@ impl BlocksScene {
     /// each a disc of its outer radius (the radius and half the outline), keyed by its index in
     /// [`BlockRuns::signals`].
     pub fn picks(&self, viewport: &Viewport) -> PickList<usize> {
+        self.picks_on(viewport, |_| 0.0)
+    }
+
+    /// [`Self::picks`] with each signal where it is drawn on the 3D terrain: raised by `ground`
+    /// (metres at `[lon, lat]`), as deck's offset mode raises the ScatterplotLayer (item G3).
+    pub fn picks_on(&self, viewport: &Viewport, ground: impl Fn([f64; 2]) -> f64) -> PickList<usize> {
         let mut list = PickList::new();
         for (i, s) in self.runs.signals.iter().enumerate() {
-            let at = viewport.project([s.at[0], s.at[1], 0.0]);
+            let at = viewport.project([s.at[0], s.at[1], ground(s.at)]);
             list.point(i, at, SIGNAL_RADIUS_PX + SIGNAL_LINE_PX / 2.0, DepthTest::Always);
         }
         list
@@ -753,5 +759,27 @@ mod tests {
         let hit = picks.pick(&viewport, [at[0] + 12.0, at[1]], 1.0).map(|h| *h.key);
         assert_eq!(hit, Some(0));
         assert_eq!(picks.pick(&viewport, [at[0], at[1] - 14.0], 1.0).map(|h| *h.key), None);
+    }
+
+    /// On the 3D terrain a signal is picked where it is drawn, raised by the ground under it (item
+    /// G3; deck's offset mode raises the ScatterplotLayer), not where it would be at sea level.
+    #[test]
+    fn on_the_terrain_a_signal_is_picked_where_it_stands() {
+        let list = line_of_blocks();
+        let set = SetRef { generation: 1, list: &list, structures: &[] };
+        let v = ViewState { pitch: 50.0, ..view(16.0) };
+        let scene = BlockBuilder::new().build(Some(set), &[], &v, SIZE, 1.0);
+        let viewport = crate::camera::viewport_for(&v, SIZE);
+        let ground = |[lon, _]: [f64; 2]| 400.0 + (lon - LON) * 10_000.0;
+        let picks = scene.picks_on(&viewport, ground);
+        let first = spot(0.0, 0.0);
+        let raised = viewport.project([first[0], first[1], ground(first)]);
+        let sunk = viewport.project([first[0], first[1], 0.0]);
+        assert!((sunk[1] - raised[1]).abs() > 100.0, "{raised:?} {sunk:?}");
+        assert_eq!(picks.items()[0].shape, crate::pick::Shape::Point { at: raised, radius: 7.0 });
+        assert_eq!(picks.pick(&viewport, [raised[0], raised[1]], 1.0).map(|h| *h.key), Some(0));
+        assert_eq!(picks.pick(&viewport, [sunk[0], sunk[1]], 1.0).map(|h| *h.key), None);
+        // on no ground, as before
+        assert_eq!(scene.picks_on(&viewport, |_| 0.0).items(), scene.picks(&viewport).items());
     }
 }

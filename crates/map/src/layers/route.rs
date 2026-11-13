@@ -36,13 +36,21 @@
 //! - The meshes are made again when the input changes (each scene refresh moves the aircraft) or
 //!   the projection swaps at zoom 12 (deck re-tessellates when the viewport's `resolution`
 //!   changes), each in its own local Mercator frame around the path.
+//!
+//! On the 3D terrain (item G3; deck's `TerrainExtension` drapes a PathLayer and offsets a
+//! ScatterplotLayer): `trail-shadow` and `route-filed`, which lie on the ground, are drawn into the
+//! terrain's covers ([`crate::layers::Drape::Part`]); where they draw differently (the trail's
+//! last leg as the aircraft moves) only the covers that show the change are drawn again; the
+//! waypoints stand on the ground under each. The trail and the estimates keep their true heights,
+//! as plan section 6 (item 3) decides: today's app would drape them too.
 
 use glam::DVec2;
 use rustradar_scene::camera::{GLOBE_RESOLUTION, lng_lat_to_world};
 use rustradar_scene::geom::grid_cut::{PolylineGridOptions, cut_polyline_by_grid};
 use rustradar_scene::geom::path::{Colors, LocalMercator, Paint, PathBuilder, PathType};
 
-use super::{DrawCx, Init, Layer, Pass, PrepareCx};
+use super::terrain::cover::{line_reach, path_changes};
+use super::{DrawCx, Init, Layer, Pass, PrepareCx, note_drawn_area};
 use crate::frame::{FrameSlot, power_of_two_scale};
 use crate::pipelines::circle::{self, Circle, CircleStyle};
 use crate::pipelines::path::{Dash, Mesh, Path, PathStyle, Segment, Style};
@@ -190,6 +198,14 @@ pub fn lines(input: &Input, globe: bool) -> [Option<(LocalMercator, Vec<Segment>
     out
 }
 
+/// What the input drapes over the 3D terrain (item G3): the trail's shadow and the filed plan,
+/// `[lon, lat]` as drawn (`|| 0`), each empty when it is not drawn.
+pub fn draped_paths(input: &Input) -> [Vec<[f64; 2]>; 2] {
+    let shadow = input.trail.as_ref().map(|t| t.path.iter().map(|&[lon, lat, _]| [or0(lon), or0(lat)]).collect()).unwrap_or_default();
+    let filed = if input.filed.len() > 1 { input.filed.iter().map(|&[lon, lat]| [or0(lon), or0(lat)]).collect() } else { Vec::new() };
+    [shadow, filed]
+}
+
 /// Rows 19–21: `trail-shadow`, `trail`, `route-filed`, `route-waypoints`, `route-before`,
 /// `route-ahead`.
 pub struct Route {
@@ -204,6 +220,9 @@ pub struct Route {
     paths: [Option<Line>; PATHS],
     /// The input and projection the meshes were made for.
     built_for: Option<(Input, bool)>,
+    /// What the draped paths (the trail's shadow, the filed plan) were last drawn as, `[lon, lat]`
+    /// (item G3: where they change, the 3D terrain's covers are drawn again).
+    draped_for: [Vec<[f64; 2]>; 2],
     /// This frame's frames, one per drawn path.
     slots: [Option<FrameSlot>; PATHS],
 }
@@ -232,6 +251,7 @@ impl Route {
             waypoint_instances: circle::Instances::new(device, "route waypoints"),
             paths: Default::default(),
             built_for: None,
+            draped_for: Default::default(),
             slots: [None; PATHS],
         }
     }
@@ -270,13 +290,32 @@ impl Layer for Route {
                 };
             }
             self.built_for = Some((input.clone(), globe));
+            // on the 3D terrain the trail's shadow and the filed plan are draped (deck's PathLayers
+            // on the ground): where they drew differently the covers there are drawn again (item G3)
+            let draped = draped_paths(input);
+            for (which, (old, new)) in self.draped_for.iter().zip(&draped).enumerate() {
+                let width = if which == 0 { TRAIL_SHADOW_WIDTH } else { ROUTE_FILED_WIDTH };
+                if let Some(area) = path_changes(old, new, false, line_reach(width)) {
+                    note_drawn_area(area);
+                }
+            }
+            self.draped_for = draped;
         }
         for (slot, line) in self.slots.iter_mut().zip(&self.paths) {
             *slot = line.as_ref().map(|l| cx.frames.push(&cx.view.local(l.local.anchor, l.local.scale, 0.0)));
         }
-        // the waypoints' dots, placed for this frame's camera
+        // the waypoints' dots, placed for this frame's camera (deck's ScatterplotLayer: on the 3D
+        // terrain raised by the ground under each, its offset mode)
+        let ground = &cx.scene.stands_on;
         let dots: Vec<circle::Instance> = if input.filed.len() > 1 {
-            input.filed.iter().map(|&[lon, lat]| circle::Instance::at(cx.view, [or0(lon), or0(lat)], 0.0).radius(WAYPOINT_RADIUS).fill(ROUTE_FILED)).collect()
+            input
+                .filed
+                .iter()
+                .map(|&[lon, lat]| {
+                    let at = [or0(lon), or0(lat)];
+                    circle::Instance::at(cx.view, at, ground.at(at)).radius(WAYPOINT_RADIUS).fill(ROUTE_FILED)
+                })
+                .collect()
         } else {
             Vec::new()
         };
@@ -284,13 +323,18 @@ impl Layer for Route {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if cx.pass != Pass::Map {
-            return;
-        }
+        // on the 3D terrain the trail's shadow and the filed plan go into the covers (item G3); the
+        // trail, the estimates and the waypoints stay in the map pass
+        let (draped, standing) = (cx.draws_draped(), cx.pass == Pass::Map);
         for which in 0..PATHS {
-            if which == Which::Before as usize {
+            if standing && which == Which::Before as usize {
                 // `route-waypoints` comes between the filed plan and the estimates
                 self.waypoints.draw(pass, &self.waypoint_style, &self.waypoint_instances);
+            }
+            let on_ground = which == Which::TrailShadow as usize || which == Which::Filed as usize;
+            let here = if on_ground { draped } else { standing };
+            if !here {
+                continue;
             }
             let (Some(line), Some(slot)) = (&self.paths[which], self.slots[which]) else { continue };
             let path = self.pipeline(which);
@@ -300,9 +344,10 @@ impl Layer for Route {
     }
 
     fn drape(&self) -> super::Drape {
-        // stage 9: deck drapes the PathLayers (their positions are vertex positions) and offsets
-        // the scatterplot; the trail keeps its true altitude (plan 1.4.12)
-        super::Drape::None
+        // deck drapes the PathLayers (their positions are vertex positions) and offsets the
+        // scatterplot: the trail's shadow and the filed plan lie on the ground, the waypoints stand
+        // on it; the trail and the estimates keep their true heights (plan section 6, item 3)
+        super::Drape::Part
     }
 }
 

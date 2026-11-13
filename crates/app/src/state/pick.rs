@@ -128,7 +128,9 @@ pub enum Target {
 /// the labels layer last drew them (row 18), then the aircraft's airframes and icons (rows 26, 28).
 pub fn picks(scene: &SceneInput, viewport: &Viewport) -> PickList<Target> {
     let mut list: PickList<Target> = scene.ships.scene.picks(viewport).into_iter().map(|item| item.map_key(Target::Ship)).collect();
-    list.extend(scene.blocks.scene.picks(viewport).into_iter().map(|item| item.map_key(Target::Signal)));
+    // the signals where they are drawn, on the 3D terrain raised by the ground under them (G3)
+    let ground = &scene.stands_on;
+    list.extend(scene.blocks.scene.picks_on(viewport, |at| ground.at(at)).into_iter().map(|item| item.map_key(Target::Signal)));
     let models = rustradar_map::layers::train_cars::models();
     list.extend(scene.trains.scene.picks(viewport, models).into_iter().map(|item| item.map_key(Target::Train)));
     list.extend(scene.labels.drawn.picks().into_iter().map(|item| item.map_key(Target::Label)));
@@ -951,5 +953,38 @@ mod tests {
         state.pick_frame(&scene, Some(at), false, &[], NOW);
         state.poll(NOW + 300.0);
         assert_eq!(state.hover_card(NOW + 300.0).map(|c| c.status), Some(HoverStatus::Unavailable));
+    }
+
+    /// On the 3D terrain a signal is picked where its disc stands, on the ground under it (item
+    /// G3): the scene the renderer stood on the terrain's ground carries it (`stands_on`).
+    #[test]
+    fn on_the_terrain_a_signal_is_picked_where_it_stands() {
+        use rustradar_core::geo::Basemap;
+        use rustradar_core::model::TrainBlock;
+        use rustradar_map::layers::terrain::ground::Ground;
+        use rustradar_scene::blocks::{BlockBuilder, SetRef};
+        use rustradar_scene::camera::viewport_for;
+        use rustradar_scene::terrain::heights::{GRID_SIDE, HeightGrid, Heights};
+        use rustradar_scene::tiles::osm_tile_to_lng_lat;
+
+        // a block starting in the middle of zoom-13 tile 4500/2370, on ground 150 m up
+        let tile = rustradar_map::layers::TileIndex::new(4500, 2370, 13);
+        let start = osm_tile_to_lng_lat(4500.5, 2370.5, 13);
+        let list = [TrainBlock { id: "b".into(), signal: Some("1".into()), lines: vec![vec![start, [start[0] + 0.002, start[1]]]] }];
+        let size = [800.0, 500.0];
+        let view = ViewState { longitude: start[0], latitude: start[1], zoom: 16.0, pitch: 50.0, bearing: 0.0, position: Some([0.0, 0.0, 150.0]) };
+        let mut scene = SceneInput::new(view, size, 1.0, Basemap::Dark);
+        scene.blocks.scene = BlockBuilder::new().build(Some(SetRef { generation: 1, list: &list, structures: &[] }), &[], &view, size, NOW);
+        let viewport = viewport_for(&view, size);
+        let [rx, ry, _] = viewport.project([start[0], start[1], 150.0]);
+        let [sx, sy, _] = viewport.project([start[0], start[1], 0.0]);
+        assert!((sy - ry).abs() > 50.0 && sy < size[1], "sea level is elsewhere on the picture: {ry} against {sy}");
+        // at sea level (no terrain), where it was
+        assert_eq!(pick_at(&scene, &view, size, [sx, sy]), Some(Target::Signal(0)));
+        assert_eq!(pick_at(&scene, &view, size, [rx, ry]), None);
+        // on the terrain's ground, where its disc is drawn
+        scene.stands_on = Ground::new(Heights::new([(tile, Arc::new(HeightGrid::from_fn(GRID_SIDE, |_, _| 150.0)))]));
+        assert_eq!(pick_at(&scene, &view, size, [rx, ry]), Some(Target::Signal(0)));
+        assert_eq!(pick_at(&scene, &view, size, [sx, sy]), None);
     }
 }

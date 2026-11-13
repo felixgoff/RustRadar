@@ -30,13 +30,19 @@
 //!
 //! The lines are made again when the set or the taken blocks change, all in one local Mercator
 //! frame round the set; the discs and texts are placed at every frame for that frame's camera.
+//!
+//! On the 3D terrain (item G3) deck drapes the three PathLayers (the tunnels' too: they then lie
+//! on the surface) and raises the signals and texts by the ground under them: the lines are drawn
+//! into the terrain's covers, and when they are made again only the covers round the runs whose
+//! colour or width changed (or round both sets, for another set) are drawn again.
 
 use std::sync::Arc;
 
 use glam::DVec2;
 use rustradar_scene::blocks::{
     BLOCK_CASING, BLOCK_LABEL_BACKGROUND, BLOCK_LABEL_COLOR, BLOCK_LABEL_PADDING, BLOCK_LABEL_SIZE, BLOCK_TUNNEL_DASHES, BlockRuns, BlocksScene,
-    SIGNAL_LINE_PX, SIGNAL_NAME_BACKGROUND, SIGNAL_NAME_COLOR, SIGNAL_NAME_OFFSET, SIGNAL_NAME_PADDING, SIGNAL_NAME_SIZE, SIGNAL_RADIUS_PX,
+    CASING_EXTRA_PX, SIGNAL_LINE_PX, SIGNAL_NAME_BACKGROUND, SIGNAL_NAME_COLOR, SIGNAL_NAME_OFFSET, SIGNAL_NAME_PADDING, SIGNAL_NAME_SIZE,
+    SIGNAL_RADIUS_PX, TAKEN_WIDTH_PX,
 };
 use rustradar_scene::camera::lng_lat_to_world;
 use rustradar_scene::geom::path::{LocalMercator, Paint, PathBuilder};
@@ -44,7 +50,8 @@ use rustradar_scene::text::{Face, Family, FontSettings, GlyphAtlas, LaidText, Te
 
 pub use rustradar_scene::blocks::{BLOCK_FREE, BLOCK_TAKEN};
 
-use super::{DrawCx, Init, Layer, Pass, PrepareCx};
+use super::terrain::cover::{DrawnArea, line_reach};
+use super::{DrawCx, Init, Layer, Pass, PrepareCx, note_drawn_area};
 use crate::frame::{FrameSlot, power_of_two_scale};
 use crate::pipelines::circle::{self, Circle, CircleStyle};
 use crate::pipelines::path::{Dash, Mesh, Path, PathStyle, Segment, Style};
@@ -159,6 +166,52 @@ pub struct Blocks {
     laid: Laid,
     /// This frame's frame of the lines, when there are any.
     slot: Option<FrameSlot>,
+    /// What the lines were last drawn as, for the 3D terrain's covers (item G3).
+    draped: Draped,
+}
+
+/// How far the lines reach past their points, texels: the widest, a taken block's casing.
+pub fn lines_reach() -> f64 {
+    line_reach(TAKEN_WIDTH_PX + CASING_EXTRA_PX)
+}
+
+/// What the three line layers drew, as the 3D terrain's covers see it (item G3): the set's runs,
+/// each run's colour and width (the ground's, then the tunnels'), and the box round them all.
+#[derive(Default)]
+struct Draped {
+    runs: Option<Arc<BlockRuns>>,
+    styles: Vec<([u8; 4], f64)>,
+    all: Option<DrawnArea>,
+}
+
+/// Each run's colour and width as `scene` draws it: the runs on the ground and bridges (whose
+/// casing follows the width), then those in tunnels.
+fn run_styles(scene: &BlocksScene) -> Vec<([u8; 4], f64)> {
+    let above = scene.runs.above.iter().map(|r| (scene.run_color(r), scene.run_width(r)));
+    let below = scene.runs.below.iter().map(|r| (scene.tunnel_color(r), scene.run_width(r)));
+    above.chain(below).collect()
+}
+
+/// The box round a run's track.
+fn run_area(path: &[[f64; 3]]) -> Option<DrawnArea> {
+    DrawnArea::round(path.iter().map(|p| [p[0], p[1]]), lines_reach())
+}
+
+/// The box round every run of `runs`.
+fn runs_area(runs: &BlockRuns) -> Option<DrawnArea> {
+    runs.above.iter().chain(&runs.below).fold(None, |a, r| DrawnArea::either(a, run_area(&r.path)))
+}
+
+/// Where `scene`'s lines draw differently from `was` (item G3): everywhere either set reaches for
+/// another set, else round each run whose colour or width changed.
+fn lines_changed(was: &Draped, scene: &BlocksScene) -> Option<DrawnArea> {
+    let same_runs = was.runs.as_ref().is_some_and(|r| Arc::ptr_eq(r, &scene.runs) || **r == *scene.runs);
+    if !same_runs {
+        return DrawnArea::either(was.all, runs_area(&scene.runs));
+    }
+    let styles = run_styles(scene);
+    let runs = scene.runs.above.iter().chain(&scene.runs.below);
+    runs.zip(styles.iter().zip(&was.styles)).filter(|(_, (now, before))| now != before).fold(None, |a, (r, _)| DrawnArea::either(a, run_area(&r.path)))
 }
 
 impl Blocks {
@@ -192,6 +245,7 @@ impl Blocks {
             labels,
             laid: Laid::default(),
             slot: None,
+            draped: Draped::default(),
         }
     }
 
@@ -252,6 +306,10 @@ impl Layer for Blocks {
                     mesh.write(device, queue, "train blocks", &[]);
                 }
             }
+            // the lines gone from the 3D terrain's covers (item G3)
+            if let Some(area) = std::mem::take(&mut self.draped).all {
+                note_drawn_area(area);
+            }
             self.slot = None;
             self.signal_instances.write(device, queue, &[]);
             self.names.set_glyphs(device, queue, &[]);
@@ -269,11 +327,17 @@ impl Layer for Blocks {
             }
             self.local = local;
             self.built = Some((scene.runs.clone(), scene.taken.clone()));
+            // on the 3D terrain the lines are draped: the covers where they drew differently are
+            // drawn again (item G3; deck redraws them all whenever the layer's data or colours change)
+            if let Some(area) = lines_changed(&self.draped, scene) {
+                note_drawn_area(area);
+            }
+            self.draped = Draped { runs: Some(scene.runs.clone()), styles: run_styles(scene), all: runs_area(&scene.runs) };
         }
         self.slot = Some(cx.frames.push(&cx.view.local(self.local.anchor, self.local.scale, 0.0)));
 
         // each block's signal at its start, lit as the blocks say (the signals and the texts on the
-        // 3D terrain raised by the ground under them, Z3; the lines are not draped yet)
+        // 3D terrain raised by the ground under them, Z3; the lines draped, G3)
         let discs: Vec<circle::Instance> = scene
             .runs
             .signals
@@ -313,14 +377,16 @@ impl Layer for Blocks {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if cx.pass != Pass::Map {
-            return;
-        }
-        if let Some(slot) = self.slot {
+        // on the 3D terrain the three PathLayers go into the covers (deck drapes them, the tunnels'
+        // too), the signals and the texts stand in the map pass (item G3)
+        if let (true, Some(slot)) = (cx.draws_draped(), self.slot) {
             self.ground.begin(pass);
             self.ground.draw_mesh(pass, cx, slot, &self.styles[0], &self.meshes[0]);
             self.ground.draw_mesh(pass, cx, slot, &self.styles[1], &self.meshes[1]);
             self.top.draw(pass, cx, slot, &self.styles[2], &self.meshes[2]);
+        }
+        if cx.pass != Pass::Map {
+            return;
         }
         self.signals.draw(pass, &self.signal_style, &self.signal_instances);
         self.text.draw(pass, &self.names);
@@ -328,9 +394,8 @@ impl Layer for Blocks {
     }
 
     fn drape(&self) -> super::Drape {
-        // stage 9: the lines on the ground are drawn into the terrain's covers, the tunnels, discs
-        // and texts raised; until then drawn as they are
-        super::Drape::None
+        // the lines (deck's PathLayers) draped over the 3D terrain, the discs and texts raised
+        super::Drape::Part
     }
 }
 
@@ -392,6 +457,36 @@ mod tests {
         scene.earth = crate::layers::earth::Input::SHOWN;
         scene.blocks.scene = built;
         scene
+    }
+
+    /// What the lines' change puts out of date on the 3D terrain (item G3): nothing for the same
+    /// set and taken blocks (made again or not), round the runs of the block whose train left,
+    /// everything either set reaches for another set.
+    #[test]
+    fn the_covers_change_round_the_runs_that_change() {
+        let (list, structures) = blocks();
+        let v = view(16.0);
+        let build = |trains: &[DrawnTrain<'_>], generation: u64, list: &[TrainBlock]| {
+            BlockBuilder::new().build(Some(SetRef { generation, list, structures: &structures }), trains, &v, SIZE, 1.782e12)
+        };
+        let in_m = [DrawnTrain { id: "t", name: "SJ 523", at: spot(-25.0, 60.5) }];
+        let taken = build(&in_m, 1, &list);
+        let drawn = Draped { runs: Some(taken.runs.clone()), styles: run_styles(&taken), all: runs_area(&taken.runs) };
+        assert_eq!(lines_changed(&drawn, &taken), None);
+        assert_eq!(lines_changed(&drawn, &build(&in_m, 1, &list)), None, "the same lines made again");
+        // the train gone: block m's run, from 100 m west to 50 m east
+        let free = build(&[], 1, &list);
+        let area = lines_changed(&drawn, &free).expect("a change");
+        let m = DrawnArea::round(east_line(-100.0, 50.0, 60.0), lines_reach()).expect("m's run");
+        assert_eq!(area, m);
+        // another set: both sets' runs
+        let mut moved = list.clone();
+        moved[2].lines = vec![east_line(50.0, 600.0, 60.0)];
+        let other = build(&in_m, 2, &moved);
+        let area = lines_changed(&drawn, &other).expect("a change");
+        assert_eq!(area, DrawnArea::either(runs_area(&taken.runs), runs_area(&other.runs)).expect("both"));
+        assert!(area.max[0] > drawn.all.expect("drawn").max[0], "as far east as the new set reaches");
+        assert_eq!(lines_reach(), 17.0);
     }
 
     /// A second blocks layer that prepares as the map's own does and draws nothing: what each row

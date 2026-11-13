@@ -45,7 +45,8 @@
 //! bookkeeping the terrain layer hands it ([`Layer::covers`]); a [`Drape::Part`] layer is drawn in
 //! both, its flat parts where [`DrawCx::draws_draped`] says. The tiles a cover layer draws
 //! differently each frame reach the covers through [`PrepareCx::update_tiles`], and what it redraws
-//! otherwise through [`note_drawn_changes`] ([`drawn_changes`]).
+//! otherwise through [`note_drawn_changes`] ([`drawn_changes`]), or by place through
+//! [`note_drawn_area`] ([`drawn_areas`]: what is not tiled, item G3).
 //!
 //! Tiles (plan 1.4.8; the renderer owns the runtime, item T1). A layer with tiles keeps a
 //! [`TileSet`] made in `new` with [`Init::tile_set`]: its sources (names of [`crate::io`]), its
@@ -148,6 +149,9 @@ thread_local! {
     /// The tiles whose drawing changed in the layer being prepared, while the renderer listens
     /// ([`listen_for_drawn_changes`], [`drawn_changes`]): filled by [`PrepareCx::update_tiles`].
     static DRAWN_CHANGES: RefCell<Option<Vec<TileIndex>>> = const { RefCell::new(None) };
+    /// The places where what the layer being prepared draws into the covers changed, while the
+    /// renderer listens ([`note_drawn_area`], [`drawn_areas`]; item G3).
+    static DRAWN_AREAS: RefCell<Option<Vec<terrain::cover::DrawnArea>>> = const { RefCell::new(None) };
 }
 
 /// From now on (on this thread) [`PrepareCx::update_tiles`] notes the tiles whose drawing changed:
@@ -155,6 +159,7 @@ thread_local! {
 /// tile drawn. The renderer listens around each cover layer's `prepare` while the terrain is drawn.
 pub fn listen_for_drawn_changes() {
     DRAWN_CHANGES.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    DRAWN_AREAS.with(|c| *c.borrow_mut() = Some(Vec::new()));
 }
 
 /// The tiles noted since [`listen_for_drawn_changes`]; it stops listening.
@@ -171,6 +176,23 @@ pub fn note_drawn_changes(tiles: impl IntoIterator<Item = TileIndex>) {
             log.extend(tiles);
         }
     });
+}
+
+/// What a layer draws into the terrain's covers changed within `area` other than through its tiles
+/// (item G3: the radar's measured ground, the signal blocks, the train route, the trail's shadow):
+/// the covers that show some of it are drawn again ([`terrain::cover::Covers::invalidate_areas`]).
+/// Nothing while the renderer does not listen (the terrain not drawn).
+pub fn note_drawn_area(area: terrain::cover::DrawnArea) {
+    DRAWN_AREAS.with(|c| {
+        if let Some(log) = c.borrow_mut().as_mut() {
+            log.push(area);
+        }
+    });
+}
+
+/// The areas noted since [`listen_for_drawn_changes`]; it stops listening for them.
+pub fn drawn_areas() -> Vec<terrain::cover::DrawnArea> {
+    DRAWN_AREAS.with(|c| c.borrow_mut().take()).unwrap_or_default()
 }
 
 /// What a layer is made with.

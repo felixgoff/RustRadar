@@ -517,7 +517,9 @@ impl MapRenderer {
         // on the 3D terrain, what stands on it raised by the ground under it (Z3)
         let mut scene = scene;
         self.handed = scene.terrain.shown.then(|| scene.clone());
-        layers::terrain::ground::stand(&mut scene, &self.ground);
+        // (with the terrain off on the sea, not on the ground it left: nothing stands it again)
+        let ground = if scene.terrain.shown { self.ground.clone() } else { Default::default() };
+        layers::terrain::ground::stand(&mut scene, &ground);
         self.scene = scene;
     }
 
@@ -640,6 +642,7 @@ impl MapRenderer {
         // of date
         let draping = self.scene.terrain.shown;
         let mut changed = Vec::new();
+        let mut areas = Vec::new();
         for layer in &mut self.layers {
             let cover = draping && layer.drape().into_covers();
             if cover {
@@ -648,6 +651,7 @@ impl MapRenderer {
             layer.prepare(&mut cx);
             if cover {
                 changed.extend(layers::drawn_changes());
+                areas.extend(layers::drawn_areas());
             }
         }
         // what the next frames stand on (Z3)
@@ -655,18 +659,19 @@ impl MapRenderer {
         self.frames.upload(&gpu.device, &gpu.queue, &self.bindings.frame_layout);
         self.bindings.write_globals(&gpu.queue, &self.view.globals);
         self.post.prepare(&self.scene, &self.view, local_now_ms);
-        self.draw_covers(gpu, &changed);
+        self.draw_covers(gpu, &changed, &areas);
     }
 
     /// The terrain's covers due this frame (stage 9): out of date where `changed` tiles of the cover
     /// layers lie and everywhere when what they draw everywhere changed, then at most
     /// [`cover::COVERS_PER_FRAME`] drawn (the cover layers in order, each pass with the cover's
     /// globals and the map pass's stencil reference), submitted now.
-    fn draw_covers(&mut self, gpu: &Gpu, changed: &[TileIndex]) {
+    fn draw_covers(&mut self, gpu: &Gpu, changed: &[TileIndex], areas: &[cover::DrawnArea]) {
         let look = cover::cover_look(&self.scene, &self.view, !self.textures.ready);
         let Some(covers) = self.layers.iter_mut().find_map(|l| l.covers()) else { return };
         covers.set_look(look);
         covers.invalidate(changed);
+        covers.invalidate_areas(areas);
         let jobs = covers.jobs(gpu, &self.view, cover::COVERS_PER_FRAME);
         if jobs.is_empty() {
             return;

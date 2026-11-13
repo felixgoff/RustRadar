@@ -164,11 +164,16 @@ impl Layer for Trains {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
+        // on the 3D terrain the route's lines (deck's PathLayers) go into the covers, its stops and
+        // everything else of the trains stand in the map pass (item G3)
+        if cx.draws_draped() {
+            self.route.draw_route_lines(pass, cx);
+        }
         if cx.pass != Pass::Map {
             return;
         }
         // the selected train's route and halo (T6), under the trains
-        self.route.draw_route(pass, cx);
+        self.route.draw_route_stops(pass);
         self.route.draw_halo(pass);
         self.icons.draw(pass);
         // close in, the cars instead (T3)
@@ -176,6 +181,11 @@ impl Layer for Trains {
         // the dev sightings (T9), then the selected train's ring (T6), over them
         self.sightings.draw(pass, cx);
         self.route.draw_ring(pass);
+    }
+
+    fn drape(&self) -> super::Drape {
+        // the route's dashes and its way to the stop draped over the 3D terrain (item G3)
+        super::Drape::Part
     }
 }
 

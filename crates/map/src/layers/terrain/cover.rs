@@ -18,7 +18,11 @@
 //!   layer draws its flat parts there and the rest in the map pass
 //!   ([`DrawCx::draws_draped`](crate::layers::DrawCx::draws_draped)): the rail map's lines (its
 //!   labels and stations stand), both building layers' shadows and the realistic one's foot shade
-//!   (the buildings stand). A pass draws with the [`Globals`] of [`cover_globals`]: the frames the
+//!   (the buildings stand); and since item G3 the radar's ground layers (RainViewer's and the
+//!   measured volumes' grounds; the lifted stack stands), the signal blocks' lines (their signals
+//!   and texts stand), the selected train's route dashes and its way to the stop (its stops
+//!   stand), the trail's shadow and the filed plan (the waypoints stand). A pass draws with the
+//!   [`Globals`] of [`cover_globals`]: the frames the
 //!   layers pushed for the map's camera are measured from the view centre, which these globals keep,
 //!   so the same frames land in the tile's square. In a cover pass `globals.mode` is the flat map's,
 //!   `globals.mercator.y` is 1 (`rl_clear` then gives 1: the draped ground takes no air, as
@@ -32,7 +36,9 @@
 //!   to 2048), kept within [`BUDGET`], drawn at most [`COVERS_PER_FRAME`] a frame, never-drawn
 //!   first. A cover is drawn again when a cover layer's tiles drawn change within its square
 //!   ([`crate::layers::drawn_changes`]: `update_tiles`, and `note_drawn_changes` for shadows recast
-//!   under a new sun), and every cover when what the cover layers draw changes everywhere
+//!   under a new sun), where what a layer that is not tiled draws changed ([`DrawnArea`], noted by
+//!   `note_drawn_area`: only the covers that show the change, item G3), and every cover when what
+//!   the cover layers draw changes everywhere
 //!   ([`CoverLook`]: the basemap, the projection, the weather and *daylight*, the ground's and the
 //!   relief's settings and the relief's zoom-stepped opacity, the dark map's land, roads and
 //!   runways, the night's minute, the realistic textures arriving). Animated effects (water, the
@@ -64,12 +70,14 @@
 //!   cover pass, so depth-tested and depth-writing draws all land, in order, as with `always`.
 //! - Every cover layer draws all of its tiles in each cover pass (the pass's viewport clips them);
 //!   deck hands a cover only the tile sublayers whose bounds meet it (`getIntersectingLayers`).
-//! - Not draped yet (they draw as they are, at sea level under the surface): the signal blocks'
-//!   lines, the selected train's route and the weather radar's flat layers (deck drapes them; their
-//!   content changes as trains move and radar frames arrive, so draping them means drawing every
-//!   cover again each time, `layerNeedsRedraw`). The selected flight's trail and route keep their
-//!   true altitude (plan 1.4.12). The platforms (an extruded area, deck: offset) are drawn flat into the cover with the
-//!   rest of the ground rails.
+//! - A draped layer that is not tiled and changes (the train route as the train moves, the trail's
+//!   last leg, the blocks as trains take them, a new set of radar volumes): deck draws every cover
+//!   it is in again (`layerNeedsRedraw`), here only those its change shows in ([`DrawnArea`]), so
+//!   such a layer costs a cover or two a scene refresh, within [`COVERS_PER_FRAME`] (item G3).
+//! - Not draped (deck drapes them): the selected flight's trail and its route's estimates keep
+//!   their true heights (plan section 6, item 3), and so do the radar's lifted layers and walls
+//!   (deck would flatten the stack onto the ground, `terrain::ground`). The platforms (an extruded
+//!   area, deck: offset) are drawn flat into the cover with the rest of the ground rails.
 //! - What changes a cover layer's picture without changing its tiles or its settings (a style a
 //!   layer works out from the zoom other than the relief's opacity) shows at the cover's next
 //!   drawing.
@@ -221,6 +229,140 @@ pub fn screen_weight(view: &ViewFrame, tile: TileIndex, z_range: [f64; 2]) -> f6
     let ground = 0.5 * (z_range[0].max(0.0) + z_range[1].max(0.0));
     let d = DVec3::new(wrap_world_x(eye[0] - middle[0]), eye[1] - middle[1], (height - ground) * mercator_units_per_meter(latitude));
     extent / d.length().max(extent * 1e-6)
+}
+
+/// Where what a layer draws into the covers changed other than through its tiles (item G3): a box
+/// in world Mercator (deck's 512 units, `y` north) and how far what is drawn there reaches past it,
+/// in a cover's texels (a line's joints and caps; covers draw pixels as texels). deck redraws every
+/// cover a changed draped layer is in (`layerNeedsRedraw`, a layer that is not a tile's is in all
+/// of them); a cover that does not show the box draws the same picture again, so here only those
+/// that do are put out of date ([`Covers::invalidate_areas`]), which keeps a layer whose content
+/// changes at each scene refresh (a moving train's way to its stop, the trail's last leg) to the
+/// one or two covers it changes in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawnArea {
+    pub min: [f64; 2],
+    pub max: [f64; 2],
+    pub reach_px: f64,
+}
+
+/// How far a line `width_px` wide reaches past its points, texels: deck's miter joints to 4 half
+/// widths (its `miterLimit`), and a texel for the edge's antialiasing.
+pub fn line_reach(width_px: f64) -> f64 {
+    2.0 * width_px + 1.0
+}
+
+impl DrawnArea {
+    /// The box round `points` (`[lon, lat]`; NaN read as 0, as the layers draw them), none for none.
+    pub fn round(points: impl IntoIterator<Item = [f64; 2]>, reach_px: f64) -> Option<DrawnArea> {
+        let or0 = |x: f64| if x.is_nan() { 0.0 } else { x };
+        let mut area: Option<DrawnArea> = None;
+        for [lon, lat] in points {
+            let w = lng_lat_to_world([or0(lon), or0(lat)]);
+            if !(w[0].is_finite() && w[1].is_finite()) {
+                continue;
+            }
+            let a = area.get_or_insert(DrawnArea { min: w, max: w, reach_px });
+            a.min = [a.min[0].min(w[0]), a.min[1].min(w[1])];
+            a.max = [a.max[0].max(w[0]), a.max[1].max(w[1])];
+        }
+        area
+    }
+
+    /// A box in world Mercator, `[west, south]` to `[east, north]`.
+    pub fn world(min: [f64; 2], max: [f64; 2], reach_px: f64) -> DrawnArea {
+        DrawnArea { min, max, reach_px }
+    }
+
+    /// The box round both, reaching as far as the farther.
+    pub fn join(self, other: DrawnArea) -> DrawnArea {
+        DrawnArea {
+            min: [self.min[0].min(other.min[0]), self.min[1].min(other.min[1])],
+            max: [self.max[0].max(other.max[0]), self.max[1].max(other.max[1])],
+            reach_px: self.reach_px.max(other.reach_px),
+        }
+    }
+
+    /// `a` and `b` joined, either missing.
+    pub fn either(a: Option<DrawnArea>, b: Option<DrawnArea>) -> Option<DrawnArea> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.join(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// `tile`'s square grown by what the area reaches in a cover of `size` texels over it
+    /// (`[west, south, east, north]`, world Mercator).
+    fn grown_square(&self, tile: TileIndex, size: u32) -> [f64; 4] {
+        let extent = tile_extent(tile.z);
+        let pad = self.reach_px * extent / f64::from(size.max(1));
+        let west = f64::from(tile.x) * extent;
+        let north = WORLD_SIZE - f64::from(tile.y) * extent;
+        [west - pad, north - extent - pad, west + extent + pad, north + pad]
+    }
+
+    /// Whether a cover of `size` texels over `tile`'s square shows something drawn in the area (on
+    /// either side of the antimeridian).
+    pub fn meets(&self, tile: TileIndex, size: u32) -> bool {
+        let [west, south, east, north] = self.grown_square(tile, size);
+        [-WORLD_SIZE, 0.0, WORLD_SIZE].iter().any(|&shift| {
+            self.min[0] + shift < east && self.max[0] + shift > west && self.min[1] < north && self.max[1] > south
+        })
+    }
+
+    /// A tile at [`PROBE_ZOOM`] in `tile`'s square nearest the area: what [`CoverCache::invalidate`]
+    /// is handed for the cover of `tile`, so that it puts out of date that cover (and those over or
+    /// under it at that spot, which show the place too) and not every cover under a coarse one.
+    fn probe(&self, tile: TileIndex) -> TileIndex {
+        let extent = tile_extent(tile.z);
+        let west = f64::from(tile.x) * extent;
+        let north = WORLD_SIZE - f64::from(tile.y) * extent;
+        let middle = [(self.min[0] + self.max[0]) / 2.0, (self.min[1] + self.max[1]) / 2.0];
+        // just inside the square, so the probe is in it whatever the rounding
+        let inset = extent * 1e-6;
+        let x = middle[0].clamp(west + inset, west + extent - inset);
+        let y = middle[1].clamp(north - extent + inset, north - inset);
+        let probe = tile_extent(PROBE_ZOOM);
+        let side = 1u64 << PROBE_ZOOM;
+        let column = ((x / probe).floor() as u64).min(side - 1) as u32;
+        let row = (((WORLD_SIZE - y) / probe).floor() as u64).min(side - 1) as u32;
+        TileIndex::new(column, row, PROBE_ZOOM)
+    }
+}
+
+/// The zoom of [`DrawnArea::probe`]'s tiles: deeper than any terrain tile's.
+const PROBE_ZOOM: u32 = 28;
+
+/// What of a path (`[lon, lat]` points, drawn when it has two or more) drew differently from `old`
+/// to `new`, none when nothing did: a line dashed from its start (deck's `highPrecisionDash`, the
+/// dashes measured along the whole path) differs from where the two part to its end; a solid one
+/// only between where they part and where they meet again, the vertices either side included
+/// (their joints change). `reach_px` as in [`DrawnArea`].
+pub fn path_changes(old: &[[f64; 2]], new: &[[f64; 2]], dashed: bool, reach_px: f64) -> Option<DrawnArea> {
+    let drawn = |p: &'_ [[f64; 2]]| -> usize { if p.len() >= 2 { p.len() } else { 0 } };
+    let (old, new) = (&old[..drawn(old)], &new[..drawn(new)]);
+    if old == new {
+        return None;
+    }
+    let shorter = old.len().min(new.len());
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = if dashed { 0 } else { old.iter().rev().zip(new.iter().rev()).take(shorter - prefix).take_while(|(a, b)| a == b).count() };
+    let part = |p: &[[f64; 2]]| {
+        let start = prefix.saturating_sub(1);
+        let end = if suffix > 0 { p.len() - suffix + 1 } else { p.len() };
+        DrawnArea::round(p[start..end.max(start)].iter().copied(), reach_px)
+    };
+    DrawnArea::either(part(old), part(new))
+}
+
+/// [`path_changes`] over two lists of paths drawn as one layer's rows, row by row (a row only one
+/// list has changed whole).
+pub fn paths_changes(old: &[Vec<[f64; 2]>], new: &[Vec<[f64; 2]>], dashed: bool, reach_px: f64) -> Option<DrawnArea> {
+    let rows = old.len().max(new.len());
+    (0..rows).fold(None, |area, i| {
+        let (a, b) = (old.get(i).map_or(&[][..], Vec::as_slice), new.get(i).map_or(&[][..], Vec::as_slice));
+        DrawnArea::either(area, path_changes(a, b, dashed, reach_px))
+    })
 }
 
 /// A cover on the GPU.
@@ -530,6 +672,22 @@ impl Covers {
     /// The tiles of cover layers drawn differently this frame: the covers they meet are out of date.
     pub fn invalidate(&mut self, changed: &[TileIndex]) {
         self.cache.invalidate(changed);
+    }
+
+    /// What the cover layers draw changed within `areas` (item G3, [`DrawnArea`]): each cover that
+    /// shows some of it (its square grown by what the area reaches at its own texel size) is out
+    /// of date. Covers kept for tiles not drawn now too, so they are right when drawn again.
+    pub fn invalidate_areas(&mut self, areas: &[DrawnArea]) {
+        if areas.is_empty() {
+            return;
+        }
+        let probes: Vec<TileIndex> = self
+            .cache
+            .iter()
+            .filter(|(_, cover)| cover.size > 0)
+            .filter_map(|(tile, cover)| areas.iter().find(|a| a.meets(tile, cover.size)).map(|a| a.probe(tile)))
+            .collect();
+        self.cache.invalidate(&probes);
     }
 
     /// The covers to draw now (at most `max`), with their passes' globals for `view` written; the
@@ -1173,5 +1331,496 @@ mod tests {
         }
         eprintln!("globe: {same} of {plain} plain pixels as the globe draws them");
         assert!(plain > 20_000 && same * 1000 >= plain * 995, "{same} of {plain}");
+    }
+
+    /// The layers draped since item G3: the radar's ground layers, the signal blocks' lines, the
+    /// selected train's route, the trail's shadow and the filed plan.
+    mod draped {
+        use std::sync::Arc;
+
+        use rustradar_core::model::{RadarBounds, RadarVolume, TrainBlock};
+        use rustradar_scene::blocks::{BlockBuilder, DrawnTrain, SetRef};
+        use rustradar_scene::camera::Viewport;
+        use rustradar_scene::radar::BandPolygon;
+
+        use super::*;
+        use crate::layers::radar::{measured, tiles};
+        use crate::layers::{blocks, radar, route, train_route};
+
+        // -------------------------------------------------------------- the CPU side
+
+        /// A box meets the covers whose squares it lies in, and the neighbours' its strokes reach
+        /// into at their own texel size: a coarse cover's texels reach further; either side of
+        /// the antimeridian.
+        #[test]
+        fn a_changed_area_meets_the_covers_that_show_it() {
+            let tile = TileIndex::new(9000, 4600, 14);
+            let extent = tile_extent(14);
+            let east = (f64::from(tile.x) + 1.0) * extent;
+            let north = WORLD_SIZE - f64::from(tile.y) * extent;
+            // a point inside, and one an eighth of the tile east of its edge
+            let inside = DrawnArea::world([east - extent / 2.0, north - extent / 2.0], [east - extent / 2.0, north - extent / 2.0], 5.0);
+            assert!(inside.meets(tile, 1024) && inside.meets(tile, 64));
+            let beyond = DrawnArea::world([east + extent / 8.0, north - extent / 2.0], [east + extent / 8.0, north - extent / 2.0], 5.0);
+            assert!(!beyond.meets(tile, 1024), "5 texels of a 1024 cover do not reach an eighth of it");
+            assert!(beyond.meets(tile, 32), "5 texels of a 32 one do (5/32 > 1/8)");
+            assert!(beyond.meets(TileIndex::new(4500, 2300, 13), 1024), "the parent holds it");
+            // the place a cover is put out of date by: in its square, at a deep zoom
+            let probe = inside.probe(tile);
+            assert!(tile.contains(probe) && probe.z == PROBE_ZOOM);
+            assert!(tile.contains(beyond.probe(tile)), "clamped into the square");
+            // across the antimeridian: a stroke at the world's west edge reaches the east edge's tile
+            let last = TileIndex::new((1 << 14) - 1, 4600, 14);
+            let west_edge = DrawnArea::world([1e-6, north - extent / 2.0], [2e-6, north - extent / 2.0], 2.0);
+            assert!(west_edge.meets(last, 1024));
+            // the box round points, `|| 0`, and joined
+            let round = DrawnArea::round([[18.0, 60.0], [f64::NAN, 59.0]], 3.0).expect("a box");
+            assert_eq!(round.min[0], lng_lat_to_world([0.0, 59.0])[0]);
+            assert_eq!(round.max, [lng_lat_to_world([18.0, 60.0])[0], lng_lat_to_world([18.0, 60.0])[1]]);
+            assert!(DrawnArea::round(std::iter::empty(), 1.0).is_none());
+            let joined = inside.join(DrawnArea { reach_px: 9.0, ..beyond });
+            assert_eq!((joined.min[0], joined.max[0], joined.reach_px), (inside.min[0], beyond.max[0], 9.0));
+            assert_eq!(line_reach(3.0), 7.0);
+        }
+
+        /// A path redraws where its points part and meet again when solid, from where they part to
+        /// its end when dashed along its whole length; the same path, or one too short to draw on
+        /// both sides, nothing; rows of paths compared row by row.
+        #[test]
+        fn a_path_changes_where_its_points_do() {
+            let p = |i: f64| [18.0 + i * 0.001, 60.0];
+            let old = [p(0.0), p(1.0), p(2.0), p(3.0), p(4.0)];
+            let box_of = |points: &[[f64; 2]], reach: f64| DrawnArea::round(points.iter().copied(), reach).expect("a box");
+            assert_eq!(path_changes(&old, &old, false, 7.0), None);
+            assert_eq!(path_changes(&[p(0.0)], &[], false, 7.0), None, "one point draws nothing");
+            // the train moved on: its first point
+            let mut moved = old;
+            moved[0] = p(0.5);
+            assert_eq!(path_changes(&old, &moved, false, 7.0), Some(box_of(&[p(0.0), p(1.0)], 7.0)), "solid: its first leg");
+            assert_eq!(path_changes(&old, &moved, true, 7.0), Some(box_of(&old, 7.0)), "dashed from its start: all of it");
+            // a point added at the end (the trail grows)
+            let grown = [p(0.0), p(1.0), p(2.0), p(3.0), p(4.0), p(5.0)];
+            assert_eq!(path_changes(&old, &grown, false, 4.0), Some(box_of(&[p(4.0), p(5.0)], 4.0)));
+            assert_eq!(path_changes(&old, &grown, true, 4.0), Some(box_of(&[p(4.0), p(5.0)], 4.0)), "the dashes before it stay");
+            // one in the middle
+            let mut bent = old;
+            bent[2] = [18.002, 60.001];
+            assert_eq!(path_changes(&old, &bent, false, 4.0), Some(box_of(&[p(1.0), p(2.0), p(3.0), bent[2]], 4.0)));
+            // drawn, then gone
+            assert_eq!(path_changes(&old, &[], false, 4.0), Some(box_of(&old, 4.0)));
+            // rows
+            let rows = vec![old.to_vec(), vec![p(10.0), p(11.0)]];
+            let fewer = vec![old.to_vec()];
+            assert_eq!(paths_changes(&rows, &rows, true, 7.0), None);
+            assert_eq!(paths_changes(&rows, &fewer, true, 7.0), Some(box_of(&[p(10.0), p(11.0)], 7.0)));
+        }
+
+        // -------------------------------------------------------------- on the GPU
+
+        /// G3's place, north-east of Uppsala, where the fixtures' RainViewer frame has echo (its
+        /// tile 7/70/37) with land to the west of it.
+        const PLACE: [f64; 2] = [18.5, 60.0];
+        const SIZE: [f64; 2] = [640.0, 400.0];
+        /// The synthetic hillside: this high at the place, rising 0.3 m a metre to the east (17°),
+        /// level north to south, down to the sea in the west (where the drawn surface stops, the
+        /// mesh's sea-level clamp). Low enough that a line left at sea level would be on the picture.
+        const PLACE_M: f64 = 150.0;
+        const GRADE: f64 = 0.3;
+        const FRAME: &str = "https://tilecache.rainviewer.com/v2/radar/47622fe604ca/256/{z}/{x}/{y}/2/1_1.png";
+        const LAND: [u8; 4] = rustradar_scene::tess::vector::LAND;
+
+        /// The hillside's height at world Mercator `[x, y]`, metres.
+        fn hillside([x, _]: [f64; 2]) -> f64 {
+            let metres_per_unit = 40_075_016.686 * PLACE[1].to_radians().cos() / WORLD_SIZE;
+            (PLACE_M + GRADE * (x - lng_lat_to_world(PLACE)[0]) * metres_per_unit).max(0.0)
+        }
+
+        fn hillside_at(lon_lat: [f64; 2]) -> f64 {
+            hillside(lng_lat_to_world(lon_lat))
+        }
+
+        /// The place `east` and `north` metres from [`PLACE`].
+        fn spot(east: f64, north: f64) -> [f64; 2] {
+            [PLACE[0] + east / (111_320.0 * PLACE[1].to_radians().cos()), PLACE[1] + north / 111_320.0]
+        }
+
+        /// A line from `half` metres west of the place's meridian to `half` east of it, `north`
+        /// metres north of the place, a point every 20 m.
+        fn line(north: f64, half: f64) -> Vec<[f64; 2]> {
+            let n = (2.0 * half / 20.0).round() as usize;
+            (0..=n).map(|k| spot(-half + 2.0 * half * k as f64 / n as f64, north)).collect()
+        }
+
+        /// The view at `zoom` and `pitch` from the south, its target on the hillside with the
+        /// terrain on (the camera's ground aim, Z4) and at sea level with it off.
+        fn view_of(zoom: f64, pitch: f64, terrain: bool) -> ViewState {
+            ViewState { longitude: PLACE[0], latitude: PLACE[1], zoom, pitch, bearing: 0.0, position: terrain.then_some([0.0, 0.0, PLACE_M]) }
+        }
+
+        /// The dark map's land alone at `view`, the terrain `terrain`, under a rig that leaves the
+        /// covers' colours as they are.
+        fn bare(view: ViewState, terrain: bool) -> SceneInput {
+            let mut scene = SceneInput::new(view, SIZE, 1.0, Basemap::Dark);
+            scene.local_now_ms = MIDSUMMER;
+            scene.feed_now_ms = MIDSUMMER;
+            scene.earth = earth::Input::SHOWN;
+            scene.terrain = terrain::Input { shown: terrain };
+            scene.lights = neutral();
+            scene
+        }
+
+        /// How far north of the place the lines lie, metres: the block, the route's dashes and its way
+        /// to the stop, the trail's shadow, the filed plan.
+        const BLOCK_N: f64 = 200.0;
+        const DASHES_N: f64 = 110.0;
+        const TO_STOP_N: f64 = 20.0;
+        const SHADOW_N: f64 = -70.0;
+        const FILED_N: f64 = -160.0;
+
+        /// One block from 300 m west to 300 m east, [`BLOCK_N`] north of the place: free, or taken by
+        /// a train in its middle.
+        fn blocks_scene(view: &ViewState, taken: bool) -> blocks::Input {
+            let list = [TrainBlock { id: "b".into(), signal: Some("121".into()), lines: vec![line(BLOCK_N, 300.0)] }];
+            let trains = if taken { vec![DrawnTrain { id: "t", name: "SJ 523", at: spot(0.0, BLOCK_N) }] } else { Vec::new() };
+            let scene = BlockBuilder::new().build(Some(SetRef { generation: 1, list: &list, structures: &[] }), &trains, view, SIZE, MIDSUMMER);
+            blocks::Input { scene }
+        }
+
+        /// The selected train's route: its dashes [`DASHES_N`] north of the place, its way to the stop
+        /// [`TO_STOP_N`], starting `moved` metres east of 300 m west.
+        fn train_route(moved: f64) -> train_route::Input {
+            let mut to_stop = line(TO_STOP_N, 300.0);
+            to_stop[0] = spot(-300.0 + moved, TO_STOP_N);
+            train_route::Input { rest: Arc::new(vec![line(DASHES_N, 300.0)]), head: Vec::new(), to_stop, stations: Vec::new(), ring: None }
+        }
+
+        /// The selected flight: its trail 2 km up over [`SHADOW_N`], drawn invisible (only its shadow
+        /// shows), with `extra` points on east; the filed plan over [`FILED_N`].
+        fn flight(extra: usize) -> route::Input {
+            let mut ground = line(SHADOW_N, 300.0);
+            ground.extend((1..=extra).map(|k| spot(300.0 + 20.0 * k as f64, SHADOW_N)));
+            let path: Vec<[f64; 3]> = ground.iter().map(|&[lon, lat]| [lon, lat, 2000.0]).collect();
+            let colors = vec![[0, 0, 0, 0]; path.len()];
+            route::Input { trail: Some(route::Trail { path, colors }), filed: line(FILED_N, 300.0), before: Vec::new(), ahead: Vec::new() }
+        }
+
+        /// A measured volume's ground: one square of band 9, `size` degrees, its south-west corner
+        /// at `[lon, lat]`, scanned at `time`; no heights, so no lifted layers.
+        fn volume(time: i64, [lon, lat]: [f64; 2], size: f64) -> Arc<measured::Volume> {
+            let bounds = RadarBounds { west: lon, south: lat, east: lon + size, north: lat + size };
+            let square = BandPolygon { band: 9, positions: vec![lon, lat, lon + size, lat, lon + size, lat + size, lon, lat + size], hole_indices: Vec::new() };
+            Arc::new(measured::Volume {
+                frame: RadarVolume { source: "mrms".into(), time, bounds, levels: Vec::new(), coverage_width: 2, coverage_height: 2 },
+                ground: vec![square],
+                levels: Vec::new(),
+                coverage: vec![1; 4],
+            })
+        }
+
+        /// The scene of the line layers at zoom 15, pitched 50°.
+        fn lines_scene(terrain: bool) -> SceneInput {
+            let view = view_of(15.0, 50.0, terrain);
+            let mut scene = bare(view, terrain);
+            scene.blocks = blocks_scene(&view, false);
+            scene.trains.route = train_route(0.0);
+            scene.route = flight(0);
+            scene
+        }
+
+        fn hillside_tiles() -> Arc<dyn TileFetcher> {
+            fixtures_on(hillside)
+        }
+
+        /// Which pixels a layer draws.
+        type Class<'a> = &'a dyn Fn([u8; 4]) -> bool;
+
+        /// Whether a pixel of `image` round `[x, y]` (±2 across, ±3 up and down) is `class`.
+        fn near(image: &Image, [x, y]: [f64; 2], class: &dyn Fn([u8; 4]) -> bool) -> bool {
+            let (x, y) = (x.round() as i64, y.round() as i64);
+            (-3..=3).any(|dy| {
+                (-2..=2).any(|dx| {
+                    let (px, py) = (x + dx, y + dy);
+                    px >= 0 && py >= 0 && px < i64::from(image.width) && py < i64::from(image.height) && class(image.pixel(px as u32, py as u32))
+                })
+            })
+        }
+
+        fn on_screen([x, y]: [f64; 2]) -> bool {
+            x >= 4.0 && y >= 4.0 && x < SIZE[0] - 4.0 && y < SIZE[1] - 4.0
+        }
+
+        /// The line layers on a 17° hillside rising east (the item's acceptance): seen from the
+        /// south at pitch 50 from a camera whose target stands on the ground 150 m up, the signal
+        /// block's line, the train route's dashes and its way to the stop, the trail's shadow and
+        /// the filed plan each lie where the CPU puts their points on the hillside, rising to the
+        /// east as the ground does, and nowhere else: not also at sea level (some 100 px lower,
+        /// where the route, drawn over everything, would show through the hillside as before).
+        #[test]
+        fn the_line_layers_follow_the_hillside() {
+            let Some(gpu) = gpu() else { return };
+            let scene = lines_scene(true);
+            let mut renderer = renderer_on(&gpu, hillside_tiles());
+            let image = render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered");
+            image.save_png(&shots_dir().join("g3-lines-on-the-hillside.png")).expect("saved");
+            assert!(!renderer.ground().is_none(), "the scene stands on the terrain");
+            let covers = renderer.terrain_covers().expect("covers");
+            eprintln!("{} covers, zooms {:?}", covers.textures(), covers.cache().iter().map(|(t, c)| (t.z, c.size)).collect::<Vec<_>>());
+            let viewport = viewport_for(&scene.view, SIZE);
+            let i = |p: [u8; 4]| p.map(i32::from);
+            let land = i(LAND);
+            let lighter = |p: [u8; 4]| (0..3).all(|c| i(p)[c] > land[c] + 15);
+            let darker = |p: [u8; 4]| (0..3).all(|c| i(p)[c] + 15 < land[c]);
+            let green = |p: [u8; 4]| i(p)[1] > i(p)[0] + 60 && i(p)[1] > i(p)[2] + 40;
+            let blue = |p: [u8; 4]| i(p)[2] > i(p)[0] + 80 && i(p)[2] > i(p)[1] + 40;
+            let layers: [(&str, f64, Class<'_>, usize); 5] = [
+                ("train-blocks", BLOCK_N, &green, 90),
+                ("train-route-dashes", DASHES_N, &darker, 70),
+                ("train-route-to-stop", TO_STOP_N, &blue, 90),
+                ("trail-shadow", SHADOW_N, &lighter, 80),
+                ("route-filed", FILED_N, &lighter, 90),
+            ];
+            for (name, north, class, percent) in layers {
+                let (mut hits, mut seen) = (0, 0);
+                let mut rise = Vec::new();
+                for k in 0..=20 {
+                    let at = spot(-250.0 + 25.0 * f64::from(k), north);
+                    let [x, y, _] = viewport.project([at[0], at[1], hillside_at(at)]);
+                    if !on_screen([x, y]) {
+                        continue;
+                    }
+                    seen += 1;
+                    hits += usize::from(near(&image, [x, y], class));
+                    rise.push(y);
+                }
+                let climb = rise.first().zip(rise.last()).map_or(0.0, |(a, b)| a - b);
+                eprintln!("{name}: {hits} of {seen} points drawn where they lie on the hillside, rising {climb:.0} px west to east");
+                assert!(seen >= 15, "{name}: {seen} points on the picture");
+                assert!(hits * 100 >= seen * percent, "{name}: {hits} of {seen}");
+                assert!(climb > 40.0, "{name} rises with the ground: {climb:.0} px");
+            }
+            // each colour only on the lines that draw in it (and the discs on them): nothing of
+            // them anywhere else, at sea level in particular (some 100 px lower, on the picture)
+            let sunk = viewport.project([PLACE[0], PLACE[1], 0.0]);
+            let raised = viewport.project([PLACE[0], PLACE[1], PLACE_M]);
+            assert!(sunk[1] - raised[1] > 60.0 && on_screen([sunk[0], sunk[1]]), "sea level is on the picture, lower: {sunk:?} against {raised:?}");
+            let draped = |north: f64| -> Vec<[f64; 2]> {
+                (0..=120)
+                    .map(|k| {
+                        let at = spot(-300.0 + 5.0 * f64::from(k), north);
+                        let [x, y, _] = viewport.project([at[0], at[1], hillside_at(at)]);
+                        [x, y]
+                    })
+                    .collect()
+            };
+            let classes: [(&str, Class<'_>, Vec<f64>); 4] = [
+                ("green", &green, vec![BLOCK_N]),
+                ("blue", &blue, vec![TO_STOP_N]),
+                ("dark", &darker, vec![BLOCK_N, DASHES_N]),
+                ("light", &lighter, vec![TO_STOP_N, SHADOW_N, FILED_N]),
+            ];
+            for (name, class, lines) in classes {
+                let allowed: Vec<[f64; 2]> = lines.iter().flat_map(|&n| draped(n)).collect();
+                let (mut drawn, mut stray) = (0, 0);
+                for y in 0..image.height {
+                    for x in 0..image.width {
+                        if !class(image.pixel(x, y)) {
+                            continue;
+                        }
+                        drawn += 1;
+                        let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                        stray += usize::from(!allowed.iter().any(|&[ax, ay]| (ax - px).hypot(ay - py) <= 7.0));
+                    }
+                }
+                eprintln!("{name}: {drawn} px, {stray} away from its lines");
+                assert!(drawn > 50 && stray == 0, "{name}: {stray} of {drawn} px away from its lines");
+            }
+        }
+
+        /// The radar's ground layers on the hillside, looking straight down at zoom 12.5 (no
+        /// lifted layers): RainViewer's echo from the fixtures and a measured volume's square
+        /// each show where the pixels' rays meet the hillside what the flat map has there (cast
+        /// on the CPU), not what it has under the pixel at sea level.
+        #[test]
+        fn the_radar_s_ground_layers_follow_the_hillside() {
+            let Some(gpu) = gpu() else { return };
+            let scene = |terrain: bool| {
+                let mut scene = bare(view_of(12.5, 0.0, terrain), terrain);
+                scene.radar = radar::Input {
+                    tiles: tiles::Input { url: Some(FRAME.into()), ..Default::default() },
+                    measured: measured::Input { volumes: vec![volume(1, [18.47, 60.002], 0.012)], exaggeration: 1.0 },
+                };
+                scene
+            };
+            let off = render_with(&gpu, &mut renderer_on(&gpu, Arc::new(DirTiles::fixtures())), &scene(false), 1.0).expect("rendered");
+            let on_scene = scene(true);
+            let mut renderer = renderer_on(&gpu, hillside_tiles());
+            let on = render_with(&gpu, &mut renderer, &on_scene, 1.0).expect("rendered");
+            off.save_png(&shots_dir().join("g3-radar-flat.png")).expect("saved");
+            on.save_png(&shots_dir().join("g3-radar-on-the-hillside.png")).expect("saved");
+            let radar = |p: [u8; 4]| (0..3).any(|c| p[c].abs_diff(LAND[c]) > 10);
+            let plain = |image: &Image, [x, y]: [f64; 2]| -> Option<bool> {
+                let (x, y) = (x.round() as i64, y.round() as i64);
+                if x < 1 || y < 1 || x + 1 >= i64::from(image.width) || y + 1 >= i64::from(image.height) {
+                    return None;
+                }
+                let class = radar(image.pixel(x as u32, y as u32));
+                let same = (-1..=1).all(|dy| (-1..=1).all(|dx| radar(image.pixel((x + dx) as u32, (y + dy) as u32)) == class));
+                same.then_some(class)
+            };
+            let on_view = viewport_for(&on_scene.view, SIZE);
+            let off_view = viewport_for(&scene(false).view, SIZE);
+            let (mut echo, mut moved, mut followed, mut stayed) = (0, 0, 0, 0);
+            for y in (4..396).step_by(4) {
+                for x in (4..636).step_by(4) {
+                    let p = [f64::from(x), f64::from(y)];
+                    echo += usize::from(radar(on.pixel(x, y)));
+                    let Some(ground) = hit(&on_view, p, &hillside) else { continue };
+                    let [gx, gy, _] = off_view.project([ground[0], ground[1], 0.0]);
+                    let (Some(want), Some(under)) = (plain(&off, [gx, gy]), plain(&off, p)) else { continue };
+                    if want == under {
+                        continue;
+                    }
+                    moved += 1;
+                    let got = radar(on.pixel(x, y));
+                    followed += usize::from(got == want);
+                    stayed += usize::from(got == under);
+                }
+            }
+            eprintln!("radar: {echo} sampled echo pixels; of {moved} where the hillside moves the echo's edge, {followed} follow it, {stayed} stay");
+            assert!(echo > 2000, "the radar is drawn: {echo}");
+            assert!(moved > 150, "the hillside moves the echo's edges: {moved}");
+            assert!(followed * 100 >= moved * 93 && stayed * 100 <= moved * 7, "{followed} and {stayed} of {moved}");
+        }
+
+        /// Where the ray of pixel `p` of `viewport` first meets the ground `metres` (of world
+        /// Mercator): `[lon, lat]`; walked down from the camera 20 m at a time, then halved to a
+        /// centimetre.
+        fn hit(viewport: &Viewport, p: [f64; 2], metres: &dyn Fn([f64; 2]) -> f64) -> Option<[f64; 2]> {
+            let camera = viewport.unproject_position(viewport.camera_position);
+            let above = |h: f64| metres(lng_lat_to_world(viewport.unproject(p, h))) < h;
+            let mut high = camera[2] - 1.0;
+            let mut low = high - 20.0;
+            while above(low) {
+                high = low;
+                low -= 20.0;
+                if low < -100.0 {
+                    return None;
+                }
+            }
+            while high - low > 0.01 {
+                let mid = (high + low) / 2.0;
+                if above(mid) { high = mid } else { low = mid }
+            }
+            Some(viewport.unproject(p, low))
+        }
+
+        /// Every draped layer at once on the hillside (the lines, RainViewer, a measured volume):
+        /// with the terrain on, then off (the picture a renderer that never had the terrain draws),
+        /// on again (the first picture) and off again (the second).
+        #[test]
+        fn turning_the_terrain_off_and_on_gives_the_same_picture_with_every_draped_layer() {
+            let Some(gpu) = gpu() else { return };
+            let scene = |terrain: bool| {
+                let mut scene = lines_scene(terrain);
+                scene.radar = radar::Input {
+                    tiles: tiles::Input { url: Some(FRAME.into()), ..Default::default() },
+                    measured: measured::Input { volumes: vec![volume(1, spot(-150.0, 80.0), 0.002)], exaggeration: 1.0 },
+                };
+                scene
+            };
+            let mut renderer = renderer_on(&gpu, hillside_tiles());
+            let on = render_with(&gpu, &mut renderer, &scene(true), 1.0).expect("rendered");
+            let off = render_with(&gpu, &mut renderer, &scene(false), 1.0).expect("rendered");
+            assert!(renderer.terrain_covers().is_none(), "no covers with the terrain off");
+            let again = render_with(&gpu, &mut renderer, &scene(true), 1.0).expect("rendered");
+            let off_again = render_with(&gpu, &mut renderer, &scene(false), 1.0).expect("rendered");
+            let never = render_with(&gpu, &mut renderer_on(&gpu, hillside_tiles()), &scene(false), 1.0).expect("rendered");
+            on.save_png(&shots_dir().join("g3-every-draped-layer-on.png")).expect("saved");
+            off.save_png(&shots_dir().join("g3-every-draped-layer-off.png")).expect("saved");
+            assert_eq!(differing(&off, &never), 0, "off, the flat map as it always is");
+            assert_eq!(differing(&on, &again), 0, "on again, the same picture");
+            assert_eq!(differing(&off, &off_again), 0, "off again, the same picture");
+            // (the land is the same colour on the terrain as on the flat map: the lines, the radar,
+            // the discs and the volume moved)
+            let changed = differing(&on, &off);
+            eprintln!("{changed} px differ between the terrain on and off");
+            assert!(changed > 5000, "the terrain changes the picture: {changed} px");
+        }
+
+        /// The covers a scene refresh draws again, counted (the per-frame budget): with nothing
+        /// changed none; as the train moves on along its way to the stop, the trail grows, the
+        /// block is taken and a new scan of the volume comes in, only the covers that show the
+        /// change, never more than [`COVERS_PER_FRAME`] a frame, where deck draws every cover the
+        /// layer is in again.
+        #[test]
+        fn the_covers_are_drawn_again_only_where_the_draped_layers_change() {
+            let Some(gpu) = gpu() else { return };
+            let with_volume = |mut scene: SceneInput, time: i64| {
+                scene.radar.measured = measured::Input { volumes: vec![volume(time, spot(-150.0, 80.0), 0.002)], exaggeration: 1.0 };
+                scene
+            };
+            let first = with_volume(lines_scene(true), 1);
+            let mut renderer = renderer_on(&gpu, hillside_tiles());
+            render_with(&gpu, &mut renderer, &first, 1.0).expect("rendered");
+            let total = renderer.terrain_covers().expect("covers").textures();
+            // frames of `scene` until its covers are drawn: the covers drawn again, and the most a frame
+            let redraw = |renderer: &mut MapRenderer, scene: &SceneInput| -> (usize, usize) {
+                renderer.update(scene.clone());
+                let before = renderer.terrain_covers().expect("covers").drawn();
+                let mut most = 0;
+                for _ in 0..400 {
+                    let was = renderer.terrain_covers().expect("covers").drawn();
+                    renderer.prepare(&gpu, scene.local_now_ms);
+                    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("polled");
+                    let covers = renderer.terrain_covers().expect("covers");
+                    most = most.max(covers.drawn() - was);
+                    // (a new scan is meshed on the worker pool first)
+                    if covers.waiting() == 0 && covers.drawn() == was && !renderer.pending() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("polled");
+                (renderer.terrain_covers().expect("covers").drawn() - before, most)
+            };
+            // the covers whose squares the change shows in (`DrawnArea::meets`)
+            let meeting = |renderer: &mut MapRenderer, area: Option<DrawnArea>| -> usize {
+                let area = area.expect("a change");
+                renderer.terrain_covers().expect("covers").cache().iter().filter(|(t, c)| c.visible() && area.meets(*t, c.size)).count()
+            };
+
+            let (same, _) = redraw(&mut renderer, &first);
+            let mut moved = first.clone();
+            moved.trains.route = train_route(4.0);
+            let train_area = train_route::route_changes(&(Arc::clone(&first.trains.route.rest), Vec::new(), first.trains.route.to_stop.clone()), &moved.trains.route);
+            let train_meets = meeting(&mut renderer, train_area);
+            let (train, train_most) = redraw(&mut renderer, &moved);
+            let mut grown = moved.clone();
+            grown.route = flight(1);
+            let trail_area = path_changes(&route::draped_paths(&moved.route)[0], &route::draped_paths(&grown.route)[0], false, line_reach(route::TRAIL_SHADOW_WIDTH));
+            let trail_meets = meeting(&mut renderer, trail_area);
+            let (trail, trail_most) = redraw(&mut renderer, &grown);
+            let mut taken = grown.clone();
+            taken.blocks = blocks_scene(&taken.view, true);
+            let block_meets = meeting(&mut renderer, DrawnArea::round(line(BLOCK_N, 300.0), blocks::lines_reach()));
+            let (block, block_most) = redraw(&mut renderer, &taken);
+            let rescanned = with_volume(taken.clone(), 2);
+            let (scan, scan_most) = redraw(&mut renderer, &rescanned);
+            eprintln!(
+                "{total} covers (deck draws them all again for each change); drawn again: nothing changed {same}, the train moved {train} (meeting {train_meets}), \
+                 the trail grew {trail} (meeting {trail_meets}), the block taken {block} (meeting {block_meets}), a new scan {scan}; at most {} a frame",
+                [train_most, trail_most, block_most, scan_most].iter().max().unwrap_or(&0)
+            );
+            assert!(total >= 6, "{total} covers");
+            assert_eq!(same, 0, "nothing changed, nothing drawn again");
+            for (what, n, meets) in [("the train", train, train_meets), ("the trail", trail, trail_meets), ("the block", block, block_meets)] {
+                assert!(n >= 1 && n <= meets && meets < total, "{what}: {n} drawn again, {meets} meet the change, of {total}");
+            }
+            assert!(train <= 2 && trail <= 2, "a train's or a trail's step costs a cover or two: {train}, {trail}");
+            assert!((1..total).contains(&scan), "a new scan: {scan} of {total}");
+            for most in [train_most, trail_most, block_most, scan_most] {
+                assert!(most <= COVERS_PER_FRAME, "{most} a frame");
+            }
+        }
     }
 }

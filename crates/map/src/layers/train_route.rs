@@ -40,6 +40,12 @@
 //!   projection swaps at zoom 12. The head and the way to the stop change at each scene refresh
 //!   and are made again whenever they do.
 //! - The circles are placed at each frame for that frame's camera.
+//!
+//! On the 3D terrain (item G3) deck drapes the three PathLayers and raises the discs: the dashes,
+//! the head's dashes and the way to the stop are drawn into the terrain's covers
+//! ([`SelectedTrain::draw_route_lines`]), and as the train moves only the covers its change shows
+//! in are drawn again ([`route_changes`]); the stop spot, the stations, the halo and the ring stand
+//! on the ground under them.
 
 use std::sync::Arc;
 
@@ -54,7 +60,8 @@ use rustradar_scene::geom::path::{LocalMercator, Paint, PathBuilder};
 use rustradar_scene::trains::Drawn;
 
 use super::route::normalise;
-use super::{DrawCx, Init, PrepareCx};
+use super::terrain::cover::{DrawnArea, line_reach, path_changes, paths_changes};
+use super::{DrawCx, Init, PrepareCx, note_drawn_area};
 use crate::frame::{FrameSlot, power_of_two_scale};
 use crate::pipelines::circle::{self, Circle, CircleStyle};
 use crate::pipelines::path::{Dash, Mesh, Path, PathStyle, Segment, Style};
@@ -251,6 +258,21 @@ pub fn lines(input: &Input, globe: bool) -> [Option<(LocalMercator, Vec<Segment>
     ]
 }
 
+/// The route's lines as last drawn (item G3): the rest, the head and the way to the stop.
+pub type DrapedRoute = (Arc<Vec<Vec<LonLat>>>, Vec<LonLat>, Vec<LonLat>);
+
+/// Where the route's lines draw differently from `was` (the rest, the head and the way to the stop
+/// as last drawn) to `input` (item G3): the dashes are measured from each path's start (a path
+/// that starts elsewhere differs along its whole length), the way to the stop is solid (it differs
+/// only where its points do: the train's end as it moves, and the frames it has passed).
+pub fn route_changes(was: &DrapedRoute, input: &Input) -> Option<DrawnArea> {
+    let dashes = line_reach(ROUTE_WIDTH);
+    let rest = if Arc::ptr_eq(&was.0, &input.rest) { None } else { paths_changes(&was.0, &input.rest, true, dashes) };
+    let head = path_changes(&was.1, &input.head, true, dashes);
+    let to_stop = path_changes(&was.2, &input.to_stop, false, line_reach(TO_STOP_WIDTH));
+    DrawnArea::either(DrawnArea::either(rest, head), to_stop)
+}
+
 /// One drawn path: its mesh and frame.
 struct Line {
     mesh: Mesh,
@@ -288,6 +310,9 @@ pub struct SelectedTrain {
     rest_for: Option<(Arc<Vec<Vec<LonLat>>>, bool)>,
     /// The head and the way to the stop, and the projection, their meshes were made for.
     head_for: Option<(Vec<LonLat>, Vec<LonLat>, bool)>,
+    /// What the lines were last drawn as (the rest, the head, the way to the stop), for the 3D
+    /// terrain's covers (item G3).
+    draped_for: DrapedRoute,
     /// This frame's frames, one per drawn path.
     slots: [Option<FrameSlot>; 3],
     circles: Circle,
@@ -314,6 +339,7 @@ impl SelectedTrain {
             lines: Default::default(),
             rest_for: None,
             head_for: None,
+            draped_for: Default::default(),
             slots: [None; 3],
             spot_style: circles.style(device, &SPOT_STYLE),
             halo_style: circles.style(device, &HALO_STYLE),
@@ -352,6 +378,15 @@ impl SelectedTrain {
         for (slot, line) in self.slots.iter_mut().zip(&self.lines) {
             *slot = line.as_ref().map(|l| cx.frames.push(&cx.view.local(l.local.anchor, l.local.scale, 0.0)));
         }
+        // on the 3D terrain the lines are draped: where they drew differently the covers are drawn
+        // again (item G3), not every cover at each scene refresh as the train moves
+        let was = &self.draped_for;
+        if !(Arc::ptr_eq(&was.0, &input.rest) && was.1 == input.head && was.2 == input.to_stop) {
+            if let Some(area) = route_changes(was, input) {
+                note_drawn_area(area);
+            }
+            self.draped_for = (Arc::clone(&input.rest), input.head.clone(), input.to_stop.clone());
+        }
 
         let (device, queue) = (&cx.gpu.device, &cx.gpu.queue);
         let spot: Vec<circle::Instance> = match input.to_stop.last() {
@@ -384,11 +419,23 @@ impl SelectedTrain {
     /// Row 13: `train-route-dashes`, `train-route-head-dashes`, `train-route-to-stop`,
     /// `train-route-stop-spot`, `train-route-stops`.
     pub fn draw_route(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
+        self.draw_route_lines(pass, cx);
+        self.draw_route_stops(pass);
+    }
+
+    /// Row 13's lines (`train-route-dashes`, `train-route-head-dashes`, `train-route-to-stop`):
+    /// what deck drapes over the 3D terrain (item G3), drawn into its covers while it is shown.
+    pub fn draw_route_lines(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
         for (which, style) in [(REST, &self.dash_style), (HEAD, &self.dash_style), (TO_STOP, &self.to_stop_style)] {
             let (Some(line), Some(slot)) = (&self.lines[which], self.slots[which]) else { continue };
             self.paths.begin(pass);
             self.paths.draw_mesh(pass, cx, slot, style, &line.mesh);
         }
+    }
+
+    /// Row 13's discs (`train-route-stop-spot`, `train-route-stops`): deck's ScatterplotLayers,
+    /// raised onto the 3D terrain by the ground under each (Z3).
+    pub fn draw_route_stops(&self, pass: &mut wgpu::RenderPass<'_>) {
         self.circles.draw(pass, &self.spot_style, &self.spot);
         self.circles.draw(pass, &self.spot_style, &self.stations);
     }
@@ -518,6 +565,33 @@ mod tests {
         assert!(!routed.on);
         assert!(off.head.is_empty() && off.rest.is_empty());
         assert_eq!(off.stations.len(), 2, "the stations stay");
+    }
+
+    /// What the route's change puts out of date on the 3D terrain (item G3): as the train moves on
+    /// its way to the stop changes round its first leg only, its head's dashes (measured from the
+    /// train) all along; the same lines, nothing; new lines on, both.
+    #[test]
+    fn the_covers_change_where_the_train_moves() {
+        let r = route();
+        let now = NOW + 5_000;
+        let (input, routed) = route_lines(&r, 1, at(550.0, 0.0), &frames(), None, now);
+        let was = (Arc::clone(&input.rest), input.head.clone(), input.to_stop.clone());
+        assert_eq!(route_changes(&was, &input), None);
+        let (on, _) = route_lines(&r, 1, at(560.0, 0.0), &frames(), Some(&routed.cursor), now + 500);
+        assert!(Arc::ptr_eq(&on.rest, &input.rest), "the same leg: the rest's lines are shared");
+        let area = route_changes(&was, &on).expect("a change");
+        let to_stop = path_changes(&input.to_stop, &on.to_stop, false, line_reach(TO_STOP_WIDTH)).expect("its first leg");
+        let head = path_changes(&input.head, &on.head, true, line_reach(ROUTE_WIDTH));
+        assert_eq!(area, DrawnArea::either(Some(to_stop), head).expect("both"));
+        // only round the train: its first leg (550 and 560 m to the next frame's 650 m), not the
+        // whole way to the stop at 1000 m
+        let whole = DrawnArea::round(on.to_stop.iter().copied(), 1.0).expect("the way");
+        let leg = DrawnArea::round([at(550.0, 0.0), at(650.0, 0.0)], line_reach(TO_STOP_WIDTH)).expect("the first leg");
+        assert_eq!(to_stop, leg);
+        assert!(to_stop.max[0] - to_stop.min[0] < 0.3 * (whole.max[0] - whole.min[0]), "{to_stop:?} of {whole:?}");
+        // gone: everything it drew
+        let gone = route_changes(&was, &Input::default()).expect("a change");
+        assert!(gone.max[0] >= whole.max[0] && gone.min[0] <= whole.min[0]);
     }
 
     #[test]

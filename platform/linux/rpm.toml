@@ -1,0 +1,52 @@
+# The rpm (doc 07 §13.3, plan stage 11 row P7): cargo-generate-rpm 0.21.1's `[package.metadata.generate-rpm]`
+# options. cargo-generate-rpm reads them from a Cargo.toml only, so `cargo xtask package rpm`
+# (crates/xtask/src/package.rs) writes one of its own with these as its options, adding the version
+# files' version (`cargo xtask version`) and, in front of `assets`, the binary (the release binary
+# named `rustradar`, the rpm's installer kind patched into it). Paths are relative to the repository
+# root. cargo-packager, which packs the deb and the AppImage from Packager.toml, makes no rpm.
+#
+# Today's rpm is Tauri's bundler's: Name rust-radar (the product name in kebab case, so dnf and zypper
+# upgrade the installed Tauri package), Release 1, Group and License empty, Summary and Description
+# the Cargo description, gzip payload, the same files as the deb, no scripts.
+
+name = "rust-radar"
+# (the package's Description too, as in Tauri's rpm)
+summary = "Live flight radar on a 3D globe, powered by a Rust port of fr24"
+license = ""
+release = "1"
+epoch = 0
+# No scriptlets, so no /bin/sh (Tauri's rpm required none either).
+require-sh = false
+
+# The binary is added in front of these by `cargo xtask package`. The icons go where Tauri's bundler
+# (and cargo-packager, for the deb) put them: by pixel size, the @2x one as 256x256@2.
+assets = [
+    { source = "platform/linux/RustRadar.desktop", dest = "/usr/share/applications/RustRadar.desktop", mode = "644" },
+    { source = "src-tauri/icons/32x32.png", dest = "/usr/share/icons/hicolor/32x32/apps/rustradar.png", mode = "644" },
+    { source = "src-tauri/icons/128x128.png", dest = "/usr/share/icons/hicolor/128x128/apps/rustradar.png", mode = "644" },
+    { source = "src-tauri/icons/128x128@2x.png", dest = "/usr/share/icons/hicolor/256x256@2/apps/rustradar.png", mode = "644" },
+]
+
+# What the binary links (libc, libm, libgcc_s, libstdc++) cargo-generate-rpm finds itself (`--auto-req
+# builtin`); what it opens at run time it cannot see, so it is listed here by soname as Tauri's rpm
+# listed WebKitGTK's (the same as the deb's `depends` in Packager.toml): for winit X11 (Xlib,
+# Xlib-xcb, Xcursor, XInput2, xcb), Wayland (client, egl), xkbcommon with its X11 part and libxcb-xkb
+# (winit on X11 panics without libxkbcommon-x11, plan stage 2 gap 7); for wgpu the Vulkan and EGL
+# loaders; for the keys dialog's file picker (rfd, through the desktop portal) libdbus; and the
+# system's root certificates, which reqwest's TLS checks every connection against (without them the
+# backend does not start).
+[requires]
+"libX11.so.6()(64bit)" = "*"
+"libX11-xcb.so.1()(64bit)" = "*"
+"libXcursor.so.1()(64bit)" = "*"
+"libXi.so.6()(64bit)" = "*"
+"libxcb.so.1()(64bit)" = "*"
+"libxkbcommon.so.0()(64bit)" = "*"
+"libxkbcommon-x11.so.0()(64bit)" = "*"
+"libxcb-xkb.so.1()(64bit)" = "*"
+"libwayland-client.so.0()(64bit)" = "*"
+"libwayland-egl.so.1()(64bit)" = "*"
+"libvulkan.so.1()(64bit)" = "*"
+"libEGL.so.1()(64bit)" = "*"
+"libdbus-1.so.3()(64bit)" = "*"
+ca-certificates = "*"

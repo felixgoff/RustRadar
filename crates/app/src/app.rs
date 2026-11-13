@@ -27,6 +27,8 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopBuilder};
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::input::{self, KeyGate, MapInput};
@@ -58,12 +60,18 @@ pub const WINDOW_MIN_SIZE: [f64; 2] = [900.0, 600.0];
 /// window). `--size` sets the inner size instead of maximising.
 pub fn window_attributes(options: &Options) -> WindowAttributes {
     let size = options.size.map_or(WINDOW_SIZE, |[w, h]| [f64::from(w), f64::from(h)]);
-    Window::default_attributes()
+    let attributes = Window::default_attributes()
         .with_title("RustRadar")
         .with_inner_size(LogicalSize::new(size[0], size[1]))
         .with_min_inner_size(LogicalSize::new(WINDOW_MIN_SIZE[0], WINDOW_MIN_SIZE[1]))
         .with_maximized(options.size.is_none())
-        .with_visible(false)
+        .with_visible(false);
+    // The app id the Linux packages' .desktop file names in StartupWMClass (platform/linux,
+    // item P7): X11's WM_CLASS and Wayland's app_id are `rustradar`, the binary's name, as the
+    // Tauri window's were.
+    #[cfg(target_os = "linux")]
+    let attributes = attributes.with_name("rustradar", "rustradar");
+    attributes
 }
 
 /// Starts the backend (`Backend::start`, doc 07 §10.1) in `dirs`, or explains in the log why the

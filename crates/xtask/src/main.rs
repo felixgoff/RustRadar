@@ -5,6 +5,7 @@ mod fixtures;
 mod fonts;
 mod icons;
 mod manifest;
+mod package;
 mod sign;
 mod testflight;
 
@@ -21,6 +22,7 @@ release (run by CI):
   bump [patch|minor|major|x.y.z|--check]   show, change or check the app's version
   version        print the app's version
   latest-json    write the updater manifest for a folder of signed artifacts
+  package        build and pack the desktop packages (deb, rpm, appimage), --sign to sign them
   sign           sign updater artifacts (TAURI_SIGNING_PRIVATE_KEY, ..._PASSWORD)
   testflight-age days since the newest TestFlight build (APPLE_API_*)";
 
@@ -34,6 +36,7 @@ fn main() -> ExitCode {
         Some("bump") => bump::run_bump(rest),
         Some("version") => bump::run_version(rest),
         Some("latest-json") => manifest::run(rest),
+        Some("package") => package::run(rest),
         Some("sign") => sign::run(rest),
         Some("testflight-age") => testflight::run(rest),
         Some("help" | "--help" | "-h") | None => {

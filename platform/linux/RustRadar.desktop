@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=
+Comment=Live flight radar on a 3D globe, powered by a Rust port of fr24
+Exec=rustradar
+StartupWMClass=rustradar
+Icon=rustradar
+Name=RustRadar
+Terminal=false
+Type=Application

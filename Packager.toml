@@ -1,0 +1,88 @@
+# The desktop packages (doc 07 §13, plan stage 11 rows P5–P7): cargo-packager 0.11.8's configuration.
+#
+# Not read by `cargo packager` on its own: `cargo xtask package <format>...` (crates/xtask/src/package.rs)
+# reads this file, adds what each build decides (`version`, the version files' one; `formats`, the one
+# format it packs; `binaries-dir`, the release binary named `rustradar` with its installer kind patched
+# into it; `out-dir`), and hands the whole to cargo-packager as its JSON configuration, run from the
+# repository root, so the paths below are relative to this folder. cargo-packager refuses keys it does
+# not know: every table here is one of its own.
+#
+# What cargo-packager 0.11.8 makes: deb, AppImage, pacman, NSIS, WiX (MSI), .app and dmg. It makes no
+# rpm: that one is cargo-generate-rpm 0.21.1's, configured in platform/linux/rpm.toml.
+#
+# Each platform's part has its own tables below: Linux (P7) here; Windows (P5: [windows], [nsis],
+# [wix]) and macOS (P6: [macos], [dmg]) add theirs at the end. The identity is today's Tauri app's
+# (src-tauri/tauri.conf.json, src-tauri/Cargo.toml, doc 07 §13.6), so that each package upgrades
+# the one installed today in place.
+
+product-name = "RustRadar"
+identifier = "com.felix.rustradar"
+# src-tauri/Cargo.toml's description and authors, which Tauri's bundler wrote into the packages
+# (the deb's Description and Maintainer, the rpm's Summary, the .desktop file's Comment).
+description = "Live flight radar on a 3D globe, powered by a Rust port of fr24"
+authors = ["you"]
+# tauri.conf.json's bundle.icon. The Linux packages take the PNGs, installed by their pixel size as
+# Tauri's bundler installs them: 32x32, 128x128 and 256x256@2 (the @2x one) under
+# /usr/share/icons/hicolor/<size>/apps/rustradar.png.
+icons = [
+    "src-tauri/icons/32x32.png",
+    "src-tauri/icons/128x128.png",
+    "src-tauri/icons/128x128@2x.png",
+    "src-tauri/icons/icon.icns",
+    "src-tauri/icons/icon.ico",
+]
+# Today's binary name: /usr/bin/rustradar, the .desktop file's Exec and Icon, the window's app id.
+binaries = [{ path = "rustradar", main = true }]
+
+# ---- Linux (P7) ----------------------------------------------------------------------------------
+
+# cargo-packager would write /usr/share/applications/rustradar.desktop (named after the binary, no
+# StartupWMClass); today's packages install RustRadar.desktop (named after the product), so the file
+# is platform/linux's copy of today's, added by `files` below.
+[linux]
+generate-desktop-entry = false
+
+[deb]
+# Package: rust-radar, the product name in kebab case as Tauri's bundler wrote it, so apt upgrades
+# the installed Tauri package. (cargo-packager's default is the same; written out to keep it.)
+package-name = "rust-radar"
+# The native app links only libc, libm, libgcc_s and libstdc++ (cargo xtask package adds libc6 at
+# the binary's newest glibc symbol version); what it opens at run time dpkg cannot see, so it is
+# listed: for winit X11 (Xlib, Xlib-xcb, Xcursor, XInput2, xcb), Wayland (client, egl) and xkbcommon
+# with its X11 part (winit on X11 panics without libxkbcommon-x11, plan stage 2 gap 7) and its
+# libxcb-xkb; for wgpu the Vulkan and EGL loaders (Vulkan, else GL through EGL); for the keys
+# dialog's file picker (rfd, through the desktop portal) libdbus; and the system's root certificates,
+# which reqwest's TLS checks every connection against (without them the backend does not start: "failed
+# to build http client"; WebKitGTK pulled them in for the Tauri package). The sonames the release
+# binary names were read off it. Today's WebKitGTK and GTK are gone. Ubuntu 22.04's package names (the
+# build's baseline, doc 07 §13.3).
+depends = [
+    "libgcc-s1",
+    "libstdc++6",
+    "libx11-6",
+    "libx11-xcb1",
+    "libxcursor1",
+    "libxi6",
+    "libxcb1",
+    "libxkbcommon0",
+    "libxkbcommon-x11-0",
+    "libxcb-xkb1",
+    "libwayland-client0",
+    "libwayland-egl1",
+    "libvulkan1",
+    "libegl1",
+    "libdbus-1-3",
+    "ca-certificates",
+]
+files = { "platform/linux/RustRadar.desktop" = "usr/share/applications/RustRadar.desktop" }
+
+[appimage]
+# Bundled from the build machine (/usr/lib*) as the AppImage's own: xkbcommon and its X11 part with
+# libxcb-xkb, which not every desktop has installed (Tauri's AppImage carried libxkbcommon through
+# GTK). The display server's libraries, the Vulkan and EGL loaders and the drivers stay the system's.
+libs = ["libxkbcommon.so.0", "libxkbcommon-x11.so.0", "libxcb-xkb.so.1"]
+# Today's .desktop file, inside the AppImage under the binary's name: cargo-packager links
+# `rustradar.desktop` at the AppImage's root to usr/share/applications/rustradar.desktop whatever the
+# file is called (Tauri's AppImage had RustRadar.desktop there; the name inside an AppImage is read by
+# no updater or package manager).
+files = { "platform/linux/RustRadar.desktop" = "usr/share/applications/rustradar.desktop" }

@@ -39,6 +39,9 @@ struct TreeIn {
     @location(5) c1: vec3<f32>,
     @location(6) c2: vec3<f32>,
     @location(7) colour: vec4<f32>,
+    // from a buffer of its own: the 3D terrain's height under the tree, metres (Z3: deck's offset
+    // mode raises each instance by the ground under its anchor)
+    @location(8) ground: f32,
 }
 
 struct ShadowOut {
@@ -59,7 +62,7 @@ fn laid(c: vec3<f32>) -> vec3<f32> {
 @vertex
 fn vs_tree_shadow(card: CardIn, tree: TreeIn) -> ShadowOut {
     let m = mat3x3<f32>(laid(tree.c0), laid(tree.c1), laid(tree.c2));
-    let ground = project_local(vec3<f32>(tree.place, 0.0));
+    let ground = project_local(vec3<f32>(tree.place, tree.ground));
     // (the trees' translation is none: the shadow's is 5 cm up)
     let offset = (m * card.position + vec3<f32>(0.0, 0.0, 0.05)) * globals.centre.z;
     let rel = ground.rel + offset;

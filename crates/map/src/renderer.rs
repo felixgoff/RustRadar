@@ -84,6 +84,10 @@ pub struct SceneInput {
     pub sky: layers::sky::Input,
     pub earth: layers::earth::Input,
     pub terrain: layers::terrain::Input,
+    /// The ground the scene stands on (item Z3, [`layers::terrain::ground`]): set by the renderer
+    /// as it takes the scene in (none in the scene the app hands over); the layers that place their
+    /// own things on the 3D terrain read it.
+    pub stands_on: layers::terrain::ground::Ground,
     pub imagery: layers::imagery::Input,
     pub ground: layers::ground::Input,
     pub hillshade: layers::hillshade::Input,
@@ -119,6 +123,7 @@ impl SceneInput {
             sky: Default::default(),
             earth: Default::default(),
             terrain: Default::default(),
+            stands_on: Default::default(),
             imagery: Default::default(),
             ground: Default::default(),
             hillshade: Default::default(),
@@ -380,6 +385,10 @@ pub struct MapRenderer {
     errors: ErrorWatch,
     /// The tilt-shift and the rain over the map (R11).
     post: Post,
+    /// The 3D terrain's ground as its layer left it last frame (item Z3), and while the terrain is
+    /// drawn the scene as the app handed it, to stand it on that ground again when it changes.
+    ground: layers::terrain::ground::Ground,
+    handed: Option<SceneInput>,
 }
 
 impl MapRenderer {
@@ -407,6 +416,8 @@ impl MapRenderer {
             upload_budget: UploadBudget::per_frame(),
             errors: ErrorWatch::default(),
             post: Post::new(&gpu.device, surface_format),
+            ground: Default::default(),
+            handed: None,
         }
     }
 
@@ -503,7 +514,17 @@ impl MapRenderer {
         self.scene_view = ViewFrame::new(&scene.view, scene.size, scene.map_scale, 0.0);
         self.camera = scene.view;
         self.camera_size = scene.size;
+        // on the 3D terrain, what stands on it raised by the ground under it (Z3)
+        let mut scene = scene;
+        self.handed = scene.terrain.shown.then(|| scene.clone());
+        layers::terrain::ground::stand(&mut scene, &self.ground);
         self.scene = scene;
+    }
+
+    /// The ground the scene stands on this frame (item Z3): the 3D terrain's heights, none without
+    /// it.
+    pub fn ground(&self) -> &layers::terrain::ground::Ground {
+        &self.scene.stands_on
     }
 
     /// The camera for the next frames (display rate, between scene refreshes), on a canvas of
@@ -564,7 +585,13 @@ impl MapRenderer {
     /// Whether a layer still waits for work that will change the picture (never while the map is
     /// stopped by an error).
     pub fn pending(&self) -> bool {
-        !self.errors.stopped() && self.layers.iter().any(|l| l.pending())
+        !self.errors.stopped() && (self.layers.iter().any(|l| l.pending()) || self.stands_on_old_ground())
+    }
+
+    /// Whether the scene stands on another ground than the terrain's now (Z3): the next frame
+    /// stands it again.
+    fn stands_on_old_ground(&self) -> bool {
+        self.handed.is_some() && self.scene.stands_on != self.ground
     }
 
     /// The layers that still wait, in draw order (for a log).
@@ -580,6 +607,14 @@ impl MapRenderer {
     pub fn prepare(&mut self, gpu: &Gpu, local_now_ms: f64) {
         if self.errors.stopped() {
             return;
+        }
+        // the scene stood again on the 3D terrain's ground when that changed (Z3)
+        if self.stands_on_old_ground()
+            && let Some(handed) = &self.handed
+        {
+            let mut scene = handed.clone();
+            layers::terrain::ground::stand(&mut scene, &self.ground);
+            self.scene = scene;
         }
         let epoch = *self.epoch_ms.get_or_insert(local_now_ms);
         let time_s = ((local_now_ms - epoch) / 1000.0) as f32;
@@ -615,6 +650,8 @@ impl MapRenderer {
                 changed.extend(layers::drawn_changes());
             }
         }
+        // what the next frames stand on (Z3)
+        self.ground = self.layers.iter().find_map(|l| l.ground()).unwrap_or_default();
         self.frames.upload(&gpu.device, &gpu.queue, &self.bindings.frame_layout);
         self.bindings.write_globals(&gpu.queue, &self.view.globals);
         self.post.prepare(&self.scene, &self.view, local_now_ms);

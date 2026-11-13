@@ -24,8 +24,11 @@
 //! - A tile that is not square with a power-of-two side would go to loaders.gl's Delatin, which is
 //!   not ported: it fails to decode (neither source sends one).
 
+use std::sync::Arc;
+
 use bytemuck::Zeroable;
 use rustradar_scene::hillshade::{MESH_COLOR, TerrainSurface};
+use rustradar_scene::terrain::heights::{GRID_SIDE, HeightGrid};
 use rustradar_scene::terrain::martini::{
     TerrainMesh, TerrainOptions, effective_mesh_max_error, overlapped_bounds, skirt_height, terrain_mesh,
 };
@@ -81,20 +84,24 @@ pub struct SurfaceMesh {
     pub size: u32,
     /// The RTIN's own triangles, without the skirt's.
     pub surface_triangles: usize,
+    /// The surface as drawn, on a grid (item Z3): what the 3D layers stand on.
+    pub heights: Arc<HeightGrid>,
 }
 
 impl ByteSize for SurfaceMesh {
     fn byte_size(&self) -> usize {
-        self.vertices.len() * size_of::<[f32; 3]>() + self.indices.len() * size_of::<u32>()
+        self.vertices.len() * size_of::<[f32; 3]>() + self.indices.len() * size_of::<u32>() + self.heights.byte_size()
     }
 }
 
 impl SurfaceMesh {
     /// The loader's mesh (positions within [`tile_bounds`], y north) in the tile's frame.
     pub fn from_loader(mesh: &TerrainMesh, size: u32) -> Self {
-        let vertices = mesh.attributes.positions.chunks_exact(3).map(|p| [p[0], (1.0 - f64::from(p[1])) as f32, p[2]]).collect();
+        let vertices: Vec<[f32; 3]> = mesh.attributes.positions.chunks_exact(3).map(|p| [p[0], (1.0 - f64::from(p[1])) as f32, p[2]]).collect();
         let [low, high] = mesh.bounding_box;
-        SurfaceMesh { vertices, indices: mesh.indices.clone(), z_range: [low[2], high[2]], size, surface_triangles: mesh.surface_triangles }
+        // (Z3: the drawn surface, raised to the sea as its shader raises it, on a grid)
+        let heights = Arc::new(HeightGrid::from_mesh(&vertices, &mesh.indices, mesh.surface_triangles, GRID_SIDE));
+        SurfaceMesh { vertices, indices: mesh.indices.clone(), z_range: [low[2], high[2]], size, surface_triangles: mesh.surface_triangles, heights }
     }
 }
 
@@ -122,6 +129,7 @@ pub struct SurfaceGpu {
     indices: wgpu::Buffer,
     elements: u32,
     z_range: [f64; 2],
+    heights: Arc<HeightGrid>,
 }
 
 impl SurfaceGpu {
@@ -135,7 +143,13 @@ impl SurfaceGpu {
             indices: buffer("terrain indices", bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX),
             elements: mesh.indices.len() as u32,
             z_range: mesh.z_range,
+            heights: Arc::clone(&mesh.heights),
         }
+    }
+
+    /// The surface as drawn, on a grid (item Z3).
+    pub fn heights(&self) -> &Arc<HeightGrid> {
+        &self.heights
     }
 
     /// The vertex buffer: `[f32; 3]` a vertex (`u`, `v`, metres) at location 0.

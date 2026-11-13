@@ -82,6 +82,7 @@ use crate::frame::FrameSlot;
 use crate::io::{self, Fetch, FetchError, FetchResult, TileFetcher};
 use crate::jobs::{Job, JobPoll, Pool};
 use crate::layers::ground::load_textures;
+use crate::layers::terrain::ground::{StandBudget, Standing};
 use crate::look::{LightUniform, Look, camera_metres};
 use crate::pipelines::{Desc, build};
 use crate::shaders;
@@ -252,6 +253,13 @@ pub const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBuffe
     array_stride: size_of::<TreeInstance>() as u64,
     step_mode: wgpu::VertexStepMode::Instance,
     attributes: &wgpu::vertex_attr_array![3 => Float32x2, 4 => Float32x3, 5 => Float32x3, 6 => Float32x3, 7 => Unorm8x4],
+};
+
+/// Instance buffer 2: the 3D terrain's height under each tree ([`Standing`], item Z3), location 8.
+pub const GROUND_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<f32>() as u64,
+    step_mode: wgpu::VertexStepMode::Instance,
+    attributes: &wgpu::vertex_attr_array![8 => Float32],
 };
 
 /// The card's buffer (`card_arrays`): position, normal, UV, locations 0–2.
@@ -779,6 +787,8 @@ pub struct TreeUniform {
 struct TileBuffer {
     planted: Arc<Planted>,
     buffer: wgpu::Buffer,
+    /// The 3D terrain's height under each tree (Z3).
+    standing: Standing,
 }
 
 /// Row 10 of doc 04 §1: `trees-z/x/y-shadows`, `-conifers`, `-broadleaves`.
@@ -851,7 +861,7 @@ impl Trees {
                     module: &module,
                     vertex_entry,
                     fragment_entry,
-                    buffers: &[Some(CARD_LAYOUT), Some(INSTANCE_LAYOUT)],
+                    buffers: &[Some(CARD_LAYOUT), Some(INSTANCE_LAYOUT), Some(GROUND_LAYOUT)],
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     state,
                     groups: &[light.layout(), &layout],
@@ -1004,7 +1014,8 @@ impl Layer for Trees {
                         contents: bytemuck::cast_slice(&planted.instances),
                         usage: wgpu::BufferUsages::VERTEX,
                     });
-                    TileBuffer { planted, buffer }
+                    let standing = Standing::new(&cx.gpu.device, &planted.instances, |t| [t.place[0], t.place[1], 0.0]);
+                    TileBuffer { planted, buffer, standing }
                 }
             };
             self.drawn.push((cx.tile_frame(tile, 0.0), tile));
@@ -1012,6 +1023,18 @@ impl Layer for Trees {
         }
         // (the tiles not drawn this frame let their buffers go)
         self.buffers = buffers;
+        // each tree standing on the 3D terrain, by the ground under it (Z3)
+        let mut budget = StandBudget::default();
+        let ground = &cx.scene.stands_on;
+        for &(_, tile) in &self.drawn {
+            if let Some(held) = self.buffers.get_mut(&tile)
+                && held.standing.stale(tile, ground)
+                && budget.take()
+            {
+                held.standing.stand(&cx.gpu.queue, tile, ground);
+            }
+        }
+        self.waiting |= budget.left > 0;
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
@@ -1029,6 +1052,7 @@ impl Layer for Trees {
                 cx.bind_frame(pass, slot);
                 pass.set_vertex_buffer(0, self.card.slice(..));
                 pass.set_vertex_buffer(1, held.buffer.slice(..));
+                held.standing.bind(pass, 2);
                 pass.draw(0..12, 0..count);
             };
             // in sunshine the tile's shadows first, then its trees

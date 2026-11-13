@@ -272,12 +272,13 @@ impl Layer for Blocks {
         }
         self.slot = Some(cx.frames.push(&cx.view.local(self.local.anchor, self.local.scale, 0.0)));
 
-        // each block's signal at its start, lit as the blocks say
+        // each block's signal at its start, lit as the blocks say (the signals and the texts on the
+        // 3D terrain raised by the ground under them, Z3; the lines are not draped yet)
         let discs: Vec<circle::Instance> = scene
             .runs
             .signals
             .iter()
-            .map(|s| circle::Instance::at(cx.view, s.at, 0.0).radius(SIGNAL_RADIUS_PX).fill(scene.aspect(s).color()).line(BLOCK_CASING, SIGNAL_LINE_PX))
+            .map(|s| circle::Instance::at(cx.view, s.at, cx.scene.stands_on.at(s.at)).radius(SIGNAL_RADIUS_PX).fill(scene.aspect(s).color()).line(BLOCK_CASING, SIGNAL_LINE_PX))
             .collect();
         self.signal_instances.write(device, queue, &discs);
 
@@ -288,7 +289,7 @@ impl Layer for Blocks {
         if scene.names {
             for (i, laid) in &self.laid.names {
                 let [lon, lat] = scene.runs.signals[*i].at;
-                let label = Label::at(cx.view, [lon, lat, 0.0], SIGNAL_NAME_SIZE, SIGNAL_NAME_COLOR).with_pixel_offset(SIGNAL_NAME_OFFSET);
+                let label = Label::at(cx.view, [lon, lat, cx.scene.stands_on.at([lon, lat])], SIGNAL_NAME_SIZE, SIGNAL_NAME_COLOR).with_pixel_offset(SIGNAL_NAME_OFFSET);
                 boxes.push(label.background(laid, SIGNAL_NAME_BACKGROUND));
                 glyphs.extend(label.glyphs(laid));
             }
@@ -301,7 +302,7 @@ impl Layer for Blocks {
         let (mut glyphs, mut boxes): (Vec<Glyph>, Vec<Background>) = (Vec::new(), Vec::new());
         for (block, laid) in scene.labels.iter().zip(&self.laid.label_texts) {
             let [lon, lat] = block.at;
-            let label = Label::at(cx.view, [lon, lat, 0.0], BLOCK_LABEL_SIZE, BLOCK_LABEL_COLOR);
+            let label = Label::at(cx.view, [lon, lat, cx.scene.stands_on.at([lon, lat])], BLOCK_LABEL_SIZE, BLOCK_LABEL_COLOR);
             boxes.push(label.background(laid, BLOCK_LABEL_BACKGROUND));
             glyphs.extend(label.glyphs(laid));
         }

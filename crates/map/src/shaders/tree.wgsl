@@ -51,6 +51,9 @@ struct TreeIn {
     @location(5) c1: vec3<f32>,
     @location(6) c2: vec3<f32>,
     @location(7) colour: vec4<f32>,
+    // from a buffer of its own: the 3D terrain's height under the tree, metres (Z3: deck's offset
+    // mode raises each instance by the ground under its anchor)
+    @location(8) ground: f32,
 }
 
 struct TreeOut {
@@ -70,7 +73,7 @@ struct TreeOut {
 @vertex
 fn vs_tree(card: CardIn, tree: TreeIn) -> TreeOut {
     let m = mat3x3<f32>(tree.c0, tree.c1, tree.c2);
-    let ground = project_local(vec3<f32>(tree.place, 0.0));
+    let ground = project_local(vec3<f32>(tree.place, tree.ground));
     // (`project_size`: metres to common units at the view centre)
     let offset = (m * card.position) * globals.centre.z;
     let rel = ground.rel + offset;

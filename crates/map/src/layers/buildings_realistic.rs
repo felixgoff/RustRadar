@@ -59,6 +59,7 @@ use super::roofs::{self, Overture, Roofs};
 use super::{ByteSize, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::FrameSlot;
 use crate::io;
+use crate::layers::terrain::ground::{StandBudget, Standing};
 use crate::jobs::Cancel;
 use crate::layers::ground::load_textures;
 use crate::look::{LightUniform, Look};
@@ -80,6 +81,13 @@ pub const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferL
     array_stride: size_of::<RealisticVertex>() as u64,
     step_mode: wgpu::VertexStepMode::Vertex,
     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Unorm8x4, 4 => Uint8x4],
+};
+
+/// Vertex buffer 1: the 3D terrain's height under each vertex ([`Standing`], item Z3), location 5.
+pub const GROUND_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<f32>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![5 => Float32],
 };
 
 /// The realistic buildings' sources by zoom (`cityBuildingSources` with `realistic`): OpenFreeMap
@@ -111,15 +119,22 @@ pub struct TileMeshes {
     pub footprints: Footprints,
     /// Its pitched roofs (R6), drawn after its buildings.
     pub roofs: Option<fill::Mesh<RealisticVertex>>,
+    /// The 3D terrain's height under each vertex of its buildings and of its roofs (item Z3; a
+    /// far tile's stays at the sea: it is draped).
+    pub standing: Standing,
+    pub roofs_standing: Standing,
 }
 
 /// The upload step, on the main thread.
 pub fn upload(device: &wgpu::Device, decoded: RealisticTile) -> TileMeshes {
+    let stands = |vertices| if decoded.extruded { vertices } else { &[][..] };
     TileMeshes {
         extruded: decoded.extruded,
         sgl: decoded.sgl,
         mesh: fill::Mesh::new(device, "realistic buildings", &decoded.vertices, &decoded.indices),
         roofs: roofs::upload(device, &decoded.roofs),
+        standing: Standing::new(device, stands(&decoded.vertices), |v| v.position),
+        roofs_standing: Standing::new(device, stands(&decoded.roofs), |v| v.position),
         footprints: decoded.footprints,
     }
 }
@@ -185,7 +200,7 @@ impl BuildingShader {
                 module: &self.module,
                 vertex_entry,
                 fragment_entry,
-                buffers: &[Some(VERTEX_LAYOUT)],
+                buffers: &[Some(VERTEX_LAYOUT), Some(GROUND_LAYOUT)],
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 state,
                 groups: &[self.light.layout(), &self.layout],
@@ -244,6 +259,8 @@ pub struct BuildingsRealistic {
     shadows: BuildingShadows,
     /// Streets GL's tiles' pitched roofs (R6).
     roofs: Roofs,
+    /// Tiles on screen left standing on an older ground this frame (Z3).
+    unstood: usize,
 }
 
 impl BuildingsRealistic {
@@ -261,7 +278,7 @@ impl BuildingsRealistic {
         let flat = shader.pipeline(init, "realistic buildings, far", "vs_building", "fs_flat", DrawState::NO_CULL);
         let shadows = BuildingShadows::new(init);
         let roofs = Roofs::new(init, &shader);
-        BuildingsRealistic { tiles, shader, walls, flat, shown: false, textures_loading: false, look: None, drawn: Vec::new(), shadows, roofs }
+        BuildingsRealistic { tiles, shader, walls, flat, shown: false, textures_loading: false, look: None, drawn: Vec::new(), shadows, roofs, unstood: 0 }
     }
 
     /// The tile set (tests).
@@ -303,6 +320,21 @@ impl Layer for BuildingsRealistic {
         self.textures_loading = cx.textures.pending();
         self.look = Some(self.shader.prepare(cx));
         self.shadows.prepare(cx, &self.tiles);
+        // standing on the 3D terrain where it is drawn (Z3)
+        let mut budget = StandBudget::default();
+        let visible: Vec<TileIndex> = self.tiles.visible().map(|(t, _)| t).collect();
+        let ground = &cx.scene.stands_on;
+        for tile in visible {
+            if let Some(m) = self.tiles.get_mut(tile)
+                && m.extruded
+                && (m.standing.stale(tile, ground) || m.roofs_standing.stale(tile, ground))
+                && budget.take()
+            {
+                m.standing.stand(&cx.gpu.queue, tile, ground);
+                m.roofs_standing.stand(&cx.gpu.queue, tile, ground);
+            }
+        }
+        self.unstood = budget.left;
         for (tile, _) in self.tiles.visible() {
             self.drawn.push((cx.tile_frame(tile, 0.0), tile));
         }
@@ -323,16 +355,20 @@ impl Layer for BuildingsRealistic {
             if draped {
                 self.shadows.draw_tile(pass, cx, slot, tile);
             }
-            if !standing {
+            // far off, flat: only the roofs show from there (draped over the 3D terrain, Z3: a
+            // SolidPolygonLayer that is not extruded has no anchors to stand on)
+            if if meshes.extruded { !standing } else { !draped } {
                 continue;
             }
-            // far off, flat: only the roofs show from there
             self.shader.begin(pass, if meshes.extruded { &self.walls } else { &self.flat });
             cx.bind_frame(pass, slot);
+            meshes.standing.bind(pass, 1);
             meshes.mesh.draw(pass);
             // a Streets GL tile's pitched roofs over its buildings (R6)
-            if let Some(roofs) = &meshes.roofs {
-                self.roofs.draw(pass, cx, &self.shader, slot, roofs);
+            if let Some(roofs) = &meshes.roofs
+                && standing
+            {
+                self.roofs.draw(pass, cx, &self.shader, slot, roofs, &meshes.roofs_standing);
             }
         }
     }
@@ -342,7 +378,7 @@ impl Layer for BuildingsRealistic {
     }
 
     fn pending(&self) -> bool {
-        self.shown && (self.tiles.loading() || self.textures_loading || self.shadows.pending())
+        self.shown && (self.tiles.loading() || self.textures_loading || self.shadows.pending() || self.unstood > 0)
     }
 }
 

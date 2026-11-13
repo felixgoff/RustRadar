@@ -44,6 +44,7 @@
 //! depth test; with the draped colour on the skirts it shows the same way.
 
 pub mod cover;
+pub mod ground;
 pub mod mesh;
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -58,7 +59,9 @@ use super::{DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Select,
 use crate::frame::FrameSlot;
 use crate::io;
 use cover::{Covers, TerrainPipeline};
+use ground::Ground;
 use mesh::{SurfaceGpu, SurfaceMesh};
+use rustradar_scene::terrain::heights::Heights;
 
 /// What the scene builder hands this layer (`SceneInput::terrain`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -120,6 +123,8 @@ pub struct Terrain {
     /// This frame's tiles, each with its frame.
     slots: Vec<(FrameSlot, TileIndex)>,
     shown: bool,
+    /// What the 3D layers stand on: the drawn tiles' heights (Z3), made again when they change.
+    ground: Ground,
 }
 
 impl Terrain {
@@ -143,6 +148,7 @@ impl Terrain {
             covers: Covers::new(init),
             slots: Vec::new(),
             shown: false,
+            ground: Ground::default(),
         }
     }
 
@@ -191,6 +197,7 @@ impl Layer for Terrain {
             if !self.covers.cache().is_empty() {
                 self.covers.clear();
             }
+            self.ground = Ground::default();
             return;
         }
         if std::mem::take(&mut self.reselect) {
@@ -214,6 +221,14 @@ impl Layer for Terrain {
         for (tile, _) in self.tiles.visible() {
             self.slots.push((cx.tile_frame(tile, 0.0), tile));
         }
+        // what the 3D layers stand on: the tiles drawn (Z3)
+        let drawn: Vec<_> = self.tiles.visible().map(|(t, gpu)| (t, Arc::clone(gpu.heights()))).collect();
+        let held = self.ground.heights().map_or(0, |h| h.tiles().count());
+        let same = held == drawn.len()
+            && self.ground.heights().is_some_and(|h| drawn.iter().all(|(t, g)| h.grids().any(|(u, f)| u == *t && Arc::ptr_eq(f, g))));
+        if !same {
+            self.ground = Ground::new(Heights::new(drawn));
+        }
         // a cover for each tile drawn (the renderer draws the cover layers into them)
         self.covers.prepare(cx, &self.tiles);
     }
@@ -228,6 +243,10 @@ impl Layer for Terrain {
 
     fn covers(&mut self) -> Option<&mut Covers> {
         self.shown.then_some(&mut self.covers)
+    }
+
+    fn ground(&self) -> Option<Ground> {
+        Some(self.ground.clone())
     }
 
     fn pending(&self) -> bool {

@@ -751,10 +751,19 @@ impl Roofs {
     }
 
     /// Draws `mesh` in the tile frame `slot`, with `shader`'s light and textures (prepared this
-    /// frame by the buildings).
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>, shader: &BuildingShader, slot: FrameSlot, mesh: &fill::Mesh<RealisticVertex>) {
+    /// frame by the buildings), standing on the ground `standing` says is under its vertices (Z3).
+    pub fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        cx: &DrawCx<'_>,
+        shader: &BuildingShader,
+        slot: FrameSlot,
+        mesh: &fill::Mesh<RealisticVertex>,
+        standing: &crate::layers::terrain::ground::Standing,
+    ) {
         shader.begin(pass, &self.pipeline);
         cx.bind_frame(pass, slot);
+        standing.bind(pass, 1);
         mesh.draw(pass);
     }
 }

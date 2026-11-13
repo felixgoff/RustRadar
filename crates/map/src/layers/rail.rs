@@ -409,7 +409,7 @@ impl Rail {
             for l in &labels[k] {
                 let Some(text) = texts.next() else { break };
                 let [lon, lat] = rails::tile_lng_lat(tile, l.position);
-                let label = Label::at(cx.view, [lon, lat, 0.0], SPEED_LABEL_SIZE_PX, SPEED_LABEL_TEXT);
+                let label = Label::at(cx.view, [lon, lat, cx.scene.stands_on.at([lon, lat])], SPEED_LABEL_SIZE_PX, SPEED_LABEL_TEXT);
                 boxes.push(label.background(text, l.color));
                 glyphs.extend(label.glyphs(text));
             }
@@ -488,7 +488,7 @@ impl Rail {
             cx.update_tiles(&mut self.stations, |_, _, decoded| decoded);
             for (_, tile) in self.stations.visible() {
                 rings.extend(tile.iter().filter(|s| s.drawn(self.flat)).map(|s| {
-                    circle::Instance::at(cx.view, s.lng_lat, 0.0).radius(s.radius).fill(STATION_FILL).line(STATION_RING, STATION_RING_WIDTH)
+                    circle::Instance::at(cx.view, s.lng_lat, cx.scene.stands_on.at(s.lng_lat)).radius(s.radius).fill(STATION_FILL).line(STATION_RING, STATION_RING_WIDTH)
                 }));
             }
         }

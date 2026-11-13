@@ -315,6 +315,11 @@ pub trait Layer {
     fn covers(&mut self) -> Option<&mut terrain::cover::Covers> {
         None
     }
+    /// The ground the 3D layers stand on, the heights of the terrain's tiles drawn (the terrain
+    /// layer's, item Z3): the renderer stands the scene on it.
+    fn ground(&self) -> Option<terrain::ground::Ground> {
+        None
+    }
     /// Whether it still waits for work (tiles, jobs, textures) that will change the picture: the
     /// headless path renders until no layer does.
     fn pending(&self) -> bool {

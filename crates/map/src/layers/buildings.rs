@@ -66,6 +66,7 @@ use rustradar_scene::tess::buildings::{self as tess, BuildingTile, BuildingVerte
 use super::{ByteSize, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::{FrameSlot, ViewFrame};
 use crate::io;
+use crate::layers::terrain::ground::{StandBudget, Standing};
 use crate::jobs::Cancel;
 use crate::pipelines::fill::{self, Fill};
 use crate::pipelines::mesh::{self, LightRig, LightsUniform, Material, StyleUniform};
@@ -106,10 +107,11 @@ pub const SHADER: &str = concat!(
 // ---- the plain buildings (layers/buildings.rs) ----
 
 // `tess::buildings::BuildingVertex`: (u, v) tile units (v south) and metres up; the normal east,
-// north, up.
+// north, up; and from a buffer of its own the 3D terrain's height under it, metres (Z3).
 struct BuildingVertex {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) ground: f32,
 }
 
 struct BuildingVaryings {
@@ -123,7 +125,8 @@ struct BuildingVaryings {
 // gives the colour as it is: the far tiles' flat footprints).
 @vertex
 fn vs_building(v: BuildingVertex) -> BuildingVaryings {
-    let p = project_local(v.position);
+    // standing on the 3D terrain (Z3: deck's offset mode, each vertex by the ground under it)
+    let p = project_local(v.position + vec3<f32>(0.0, 0.0, v.ground));
     let normal = unit(local_basis(v.position.xy) * v.normal);
     var out: BuildingVaryings;
     out.clip = p.clip;
@@ -151,6 +154,13 @@ pub const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferL
     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
 };
 
+/// Vertex buffer 1: the 3D terrain's height under each vertex ([`Standing`], item Z3), location 2.
+pub const GROUND_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<f32>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![2 => Float32],
+};
+
 impl ByteSize for BuildingTile {
     fn byte_size(&self) -> usize {
         BuildingTile::byte_size(self)
@@ -164,6 +174,9 @@ pub struct TileMeshes {
     pub extruded: bool,
     pub mesh: fill::Mesh<BuildingVertex>,
     pub footprints: Footprints,
+    /// The 3D terrain's height under each vertex (item Z3; a far tile's stays at the sea: it is
+    /// draped).
+    pub standing: Standing,
     /// Which upload made it (a tile loaded again is a new one: its shadows are cast anew).
     serial: u64,
 }
@@ -173,6 +186,7 @@ pub fn upload(device: &wgpu::Device, decoded: BuildingTile, serial: u64) -> Tile
     TileMeshes {
         extruded: decoded.extruded,
         mesh: fill::Mesh::new(device, "buildings", &decoded.vertices, &decoded.indices),
+        standing: Standing::new(device, if decoded.extruded { &decoded.vertices } else { &[] }, |v| v.position),
         footprints: decoded.footprints,
         serial,
     }
@@ -249,7 +263,7 @@ impl BuildingPipeline {
                 module: &module,
                 vertex_entry: "vs_building",
                 fragment_entry: "fs_building",
-                buffers: &[Some(VERTEX_LAYOUT)],
+                buffers: &[Some(VERTEX_LAYOUT), Some(GROUND_LAYOUT)],
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 state,
                 groups: &[&group_layout],
@@ -284,14 +298,16 @@ impl BuildingPipeline {
         Style { group }
     }
 
-    /// Draws `mesh` in the tile frame `frame` with `style`.
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>, frame: FrameSlot, style: &Style, mesh: &fill::Mesh<BuildingVertex>) {
+    /// Draws `mesh` in the tile frame `frame` with `style`, standing on the ground `standing`
+    /// says is under its vertices.
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>, frame: FrameSlot, style: &Style, mesh: &fill::Mesh<BuildingVertex>, standing: &Standing) {
         if mesh.index_count() == 0 {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(mesh::STYLE_GROUP, &style.group, &[]);
         cx.bind_frame(pass, frame);
+        standing.bind(pass, 1);
         mesh.draw(pass);
     }
 }
@@ -316,6 +332,8 @@ pub struct Buildings {
     shown: bool,
     /// Tiles on screen left with shadows of an older sun this frame.
     stale: usize,
+    /// Tiles on screen left standing on an older ground this frame (Z3).
+    unstood: usize,
     /// This frame's tiles in draw order, each with its frame.
     drawn: Vec<(FrameSlot, TileIndex)>,
 }
@@ -346,6 +364,7 @@ impl Buildings {
             serial: 0,
             shown: false,
             stale: 0,
+            unstood: 0,
             drawn: Vec::new(),
         }
     }
@@ -411,6 +430,19 @@ impl Layer for Buildings {
         });
         let sun = self.sun.at(cx.scene.feed_now_ms);
         self.cast(&cx.gpu.device, sun);
+        // standing on the 3D terrain where it is drawn (Z3)
+        let mut budget = StandBudget::default();
+        let visible: Vec<TileIndex> = self.tiles.visible().map(|(t, _)| t).collect();
+        for tile in visible {
+            if let Some(m) = self.tiles.get_mut(tile)
+                && m.extruded
+                && m.standing.stale(tile, &cx.scene.stands_on)
+                && budget.take()
+            {
+                m.standing.stand(&cx.gpu.queue, tile, &cx.scene.stands_on);
+            }
+        }
+        self.unstood = budget.left;
         self.pipeline.set_lights(&cx.gpu.queue, cx.lights(), cx.view);
         for (tile, _) in self.tiles.visible() {
             self.drawn.push((cx.tile_frame(tile, 0.0), tile));
@@ -426,9 +458,10 @@ impl Layer for Buildings {
         for &(slot, tile) in &self.drawn {
             let Some(meshes) = self.tiles.get(tile) else { continue };
             if !meshes.extruded {
-                // far off, flat: only the roofs show from there
-                if standing {
-                    self.pipeline.draw(pass, cx, slot, &self.flat, &meshes.mesh);
+                // far off, flat: only the roofs show from there (draped over the 3D terrain, Z3:
+                // a SolidPolygonLayer that is not extruded has no anchors to stand on)
+                if draped {
+                    self.pipeline.draw(pass, cx, slot, &self.flat, &meshes.mesh, &meshes.standing);
                 }
                 continue;
             }
@@ -437,7 +470,7 @@ impl Layer for Buildings {
                 self.shadows.draw(pass, cx, slot, &self.shadow_style, shadows);
             }
             if standing {
-                self.pipeline.draw(pass, cx, slot, &self.lit, &meshes.mesh);
+                self.pipeline.draw(pass, cx, slot, &self.lit, &meshes.mesh, &meshes.standing);
             }
         }
     }
@@ -447,7 +480,7 @@ impl Layer for Buildings {
     }
 
     fn pending(&self) -> bool {
-        self.shown && (self.tiles.loading() || self.stale > 0)
+        self.shown && (self.tiles.loading() || self.stale > 0 || self.unstood > 0)
     }
 }
 

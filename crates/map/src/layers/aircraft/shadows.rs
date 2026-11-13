@@ -50,8 +50,10 @@
 //!   ([`crate::pipelines::mesh::local_frame`]) with `[e, n, up]` and no yaw offset (as
 //!   [`rustradar_scene::aircraft::orientation_of`]). The two are the same shadow (test
 //!   `the_true_frame_casts_decks_flipped_shadow`).
-//! - Not yet: the terrain extension (stage 9: the shadow's anchor raised by the ground height,
-//!   drawn into the terrain's cover textures). Shadows draw in the map pass only.
+//! - On the 3D terrain (item Z3; deck's offset mode: a mesh layer's instances take the ground's
+//!   height under their anchor) a shadow lies on the ground under its aircraft, cast from the
+//!   aircraft's height above that ground ([`casts_on`]): the aircraft stand on the terrain as the
+//!   scene does it (`layers::terrain::ground::stand`). Shadows draw in the map pass only.
 
 use std::ops::Range;
 
@@ -62,6 +64,7 @@ use rustradar_scene::aircraft_models::ModelKind;
 
 use super::assets::{AircraftAssets, AircraftShape};
 use crate::frame::ViewFrame;
+use crate::layers::terrain::ground::Ground;
 use crate::layers::{DrawCx, Init, Pass, PrepareCx};
 use crate::pipelines::mesh::{Instance, Instances, Material, MeshPipeline, Style, StyleUniform};
 use crate::pipelines::shadow;
@@ -112,6 +115,13 @@ impl Cast {
 /// The shadow of `aircraft` (the `index`-th of its group) with the sun along `sun`
 /// ([`sun_direction`]) and the shadows faded in by `fade`, if it casts one (G:2820-2831).
 pub fn cast(index: usize, aircraft: &MeshInstance, sun: [f64; 3], fade: f64) -> Option<Cast> {
+    cast_on(index, aircraft, sun, fade, 0.0)
+}
+
+/// [`cast`] on ground `ground` metres up under the aircraft (the 3D terrain, item Z3): the shadow
+/// lies there, cast from the aircraft's height above it (deck raises the shadow's anchor by the
+/// ground, as it raises the aircraft).
+pub fn cast_on(index: usize, aircraft: &MeshInstance, sun: [f64; 3], fade: f64, ground: f64) -> Option<Cast> {
     let pose = &aircraft.pose;
     let to_sun = local_sun(sun, pose.lat, pose.lon);
     // the true size and height, so the fade doesn't change with zoom
@@ -121,9 +131,9 @@ pub fn cast(index: usize, aircraft: &MeshInstance, sun: [f64; 3], fade: f64) -> 
     }
     let [lon, lat, height] = aircraft.position;
     // aircraft are raised onto their wheels, so the ground is the map
-    let transform = shadow_matrix(aircraft.orientation, aircraft.scale, to_sun, height, 0.0);
+    let transform = shadow_matrix(aircraft.orientation, aircraft.scale, to_sun, height - ground, 0.0);
     let [r, g, b] = SHADOW_COLOR;
-    Some(Cast { instance: index, to_sun, alpha, position: [lon, lat, 0.0], transform, color: [r, g, b, color_alpha(alpha)] })
+    Some(Cast { instance: index, to_sun, alpha, position: [lon, lat, ground], transform, color: [r, g, b, color_alpha(alpha)] })
 }
 
 /// The colour's alpha for a shadow of opacity `alpha`: `Math.round(alpha[i] · 255)`, where today's
@@ -135,7 +145,17 @@ pub fn color_alpha(alpha: f64) -> u8 {
 
 /// The shadows `group` casts, in its aircraft's order (the layer's `data: casting`).
 pub fn casts(group: &Group, sun: [f64; 3], fade: f64) -> Vec<Cast> {
-    group.instances.iter().enumerate().filter_map(|(i, aircraft)| cast(i, aircraft, sun, fade)).collect()
+    casts_on(group, sun, fade, &Ground::default())
+}
+
+/// [`casts`] with each aircraft over `ground` (the 3D terrain the scene stands on, item Z3).
+pub fn casts_on(group: &Group, sun: [f64; 3], fade: f64, ground: &Ground) -> Vec<Cast> {
+    group
+        .instances
+        .iter()
+        .enumerate()
+        .filter_map(|(i, aircraft)| cast_on(i, aircraft, sun, fade, ground.at([aircraft.position[0], aircraft.position[1]])))
+        .collect()
 }
 
 /// The mesh a group's shadows are drawn with: its model's whole mesh at the group's level of detail.
@@ -200,7 +220,7 @@ impl Shadows {
             if mesh.shape(assets).is_none() {
                 continue;
             }
-            let casting = casts(group, sun, fade);
+            let casting = casts_on(group, sun, fade, &cx.scene.stands_on);
             if casting.is_empty() {
                 continue;
             }

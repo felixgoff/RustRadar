@@ -273,13 +273,13 @@ impl Sightings {
         let rings: Vec<circle::Instance> = input
             .predicted
             .iter()
-            .map(|p| circle::Instance::at(cx.view, p.at, 0.0).radius(PREDICTED_RADIUS_PX).line(SIGHT_PREDICTED, LINE_PX))
+            .map(|p| circle::Instance::at(cx.view, p.at, cx.scene.stands_on.at(p.at)).radius(PREDICTED_RADIUS_PX).line(SIGHT_PREDICTED, LINE_PX))
             .collect();
         self.predicted.write(device, queue, &rings);
         let discs: Vec<circle::Instance> = input
             .latest
             .iter()
-            .map(|&at| circle::Instance::at(cx.view, at, 0.0).radius(LATEST_RADIUS_PX).fill(SIGHT_LATEST).line(SIGHT_RING, LINE_PX))
+            .map(|&at| circle::Instance::at(cx.view, at, cx.scene.stands_on.at(at)).radius(LATEST_RADIUS_PX).fill(SIGHT_LATEST).line(SIGHT_RING, LINE_PX))
             .collect();
         self.latest.write(device, queue, &discs);
 
@@ -289,7 +289,7 @@ impl Sightings {
         let (mut glyphs, mut boxes): (Vec<Glyph>, Vec<Background>) = (Vec::new(), Vec::new());
         if let Some(laid) = &self.laid.predicted {
             for p in input.predicted.iter().filter(|p| p.selected) {
-                let label = Label::at(cx.view, [p.at[0], p.at[1], 0.0], TEXT_SIZE, SIGHT_PREDICTED).with_pixel_offset(PREDICTED_OFFSET);
+                let label = Label::at(cx.view, [p.at[0], p.at[1], cx.scene.stands_on.at(p.at)], TEXT_SIZE, SIGHT_PREDICTED).with_pixel_offset(PREDICTED_OFFSET);
                 boxes.push(label.background(laid, SIGHT_LABEL_BG));
                 glyphs.extend(label.glyphs(laid));
             }
@@ -300,7 +300,7 @@ impl Sightings {
 
         let (mut glyphs, mut boxes): (Vec<Glyph>, Vec<Background>) = (Vec::new(), Vec::new());
         for ((at, _), laid) in input.labels.iter().zip(&self.laid.labels) {
-            let label = Label::at(cx.view, [at[0], at[1], 0.0], TEXT_SIZE, SIGHT_LATEST).with_pixel_offset(SIGHTING_OFFSET);
+            let label = Label::at(cx.view, [at[0], at[1], cx.scene.stands_on.at(*at)], TEXT_SIZE, SIGHT_LATEST).with_pixel_offset(SIGHTING_OFFSET);
             boxes.push(label.background(laid, SIGHT_LABEL_BG));
             glyphs.extend(label.glyphs(laid));
         }

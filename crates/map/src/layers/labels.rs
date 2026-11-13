@@ -176,6 +176,8 @@ struct Placed {
     data: Vec<usize>,
     label_scale: f64,
     generation: u64,
+    /// The 3D terrain's ground the labels stand on (Z3).
+    ground: u64,
 }
 
 /// Row 18: `label-tiles`, `labels`.
@@ -280,11 +282,12 @@ fn wrap_world_x(dx: f64) -> f64 {
     dx - WORLD * ((dx + WORLD / 2.0) / WORLD).floor()
 }
 
-/// Where a label at `[lon, lat]` (altitude 0) is drawn in `view`: its anchor in CSS pixels from
-/// the top left, the focal depth's clip w over its own (a billboard's pixel offsets shrink by
-/// that), and its NDC depth; `None` when it is not in front of the camera.
-fn place_anchor(view: &ViewFrame, focal: f64, [lon, lat]: [f64; 2]) -> Option<([f64; 2], f64, f64)> {
-    let mut p = view.viewport.project_position([lon, lat, 0.0]);
+/// Where a label at `[lon, lat]` (`h` metres up: 0, or the 3D terrain's ground there) is drawn in
+/// `view`: its anchor in CSS pixels from the top left, the focal depth's clip w over its own (a
+/// billboard's pixel offsets shrink by that), and its NDC depth; `None` when it is not in front of
+/// the camera.
+fn place_anchor(view: &ViewFrame, focal: f64, [lon, lat]: [f64; 2], h: f64) -> Option<([f64; 2], f64, f64)> {
+    let mut p = view.viewport.project_position([lon, lat, h]);
     let vp = &*view.viewport;
     if !view.is_globe() {
         p.x = vp.center.x + wrap_world_x(p.x - vp.center.x);
@@ -347,13 +350,22 @@ impl Layer for Labels {
             data,
             label_scale,
             generation: self.laid_generation,
+            ground: cx.scene.stands_on.version(),
         };
         if self.placed.as_ref() == Some(&placed) {
             return;
         }
         // the collision pass for this camera, then the labels it leaves
         let focal = focal_w(cx.view);
-        let anchors: Vec<_> = placed.data.iter().map(|&i| place_anchor(cx.view, focal, [self.features[i].lon, self.features[i].lat])).collect();
+        let ground = &cx.scene.stands_on;
+        let anchors: Vec<_> = placed
+            .data
+            .iter()
+            .map(|&i| {
+                let at = [self.features[i].lon, self.features[i].lat];
+                place_anchor(cx.view, focal, at, ground.at(at))
+            })
+            .collect();
         let empty = LaidText { glyphs: Vec::new(), rect: [0.0; 4], font_size: FontSettings::LABELS.font_size, generation: 0 };
         let placings: Vec<Placing<'_>> = placed
             .data
@@ -381,7 +393,8 @@ impl Layer for Labels {
             let f = &self.features[i];
             let mut color = f.color;
             color[3] = (f64::from(color[3]) * fade).round() as u8;
-            let label = Label::at(cx.view, [f.lon, f.lat, 0.0], f.size, color);
+            // (on the 3D terrain, raised by the ground under it: Z3)
+            let label = Label::at(cx.view, [f.lon, f.lat, cx.scene.stands_on.at([f.lon, f.lat])], f.size, color);
             glyphs.extend(label.glyphs(placing.text));
             let Some(rect) = labels_map::bounds(labels_map::glyph_quads(placing.text, anchor, f.size * label_scale, perspective)) else { continue };
             shown.push(Shown { text: f.text.clone(), iata: f.iata.clone(), name: f.name.clone(), lon: f.lon, lat: f.lat, anchor, depth, rect, fade, priority: f.priority, color: f.color, size: f.size });

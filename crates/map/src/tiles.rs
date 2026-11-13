@@ -553,6 +553,12 @@ impl<D: ByteSize + Send + 'static, T> TileSet<D, T> {
         self.tile(index)?.content.as_ref()
     }
 
+    /// A cached tile's content, to change it (a mesh raised onto the 3D terrain, item Z3).
+    pub fn get_mut(&mut self, index: TileIndex) -> Option<&mut T> {
+        let &i = self.at.get(&index)?;
+        self.tiles[i].content.as_mut()
+    }
+
     /// Where a cached tile is; `None` when it is not cached.
     pub fn state(&self, index: TileIndex) -> Option<TileState> {
         let tile = self.tile(index)?;

@@ -188,6 +188,11 @@ impl Heights {
         self.tiles.keys().copied()
     }
 
+    /// The tiles with their grids, in no order.
+    pub fn grids(&self) -> impl Iterator<Item = (TileIndex, &Arc<HeightGrid>)> + '_ {
+        self.tiles.iter().map(|(&t, g)| (t, g))
+    }
+
     /// The ground's height at the flat map's world point `[x, y]` (512 units round the world, `y`
     /// north; any copy of the world), metres; `None` where no tile holds it.
     pub fn at_world(&self, [x, y]: [f64; 2]) -> Option<f64> {

@@ -65,6 +65,9 @@ struct BuildingIn {
     @location(3) tint: vec4<f32>,
     // façade, roof, the roof's kind, wall and bay bits
     @location(4) style: vec4<u32>,
+    // from a buffer of its own: the 3D terrain's height under the vertex, metres (Z3: deck's
+    // offset mode, each vertex of an extruded layer raised by the ground under it)
+    @location(5) ground: f32,
 }
 
 struct BuildingOut {
@@ -86,7 +89,8 @@ struct BuildingOut {
 }
 
 fn building_out(v: BuildingIn, tangent: vec3<f32>, z: f32) -> BuildingOut {
-    let p = project_local(v.position);
+    // (the height above the building's foot, `rb_z`, stays the vertex's own)
+    let p = project_local(v.position + vec3<f32>(0.0, 0.0, v.ground));
     let rl = rl_vertex(p.rel, rl_mercator(local_offset(v.position.xy)));
     var out: BuildingOut;
     out.clip = p.clip;

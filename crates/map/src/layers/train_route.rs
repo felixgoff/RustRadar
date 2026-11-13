@@ -356,7 +356,7 @@ impl SelectedTrain {
         let (device, queue) = (&cx.gpu.device, &cx.gpu.queue);
         let spot: Vec<circle::Instance> = match input.to_stop.last() {
             Some(&at) if input.to_stop.len() >= 2 => {
-                vec![circle::Instance::at(cx.view, at, 0.0).radius(STOP_SPOT_RADIUS).fill(STOP_SPOT_FILL).line(TRAIN_TO_STOP, STOP_SPOT_LINE)]
+                vec![circle::Instance::at(cx.view, at, cx.scene.stands_on.at(at)).radius(STOP_SPOT_RADIUS).fill(STOP_SPOT_FILL).line(TRAIN_TO_STOP, STOP_SPOT_LINE)]
             }
             _ => Vec::new(),
         };
@@ -364,10 +364,11 @@ impl SelectedTrain {
         let stations: Vec<circle::Instance> = input
             .stations
             .iter()
-            .map(|&at| circle::Instance::at(cx.view, at, 0.0).radius(STOP_RADIUS).fill(TRAIN_ROUTE_CASING).line(TRAIN_ROUTE_DASH, STOP_LINE))
+            .map(|&at| circle::Instance::at(cx.view, at, cx.scene.stands_on.at(at)).radius(STOP_RADIUS).fill(TRAIN_ROUTE_CASING).line(TRAIN_ROUTE_DASH, STOP_LINE))
             .collect();
         self.stations.write(device, queue, &stations);
-        let at = |ring: &Ring| circle::Instance::at(cx.view, ring.at, 0.0).radius(ring.radius_px);
+        // (the stops and the ring on the 3D terrain, raised by the ground under them: Z3)
+        let at = |ring: &Ring| circle::Instance::at(cx.view, ring.at, cx.scene.stands_on.at(ring.at)).radius(ring.radius_px);
         let halo: Vec<circle::Instance> = input.ring.iter().map(|r| at(r).fill(HALO_COLOR)).collect();
         self.halo.write(device, queue, &halo);
         let ring: Vec<circle::Instance> = input.ring.iter().map(|r| at(r).line(RING_COLOR, RING_WIDTH)).collect();

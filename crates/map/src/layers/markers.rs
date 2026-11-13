@@ -111,13 +111,14 @@ fn group(
 ) -> (Vec<circle::Instance>, Vec<Glyph>) {
     let (radius, fill) = dot;
     let (face, size, color, offset) = text;
-    let dots = marks.iter().map(|&(lon, lat, _)| circle::Instance::at(cx.view, [lon, lat], 0.0).radius(radius).fill(fill).line(MARKER_LINE, DOT_LINE_WIDTH)).collect();
+    // (on the 3D terrain, raised by the ground under them: Z3)
+    let dots = marks.iter().map(|&(lon, lat, _)| circle::Instance::at(cx.view, [lon, lat], cx.scene.stands_on.at([lon, lat])).radius(radius).fill(fill).line(MARKER_LINE, DOT_LINE_WIDTH)).collect();
     let laid: Vec<LaidText> = lay_out(atlas, face, marks.iter().map(|m| m.2));
     let glyphs = marks
         .iter()
         .zip(&laid)
         .flat_map(|(&(lon, lat, _), text)| {
-            let label = Label::at(cx.view, [lon, lat, 0.0], size, color).with_pixel_offset(offset);
+            let label = Label::at(cx.view, [lon, lat, cx.scene.stands_on.at([lon, lat])], size, color).with_pixel_offset(offset);
             label.glyphs(text).collect::<Vec<_>>()
         })
         .collect();

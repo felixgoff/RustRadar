@@ -7,10 +7,23 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// The version CI passes (doc 07 §8.1, §13.4): -PversionName=x.y.z -PversionCode=<major·1000000 +
-// minor·1000 + patch>, the code the Tauri build used, so an update installs over it.
-val appVersionName = providers.gradleProperty("versionName").getOrElse("1.0")
-val appVersionCode = providers.gradleProperty("versionCode").getOrElse("1").toInt()
+// The version (doc 07 §8.1, §13.4): -PversionName=x.y.z (`cargo xtask android-release` passes the
+// release version), else the app crate's own [package] version, the one the app compiles in
+// (CARGO_PKG_VERSION, which its update check compares with the releases').
+val crateVersion = providers.fileContents(rootProject.layout.projectDirectory.file("../../crates/app/Cargo.toml"))
+    .asText.map { manifest ->
+        Regex("(?m)^version\\s*=\\s*\"([^\"]+)\"").find(manifest)?.groupValues?.get(1)
+            ?: throw GradleException("no [package] version in crates/app/Cargo.toml")
+    }
+val appVersionName = providers.gradleProperty("versionName").orElse(crateVersion).get()
+// The versionCode the Tauri CLI wrote into tauri.properties: major·1000000 + minor·1000 + patch
+// (v0.3.16's APK has 3016), so the native APK installs over the Tauri one; -PversionCode overrides it.
+val appVersionCode = providers.gradleProperty("versionCode").map { it.toInt() }.getOrElse(
+    Regex("^([0-9]+)\\.([0-9]+)\\.([0-9]+)$").find(appVersionName)?.destructured
+        ?.let { (major, minor, patch) -> major.toLong() * 1000000 + minor.toLong() * 1000 + patch.toLong() }
+        ?.takeIf { it in 1L..2100000000L }?.toInt()
+        ?: throw GradleException("versionName $appVersionName is not x.y.z with a versionCode from 1 to 2100000000")
+)
 
 android {
     compileSdk = 37

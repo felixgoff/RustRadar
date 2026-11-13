@@ -41,6 +41,7 @@
 //! without the skirts or with ten times the overlap). deck draws the same geometry with the same
 //! depth test; Z2's draped colour on the skirts will show it the same way.
 
+pub mod cover;
 pub mod mesh;
 
 use std::sync::{Arc, Mutex, PoisonError};

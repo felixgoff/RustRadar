@@ -53,8 +53,9 @@
 //! - The PNG is read by the `image` crate, not the browser; both give the exact pixels, as
 //!   `pixels()`'s `colorSpaceConversion: "none"` asks.
 //! - Terrain (stage 9): deck drapes the relief over the 3D surface; this layer is
-//!   [`Drape::Cover`](super::Drape::Cover) but draws only in the map pass until the terrain items
-//!   give it a cover pass (with `cover = 1` the haze is then 1, as `rl_clear` has it).
+//!   [`Drape::Cover`](super::Drape::Cover): while the 3D terrain is drawn it draws into the
+//!   terrain's covers (`terrain::cover`), where `rl_clear` is 1 (`cover = 1`), and not in the map
+//!   pass.
 
 use bytemuck::Zeroable;
 use rustradar_core::geo::Basemap;
@@ -64,7 +65,7 @@ use rustradar_scene::hillshade::{
 };
 use rustradar_scene::tiles::TilesetOptions;
 
-use super::{ByteSize, DeckSelect, DrawCx, Init, Layer, Pass, PrepareCx, Source, TileIndex, TileSet, TileSetOptions};
+use super::{ByteSize, DeckSelect, DrawCx, Init, Layer, PrepareCx, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::FrameSlot;
 use crate::gpu::Gpu;
 use crate::io;
@@ -371,7 +372,7 @@ impl Layer for Hillshade {
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
         let Some(drawn) = self.drawn else { return };
-        if cx.pass != Pass::Map || self.slots.is_empty() {
+        if !cx.pass.draws(self.drape()) || self.slots.is_empty() {
             return;
         }
         let mesh = |tile: TileIndex| &self.meshes[tile.z.min(HILLSHADE_MAX_ZOOM) as usize];

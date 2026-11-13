@@ -156,6 +156,11 @@ impl CoverCache {
         self.budget
     }
 
+    /// From the next [`Self::plan`] on, the covers fit `budget` bytes.
+    pub fn set_budget(&mut self, budget: usize) {
+        self.budget = budget;
+    }
+
     /// The bytes the covers' textures hold now: never more than the budget after a plan.
     pub fn bytes(&self) -> usize {
         self.covers.values().map(|c| cover_bytes(c.size)).sum()

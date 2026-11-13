@@ -50,7 +50,7 @@ use rustradar_core::geo::Basemap;
 use rustradar_scene::ground::{LINE_MIN_PIXELS, SURFACE_COUNT, surface_table};
 pub use rustradar_scene::tess::ground::GroundVertex;
 
-use super::{DrawCx, Init, Layer, Pass, PrepareCx};
+use super::{DrawCx, Init, Layer, PrepareCx};
 use crate::frame::FrameSlot;
 use crate::look::{LightUniform, Look};
 use crate::pipelines::path::{MAX_SAFE_INTEGER, Segment as PathSegment};
@@ -489,7 +489,7 @@ impl Layer for Ground {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if !self.shown || cx.pass != Pass::Map {
+        if !self.shown || !cx.pass.draws(self.drape()) {
             return;
         }
         self.globe.draw(pass, cx, &self.shader, &self.areas, &self.lines);

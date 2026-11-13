@@ -356,7 +356,11 @@ fn the_whole_app_settles_on_the_ground_before_its_shot() {
     let started = std::time::Instant::now();
     let shot = headless::render_on_with(&gpu, &options, |state| state.persisted.settings.terrain = true).expect("the shot");
     eprintln!("the terrain-on shot took {} ms", started.elapsed().as_millis());
-    assert!(shot.missing_tiles.is_empty(), "the fixtures lack tiles the raised camera asks for: {:?}", shot.missing_tiles);
+    // (the 3D surface, drawn with the terrain on since Z2, also asks for its passing selections
+    // while the camera rises and its range widens; X1 holds its settled ones, which
+    // `the_surface_from_the_raised_camera_meets_the_centre_where_the_flat_map_has_it` checks)
+    let missing: Vec<_> = shot.missing_tiles.iter().filter(|(source, _)| source != io::MAPTERHORN).collect();
+    assert!(missing.is_empty(), "the fixtures lack tiles the raised camera asks for: {missing:?}");
     let on = shot.image;
     save(&on, "z4-zermatt-app-on.png");
     let changed = off.rgba.chunks_exact(4).zip(on.rgba.chunks_exact(4)).filter(|(a, b)| a != b).count();

@@ -77,7 +77,7 @@ use rustradar_core::geo::Basemap;
 use rustradar_scene::tess::vector::{self, FillVertex, VectorTile};
 use rustradar_scene::tiles::VECTOR_TILES;
 
-use super::{ByteSize, DeckSelect, DrawCx, Init, Layer, Pass, PrepareCx, Source, TileIndex, TileSet, TileSetOptions};
+use super::{ByteSize, DeckSelect, DrawCx, Init, Layer, PrepareCx, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::FrameSlot;
 use crate::io;
 use crate::jobs::Cancel;
@@ -322,7 +322,7 @@ impl Layer for VectorMap {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if cx.pass != Pass::Map {
+        if !cx.pass.draws(self.drape()) {
             return;
         }
         for &(slot, tile) in &self.drawn {
@@ -352,6 +352,11 @@ impl Layer for VectorMap {
                 self.globe.draw_runways(pass, cx, slot, &runways.true_width);
             }
         }
+    }
+
+    fn drape(&self) -> super::Drape {
+        // stage 9: drawn into the terrain's covers while the 3D terrain is drawn
+        super::Drape::Cover
     }
 
     fn pending(&self) -> bool {

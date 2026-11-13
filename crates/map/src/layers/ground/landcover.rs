@@ -56,7 +56,7 @@ use super::{GroundShader, GroundVertex, LineWidth, load_textures};
 use crate::frame::FrameSlot;
 use crate::io::{DirTiles, FetchResult};
 use crate::jobs::Cancel;
-use crate::layers::{ByteSize, DeckSelect, DrawCx, Init, Layer, Pass, PrepareCx, Source, TileIndex, TileSet, TileSetOptions};
+use crate::layers::{ByteSize, DeckSelect, DrawCx, Init, Layer, PrepareCx, Source, TileIndex, TileSet, TileSetOptions};
 use crate::pipelines::fill::Mesh;
 use crate::state::DrawState;
 
@@ -308,7 +308,7 @@ impl Layer for GroundLandCover {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if self.slots.is_empty() || cx.pass != Pass::Map {
+        if self.slots.is_empty() || !cx.pass.draws(self.drape()) {
             return;
         }
         self.shader.begin(pass, &self.pipeline, LineWidth::Hairline);

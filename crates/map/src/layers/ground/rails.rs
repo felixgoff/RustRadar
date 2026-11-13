@@ -64,7 +64,7 @@ use super::{GroundShader, LineMesh, LineWidth, load_textures};
 use crate::frame::FrameSlot;
 use crate::jobs::Cancel;
 use crate::layers::vector_map::{CLIP_MARK, CLIP_RESET, CLIPPED, MAX_REQUESTS};
-use crate::layers::{ByteSize, DeckSelect, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
+use crate::layers::{ByteSize, DeckSelect, DrawCx, Init, Layer, LodSelect, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::pipelines::fill;
 use crate::pipelines::path::{self, Path, Segment as PathSegment};
 use crate::state::DrawState;
@@ -441,7 +441,7 @@ impl Layer for GroundRails {
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
         let Some(shown) = self.shown else { return };
-        if cx.pass != Pass::Map {
+        if !cx.pass.draws(self.drape()) {
             return;
         }
         let shader = &self.shader;

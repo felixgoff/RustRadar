@@ -296,7 +296,7 @@ impl Layer for Land {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if self.slots.is_empty() || cx.pass != Pass::Map {
+        if self.slots.is_empty() || !cx.pass.draws(self.drape()) {
             return;
         }
         self.fill.bind(pass, &self.style);
@@ -304,6 +304,11 @@ impl Layer for Land {
             cx.bind_frame(pass, *slot);
             self.mesh.draw(pass);
         }
+    }
+
+    fn drape(&self) -> super::Drape {
+        // stage 9: drawn into the terrain's covers while the 3D terrain is drawn
+        super::Drape::Cover
     }
 }
 

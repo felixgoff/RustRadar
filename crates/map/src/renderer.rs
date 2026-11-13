@@ -9,6 +9,14 @@
 //! [`MapRenderer::update`] hands over a new [`SceneInput`] at each scene refresh (plan 1.4.9);
 //! [`MapRenderer::set_camera`] moves the camera at display rate in between.
 //!
+//! The 3D terrain (stage 9, plan 1.4.4 step 1, `layers::terrain::cover`): while the scene shows it,
+//! the [`Drape::Cover`] layers are left out of the map pass and drawn into the terrain tiles' covers
+//! instead. `prepare` notes the tiles each of them draws differently this frame
+//! ([`layers::drawn_changes`]), hands the terrain's covers those and what they draw everywhere
+//! ([`cover::cover_look`]), and records and submits the passes of the covers due (at most
+//! [`cover::COVERS_PER_FRAME`]) in a command buffer of their own, so a shot, which only prepares
+//! while it waits, has its covers too.
+//!
 //! Tiles (plan 1.4.8, item T1): the renderer owns the tile runtime, a worker pool of
 //! [`jobs::default_threads`] and a [`TileFetcher`] (none at first: [`io::offline`]), which every
 //! layer gets in [`Init::tiles`] and [`PrepareCx::tiles`]; the app hands over its fetcher and the
@@ -43,7 +51,8 @@ use crate::frame::{Bindings, FrameArena, GLOBALS_GROUP, ViewFrame};
 use crate::gpu::Gpu;
 use crate::io::{self, TileFetcher};
 use crate::jobs::{self, Pool, Wake};
-use crate::layers::{self, DrawCx, Init, Layer, Pass, PrepareCx};
+use crate::layers::terrain::cover;
+use crate::layers::{self, DrawCx, Drape, Init, Layer, Pass, PrepareCx, TileIndex};
 use crate::pipelines::mesh::LightRig;
 use crate::post::Post;
 use crate::state::SHADOW_STENCIL_REFERENCE;
@@ -535,6 +544,12 @@ impl MapRenderer {
         Init { gpu, bindings: &self.bindings, color_format: MAP_FORMAT, samples: self.target.samples(), tiles: &self.tiles }
     }
 
+    /// The 3D terrain's covers while it is drawn (stage 9, `layers::terrain::cover`): their
+    /// bookkeeping and memory, for tests and logs.
+    pub fn terrain_covers(&mut self) -> Option<&mut cover::Covers> {
+        self.layers.iter_mut().find_map(|l| l.covers())
+    }
+
     /// Adds a layer after all the others (tests, debug overlays).
     pub fn add_layer(&mut self, layer: Box<dyn Layer>) {
         self.layers.push(layer);
@@ -585,12 +600,53 @@ impl MapRenderer {
             budget: &mut budget,
             textures: &mut self.textures,
         };
+        // while the 3D terrain is drawn, what the cover layers draw differently puts its covers out
+        // of date
+        let draping = self.scene.terrain.shown;
+        let mut changed = Vec::new();
         for layer in &mut self.layers {
+            let cover = draping && layer.drape() == Drape::Cover;
+            if cover {
+                layers::listen_for_drawn_changes();
+            }
             layer.prepare(&mut cx);
+            if cover {
+                changed.extend(layers::drawn_changes());
+            }
         }
         self.frames.upload(&gpu.device, &gpu.queue, &self.bindings.frame_layout);
         self.bindings.write_globals(&gpu.queue, &self.view.globals);
         self.post.prepare(&self.scene, &self.view, local_now_ms);
+        self.draw_covers(gpu, &changed);
+    }
+
+    /// The terrain's covers due this frame (stage 9): out of date where `changed` tiles of the cover
+    /// layers lie and everywhere when what they draw everywhere changed, then at most
+    /// [`cover::COVERS_PER_FRAME`] drawn (the cover layers in order, each pass with the cover's
+    /// globals and the map pass's stencil reference), submitted now.
+    fn draw_covers(&mut self, gpu: &Gpu, changed: &[TileIndex]) {
+        let look = cover::cover_look(&self.scene, &self.view, !self.textures.ready);
+        let Some(covers) = self.layers.iter_mut().find_map(|l| l.covers()) else { return };
+        covers.set_look(look);
+        covers.invalidate(changed);
+        let jobs = covers.jobs(gpu, &self.view, cover::COVERS_PER_FRAME);
+        if jobs.is_empty() {
+            return;
+        }
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("terrain covers") });
+        let (scene, view, frames, layers) = (&self.scene, &self.view, &self.frames, &self.layers);
+        for job in &jobs {
+            job.encode(&mut encoder, &mut |pass, globals| {
+                pass.set_stencil_reference(SHADOW_STENCIL_REFERENCE);
+                pass.set_bind_group(GLOBALS_GROUP, globals, &[]);
+                frames.bind(pass, FrameArena::DEFAULT);
+                let cx = DrawCx { scene, view, frames, globals, pass: Pass::Cover };
+                for layer in layers.iter().filter(|l| l.drape() == Drape::Cover) {
+                    layer.draw(pass, &cx);
+                }
+            });
+        }
+        gpu.queue.submit([encoder.finish()]);
     }
 
     /// Whether the picture moves by itself (the rain falls, R11): the window should draw every
@@ -623,7 +679,9 @@ impl MapRenderer {
                 globals: self.bindings.globals_group(),
                 pass: Pass::Map,
             };
-            for layer in &self.layers {
+            // (while the 3D terrain is drawn the cover layers are drawn into its covers instead)
+            let draping = self.scene.terrain.shown;
+            for layer in self.layers.iter().filter(|l| !(draping && l.drape() == Drape::Cover)) {
                 layer.draw(&mut pass, &cx);
             }
         }

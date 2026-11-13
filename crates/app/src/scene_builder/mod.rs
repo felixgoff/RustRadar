@@ -112,6 +112,9 @@ impl SceneBuilder {
         // the shaded relief (R12; G:2649-2671): always on realistic, on dark and satellite with the
         // *terrain* setting; the layer works out the basemap's rule
         scene.hillshade = rustradar_map::layers::hillshade::Input { shown: true, terrain: settings.terrain };
+        // the 3D terrain (Z1, Z2; G:2639-2645, `relief = terrain`): on every basemap and both
+        // projections, the flat layers draped over it
+        scene.terrain = rustradar_map::layers::terrain::Input { shown: settings.terrain };
         self.radar.build(state, &mut scene);
         // the ship hovered in the ships list while ships are the focus (U15), handed over when it
         // changes

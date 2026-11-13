@@ -64,13 +64,13 @@
 //!   its ancestors: the coarser picture stays drawn there (the tile runtime's rule; deck 9.4 counts
 //!   such a tile loaded and leaves a hole).
 //! - Terrain (stage 9): deck drapes the imagery over the relief (`TerrainExtension`, doc 01 §5.3);
-//!   this layer draws only in the map pass and stays [`Drape::None`](super::Drape::None) until the
-//!   terrain items give it a cover pass.
+//!   this layer is [`Drape::Cover`](super::Drape::Cover): while the 3D terrain is drawn it draws
+//!   into the terrain's covers (`terrain::cover`) and not in the map pass.
 
 use rustradar_core::geo::Basemap;
 use rustradar_scene::tiles::IMAGERY_TILES;
 
-use super::{ByteSize, DeckSelect, DrawCx, Init, Layer, Pass, PrepareCx, Source, TileIndex, TileSet, TileSetOptions};
+use super::{ByteSize, DeckSelect, DrawCx, Init, Layer, PrepareCx, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::FrameSlot;
 use crate::gpu::Gpu;
 use crate::io;
@@ -202,7 +202,7 @@ impl Layer for Imagery {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if cx.pass != Pass::Map || self.drawn.is_empty() {
+        if !cx.pass.draws(self.drape()) || self.drawn.is_empty() {
             return;
         }
         for &(slot, tile) in &self.drawn {
@@ -210,6 +210,11 @@ impl Layer for Imagery {
             let mesh = &self.meshes[tile.z.min(MAX_TILE_ZOOM) as usize];
             self.bitmap.draw(pass, cx, slot, &texture.bound, &self.style, mesh);
         }
+    }
+
+    fn drape(&self) -> super::Drape {
+        // stage 9: drawn into the terrain's covers while the 3D terrain is drawn
+        super::Drape::Cover
     }
 
     fn pending(&self) -> bool {

@@ -1,6 +1,6 @@
-//! Item R12's shots: the shaded relief drawn by the whole app (`--screenshot`'s path: the settings,
-//! the scene builder's `scene.hillshade`, the map's hillshade layer on its terrarium tiles) at the
-//! fixtures' Alps (`RELIEF_VIEWS`: 46.0 N, 7.75 E, zoom 9.45, 1100 × 720) from the committed tiles.
+//! Item R12's shots: the shaded relief as the app draws it (the settings, the scene builder's
+//! `scene.hillshade`, the map's hillshade layer on its terrarium tiles) at the fixtures' Alps
+//! (`RELIEF_VIEWS`: 46.0 N, 7.75 E, zoom 9.45, 1100 × 720) from the committed tiles.
 //!
 //! - The scene hands the layer the *terrain* setting on every basemap; the layer draws today's
 //!   choice (G:2649-2671): always on realistic, on dark and satellite with the terrain on.
@@ -14,20 +14,23 @@
 //! (SwiftShader or lavapipe through `VK_ICD_FILENAMES`); without one it prints `skipped: …` and
 //! passes. Shots go to `target/shots/r12-app-*.png`.
 //!
-//! Trap for stage 9: with the terrain on, Z1's 3D surface will be drawn too (on the globe as on
-//! the flat map); these shots compare the terrain on against off, so the surface must leave the
-//! picture's colours where it drapes them as they are, or these comparisons need its own base.
+//! Stage 9: with the terrain on the app also draws the 3D surface (Z1) and drapes the relief over
+//! it, into its tiles' covers (Z2); the fixtures hold no surface for this view (X1: the Alps view
+//! takes no 3D surface), and the surface lights what is draped over it. So the shots are the app's
+//! scene (`SceneBuilder`) drawn by the map with the surface left out: the relief drawn flat, as it
+//! is drawn into the covers. The draping itself is `layers::terrain::cover`'s tests.
 
 mod common;
 
+use std::sync::Arc;
+
 use common::shots::{LAND, gpu, save};
-use common::{app_shot_with, options};
-use rustradar_app::Options;
 use rustradar_app::scene_builder::SceneBuilder;
 use rustradar_app::state::{AppState, Clocks, Startup};
 use rustradar_core::geo::Basemap;
-use rustradar_map::headless::Image;
-use rustradar_map::io;
+use rustradar_map::MapRenderer;
+use rustradar_map::headless::{FORMAT, Image, render_with};
+use rustradar_map::io::DirTiles;
 use rustradar_map::layers::hillshade::{self, layer_for};
 use rustradar_scene::camera::ViewState;
 
@@ -37,15 +40,22 @@ const SIZE: [u32; 2] = [1100, 720];
 /// The hillshade's shadow colour (`HILLSHADE_STYLE.shadow`).
 const SHADOW: [u8; 3] = [4, 8, 16];
 
-/// The app's shot of the Alps on `basemap` from the committed fixtures, the names off, the
-/// terrain setting `terrain`.
+/// The app's scene of the Alps on `basemap` (the names off, the terrain setting `terrain`) drawn
+/// by the map from the committed fixtures, the 3D surface left out (see the module's docs).
 fn shot(gpu: &rustradar_map::Gpu, basemap: Basemap, terrain: bool) -> Image {
-    let fixture = io::fixture_tiles_dir().parent().expect("the data folder").to_owned();
-    let options = Options { fixture: Some(fixture), ..options(ALPS, basemap, SIZE, 1.0) };
-    app_shot_with(gpu, &options, |state| {
-        state.persisted.settings.labels = false;
-        state.persisted.settings.terrain = terrain;
-    })
+    let size = [f64::from(SIZE[0]), f64::from(SIZE[1])];
+    let mut state = AppState::new(Startup { basemap: Some(basemap), ..Default::default() }, None, None, None, ALPS, size);
+    state.persisted.settings.labels = false;
+    state.persisted.settings.terrain = terrain;
+    let clocks = Clocks { local_ms: common::NOW_MS, feed_ms: common::NOW_MS };
+    let mut scene = SceneBuilder::default().build(&mut state, clocks, 1.0);
+    assert_eq!(scene.terrain.shown, terrain, "the app draws the 3D surface with the terrain on");
+    scene.terrain.shown = false;
+    let mut renderer = MapRenderer::new(gpu, FORMAT);
+    renderer.set_tiles(Arc::new(DirTiles::fixtures()), None);
+    let image = render_with(gpu, &mut renderer, &scene, 1.0).expect("rendered");
+    assert_eq!([image.width, image.height], SIZE);
+    image
 }
 
 /// The share of the shadow colour `over` took over `base` at a pixel (least squares over its

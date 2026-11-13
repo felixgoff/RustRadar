@@ -58,7 +58,7 @@ use rustradar_scene::geom::densify::GLOBE_RESOLUTION_DEG;
 use rustradar_scene::geom::earcut::earcut;
 use rustradar_scene::geom::grid_cut::{GridOptions, cut_polygon_by_grid};
 
-use super::{DrawCx, Init, Layer, Pass, PrepareCx};
+use super::{DrawCx, Init, Layer, PrepareCx};
 use crate::frame::{Frame, FrameSlot};
 use crate::pipelines::fill::{self, Fill, Mesh};
 use crate::renderer::SceneInput;
@@ -272,7 +272,7 @@ impl Layer for Night {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if self.slots.is_empty() || cx.pass != Pass::Map {
+        if self.slots.is_empty() || !cx.pass.draws(self.drape()) {
             return;
         }
         let Some(mesh) = self.bands.get(self.globe) else { return };
@@ -281,6 +281,11 @@ impl Layer for Night {
             cx.bind_frame(pass, *slot);
             mesh.draw(pass);
         }
+    }
+
+    fn drape(&self) -> super::Drape {
+        // stage 9: drawn into the terrain's covers while the 3D terrain is drawn
+        super::Drape::Cover
     }
 }
 

@@ -34,7 +34,7 @@ use super::twin::{self, Fragment};
 use super::{GroundShader, GroundVertex, LineWidth};
 use crate::frame::{Frame, FrameSlot, ViewFrame};
 use crate::layers::earth::land_mesh;
-use crate::layers::{DrawCx, Init, Layer, Pass, PrepareCx};
+use crate::layers::{DrawCx, Init, Layer, PrepareCx};
 use crate::look::{self, Look, RLight};
 use crate::pipelines::fill::Mesh;
 use crate::state::DrawState;
@@ -135,13 +135,18 @@ impl Layer for GroundLand {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
-        if self.slots.is_empty() || cx.pass != Pass::Map {
+        if self.slots.is_empty() || !cx.pass.draws(self.drape()) {
             return;
         }
         self.shader.begin(pass, &self.pipeline, LineWidth::Hairline);
         for slot in &self.slots {
             self.shader.draw_areas(pass, cx, *slot, &self.mesh);
         }
+    }
+
+    fn drape(&self) -> crate::layers::Drape {
+        // stage 9: drawn into the terrain's covers while the 3D terrain is drawn
+        crate::layers::Drape::Cover
     }
 }
 

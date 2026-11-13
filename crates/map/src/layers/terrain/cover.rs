@@ -346,6 +346,12 @@ pub struct Covers {
     look: Option<CoverLook>,
     /// Covers drawn since made (for tests and logs).
     drawn: usize,
+    /// Textures planned and not made yet: made before the covers' next passes ([`Self::jobs`]), so
+    /// covers nobody draws hold none.
+    planned: Vec<(TileIndex, u32)>,
+    /// A renderer draws these covers (it has asked for their passes): only then does a tile drawn
+    /// wait for its cover ([`Self::waiting`]).
+    attached: bool,
 }
 
 impl Covers {
@@ -395,6 +401,8 @@ impl Covers {
             scratch: None,
             look: None,
             drawn: 0,
+            planned: Vec::new(),
+            attached: false,
         }
     }
 
@@ -403,9 +411,24 @@ impl Covers {
         &self.cache
     }
 
-    /// The bytes the covers' textures hold (within the budget).
+    /// From the next frame on, the covers fit `budget` bytes (tests; the app keeps [`BUDGET`]).
+    pub fn set_budget(&mut self, budget: usize) {
+        self.cache.set_budget(budget);
+    }
+
+    /// The bytes the covers' textures will hold once those planned are made (within the budget).
     pub fn bytes(&self) -> usize {
         self.cache.bytes()
+    }
+
+    /// The bytes the cover textures on the GPU hold now (within the budget).
+    pub fn texture_bytes(&self) -> usize {
+        self.textures.values().map(|t| cover_bytes(t.texture.width())).sum()
+    }
+
+    /// The cover textures on the GPU now.
+    pub fn textures(&self) -> usize {
+        self.textures.len()
     }
 
     /// The bytes the cover passes' scratch holds while the terrain is drawn (outside the budget, as
@@ -419,15 +442,17 @@ impl Covers {
         self.drawn
     }
 
-    /// Drawn tiles whose covers are not yet as they should be: the headless path waits for them.
+    /// Drawn tiles whose covers are not yet as they should be, once a renderer draws these covers:
+    /// the headless path waits for them.
     pub fn waiting(&self) -> usize {
-        self.cache.waiting()
+        if self.attached { self.cache.waiting() } else { 0 }
     }
 
     /// Lets every cover go (the terrain turned off), and the passes' scratch.
     pub fn clear(&mut self) {
         self.cache.clear();
         self.textures.clear();
+        self.planned.clear();
         self.scratch = None;
         self.globals.clear();
         self.look = None;
@@ -446,11 +471,19 @@ impl Covers {
             })
             .collect();
         let plan = self.cache.plan(&wants, |tile| tiles.state(tile).is_some());
-        let device = &cx.gpu.device;
         for tile in plan.free {
             self.textures.remove(&tile);
+            self.planned.retain(|&(t, _)| t != tile);
         }
         for (tile, size) in plan.allocate {
+            self.planned.retain(|&(t, _)| t != tile);
+            self.planned.push((tile, size));
+        }
+    }
+
+    /// Makes the textures planned.
+    fn allocate(&mut self, device: &wgpu::Device) {
+        for (tile, size) in std::mem::take(&mut self.planned) {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("terrain cover"),
                 size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
@@ -480,8 +513,11 @@ impl Covers {
         self.cache.invalidate(changed);
     }
 
-    /// The covers to draw now (at most `max`), with their passes' globals for `view` written.
+    /// The covers to draw now (at most `max`), with their passes' globals for `view` written; the
+    /// textures planned are made first. From the first call on, drawn tiles wait for their covers.
     pub fn jobs(&mut self, gpu: &Gpu, view: &ViewFrame, max: usize) -> Vec<CoverJob> {
+        self.attached = true;
+        self.allocate(&gpu.device);
         let tiles = self.cache.next(max);
         if tiles.is_empty() {
             return Vec::new();
@@ -671,5 +707,375 @@ impl TerrainPipeline {
             pass.set_bind_group(COVER_GROUP, covers.group(tile), &[]);
             gpu.draw(pass);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use rustradar_core::geo::Basemap;
+    use rustradar_core::weather::PRESETS;
+    use rustradar_scene::camera::{ViewState, lng_lat_to_world, viewport_for};
+
+    use super::*;
+    use crate::frame::ViewFrame;
+    use crate::gpu::testing::gpu;
+    use crate::headless::{FORMAT, Image, render_with};
+    use crate::io::{self, DirTiles, FnFetcher, TileFetcher};
+    use crate::layers::{earth, ground, hillshade, sky, terrain, vector_map};
+    use crate::pipelines::fill::tests::wgsl_members;
+    use crate::pipelines::mesh::{self, Light};
+    use crate::renderer::MapRenderer;
+
+    /// `TERRAIN_VIEWS`' Zermatt (X1): looking north down the Mattertal at pitch 60, the target
+    /// raised to the village's ground (1608 m, as the terrain's camera aim has it, Z4), on the
+    /// 800 × 500 canvas the fixtures were fetched for.
+    const ZERMATT: ViewState =
+        ViewState { latitude: 46.0207, longitude: 7.7491, zoom: 16.0, pitch: 60.0, bearing: 0.0, position: Some([0.0, 0.0, 1608.0]) };
+    const ZERMATT_SIZE: [f64; 2] = [800.0, 500.0];
+    /// V5 (plan section 8): Stockholm's centre, pitched, on the shots' 1100 × 720 canvas.
+    const V5: ViewState = ViewState { latitude: 59.3293, longitude: 18.0686, zoom: 15.5, pitch: 60.0, bearing: 20.0, position: None };
+    const V5_SIZE: [f64; 2] = [1100.0, 720.0];
+    /// 2026-06-21 10:00 UTC (the reference pictures' summer morning).
+    const MIDSUMMER: f64 = 1_782_036_000_000.0;
+    const MIB: usize = 1024 * 1024;
+
+    fn shots_dir() -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+        std::fs::create_dir_all(&dir).expect("the shot folder");
+        dir
+    }
+
+    /// A renderer whose tiles come from `tiles`.
+    fn renderer_on(gpu: &crate::Gpu, tiles: Arc<dyn TileFetcher>) -> MapRenderer {
+        let mut renderer = MapRenderer::new(gpu, FORMAT);
+        renderer.set_tiles(tiles, None);
+        renderer
+    }
+
+    /// The dark map (its land and vector map) at `view`, the terrain `terrain`.
+    fn dark(view: ViewState, size: [f64; 2], terrain: bool) -> SceneInput {
+        let mut scene = SceneInput::new(view, size, 1.0, Basemap::Dark);
+        scene.local_now_ms = MIDSUMMER;
+        scene.feed_now_ms = MIDSUMMER;
+        scene.earth = earth::Input::SHOWN;
+        scene.vector_map = vector_map::Input::SHOWN;
+        scene.terrain = terrain::Input { shown: terrain };
+        scene
+    }
+
+    /// The realistic map (sky, earth, ground, relief) at `view`, sunny at midsummer, the terrain
+    /// `terrain`, as the app's scene builder has it.
+    fn realistic(view: ViewState, size: [f64; 2], terrain: bool) -> SceneInput {
+        let mut scene = SceneInput::new(view, size, 1.0, Basemap::Realistic);
+        scene.local_now_ms = MIDSUMMER;
+        scene.feed_now_ms = MIDSUMMER;
+        scene.earth = earth::Input::SHOWN;
+        scene.sky = sky::Input { shown: true, weather: Some(PRESETS.sunny), daylight: true };
+        scene.ground = ground::Input::SHOWN;
+        scene.hillshade = hillshade::Input { shown: true, terrain };
+        scene.terrain = terrain::Input { shown: terrain };
+        scene
+    }
+
+    /// A rig that leaves a colour as it is (the ambient light alone, `1 / 0.35` of white against
+    /// the surface's ambient 0.35): the surface then shows its cover's colours exactly.
+    fn neutral() -> mesh::LightRig {
+        let off = Light { color: [0.0; 3], intensity: 0.0 };
+        mesh::LightRig { ambient: Light { color: [255.0; 3], intensity: 1.0 / 0.35 }, camera: off, key: off, ..mesh::LightRig::new() }
+    }
+
+    /// The fixtures, but every Mapterhorn tile a 256 px terrarium picture of `metres` (of a
+    /// place's world Mercator `[x, y]`), its pixels where the loader puts its grid's points (the
+    /// tile's square grown by a pixel of 512 on every side).
+    fn fixtures_on(metres: impl Fn([f64; 2]) -> f64 + Send + Sync + 'static) -> Arc<dyn TileFetcher> {
+        let tiles = DirTiles::fixtures();
+        Arc::new(FnFetcher(move |source: &str, tile: TileIndex| {
+            if source != io::MAPTERHORN {
+                return tiles.read(source, tile);
+            }
+            let extent = tile_extent(tile.z);
+            let pad = 1.0 / 512.0;
+            let at = |i: u32| -pad + f64::from(i) * (1.0 + 2.0 * pad) / 256.0;
+            let image = image::RgbImage::from_fn(256, 256, |i, j| {
+                let world = [(f64::from(tile.x) + at(i)) * extent, WORLD_SIZE - (f64::from(tile.y) + at(j)) * extent];
+                let v = ((metres(world) + 32768.0) * 256.0).round() as u32;
+                image::Rgb([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+            });
+            let mut png = Vec::new();
+            image.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).expect("a PNG");
+            Ok(Some(png))
+        }))
+    }
+
+    /// The dark map's fills: its water, its land, anything else (roads, borders, edges).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Fill {
+        Water,
+        Land,
+        Other,
+    }
+
+    fn fill_of(p: [u8; 4]) -> Fill {
+        let near = |c: [u8; 4]| (0..3).all(|i| (i32::from(p[i]) - i32::from(c[i])).abs() <= 3);
+        if near(rustradar_scene::tess::vector::WATER) {
+            Fill::Water
+        } else if near(rustradar_scene::tess::vector::LAND) {
+            Fill::Land
+        } else {
+            Fill::Other
+        }
+    }
+
+    /// The fill of `image` at `[x, y]` when its 3 × 3 pixels round it all are the same water or
+    /// land (`None` near an edge, a road or the picture's border).
+    fn plain_fill(image: &Image, [x, y]: [f64; 2]) -> Option<Fill> {
+        let (x, y) = (x.round() as i64, y.round() as i64);
+        if x < 1 || y < 1 || x + 1 >= i64::from(image.width) || y + 1 >= i64::from(image.height) {
+            return None;
+        }
+        let fill = fill_of(image.pixel(x as u32, y as u32));
+        let same = (-1..=1).all(|dy| (-1..=1).all(|dx| fill_of(image.pixel((x + dx) as u32, (y + dy) as u32)) == fill));
+        (same && fill != Fill::Other).then_some(fill)
+    }
+
+    /// Where the ray of pixel `p` of `view` first meets the ground `metres` (of world Mercator):
+    /// `[lon, lat]`. The ray is walked down from the camera in steps of 2 m of height, then the
+    /// crossing halved down to a centimetre.
+    fn ground_at(view: &ViewState, size: [f64; 2], p: [f64; 2], metres: &dyn Fn([f64; 2]) -> f64) -> Option<[f64; 2]> {
+        let viewport = viewport_for(view, size);
+        let camera = viewport.unproject_position(viewport.camera_position);
+        let above = |h: f64| metres(lng_lat_to_world(viewport.unproject(p, h))) < h;
+        let mut high = camera[2] - 1.0;
+        let mut low = high - 2.0;
+        while above(low) {
+            high = low;
+            low -= 2.0;
+            if low < -100.0 {
+                return None;
+            }
+        }
+        while high - low > 0.01 {
+            let mid = (high + low) / 2.0;
+            if above(mid) { high = mid } else { low = mid }
+        }
+        Some(viewport.unproject(p, low))
+    }
+
+    // ------------------------------------------------------------------ the CPU side
+
+    /// `terrain.wgsl` takes the mesh pipeline's rig and style and `lib/rlight.wgsl`'s light;
+    /// what makes a cover pass one (`globals.mercator.y`) is [`COVER_PASS`].
+    #[test]
+    fn the_shader_takes_the_rig_the_style_and_the_light() {
+        for name in ["Lights", "Style"] {
+            assert_eq!(wgsl_members(SHADER, name), wgsl_members(mesh::SHADER, name), "{name}");
+        }
+        assert_eq!(wgsl_members(SHADER, "RLight").0, size_of::<RLight>() as u32);
+        assert_eq!(COVER_PASS, 1.0);
+        assert!(crate::shaders::LIBRARIES.iter().any(|(p, src)| *p == "lib/rlight.wgsl" && src.contains("globals.mercator.y > 0.5")));
+    }
+
+    /// A cover pass's camera looks straight down on its tile's square: the square's north-west
+    /// corner (the tile frame's origin) lands on the pass's top left, its south-east corner on its
+    /// bottom right, every depth at 0.5; a 2048 cover's four chunks each take a quarter, the
+    /// first the north-west; pixels are texels; the flat map's terms are the tile middle's; the
+    /// camera the map's; the pass says it is one.
+    #[test]
+    fn a_cover_pass_sees_its_tile_from_straight_above() {
+        let view = ViewFrame::new(&ZERMATT, ZERMATT_SIZE, 1.0, 0.0);
+        let tile = TileIndex::new(34178, 23309, 16);
+        let frame = view.tile(tile, 0.0);
+        let anchor = [f64::from(frame.offset_hi[0]) + f64::from(frame.offset_lo[0]), f64::from(frame.offset_hi[1]) + f64::from(frame.offset_lo[1])];
+        let extent = tile_extent(16);
+        let clip = |g: &Globals, x: f64, y: f64| {
+            let m = glam::Mat4::from_cols_array_2d(&g.centre_cam).as_dmat4();
+            m * glam::DVec4::new(x, y, 123.0, 1.0)
+        };
+        let whole = cover_globals(&view, tile, 1024, 1, 0, 0);
+        let nw = clip(&whole, anchor[0], anchor[1]);
+        let se = clip(&whole, anchor[0] + extent, anchor[1] - extent);
+        for (got, want) in [(nw, [-1.0, 1.0]), (se, [1.0, -1.0])] {
+            assert!((got.x - want[0]).abs() < 1e-4 && (got.y - want[1]).abs() < 1e-4 && got.z == 0.5 && got.w == 1.0, "{got:?} against {want:?}");
+        }
+        assert_eq!(whole.view_proj, whole.centre_cam);
+        assert_eq!((whole.mode, whole.mercator[1]), (MODE_FLAT, COVER_PASS));
+        assert_eq!(whole.viewport[..3], [1024.0, 1024.0, 1.0]);
+        assert!((f64::from(whole.pixels_per_unit) - 1024.0 / extent).abs() / (1024.0 / extent) < 1e-6);
+        let (lat, upm) = (46.0207f64, mercator_units_per_meter(46.0207));
+        assert!((f64::from(whole.centre[2]) - upm).abs() / upm < 1e-3 && (f64::from(whole.centre[1]) - lat.to_radians().sin()).abs() < 1e-3);
+        assert!((f64::from(whole.metres_per_pixel) - extent / 1024.0 / upm).abs() < 1e-3, "{}", whole.metres_per_pixel);
+        // the map's camera, as `aimMapEye` has it: south of the target and above it
+        let (eye, height) = map_eye(&view);
+        assert!(height > 1608.0 && eye[1] < lng_lat_to_world([ZERMATT.longitude, ZERMATT.latitude])[1]);
+        // a 2048 cover in four chunks: the south-east one takes the square's south-east quarter
+        let chunk = cover_globals(&view, tile, 2048, 2, 1, 1);
+        let middle = clip(&chunk, anchor[0] + extent / 2.0, anchor[1] - extent / 2.0);
+        let corner = clip(&chunk, anchor[0] + extent, anchor[1] - extent);
+        assert!((middle.x + 1.0).abs() < 1e-4 && (middle.y - 1.0).abs() < 1e-4 && (corner.x - 1.0).abs() < 1e-4 && (corner.y + 1.0).abs() < 1e-4);
+        assert_eq!(chunk.viewport[..2], [1024.0, 1024.0]);
+    }
+
+    /// What every cover holds changes with the basemap, the projection, the weather, the relief's
+    /// opacity step and the night's minute; not with the camera moving within them.
+    #[test]
+    fn the_covers_look_changes_with_what_is_draped_everywhere() {
+        let view = |v: &ViewState| ViewFrame::new(v, V5_SIZE, 1.0, 0.0);
+        let mut scene = realistic(V5, V5_SIZE, true);
+        let look = cover_look(&scene, &view(&V5), false);
+        let panned = ViewState { longitude: V5.longitude + 0.01, bearing: 40.0, ..V5 };
+        assert_eq!(cover_look(&scene, &view(&panned), false), look);
+        assert_ne!(cover_look(&scene, &view(&V5), true), look, "the textures arriving");
+        scene.sky.weather = Some(PRESETS.rain);
+        assert_ne!(cover_look(&scene, &view(&V5), false), look);
+        let globe = ViewState { zoom: 9.0, ..V5 };
+        let scene = realistic(V5, V5_SIZE, true);
+        assert_ne!(cover_look(&scene, &view(&globe), false), look);
+        let mut dark_scene = dark(V5, V5_SIZE, true);
+        dark_scene.night = crate::layers::night::Input::SHOWN;
+        let at = |ms: f64| {
+            let mut s = dark_scene.clone();
+            s.feed_now_ms = ms;
+            cover_look(&s, &view(&V5), false)
+        };
+        assert_eq!(at(MIDSUMMER), at(MIDSUMMER + 59_000.0));
+        assert_ne!(at(MIDSUMMER), at(MIDSUMMER + 60_000.0), "the night's minute");
+    }
+
+    // ------------------------------------------------------------------ on the GPU
+
+    /// The registration: over a surface at sea level the draped map is the flat map where it is
+    /// plain water or plain land (the covers' colours shown as they are under a rig that leaves
+    /// them so); then the acceptance: over ridges 150 m high (running north and south, 700 m
+    /// apart) at V5 the dark map's water and land follow the relief: each pixel shows what the flat
+    /// map has where the pixel's ray meets the ridges (cast on the CPU), not what lies under it on
+    /// the sea.
+    #[test]
+    fn the_map_follows_the_relief() {
+        let Some(gpu) = gpu() else { return };
+        let off = render_with(&gpu, &mut renderer_on(&gpu, Arc::new(DirTiles::fixtures())), &dark(V5, V5_SIZE, false), 1.0).expect("rendered");
+        let shoot = |metres: fn([f64; 2]) -> f64| {
+            let mut scene = dark(V5, V5_SIZE, true);
+            scene.lights = neutral();
+            let mut renderer = renderer_on(&gpu, fixtures_on(metres));
+            let image = render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered");
+            assert!(!renderer.pending(), "{:?}", renderer.pending_layers());
+            image
+        };
+        let sea = shoot(|_| 0.0);
+        sea.save_png(&shots_dir().join("z2-v5-dark-sea-level.png")).expect("saved");
+        let ridges: fn([f64; 2]) -> f64 = |[x, _]| 75.0 * (1.0 - (2.0 * std::f64::consts::PI * x / (700.0 * mercator_units_per_meter(59.3293))).cos());
+        let relief = shoot(ridges);
+        relief.save_png(&shots_dir().join("z2-v5-dark-ridges.png")).expect("saved");
+        off.save_png(&shots_dir().join("z2-v5-dark-off.png")).expect("saved");
+
+        let viewport = viewport_for(&V5, V5_SIZE);
+        let (mut same, mut plain) = (0, 0);
+        let (mut followed, mut stayed, mut moved) = (0, 0, 0);
+        for y in (8..712).step_by(6) {
+            for x in (8..1092).step_by(6) {
+                let p = [f64::from(x), f64::from(y)];
+                // over the sea-level surface
+                if let (Some(want), got) = (plain_fill(&off, p), fill_of(sea.pixel(x, y))) {
+                    plain += 1;
+                    same += usize::from(got == want);
+                }
+                // over the ridges: what the flat map has where the ray meets them, against what it
+                // has under the pixel
+                let Some(ground) = ground_at(&V5, V5_SIZE, p, &ridges) else { continue };
+                let [gx, gy, _] = viewport.project([ground[0], ground[1], 0.0]);
+                let (Some(want), Some(under)) = (plain_fill(&off, [gx, gy]), plain_fill(&off, p)) else { continue };
+                if want == under {
+                    continue;
+                }
+                moved += 1;
+                let got = fill_of(relief.pixel(x, y));
+                followed += usize::from(got == want);
+                stayed += usize::from(got == under);
+            }
+        }
+        eprintln!("sea level: {same} of {plain} plain pixels as the flat map; ridges: of {moved} where the relief moves the fill, {followed} follow it, {stayed} stay");
+        assert!(plain > 5000 && same * 1000 >= plain * 995, "sea level: {same} of {plain}");
+        assert!(moved > 300, "the ridges move the map's fills: {moved}");
+        assert!(followed * 100 >= moved * 95 && stayed * 100 <= moved * 3, "{followed} and {stayed} of {moved}");
+    }
+
+    fn differing(a: &Image, b: &Image) -> usize {
+        a.rgba.chunks_exact(4).zip(b.rgba.chunks_exact(4)).filter(|(a, b)| a != b).count()
+    }
+
+    /// Zermatt on the realistic map from the committed fixtures (the acceptance's shot: the
+    /// Mattertal's meadows, rock, paths and the Vispa draped over its slopes, the air over them):
+    /// with the terrain on, then off (the covers let go, the picture the flat map's as a renderer
+    /// that never had the terrain draws it), then on again (the same picture as the first).
+    #[test]
+    fn turning_the_terrain_off_and_on_gives_the_same_picture() {
+        let Some(gpu) = gpu() else { return };
+        let fixtures: Arc<dyn TileFetcher> = Arc::new(DirTiles::fixtures());
+        let on = realistic(ZERMATT, ZERMATT_SIZE, true);
+        // terrain off, the camera's target back on the sea (Z4)
+        let off = realistic(ViewState { position: None, ..ZERMATT }, ZERMATT_SIZE, false);
+        let mut renderer = renderer_on(&gpu, Arc::clone(&fixtures));
+        let first = render_with(&gpu, &mut renderer, &on, 1.0).expect("rendered");
+        first.save_png(&shots_dir().join("z2-zermatt-realistic.png")).expect("saved");
+        let covers = renderer.terrain_covers().expect("the terrain's covers");
+        let (textures, drawn) = (covers.textures(), covers.drawn());
+        eprintln!("{textures} covers, {} MB, drawn {drawn} times", covers.texture_bytes() / MIB);
+        assert!(textures >= 8 && covers.waiting() == 0 && drawn >= textures);
+        let flat = render_with(&gpu, &mut renderer, &off, 1.0).expect("rendered");
+        assert!(renderer.terrain_covers().is_none(), "no covers with the terrain off");
+        let never = render_with(&gpu, &mut renderer_on(&gpu, Arc::clone(&fixtures)), &off, 1.0).expect("rendered");
+        assert_eq!(differing(&flat, &never), 0, "off, the flat map as it always is");
+        let again = render_with(&gpu, &mut renderer, &on, 1.0).expect("rendered");
+        assert_eq!(differing(&first, &again), 0, "on again, the same picture");
+        let changed = differing(&first, &flat);
+        assert!(changed * 2 > first.rgba.len() / 4, "the terrain changes the picture: {changed} px");
+    }
+
+    /// The covers' memory (the bookkeeping and the textures on the GPU) stays within the budget:
+    /// the desktop's 256 MB at the Zermatt skyline (pitch 75: 65 tiles, 260 MB at 1024 texels
+    /// each, so the two smallest on the screen are halved), and a budget of 12 MB at Zermatt,
+    /// where the covers are cut down to fit and the map is still draped (coarser).
+    #[test]
+    fn the_covers_stay_within_their_memory_budget() {
+        let Some(gpu) = gpu() else { return };
+        let fixtures: Arc<dyn TileFetcher> = Arc::new(DirTiles::fixtures());
+        let skyline = ViewState { pitch: 75.0, ..ZERMATT };
+        let mut renderer = renderer_on(&gpu, Arc::clone(&fixtures));
+        render_with(&gpu, &mut renderer, &dark(skyline, ZERMATT_SIZE, true), 1.0).expect("rendered");
+        let covers = renderer.terrain_covers().expect("the terrain's covers");
+        let sizes = |covers: &Covers| covers.cache().iter().map(|(_, c)| c.size).collect::<Vec<u32>>();
+        eprintln!("skyline: {} covers, {} MB of {} MB, sizes {:?}", covers.textures(), covers.texture_bytes() / MIB, covers.cache().budget() / MIB, sizes(covers));
+        assert_eq!(covers.cache().budget(), BUDGET);
+        assert!(covers.bytes() <= BUDGET && covers.texture_bytes() <= BUDGET);
+        assert_eq!(covers.texture_bytes(), covers.bytes(), "every cover planned is made");
+        assert!(covers.textures() >= 60 && covers.waiting() == 0, "{} covers", covers.textures());
+
+        let full = render_with(&gpu, &mut renderer_on(&gpu, Arc::clone(&fixtures)), &realistic(ZERMATT, ZERMATT_SIZE, true), 1.0).expect("rendered");
+        let budget = 12 * MIB;
+        let mut renderer = renderer_on(&gpu, Arc::clone(&fixtures));
+        let scene = realistic(ZERMATT, ZERMATT_SIZE, true);
+        // the first frame makes the covers; from the next they fit the small budget
+        renderer.update(scene.clone());
+        renderer.prepare(&gpu, scene.local_now_ms);
+        let mut frames = 0;
+        while renderer.terrain_covers().is_none() {
+            renderer.prepare(&gpu, scene.local_now_ms);
+            frames += 1;
+            assert!(frames < 1000, "the terrain never shows");
+        }
+        renderer.terrain_covers().expect("covers").set_budget(budget);
+        let small = render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered");
+        small.save_png(&shots_dir().join("z2-zermatt-12mb.png")).expect("saved");
+        let covers = renderer.terrain_covers().expect("the terrain's covers");
+        eprintln!("12 MB: {} covers, {} KB, sizes {:?}", covers.textures(), covers.texture_bytes() / 1024, sizes(covers));
+        assert!(covers.bytes() <= budget && covers.texture_bytes() <= budget);
+        assert!(sizes(covers).iter().any(|&s| s < 1024) && covers.waiting() == 0);
+        // coarser, but the same map: most pixels within a few levels of the full covers'
+        let close = full.rgba.chunks_exact(4).zip(small.rgba.chunks_exact(4)).filter(|(a, b)| (0..3).all(|c| a[c].abs_diff(b[c]) <= 12)).count();
+        eprintln!("{close} of {} px within 12 levels", full.rgba.len() / 4);
+        assert!(close * 10 >= full.rgba.len() / 4 * 8, "{close} px");
     }
 }

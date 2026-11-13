@@ -61,7 +61,8 @@ struct Globals {
     // seconds since the renderer's first frame
     viewport: vec4<f32>,
     // flat: world y of the view centre minus world y of the view's latitude (0 unless `position`
-    // moves the centre north or south); the rest unused
+    // moves the centre north or south); `y` 1 in a terrain cover pass (`layers::terrain::cover`),
+    // else 0; the rest unused
     mercator: vec4<f32>,
 }
 

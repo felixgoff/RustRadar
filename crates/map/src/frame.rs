@@ -68,7 +68,8 @@ pub struct Globals {
     /// Canvas width and height in CSS pixels, map pixels per CSS pixel, and the local clock in
     /// seconds since the renderer's first frame (for animations).
     pub viewport: [f32; 4],
-    /// Flat: world y of the view centre minus world y of the view's latitude; the rest 0.
+    /// Flat: world y of the view centre minus world y of the view's latitude; `[1]` 1 in a terrain
+    /// cover pass (`layers::terrain::cover`), else 0; the rest 0.
     pub mercator: [f32; 4],
 }
 

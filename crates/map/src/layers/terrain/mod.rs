@@ -21,15 +21,17 @@
 //! - **Meshes** ([`mesh::decode`] on the worker pool): loaders.gl's `TerrainLoader` through
 //!   `scene::terrain::martini`: the RTIN at `meshMaxError` 2 m on the back-filled `513²` (or
 //!   `257²`) grid, the 4 m skirt, a pixel of overlap.
-//! - **Drawing** ([`mesh::SurfacePipeline`]): `MESH_COLOR` `[34, 39, 48]` lit by the scene's rig
-//!   (luma's default Phong material, which deck 9.4 draws `material: false` with) with flat-shaded
-//!   normals, no vertex below the sea (`SeaLevelExtension`), depth written, both faces.
+//! - **Drawing** ([`cover::TerrainPipeline`], `terrain.wgsl`; Z1 drew the bare mesh with
+//!   [`mesh::SurfacePipeline`]): each tile's cover (what is draped over it, [`cover`], Z2) over
+//!   `MESH_COLOR` `[34, 39, 48]`, lit by the scene's rig (luma's default Phong material, which deck
+//!   9.4 draws `material: false` with) with flat-shaded normals, no vertex below the sea
+//!   (`SeaLevelExtension`), depth written, both faces; on the realistic map the air over it
+//!   (`TERRAIN_AIR`).
 //!
-//! Not here yet (the terrain items after Z1): what is draped over the surface, its cover textures
-//! and the realistic map's air over it (`TERRAIN_AIR`, Z2); the 3D layers raised onto it (Z3); the
-//! camera's target raised to the ground (Z4). Until Z2 draws the 2D layers into covers they draw in
-//! the map pass as before, under the surface wherever it stands above the sea, so the app's scene
-//! builder does not hand this layer the setting yet ([`Input::shown`] stays off in the app).
+//! The terrain items after Z1: the 2D layers draped over the surface into its tiles' covers and
+//! the realistic map's air over it (Z2, [`cover`]: while the surface is drawn the renderer draws the
+//! cover layers into the covers and leaves them out of the map pass, as deck's `TERRAIN_MODE_SKIP`
+//! does); the 3D layers raised onto it (Z3); the camera's target raised to the ground (Z4).
 //!
 //! Deviations: on the globe the meshes are in their Web Mercator frames (deck: degrees, rows evenly
 //! in latitude; [`mesh`]); tiles neither source has are nothing there and settle (deck: a failed
@@ -39,7 +41,7 @@
 //! neighbour, and the rasteriser lets a sample of them through there now and then: a faint line
 //! one pixel wide along a seam (10 levels darker on SwiftShader, seen from straight above; gone
 //! without the skirts or with ten times the overlap). deck draws the same geometry with the same
-//! depth test; Z2's draped colour on the skirts will show it the same way.
+//! depth test; with the draped colour on the skirts it shows the same way.
 
 pub mod cover;
 pub mod mesh;
@@ -55,7 +57,8 @@ use rustradar_scene::terrain::martini::TerrainOptions;
 use super::{DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Select, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::FrameSlot;
 use crate::io;
-use mesh::{SurfaceGpu, SurfaceMesh, SurfacePipeline};
+use cover::{Covers, TerrainPipeline};
+use mesh::{SurfaceGpu, SurfaceMesh};
 
 /// What the scene builder hands this layer (`SceneInput::terrain`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -110,7 +113,10 @@ pub struct Terrain {
     z_range: Arc<Mutex<Option<[f64; 2]>>>,
     /// The range widened since the last selection: the next update selects again.
     reselect: bool,
-    pipeline: SurfacePipeline,
+    /// The surface with its covers (Z2's `terrain.wgsl`).
+    pipeline: TerrainPipeline,
+    /// What is draped over the tiles drawn (Z2).
+    covers: Covers,
     /// This frame's tiles, each with its frame.
     slots: Vec<(FrameSlot, TileIndex)>,
     shown: bool,
@@ -129,7 +135,15 @@ impl Terrain {
             TileSetOptions { max_requests: surface.max_requests, refinement: Refinement::KeepCoarserUntilIn, ..Default::default() },
             move |tile, bytes, cancel| mesh::decode(tile, &bytes, cancel, &options),
         );
-        Terrain { tiles, z_range, reselect: false, pipeline: SurfacePipeline::new(init), slots: Vec::new(), shown: false }
+        Terrain {
+            tiles,
+            z_range,
+            reselect: false,
+            pipeline: TerrainPipeline::new(init),
+            covers: Covers::new(init),
+            slots: Vec::new(),
+            shown: false,
+        }
     }
 
     /// The tile set (for the terrain items after this one, and tests).
@@ -151,6 +165,11 @@ impl Terrain {
     pub fn slots(&self) -> &[(FrameSlot, TileIndex)] {
         &self.slots
     }
+
+    /// The tiles' covers (Z2).
+    pub fn cover_textures(&self) -> &Covers {
+        &self.covers
+    }
 }
 
 impl Layer for Terrain {
@@ -168,6 +187,10 @@ impl Layer for Terrain {
             }
             *self.z_range.lock().unwrap_or_else(PoisonError::into_inner) = None;
             self.reselect = false;
+            // (and its covers, as deck's `TerrainEffect` lets go of a finalized layer's)
+            if !self.covers.cache().is_empty() {
+                self.covers.clear();
+            }
             return;
         }
         if std::mem::take(&mut self.reselect) {
@@ -191,18 +214,24 @@ impl Layer for Terrain {
         for (tile, _) in self.tiles.visible() {
             self.slots.push((cx.tile_frame(tile, 0.0), tile));
         }
+        // a cover for each tile drawn (the renderer draws the cover layers into them)
+        self.covers.prepare(cx, &self.tiles);
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
         if !self.shown || cx.pass != Pass::Map || self.slots.is_empty() {
             return;
         }
-        let tiles = self.slots.iter().filter_map(|&(slot, tile)| Some((slot, self.tiles.get(tile)?)));
-        self.pipeline.draw(pass, cx, tiles);
+        let tiles = self.slots.iter().filter_map(|&(slot, tile)| Some((slot, tile, self.tiles.get(tile)?)));
+        self.pipeline.draw(pass, cx, &self.covers, tiles);
+    }
+
+    fn covers(&mut self) -> Option<&mut Covers> {
+        self.shown.then_some(&mut self.covers)
     }
 
     fn pending(&self) -> bool {
-        self.shown && (self.reselect || self.tiles.loading())
+        self.shown && (self.reselect || self.tiles.loading() || self.covers.waiting() > 0)
     }
 }
 

@@ -269,7 +269,8 @@ fn rl_shade(
 // how much of what is here gets through the air to the camera (fog only from some way out, so the
 // map stays readable); draped on the 3D terrain its surface takes the air, as it is drawn
 fn rl_clear(rl: RlVary) -> f32 {
-    if (rlight.cover > 0.5) {
+    // (a terrain cover pass, stage 9, says so in `globals.mercator.y`: `layers::terrain::cover`)
+    if (rlight.cover > 0.5 || globals.mercator.y > 0.5) {
         return 1.0;
     }
     return exp(-max(length(rl.eye) - rlight.haze_start, 0.0) * rlight.haze_density);

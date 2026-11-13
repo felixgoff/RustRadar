@@ -448,7 +448,9 @@ fn set_executable(_: &Path) -> Result<(), String> {
 pub fn run(args: &[String]) -> Result<(), String> {
     let args = parse(args)?;
     let root = bump::repo_root();
-    check_tool("packager", PACKAGER)?;
+    if args.formats.iter().any(|f| matches!(f, Format::Deb | Format::AppImage)) {
+        check_tool("packager", PACKAGER)?;
+    }
     if args.formats.contains(&Format::Rpm) {
         check_tool("generate-rpm", GENERATE_RPM)?;
     }

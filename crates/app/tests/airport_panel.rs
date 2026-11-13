@@ -127,9 +127,12 @@ fn arlanda() -> Airport {
 }
 
 /// The fixture folder `name` under the tests' temporary folder, with the reference data and
-/// `pages` (by `{mode}-{page}`).
+/// `pages` (by `{mode}-{page}`). Each call has a folder of its own: the tests run in parallel, and
+/// one that cleared a shared folder while another was writing or reading it failed with NotFound.
 fn folder(name: &str, pages: &[(&str, Board)]) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}-{call}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join(FIXTURE_BOARD)).expect("the fixture folder");
     let reference = ReferenceData { fetched_at: NOW, airlines: Vec::new(), airports: vec![arlanda()] };

@@ -915,24 +915,24 @@ are.
 
 | ☐ | Feature | Spec | Item |
 |---|---|---|---|
-| ☐ | RainViewer bands on the ground at 55 % | 02 §3.2, §3.5 | W1, W2 |
-| ☐ | Lifted 3D stack with walls when tilted | 02 §3.5 | W3 |
+| ☑ | RainViewer bands on the ground at 55 % | 02 §3.2, §3.5 | W1, W2 |
+| ☑ | Lifted 3D stack with walls when tilted | 02 §3.5 | W3 |
 | ☐ | Measured volumes (MRMS, DWD), RainViewer blanked under them | 02 §3.3 | W4, W5 |
 
 **Realistic map and terrain**
 
 | ☐ | Feature | Spec | Item |
 |---|---|---|---|
-| ☐ | Light model, sun, sky gradient, weather presets and live weather | 04 §2–4 | R1, R11 |
-| ☐ | Textured ground: areas, roads, water, fields, snow, wetness | 04 §6 | R2, R3 |
-| ☐ | Distance LOD tiles with look-ahead and no double drawing | 04 §13 | R3 |
-| ☐ | Buildings: façades, windows, night glow, pitched roofs, Overture heights | 04 §7 | R4, R6 |
-| ☐ | Foot shade and building shadows | 04 §7.4, §7.6 | R5 |
-| ☐ | Trees with shadows, canopy heights, street trees, seasons | 04 §8 | R7 |
-| ☐ | Land cover; road widths; ground rails and platforms | 04 §6.7, §11; 02 §8.6 | R8, R9 |
-| ☐ | Earth picture and night lights on the globe; clouds | 04 §5.1, §9 | R10 |
-| ☐ | Rain streaks; tilt-shift; map scale cap 1.5 | 04 §10; 01 §1.4, §2.5 | R11 |
-| ☐ | Hillshade on all basemaps | 04 §14.2 | R12, Z3 |
+| ☑ | Light model, sun, sky gradient, weather presets and live weather | 04 §2–4 | R1, R11 |
+| ☑ | Textured ground: areas, roads, water, fields, snow, wetness | 04 §6 | R2, R3 |
+| ☑ | Distance LOD tiles with look-ahead and no double drawing | 04 §13 | R3 |
+| ☑ | Buildings: façades, windows, night glow, pitched roofs, Overture heights | 04 §7 | R4, R6 |
+| ☑ | Foot shade and building shadows | 04 §7.4, §7.6 | R5 |
+| ☑ | Trees with shadows, canopy heights, street trees, seasons | 04 §8 | R7 |
+| ☑ | Land cover; road widths; ground rails and platforms | 04 §6.7, §11; 02 §8.6 | R8, R9 |
+| ☑ | Earth picture and night lights on the globe; clouds | 04 §5.1, §9 | R10 |
+| ☑ | Rain streaks; tilt-shift; map scale cap 1.5 | 04 §10; 01 §1.4, §2.5 | R11 |
+| ☑ | Hillshade on all basemaps | 04 §14.2 | R12, Z3 |
 | ☐ | 3D terrain surface, draped ground, objects standing on it, camera ground follow | 04 §14 | Z1–Z4 |
 
 **UI**

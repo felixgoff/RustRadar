@@ -38,7 +38,9 @@
 //!   their rail decks) into four more passes after the three: [`GroundTile::bridge_shade`]
 //!   (`-bridge-shade`: every bridge flat in [`BRIDGE_SHADE`], `max(width, edge width) + 2` m wide,
 //!   unlit, a plain RGBA colour, not a paint), [`GroundTile::bridge_edges`] and
-//!   [`GroundTile::bridge_lines`] (raised to their decks, metres up), and
+//!   [`GroundTile::bridge_lines`] (raised to their decks as today's app raises them: the deck's
+//!   metres times `crate::bridges::rail_map_lift`, a 6 m deck 0.15 mm at Stockholm, because
+//!   `bridgeParts` writes deck's common units into tiles deck reads in metres), and
 //!   [`GroundTile::bridge_decks`] (`-bridge-decks`: the raised bridges in [`NONE`] with depth
 //!   written, a railway's 0 m wide, else as wide as its edging; plain RGBA). On the globe nothing
 //!   is raised and these stay empty. MVTLayer's tile clip on the flat map is the layer's.
@@ -469,7 +471,14 @@ impl Builder {
             let line = line_of(p);
             self.shade.push(&path, &open(BRIDGE_SHADE, js_max(line.width, line.edge_width()) + 2.0));
         });
-        each_path(&parts.raised, |p, path| {
+        // at today's height: `bridgeParts` writes its decks in deck's common units, which deck's
+        // CARTESIAN tiles read as metres (`commonUnitsPerWorldUnit[2] = unitsPerMeter`), so a
+        // 6 m deck stands 0.15 mm up at Stockholm, as the rail map's (`bridges::rail_map_lift`)
+        let lift = bridges::rail_map_lift(index);
+        each_path(&parts.raised, |p, mut path| {
+            for v in &mut path {
+                v[2] *= lift;
+            }
             let line: Line = line_of(p);
             push_painted(&mut self.bridge_edges, &path, line.edge_paint, line.edge_width(), PathType::Open);
             push_painted(&mut self.bridge_lines, &path, line.paint, line.width, PathType::Open);
@@ -806,7 +815,8 @@ mod tests {
 
     /// The flat map's bridges stand on their decks over their shade (`bridgeParts`): a road's a
     /// deck a `layer` (6 m each), a tram's a railway's (6 m, its deck 0 wide in the depth buffer,
-    /// as it carries the rail map); on the globe they lie on the ground.
+    /// as it carries the rail map), each at today's height, its metres times the tile's
+    /// `rail_map_lift`; on the globe they lie on the ground.
     #[test]
     fn the_flat_maps_bridges_are_raised() {
         let bytes = encode(&[(
@@ -826,9 +836,12 @@ mod tests {
         assert_eq!(runs(&flat.bridge_decks), [(NONE, 13.0), (NONE, 12.0), (NONE, 0.0)]);
         // up to their decks in the middle
         let top = |segments: &[PathSegment], width: f32| segments.iter().filter(|s| s.width == width).map(|s| s.start[2]).fold(0.0, f32::max);
-        assert_eq!(top(&flat.bridge_lines, 9.0), 6.0);
-        assert_eq!(top(&flat.bridge_lines, 8.0), 12.0);
-        assert_eq!(top(&flat.bridge_lines, 2.2), 6.0);
+        let lift = crate::bridges::rail_map_lift(crate::bridges::TileIndex { x: Z14.x, y: Z14.y, z: Z14.z });
+        assert!(lift > 1e-6 && lift < 1e-4, "{lift}");
+        assert_eq!(top(&flat.bridge_lines, 9.0), (6.0 * lift) as f32);
+        assert_eq!(top(&flat.bridge_lines, 8.0), (12.0 * lift) as f32);
+        assert_eq!(top(&flat.bridge_lines, 2.2), (6.0 * lift) as f32);
+        assert_eq!(top(&flat.bridge_decks, 13.0), (6.0 * lift) as f32);
         assert!(flat.bridge_shade.iter().all(|s| s.start[2] == 0.0));
         // on the globe, on the ground
         let globe = tessellate(Z14, &bytes, &GROUND_LAYERS, false, &never).expect("not cancelled");

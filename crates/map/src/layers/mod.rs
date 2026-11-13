@@ -39,7 +39,11 @@
 //! | [`aircraft::Aircraft`] | 25–29 shadows, gear and models, icon outlines, icons, labels | A2, A4–A7 |
 //! | [`markers::SelectionRing`] | 30 `selection-ring` | A8 |
 //!
-//! The terrain-draping hooks ([`Layer::drape`]) are for stage 9.
+//! The terrain-draping hooks (stage 9): [`Layer::drape`] says how a layer stands on the 3D terrain;
+//! while the terrain is drawn the renderer leaves the [`Drape::Cover`] layers out of the map pass
+//! and draws them into the terrain tiles' covers instead ([`Pass::Cover`], `terrain::cover`), whose
+//! bookkeeping the terrain layer hands it ([`Layer::covers`]); the tiles a cover layer draws
+//! differently each frame reach it through [`PrepareCx::update_tiles`] ([`drawn_changes`]).
 //!
 //! Tiles (plan 1.4.8; the renderer owns the runtime, item T1). A layer with tiles keeps a
 //! [`TileSet`] made in `new` with [`Init::tile_set`]: its sources (names of [`crate::io`]), its
@@ -85,6 +89,8 @@ pub mod trains;
 pub mod trees;
 pub mod vector_map;
 
+use std::cell::RefCell;
+
 use crate::frame::{Bindings, FrameArena, FrameSlot, GLOBALS_GROUP, ViewFrame};
 use crate::gpu::Gpu;
 use crate::jobs::Cancel;
@@ -111,8 +117,37 @@ pub enum Drape {
 pub enum Pass {
     /// The map pass: [`crate::target::MAP_FORMAT`] with MSAA and depth/stencil.
     Map,
-    /// A terrain cover pass (stage 9): orthographic, no MSAA.
+    /// A terrain cover pass (stage 9, `terrain::cover`): one terrain tile's square seen from
+    /// straight above, into a texture of the same format, sample count and depth/stencil as the map
+    /// pass's; only [`Drape::Cover`] layers are drawn into it.
     Cover,
+}
+
+impl Pass {
+    /// Whether a layer that stands on the terrain as `drape` draws in this pass: every layer in the
+    /// map pass (the renderer leaves the cover layers out of it while the terrain is drawn), the
+    /// cover layers in a cover pass too.
+    pub fn draws(self, drape: Drape) -> bool {
+        self == Pass::Map || drape == Drape::Cover
+    }
+}
+
+thread_local! {
+    /// The tiles whose drawing changed in the layer being prepared, while the renderer listens
+    /// ([`listen_for_drawn_changes`], [`drawn_changes`]): filled by [`PrepareCx::update_tiles`].
+    static DRAWN_CHANGES: RefCell<Option<Vec<TileIndex>>> = const { RefCell::new(None) };
+}
+
+/// From now on (on this thread) [`PrepareCx::update_tiles`] notes the tiles whose drawing changed:
+/// those that came to be drawn or stopped being drawn, or, when only their content changed, every
+/// tile drawn. The renderer listens around each cover layer's `prepare` while the terrain is drawn.
+pub fn listen_for_drawn_changes() {
+    DRAWN_CHANGES.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// The tiles noted since [`listen_for_drawn_changes`]; it stops listening.
+pub fn drawn_changes() -> Vec<TileIndex> {
+    DRAWN_CHANGES.with(|c| c.borrow_mut().take()).unwrap_or_default()
 }
 
 /// What a layer is made with.
@@ -176,7 +211,19 @@ impl PrepareCx<'_> {
     /// Whether the tiles drawn changed.
     pub fn update_tiles<D: ByteSize + Send + 'static, T>(&mut self, set: &mut TileSet<D, T>, mut upload: impl FnMut(&Gpu, TileIndex, D) -> T) -> bool {
         let gpu = self.gpu;
-        set.update(&self.view.viewport, self.budget, |tile, decoded| upload(gpu, tile, decoded))
+        let listening = DRAWN_CHANGES.with(|c| c.borrow().is_some());
+        let before: Vec<TileIndex> = if listening { set.visible().map(|(t, _)| t).collect() } else { Vec::new() };
+        let changed = set.update(&self.view.viewport, self.budget, |tile, decoded| upload(gpu, tile, decoded));
+        if listening && changed {
+            // (the terrain's covers: what came, what went, or all drawn when only their content changed)
+            let after: Vec<TileIndex> = set.visible().map(|(t, _)| t).collect();
+            let mut moved: Vec<TileIndex> = before.iter().filter(|t| !after.contains(t)).chain(after.iter().filter(|t| !before.contains(t))).copied().collect();
+            if moved.is_empty() {
+                moved = after;
+            }
+            DRAWN_CHANGES.with(|c| c.borrow_mut().as_mut().map(|log| log.extend(moved)));
+        }
+        changed
     }
 
     /// Pushes the local Mercator frame of `tile` (tile units, `v` south; `z_offset_m` metres up,
@@ -233,6 +280,11 @@ pub trait Layer {
     /// How it stands on 3D terrain (stage 9).
     fn drape(&self) -> Drape {
         Drape::None
+    }
+    /// The terrain's covers while it is drawn (the terrain layer's, stage 9): the renderer draws
+    /// the [`Drape::Cover`] layers into them.
+    fn covers(&mut self) -> Option<&mut terrain::cover::Covers> {
+        None
     }
     /// Whether it still waits for work (tiles, jobs, textures) that will change the picture: the
     /// headless path renders until no layer does.

@@ -1148,4 +1148,30 @@ mod tests {
         assert!(kept * 100 >= shadow * 95 && twice == 0 && lost * 100 <= shadow, "{kept}, {twice} and {lost} of {shadow}");
         assert!(same * 100 >= total * 97, "{same} of {total}");
     }
+
+    /// On the globe (V3, zoom 9) the covers are drawn on the flat map's terms all the same: over a
+    /// surface at sea level the dark map's water and land are where the globe draws them.
+    #[test]
+    fn on_the_globe_the_draped_map_is_the_globe_s() {
+        let Some(gpu) = gpu() else { return };
+        let v3 = ViewState { latitude: 59.33, longitude: 18.07, zoom: 9.0, pitch: 0.0, bearing: 0.0, position: None };
+        let off = render_with(&gpu, &mut renderer_on(&gpu, Arc::new(DirTiles::fixtures())), &dark(v3, V5_SIZE, false), 1.0).expect("rendered");
+        let mut scene = dark(v3, V5_SIZE, true);
+        scene.lights = neutral();
+        let mut renderer = renderer_on(&gpu, fixtures_on(|_| 0.0));
+        let on = render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered");
+        on.save_png(&shots_dir().join("z2-v3-globe-sea-level.png")).expect("saved");
+        assert!(renderer.terrain_covers().is_some_and(|c| c.textures() > 0));
+        let (mut same, mut plain) = (0, 0);
+        for y in (2..718).step_by(3) {
+            for x in (2..1098).step_by(3) {
+                if let Some(want) = plain_fill(&off, [f64::from(x), f64::from(y)]) {
+                    plain += 1;
+                    same += usize::from(fill_of(on.pixel(x, y)) == want);
+                }
+            }
+        }
+        eprintln!("globe: {same} of {plain} plain pixels as the globe draws them");
+        assert!(plain > 20_000 && same * 1000 >= plain * 995, "{same} of {plain}");
+    }
 }

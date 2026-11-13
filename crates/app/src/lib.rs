@@ -8,12 +8,16 @@
 //! - [`requests`]: the runtime, the wake, [`requests::Pending`]. [`input`]: events between egui
 //!   and the map. [`platform`]: folders and other platform glue.
 //! - `--screenshot` is drawn by [`headless`].
+//! - The command line is [`Options`] (its `--help` is [`USAGE`]); `--set KEY=VALUE`, a setting for
+//!   the run only (the window's or a shot's: the sky, a weather preset, the tilt-shift, the
+//!   terrain, the radar, the labels, …), is read and seeded by [`cli`].
 //!
 //! Entry points: the desktop binary (`main.rs`), `android_main` (Android's activity calls it on its
 //! own thread) and `rustradar_ios_main` (iOS's `main.m` calls it).
 
 pub mod app;
 pub mod assets;
+pub mod cli;
 pub mod dev;
 pub mod headless;
 pub mod images;
@@ -36,7 +40,7 @@ use crate::state::Startup;
 
 /// The command line (plan section 8).
 pub const USAGE: &str = "usage: rustradar-app [--view LAT,LON,ZOOM[,PITCH[,BEARING]]] [--basemap dark|satellite|realistic]
-                     [--size WIDTHxHEIGHT] [--now UNIX_MS] [--fixture DIR] [--demo]
+                     [--size WIDTHxHEIGHT] [--now UNIX_MS] [--fixture DIR] [--demo] [--set KEY=VALUE]...
                      [--screenshot FILE.png [--scale FACTOR] [--wait SECONDS] [--ui] [--select ID]
                      [--mode aircraft|trains|ships]] [--updated]
 
@@ -46,6 +50,19 @@ pub const USAGE: &str = "usage: rustradar-app [--view LAT,LON,ZOOM[,PITCH[,BEARI
   --now         the local clock starts at this time (Unix milliseconds); a shot's clock stands still there
   --fixture     canned feeds from this folder instead of the network
   --demo        the demo trains
+  --set         a setting for this run only, named as the settings file names it; it may be given
+                again, the last value of a key wins. A run with --set saves no settings. The keys:
+                  labels, buildings, aircraftLabels, daylight, weather (the radar), adsb, railMap,
+                  tiltShift, terrain                    true or false
+                  sky (the realistic map's weather)     live, sunny, cloudy, rain, fog or snow
+                  mode                                  aircraft, trains or ships (a shot's --mode wins)
+                  alsoShow                              a list of those, e.g. trains,ships (or nothing)
+                  basemap                               as --basemap (the one given last wins)
+                  railShows                             speeds or blocks
+                  labelSize                             0.85, 1, 1.25 or 1.5
+                  exaggeration                          a whole number from 1 to 40
+                e.g. --set terrain=true --set sky=rain. A shot's live sky never asks the network:
+                it reads the --fixture folder's forecast, else it is a fine day
   --screenshot  draw one frame without a window into this PNG, and exit
   --scale       the shot's device pixels per CSS pixel (default 1)
   --wait        how long a shot waits for the map's tiles before it is taken anyway (default
@@ -91,6 +108,10 @@ pub struct Options {
     /// `--updated`: the updater started this run after installing it, so the launch does not look
     /// for an update again (`UPDATED_FLAG`, item P3; the Tauri updater passes it too).
     pub updated: bool,
+    /// `--set KEY=VALUE`: settings for this run only, each key once with its last value, in the
+    /// order given ([`cli::seed`] writes them before the first frame). A basemap goes to
+    /// [`Options::basemap`] instead.
+    pub set: Vec<cli::Set>,
 }
 
 /// Why the command line was not taken.
@@ -167,6 +188,14 @@ impl Options {
                     options.fixture = Some(dir);
                 }
                 "--demo" => options.demo = true,
+                // a setting for the run (item F3): the last value of a key wins
+                "--set" => match cli::Set::parse(&value()?).map_err(bad)? {
+                    cli::Set::Basemap(basemap) => options.basemap = Some(basemap),
+                    set => {
+                        options.set.retain(|s| s.key() != set.key());
+                        options.set.push(set);
+                    }
+                },
                 "--screenshot" => options.screenshot = Some(PathBuf::from(value()?)),
                 "--wait" => {
                     let v = value()?;

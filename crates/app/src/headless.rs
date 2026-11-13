@@ -13,7 +13,9 @@
 //! map as a drawn frame does, but nobody sees their picture, and on SwiftShader a map pass can
 //! take seconds (P1: V2's dark map, about five). With `--ui` the shot draws the window's UI over
 //! the map ([`Engine::shell`]), its last frames a quarter of a second of egui's clock apart for
-//! the UI to settle; `--select` opens it with a flight selected, `--mode` with that focus. Its
+//! the UI to settle; `--select` opens it with a flight selected, `--mode` with that focus, each
+//! `--set KEY=VALUE` with that setting ([`crate::cli`]: the sky, a weather preset, the terrain, the
+//! radar, …; a shot's live sky reads only the `--fixture` folder's forecast, else is a fine day). Its
 //! remote pictures (photos, logos) come from the `--fixture` folder's `images/`, else from nowhere
 //! ([`images::connect_offline`], item F2): one without a file there reads as failed.
 
@@ -134,6 +136,8 @@ pub fn render_on_with(gpu: &Gpu, options: &Options, setup: impl FnOnce(&mut AppS
         // nor MET Norway's weather for the live sky (R11): a fine day
         state.weather = crate::state::weather::Weather::with_feed(None);
     }
+    // --set: the settings as a saved file would give them, for this shot only (F3)
+    crate::cli::seed(&mut state, &options.set);
     // --mode: the focus as a saved settings file would give it
     if let Some(mode) = options.mode {
         state.persisted.settings.mode = mode;

@@ -455,6 +455,8 @@ pub fn run_with(mut builder: EventLoopBuilder<UserEvent>, options: Options) -> R
     let requests = Requests::new(rt.handle().clone(), wake);
     let view = options.view.unwrap_or(ViewState::INITIAL);
     let mut state = AppState::new(options.startup(), backend, Some(requests), Some(events_rx), view, WINDOW_SIZE);
+    // --set: settings for this run only, none saved (F3)
+    crate::cli::seed(&mut state, &options.set);
     // times without a zone in the system's (today: the browser's); shots keep UTC (item F1)
     state.viewer_clocks = rustradar_core::time::Clocks::new(&platform::time_zone());
     // a version an earlier activity of this process found (the toast's `pending_update`; P4)

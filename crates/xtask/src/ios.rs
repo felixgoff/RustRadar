@@ -49,12 +49,16 @@
 //! step writes it and altool looks) only after the archive, so no build script of the Rust build runs
 //! while it is there, and removed at the end. No child process gets the secrets in its environment
 //! ([`without_secrets`]); the export and altool get the key id and issuer as arguments, as today, and
-//! they are shown as `***` in what this prints. Nothing here prints a secret's value.
+//! they are shown as `***` in what this prints. Nothing here prints a secret's value. `cargo xtask`
+//! itself builds xtask's dependencies first, build scripts and all, in the environment it is started
+//! in: a workflow builds xtask in a step without the secrets (`cargo build -p xtask --locked`) and
+//! runs `target/debug/xtask ios-release …` with them.
 //!
 //! Output: `--out` (default `<target dir>/ios`); under GitHub Actions `$GITHUB_OUTPUT` gets `ipa`,
 //! `name`, `signed` and `uploaded`, the step summary a line. `--dry-run` prints the choice, the version
 //! and the commands, and runs nothing (it works on any OS). Needs on the Mac: Xcode (15.4 or later for
 //! today's export method name), xcodegen (`brew install xcodegen`), the Rust target `aarch64-apple-ios`.
+//! The tests run the whole release, both builds, through stand-ins for the Mac's tools (`Tools`).
 //!
 //! Deviations from today's job, by design: the archive gets no App Store Connect key (it is not signed,
 //! so it had no use for it; the key is written after it); the ad hoc signature in place of the Tauri
@@ -419,6 +423,32 @@ pub fn without_secrets(mut command: Command) -> Command {
     command
 }
 
+/// Where the Mac's tools (xcodegen, xcodebuild, plutil, xcrun, codesign) are found: on `PATH`
+/// (`None`, a real release), or all in one folder (the tests' stand-ins).
+#[derive(Default)]
+struct Tools(Option<PathBuf>);
+
+impl Tools {
+    /// `command` as it is run: the secrets out of its environment ([`without_secrets`]) and its
+    /// program taken from the tools' folder, if there is one.
+    fn prepare(&self, command: Command) -> Command {
+        let command = without_secrets(command);
+        let Some(dir) = &self.0 else { return command };
+        let mut c = Command::new(dir.join(command.get_program()));
+        c.args(command.get_args());
+        for (name, value) in command.get_envs() {
+            match value {
+                Some(value) => c.env(name, value),
+                None => c.env_remove(name),
+            };
+        }
+        if let Some(cwd) = command.get_current_dir() {
+            c.current_dir(cwd);
+        }
+        c
+    }
+}
+
 /// `command` as one line, each argument holding a value of `hidden` shown as `***`.
 pub fn shown(command: &Command, hidden: &[&str]) -> String {
     let mut words = vec![command.get_program().to_string_lossy().into_owned()];
@@ -483,7 +513,7 @@ pub fn write_ipa(app: &Path, ipa: &Path) -> Result<usize, String> {
     collect(app, &format!("Payload/{name}"), &mut entries)?;
     let file = fs::File::create(ipa).map_err(|e| format!("{}: {e}", ipa.display()))?;
     let mut out = Zip { out: BufWriter::new(file), offset: 0, central: Vec::new(), count: 0 };
-    out.add(&"Payload/".to_owned(), None)?;
+    out.add("Payload/", None)?;
     for (entry, path) in &entries {
         let data = match path {
             Some(path) => Some(fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?),
@@ -738,11 +768,16 @@ fn github_file(env: &Env, var: &str, lines: &str) -> Result<(), String> {
 
 pub fn run(list: &[String]) -> Result<(), String> {
     let args = args(list)?;
-    release(&bump::repo_root(), &args, &|name| std::env::var(name).ok().filter(|v| !v.is_empty())).map(|_| ())
+    if !args.dry_run && !cfg!(target_os = "macos") {
+        return Err("the iOS build needs a Mac with Xcode and xcodegen (--dry-run shows the plan anywhere)".to_owned());
+    }
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    release(&bump::repo_root(), &args, &env, &Tools::default()).map(|_| ())
 }
 
-/// The release under `root`: the IPA's path, or `None` for a dry run.
-fn release(root: &Path, args: &Args, env: &Env) -> Result<Option<PathBuf>, String> {
+/// The release under `root`, its commands run as `tools` says: the IPA's path, or `None` for a dry
+/// run.
+fn release(root: &Path, args: &Args, env: &Env, tools: &Tools) -> Result<Option<PathBuf>, String> {
     let paths = Paths::new(root);
     let version = release_version(root, args.version.as_deref())?;
     let (short, bundle) = bundle_versions(&version, args.build_number.as_deref())?;
@@ -790,31 +825,28 @@ fn release(root: &Path, args: &Args, env: &Env) -> Result<Option<PathBuf>, Strin
     if args.dry_run {
         return Ok(None);
     }
-    if !cfg!(target_os = "macos") {
-        return Err("the iOS build needs a Mac with Xcode and xcodegen (--dry-run shows the plan anywhere)".to_owned());
-    }
     let mut probe = Command::new("xcodegen");
     probe.arg("--version");
-    output(without_secrets(probe), "xcodegen (brew install xcodegen)")?;
+    output(tools.prepare(probe), "xcodegen (brew install xcodegen)")?;
 
-    run_command(without_secrets(xcodegen(&paths)), "xcodegen generate")?;
+    run_command(tools.prepare(xcodegen(&paths)), "xcodegen generate")?;
     for stale in [paths.archive(), paths.export()] {
         if stale.exists() {
             fs::remove_dir_all(&stale).map_err(|e| format!("{}: {e}", stale.display()))?;
         }
     }
-    run_command(without_secrets(archive(&paths, &short, &bundle)), "xcodebuild archive")?;
+    run_command(tools.prepare(archive(&paths, &short, &bundle)), "xcodebuild archive")?;
     let app = paths.app();
     let plist = app.join("Info.plist");
     let mut values = Vec::new();
     for key in CHECKED_KEYS {
         let mut plutil = Command::new("plutil");
         plutil.args(["-extract", key, "raw", "-o", "-"]).arg(&plist);
-        values.push((key, output(without_secrets(plutil), &format!("plutil -extract {key}")).unwrap_or_default()));
+        values.push((key, output(tools.prepare(plutil), &format!("plutil -extract {key}")).unwrap_or_default()));
     }
     let mut lipo = Command::new("xcrun");
     lipo.args(["lipo", "-archs"]).arg(app.join(PRODUCT));
-    let archs = output(without_secrets(lipo), "lipo -archs")?;
+    let archs = output(tools.prepare(lipo), "lipo -archs")?;
     let pairs: Vec<PlistValue> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
     check_app(&pairs, &archs, &app, &short, &bundle)?;
     println!("  {}: {BUNDLE_ID} {short} ({bundle}), iOS {MINIMUM_IOS}, {}", app.display(), archs.trim());
@@ -828,19 +860,20 @@ fn release(root: &Path, args: &Args, env: &Env) -> Result<Option<PathBuf>, Strin
             println!("  {entries} entries zipped");
         }
         Build::AppStore { credentials, upload } => {
-            run_command(without_secrets(adhoc_sign(&paths)), "codesign (ad hoc, for the entitlements)")?;
+            run_command(tools.prepare(adhoc_sign(&paths)), "codesign (ad hoc, for the entitlements)")?;
             let mut xcode = Command::new("xcodebuild");
             xcode.arg("-version");
-            let method = export_method(&output(without_secrets(xcode), "xcodebuild -version")?)?;
+            let method = export_method(&output(tools.prepare(xcode), "xcodebuild -version")?)?;
             // only now, after the Rust build: no build script ran while the key was on disk
             let mut written = Materialised(Vec::new());
             let (key, keys_dir) = key_file(credentials, env, &mut written)?;
             let options = paths.build.join("ExportOptions.plist");
+            fs::create_dir_all(&paths.build).map_err(|e| format!("{}: {e}", paths.build.display()))?;
             if options.exists() {
                 fs::remove_file(&options).map_err(|e| format!("{}: {e}", options.display()))?;
             }
             written.write(options.clone(), export_options(method, &credentials.team).as_bytes())?;
-            run_command(without_secrets(export(&paths, &options, credentials, &key)), "xcodebuild -exportArchive")?;
+            run_command(tools.prepare(export(&paths, &options, credentials, &key)), "xcodebuild -exportArchive")?;
             let exported = fs::read_dir(paths.export())
                 .map_err(|e| format!("{}: {e}", paths.export().display()))?
                 .flatten()
@@ -852,7 +885,7 @@ fn release(root: &Path, args: &Args, env: &Env) -> Result<Option<PathBuf>, Strin
                 if !may_publish(env("GITHUB_REF").as_deref()) {
                     return Err("TestFlight uploads go out only from main or a v* tag".to_owned());
                 }
-                run_command(without_secrets(altool(&dest, credentials, keys_dir.as_deref())), "xcrun altool --upload-app")?;
+                run_command(tools.prepare(altool(&dest, credentials, keys_dir.as_deref())), "xcrun altool --upload-app")?;
                 uploaded = true;
             }
             drop(written);
@@ -1371,15 +1404,15 @@ mod tests {
         let root = bump::repo_root();
         let files = bump::current().unwrap();
         let unsigned = Args { wanted: Wanted::Unsigned, dry_run: true, ..Args::default() };
-        assert_eq!(release(&root, &unsigned, &env_of(&[])), Ok(None));
+        assert_eq!(release(&root, &unsigned, &env_of(&[]), &Tools::default()), Ok(None));
         let app_store = Args { wanted: Wanted::AppStore, upload: true, dry_run: true, ..Args::default() };
-        assert_eq!(release(&root, &app_store, &release_env("schedule", "refs/heads/main")), Ok(None));
-        assert!(release(&root, &app_store, &release_env("push", "refs/heads/rust-port")).unwrap_err().contains("rust-port"));
+        assert_eq!(release(&root, &app_store, &release_env("schedule", "refs/heads/main"), &Tools::default()), Ok(None));
+        assert!(release(&root, &app_store, &release_env("push", "refs/heads/rust-port"), &Tools::default()).unwrap_err().contains("rust-port"));
         // the release version must be the files'
         let other = Args { version: Some("9.9.9".to_owned()), ..unsigned };
-        assert!(release(&root, &other, &env_of(&[])).unwrap_err().contains("cargo xtask bump 9.9.9"));
+        assert!(release(&root, &other, &env_of(&[]), &Tools::default()).unwrap_err().contains("cargo xtask bump 9.9.9"));
         let same = Args { version: Some(files), wanted: Wanted::Unsigned, dry_run: true, ..Args::default() };
-        assert_eq!(release(&root, &same, &env_of(&[])), Ok(None));
+        assert_eq!(release(&root, &same, &env_of(&[]), &Tools::default()), Ok(None));
         assert!(!root.join(PROJECT).join("build/ExportOptions.plist").exists());
     }
 
@@ -1484,7 +1517,40 @@ mod tests {
             "UIInterfaceOrientationPortrait,UIInterfaceOrientationPortraitUpsideDown,UIInterfaceOrientationLandscapeLeft,\
              UIInterfaceOrientationLandscapeRight"
         );
-        assert!(!info.contains_key("UILaunchScreen"));
+        // today's keys and no others: xcodegen's defaults (its InfoPlistGenerator), the Tauri CLI
+        // template's `info.properties`, src-tauri/Info.ios.plist; CFBundleDisplayName says the name
+        // today's shows through CFBundleName once more. No UILaunchScreen (the storyboard is
+        // today's) and no UIApplicationSupportsIndirectInputEvents (today's iPads send a mouse's
+        // clicks as touches)
+        let text = fs::read_to_string(repo("platform/ios/Info.plist")).unwrap();
+        let mut keys: Vec<String> = Regex::new(r"<key>([^<]+)</key>").unwrap().captures_iter(&text).map(|c| c[1].to_owned()).collect();
+        keys.sort_unstable();
+        let mut read: Vec<&String> = info.keys().collect();
+        read.sort_unstable();
+        // every key (a nested dict's too) has a string, a boolean or an array of strings
+        assert_eq!(read, keys.iter().collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            [
+                "CFBundleDevelopmentRegion",
+                "CFBundleDisplayName",
+                "CFBundleExecutable",
+                "CFBundleIdentifier",
+                "CFBundleInfoDictionaryVersion",
+                "CFBundleName",
+                "CFBundlePackageType",
+                "CFBundleShortVersionString",
+                "CFBundleVersion",
+                "ITSAppUsesNonExemptEncryption",
+                "LSRequiresIPhoneOS",
+                "UILaunchStoryboardName",
+                "UIRequiredDeviceCapabilities",
+                "UISupportedInterfaceOrientations",
+                "UISupportedInterfaceOrientations~ipad",
+            ]
+        );
+        assert_eq!(get("CFBundleDevelopmentRegion"), "en");
+        assert_eq!(get("CFBundleInfoDictionaryVersion"), "6.0");
         // src-tauri/Info.ios.plist, merged in today
         assert_eq!(get("ITSAppUsesNonExemptEncryption"), "false");
         let merged = repo("src-tauri/Info.ios.plist");
@@ -1567,5 +1633,305 @@ mod tests {
         assert!(script.contains("flags=(--release --locked)"));
         assert!(script.contains("IPHONEOS_DEPLOYMENT_TARGET=\"${IPHONEOS_DEPLOYMENT_TARGET:-15.0}\""));
         assert!(script.contains("cargo build -p rustradar-app --lib"));
+    }
+
+    /// Writes `text` to `path` under `dir`, executable.
+    #[cfg(unix)]
+    fn write_exe(dir: &Path, path: &str, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// build-rust.sh as Xcode's build phase runs it (the build settings in its environment, the
+    /// iOS SDK in SDKROOT), through a stand-in cargo that notes what it is asked and leaves a
+    /// library where cargo would.
+    #[cfg(unix)]
+    #[test]
+    fn the_build_phase_builds_the_library_xcode_links() {
+        let tree = Tree::new("phase");
+        let dir = &tree.0;
+        let log = dir.join("log");
+        write_exe(
+            dir,
+            "bin/cargo",
+            &format!(
+                "#!/bin/sh\necho \"cargo $* in $PWD\" >> '{log}'\necho \"SDKROOT=${{SDKROOT-unset}} \
+                 IPHONEOS_DEPLOYMENT_TARGET=$IPHONEOS_DEPLOYMENT_TARGET\" >> '{log}'\n\
+                 for t in aarch64-apple-ios aarch64-apple-ios-sim; do for p in debug release; do\n\
+                 mkdir -p \"$CARGO_TARGET_DIR/$t/$p\" && echo \"$t $p\" > \"$CARGO_TARGET_DIR/$t/$p/librustradar_app.a\"\n\
+                 done; done\n",
+                log = log.display()
+            ),
+        );
+        fs::create_dir_all(dir.join("home")).unwrap();
+        let phase = |platform: &str, configuration: &str| {
+            let products = dir.join(format!("products-{platform}-{configuration}"));
+            let status = Command::new("bash")
+                .arg(repo("platform/ios/build-rust.sh"))
+                .env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.join("bin").display()))
+                // no ~/.cargo/bin there: the stand-in answers
+                .env("HOME", dir.join("home"))
+                .env("PLATFORM_NAME", platform)
+                .env("CONFIGURATION", configuration)
+                .env("BUILT_PRODUCTS_DIR", &products)
+                .env("SDKROOT", "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk")
+                .env("IPHONEOS_DEPLOYMENT_TARGET", MINIMUM_IOS)
+                .env("CARGO_TARGET_DIR", dir.join("target"))
+                .status()
+                .unwrap();
+            let lib = fs::read_to_string(products.join("librustradar_app.a")).ok();
+            let said = fs::read_to_string(&log).unwrap_or_default();
+            let _ = fs::remove_file(&log);
+            (status.success(), said.replace(&bump::repo_root().display().to_string(), "ROOT"), lib)
+        };
+        // the archive: Release for devices, the committed lock, the SDK kept from the build scripts
+        let (ok, said, lib) = phase("iphoneos", "Release");
+        assert!(ok);
+        assert_eq!(
+            said,
+            "cargo build -p rustradar-app --lib --target aarch64-apple-ios --release --locked in ROOT\n\
+             SDKROOT=unset IPHONEOS_DEPLOYMENT_TARGET=15.0\n"
+        );
+        assert_eq!(lib.as_deref(), Some("aarch64-apple-ios release\n"));
+        // the phone shells' simulator build
+        let (ok, said, lib) = phase("iphonesimulator", "Debug");
+        assert!(ok && said.starts_with("cargo build -p rustradar-app --lib --target aarch64-apple-ios-sim in ROOT\n"), "{said}");
+        assert_eq!(lib.as_deref(), Some("aarch64-apple-ios-sim debug\n"));
+        let (ok, said, _) = phase("macosx", "Release");
+        assert!(!ok && said.is_empty());
+    }
+
+    /// A repository in a fresh folder (version files at 0.3.17, the iOS project) with stand-ins for
+    /// the Mac's tools in `tools/`, which note in `log` what they are asked and whether the App
+    /// Store Connect key was on disk (`key=yes`) when they ran: `xcodebuild archive` makes the
+    /// archived app (its Info.plist as `key=value` lines, at the versions it was given, which the
+    /// stand-in `plutil` reads), `-exportArchive` an IPA, `xcrun lipo` answers arm64.
+    #[cfg(unix)]
+    fn stage(name: &str) -> Tree {
+        let tree = Tree::new(&format!("stage-{name}"));
+        let dir = &tree.0;
+        let write = |path: &str, text: &str| {
+            let path = dir.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write("Cargo.toml", "[workspace]\nmembers = [\"crates/app\"]\n");
+        write("crates/app/Cargo.toml", "[package]\nname = \"rustradar\"\nversion = \"0.3.17\"\n");
+        write("Cargo.lock", "[[package]]\nname = \"rustradar\"\nversion = \"0.3.17\"\n");
+        write("platform/ios/project.yml", "name: RustRadar\n");
+        write("platform/ios/RustRadar.entitlements", "<plist version=\"1.0\"><dict/></plist>\n");
+        write("home/.keep", "");
+        let log = dir.join("log").display().to_string();
+        let key = dir.join("home/.appstoreconnect/private_keys/AuthKey_TESTKEYID0.p8").display().to_string();
+        let seen = format!("key=no; [ -e '{key}' ] && key=yes");
+        write_exe(
+            dir,
+            "tools/xcodegen",
+            &format!("#!/bin/sh\ncase \"$1\" in --version) echo 'Version: 2.44.1' ;; *) echo \"xcodegen $* ($(basename \"$PWD\"))\" >> '{log}' ;; esac\n"),
+        );
+        write_exe(
+            dir,
+            "tools/xcodebuild",
+            &format!(
+                r#"#!/bin/sh
+{seen}
+if [ "$1" = "-version" ]; then printf 'Xcode 16.4\nBuild version 16F6\n'; exit 0; fi
+if [ "$1" = "-exportArchive" ]; then
+  echo "xcodebuild -exportArchive key=$key options: $(tr -d '\n\t' < "$5" | sed 's/.*<dict>//; s/<\/dict>.*//')" >> '{log}'
+  [ -e "$(dirname '{log}')/fail-export" ] && exit 70
+  mkdir -p "$7" && echo 'signed ipa' > "$7/RustRadar.ipa"
+  exit 0
+fi
+archive=""; prev=""; short=""; build=""
+for a in "$@"; do
+  [ "$prev" = "-archivePath" ] && archive="$a"
+  case "$a" in MARKETING_VERSION=*) short="${{a#*=}}" ;; CURRENT_PROJECT_VERSION=*) build="${{a#*=}}" ;; esac
+  prev="$a"
+done
+echo "xcodebuild archive key=$key $short ($build)" >> '{log}'
+app="$archive/Products/Applications/RustRadar.app"
+mkdir -p "$app/LaunchScreen.storyboardc"
+printf 'CFBundleIdentifier=com.felix.rustradar\nCFBundleExecutable=RustRadar\nCFBundleName=RustRadar\nCFBundleShortVersionString=%s\nCFBundleVersion=%s\nMinimumOSVersion=15.0\nITSAppUsesNonExemptEncryption=false\nUILaunchStoryboardName=LaunchScreen\n' "$short" "$build" > "$app/Info.plist"
+echo 'Mach-O' > "$app/RustRadar"; echo 'car' > "$app/Assets.car"; echo 'nib' > "$app/LaunchScreen.storyboardc/Info.plist"
+"#
+            ),
+        );
+        write_exe(dir, "tools/plutil", "#!/bin/sh\nsed -n \"s/^$2=//p\" \"$6\"\n");
+        write_exe(
+            dir,
+            "tools/xcrun",
+            &format!(
+                "#!/bin/sh\n{seen}\ncase \"$1\" in\n  lipo) echo arm64 ;;\n  altool) echo \"xcrun $* key=$key dir=${{API_PRIVATE_KEYS_DIR:-none}}\" >> '{log}' ;;\nesac\n"
+            ),
+        );
+        write_exe(dir, "tools/codesign", &format!("#!/bin/sh\necho \"codesign $1 $2 $3 $4 $(basename \"$5\") $(basename \"$6\")\" >> '{log}'\n"));
+        tree
+    }
+
+    /// The staged repository's environment: `pairs`, its HOME and the GitHub Actions files.
+    #[cfg(unix)]
+    fn staged_env(dir: &Path, pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
+        let mut all: Vec<(String, String)> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        for (name, path) in [("HOME", "home"), ("GITHUB_OUTPUT", "github_output"), ("GITHUB_STEP_SUMMARY", "summary")] {
+            all.push((name.to_owned(), dir.join(path).display().to_string()));
+        }
+        let refs: Vec<(&str, &str)> = all.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        env_of(&refs)
+    }
+
+    /// The staged release's log, its folder written as DIR.
+    #[cfg(unix)]
+    fn staged_log(dir: &Path) -> String {
+        fs::read_to_string(dir.join("log")).unwrap_or_default().replace(&dir.display().to_string(), "DIR")
+    }
+
+    #[cfg(unix)]
+    fn staged_args(dir: &Path) -> Args {
+        Args { version: Some("0.3.17".into()), out: Some(dir.join("out")), upload: true, ..Args::default() }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_push_to_rust_port_builds_the_unsigned_ipa_and_uploads_nothing() {
+        let tree = stage("unsigned");
+        let dir = &tree.0;
+        let tools = Tools(Some(dir.join("tools")));
+        // all four secrets present and --upload asked: still not a release
+        let mut pairs = vec![("GITHUB_EVENT_NAME", "push"), ("GITHUB_REF", "refs/heads/rust-port")];
+        pairs.extend([("APPLE_API_ISSUER", ISSUER), ("APPLE_API_KEY_ID", KEY_ID), ("APPLE_API_KEY", "test key contents"), ("APPLE_DEVELOPMENT_TEAM", TEAM)]);
+        let ipa = release(dir, &staged_args(dir), &staged_env(dir, &pairs), &tools).unwrap().unwrap();
+        assert_eq!(ipa, dir.join("out/RustRadar_0.3.17_unsigned.ipa"));
+        assert_eq!(staged_log(dir), "xcodegen generate --spec project.yml (ios)\nxcodebuild archive key=no 0.3.17 (0.3.17)\n");
+        let entries = read_zip(&fs::read(&ipa).unwrap());
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Payload/",
+                "Payload/RustRadar.app/",
+                "Payload/RustRadar.app/Assets.car",
+                "Payload/RustRadar.app/Info.plist",
+                "Payload/RustRadar.app/LaunchScreen.storyboardc/",
+                "Payload/RustRadar.app/LaunchScreen.storyboardc/Info.plist",
+                "Payload/RustRadar.app/RustRadar",
+            ]
+        );
+        assert_eq!(entries[6].data, b"Mach-O\n");
+        let output = fs::read_to_string(dir.join("github_output")).unwrap();
+        assert_eq!(output, format!("ipa={}\nname=RustRadar_0.3.17_unsigned.ipa\nsigned=false\nuploaded=false\n", ipa.display()));
+        assert!(fs::read_to_string(dir.join("summary")).unwrap().starts_with("iOS: `RustRadar_0.3.17_unsigned.ipa`, 0.3.17 (0.3.17), unsigned"));
+        assert!(!dir.join("home/.appstoreconnect").exists(), "the key was written");
+        assert!(!dir.join("platform/ios/build/ExportOptions.plist").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_v_tag_builds_for_the_app_store_and_uploads_with_the_key_on_disk_only_after_the_rust_build() {
+        let tree = stage("tag");
+        let dir = &tree.0;
+        let tools = Tools(Some(dir.join("tools")));
+        let pairs = [
+            ("GITHUB_EVENT_NAME", "push"),
+            ("GITHUB_REF", "refs/tags/v0.3.17"),
+            ("APPLE_API_ISSUER", ISSUER),
+            ("APPLE_API_KEY_ID", KEY_ID),
+            ("APPLE_API_KEY", "test key contents"),
+            ("APPLE_DEVELOPMENT_TEAM", TEAM),
+        ];
+        let ipa = release(dir, &staged_args(dir), &staged_env(dir, &pairs), &tools).unwrap().unwrap();
+        assert_eq!(ipa, dir.join("out/RustRadar_0.3.17.ipa"));
+        assert_eq!(
+            staged_log(dir),
+            format!(
+                "xcodegen generate --spec project.yml (ios)\n\
+                 xcodebuild archive key=no 0.3.17 (0.3.17)\n\
+                 codesign --force -s - --entitlements RustRadar.entitlements RustRadar\n\
+                 xcodebuild -exportArchive key=yes options: <key>method</key><string>app-store-connect</string>\
+                 <key>signingStyle</key><string>automatic</string><key>teamID</key><string>{TEAM}</string>\n\
+                 xcrun altool --upload-app --type ios --file DIR/out/RustRadar_0.3.17.ipa --apiKey {KEY_ID} --apiIssuer {ISSUER} \
+                 key=yes dir=none\n"
+            )
+        );
+        assert_eq!(fs::read_to_string(&ipa).unwrap(), "signed ipa\n");
+        let output = fs::read_to_string(dir.join("github_output")).unwrap();
+        assert!(output.ends_with("name=RustRadar_0.3.17.ipa\nsigned=true\nuploaded=true\n"), "{output}");
+        assert!(fs::read_to_string(dir.join("summary")).unwrap().contains("App Store build"));
+        // the key and the export options (the team) are gone with the build
+        assert!(!dir.join("home/.appstoreconnect/private_keys/AuthKey_TESTKEYID0.p8").exists());
+        assert!(!dir.join("platform/ios/build/ExportOptions.plist").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_refresh_uploads_its_build_number_and_a_failed_export_leaves_no_key() {
+        let tree = stage("refresh");
+        let dir = &tree.0;
+        let tools = Tools(Some(dir.join("tools")));
+        // testflight-refresh: scheduled on main, the key already written where altool finds it
+        let given = dir.join("runner/AuthKey_TESTKEYID0.p8");
+        fs::create_dir_all(given.parent().unwrap()).unwrap();
+        fs::write(&given, "theirs\n").unwrap();
+        let given_path = given.display().to_string();
+        let pairs = [
+            ("GITHUB_EVENT_NAME", "schedule"),
+            ("GITHUB_REF", "refs/heads/main"),
+            ("APPLE_API_ISSUER", ISSUER),
+            ("APPLE_API_KEY_ID", KEY_ID),
+            ("APPLE_API_KEY_PATH", given_path.as_str()),
+            ("APPLE_DEVELOPMENT_TEAM", TEAM),
+        ];
+        let args = Args { wanted: Wanted::AppStore, build_number: Some("2026111406".into()), ..staged_args(dir) };
+        let ipa = release(dir, &args, &staged_env(dir, &pairs), &tools).unwrap().unwrap();
+        assert_eq!(ipa, dir.join("out/RustRadar_0.3.17.ipa"));
+        let log = staged_log(dir);
+        assert!(log.contains("xcodebuild archive key=no 0.3.17 (2026111406)\n"), "{log}");
+        assert!(log.ends_with(&format!("--apiKey {KEY_ID} --apiIssuer {ISSUER} key=no dir=DIR/runner\n")), "{log}");
+        assert_eq!(fs::read_to_string(&given).unwrap(), "theirs\n");
+        assert!(!dir.join("home/.appstoreconnect").exists());
+
+        // the same on a run by hand on rust-port: refused before anything runs
+        fs::remove_file(dir.join("log")).unwrap();
+        let mut by_hand = pairs;
+        by_hand[0] = ("GITHUB_EVENT_NAME", "workflow_dispatch");
+        by_hand[1] = ("GITHUB_REF", "refs/heads/rust-port");
+        let err = release(dir, &args, &staged_env(dir, &by_hand), &tools).unwrap_err();
+        assert!(err.contains("only from main or a v* tag"), "{err}");
+        assert_eq!(staged_log(dir), "");
+
+        // an export that fails: the key written for it and the options go with the failure
+        fs::write(dir.join("fail-export"), "").unwrap();
+        let pairs = [
+            ("GITHUB_EVENT_NAME", "push"),
+            ("GITHUB_REF", "refs/heads/main"),
+            ("APPLE_API_ISSUER", ISSUER),
+            ("APPLE_API_KEY_ID", KEY_ID),
+            ("APPLE_API_KEY", "test key contents"),
+            ("APPLE_DEVELOPMENT_TEAM", TEAM),
+        ];
+        let err = release(dir, &staged_args(dir), &staged_env(dir, &pairs), &tools).unwrap_err();
+        assert!(err.contains("xcodebuild -exportArchive failed"), "{err}");
+        assert!(staged_log(dir).contains("xcodebuild -exportArchive key=yes"));
+        assert!(!staged_log(dir).contains("altool"));
+        assert!(!dir.join("home/.appstoreconnect/private_keys/AuthKey_TESTKEYID0.p8").exists());
+        assert!(!dir.join("platform/ios/build/ExportOptions.plist").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_archived_app_that_is_not_todays_is_refused() {
+        let tree = stage("wrong");
+        let dir = &tree.0;
+        // an archive that drops the version it was given
+        let stand_in = fs::read_to_string(dir.join("tools/xcodebuild")).unwrap().replace("CFBundleShortVersionString=%s", "CFBundleShortVersionString=1.0%.0s");
+        write_exe(dir, "tools/xcodebuild", &stand_in);
+        let tools = Tools(Some(dir.join("tools")));
+        let args = Args { wanted: Wanted::Unsigned, upload: false, ..staged_args(dir) };
+        let err = release(dir, &args, &staged_env(dir, &[]), &tools).unwrap_err();
+        assert!(err.contains("CFBundleShortVersionString = 1.0, not 0.3.17"), "{err}");
+        assert!(!dir.join("out").exists());
     }
 }

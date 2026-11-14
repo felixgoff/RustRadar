@@ -4,6 +4,9 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<!-- the name under the icon: today's app shows its CFBundleName, PRODUCT_NAME RustRadar; said here
+	     once more. The other keys are those today's Info.plist has (xcodegen's defaults, the Tauri
+	     CLI 2.12.1 template's properties, src-tauri/Info.ios.plist), nothing else -->
 	<key>CFBundleDisplayName</key>
 	<string>RustRadar</string>
 	<key>CFBundleExecutable</key>
@@ -35,8 +38,6 @@
 		<string>arm64</string>
 		<string>metal</string>
 	</array>
-	<key>UIApplicationSupportsIndirectInputEvents</key>
-	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

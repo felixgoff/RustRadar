@@ -32,4 +32,6 @@ cd "$here/../.."
 env -u SDKROOT IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-15.0}" \
   cargo build -p rustradar-app --lib --target "$target" ${flags[@]+"${flags[@]}"}
 mkdir -p "$out"
-cp "target/$target/$profile_dir/librustradar_app.a" "$out/librustradar_app.a"
+# where cargo put it: CARGO_TARGET_DIR (xcodebuild hands its caller's environment to this phase,
+# as cargo xtask ios-release reads it too), else the workspace's target/
+cp "${CARGO_TARGET_DIR:-target}/$target/$profile_dir/librustradar_app.a" "$out/librustradar_app.a"

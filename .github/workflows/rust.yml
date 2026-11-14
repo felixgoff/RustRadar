@@ -1,15 +1,38 @@
 name: Build
 
+# One workflow for today's Tauri app and for the native app that replaces it (docs/port; doc 07
+# sections 9 and 14, plan stage 11 row P10). Which one a push to main or a v* tag releases depends on
+# the tree it builds (job `tree`):
+#
+# - While the repository still holds the Tauri app (src-tauri/tauri.conf.json), a push to main or a
+#   v* tag builds and publishes today's Tauri release exactly as before: jobs check, version, bundle,
+#   android, ios and mobile-release. The native packages are not built for those pushes.
+# - Once stage 12 has removed src-tauri, the native jobs publish instead: package (every desktop
+#   package through `cargo xtask package`), updater (their .sig files through `cargo xtask sign` and
+#   one latest.json through `cargo xtask latest-json`), release (the GitHub release, created once),
+#   android-release and ios-release (through `cargo xtask android-release` and `ios-release`),
+#   testflight and phones-release. A release waits for the native tests and the install check; the
+#   builds do not wait, so they run beside the tests.
+# - Everywhere else (pushes to rust-port, pull requests, runs by hand) the native jobs are a dry
+#   run of that release: every package and both phone release builds are made at the version a
+#   release would carry and kept as workflow artifacts, the packages are signed with a throwaway key
+#   and latest.json is written and checked, the .deb is installed in ubuntu:22.04 and started, the
+#   AppImage started, the APK's badging read. Nothing is published: the publishing jobs run only for
+#   a push to main or a v* tag of a tree without src-tauri, and the signing and store secrets reach
+#   only those runs. rust-port runs only the native jobs.
+
 on:
   push:
-    # rust-port (the native port, docs/port) runs only the port's jobs, native and
-    # native-targets: `check` and `version` skip a push there, and every job after them
-    # follows through `needs`, so nothing is bundled or published from it.
     branches: ["main", "rust-port"]
     tags: ["v*"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:
+    inputs:
+      lavapipe:
+        description: Also run the native tests on Mesa's lavapipe (not required; about 85 minutes)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,11 +47,50 @@ env:
   RELEASE: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
 
 jobs:
-  # Fast feedback: frontend type-check + Rust tests for the whole workspace.
+  # Which app this commit releases: the Tauri app while src-tauri/tauri.conf.json exists, the native
+  # one after stage 12. Outputs:
+  #   tauri    the tree holds the Tauri app
+  #   native   the native packages and phone release builds are made (all but a Tauri release push)
+  #   publish  they are published (a push to main or a v* tag of a native tree; never rust-port)
+  tree:
+    name: Tauri or native tree
+    runs-on: ubuntu-latest
+    outputs:
+      tauri: ${{ steps.tree.outputs.tauri }}
+      native: ${{ steps.tree.outputs.native }}
+      publish: ${{ steps.tree.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: src-tauri/tauri.conf.json
+          sparse-checkout-cone-mode: false
+
+      - id: tree
+        run: |
+          tauri=false native=true publish=false
+          if [ -f src-tauri/tauri.conf.json ]; then tauri=true; fi
+          if [ "$RELEASE" = true ]; then
+            if [ "$tauri" = true ]; then native=false; else publish=true; fi
+          fi
+          # belt and braces: nothing is published from anywhere but main and v* tags
+          case "$GITHUB_REF" in
+            refs/heads/main | refs/tags/v*) ;;
+            *) publish=false ;;
+          esac
+          {
+            echo "tauri=$tauri"
+            echo "native=$native"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "**Tree:** Tauri app: $tauri; native packages built: $native; published: $publish" >> "$GITHUB_STEP_SUMMARY"
+
+  # Fast feedback: frontend type-check + Rust tests of the Tauri app.
   check:
     name: Check & test
-    # not on a push to rust-port (see `on.push`)
-    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/rust-port') }}
+    needs: tree
+    # the Tauri app's jobs: only while the tree holds it, and never on rust-port (bundle, android, ios
+    # and mobile-release follow this job through `needs`)
+    if: ${{ needs.tree.outputs.tauri == 'true' && github.ref != 'refs/heads/rust-port' }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -69,195 +131,56 @@ jobs:
       - name: Build frontend
         run: bun run build
 
+      # The Tauri app's packages, as today's workspace has them (src-tauri and crates/fr24); the
+      # native crates have their own job (`native`, with a software GPU).
       - name: Rust tests
-        run: cargo test --workspace --locked
-
-  # The native port (docs/port): the workspace's tests on a software Vulkan
-  # driver, so the GPU tests run instead of printing "skipped", then clippy on
-  # the port's crates. The Tauri shim is left out: `check` tests it, with the
-  # WebKitGTK and frontend build it needs. No job needs this one, so it never
-  # holds back a release.
-  native:
-    name: Native port (test & clippy)
-    runs-on: ubuntu-24.04
-    # the SwiftShader step alone takes about 85 min since stages 8-10 (the map crate's GPU tests
-    # an hour), and lavapipe runs them all once more
-    timeout-minutes: 240
-    env:
-      # line tables only: stack traces with lines, and a target folder that fits the runner's disk
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-    steps:
-      - uses: actions/checkout@v4
-
-      # Two CPU Vulkan drivers. SwiftShader, from the runner's Google Chrome, is the
-      # one the tests must pass on: the port's engineers check them with it (plan
-      # section 8). lavapipe, Mesa's, runs them once more, not required (below).
-      # lavapipe's ICD file is lvp_icd.json or lvp_icd.x86_64.json, depending on
-      # the Mesa version.
-      - name: Software Vulkan (SwiftShader, lavapipe)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
-          swiftshader="$(find /opt/google/chrome -name vk_swiftshader_icd.json -print -quit)"
-          lavapipe=(/usr/share/vulkan/icd.d/lvp_icd*.json)
-          test -f "$swiftshader"
-          test -f "${lavapipe[0]}"
-          {
-            echo "VK_ICD_FILENAMES=$swiftshader"
-            echo "LAVAPIPE_ICD=${lavapipe[0]}"
-            echo "WGPU_BACKEND=vulkan"
-          } >> "$GITHUB_ENV"
-          # fails unless each driver loads and lists a device
-          for icd in "$swiftshader" "${lavapipe[0]}"; do
-            VK_ICD_FILENAMES="$icd" vulkaninfo --summary | grep -E "deviceName|driverInfo"
-          done
-
-      # The port's jobs use the Rust its engineers check it with, not the newest stable:
-      # each release's clippy adds lints, and -D warnings would turn them red with no
-      # change on the branch. Raise this with the code (native-targets too).
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.97.0"
-          components: clippy
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target"
-          key: native
-
-      # A GPU test with no adapter prints `skipped: …` and passes, so a driver that wgpu
-      # cannot open would leave the rendering untested with every test green. One GPU test,
-      # its output shown: it names the adapter, or the step fails. (--lib: the same build as
-      # the next step's, so nothing is compiled twice.)
-      - name: The GPU tests have an adapter
-        run: |
-          out="$(cargo test --workspace --exclude rustradar --locked --lib -- --nocapture --exact gpu::tests::the_device_asks_for_the_texture_compression_the_adapter_has 2>&1)"
-          printf '%s\n' "$out" | grep -E "compression|skipped"
-          if printf '%s\n' "$out" | grep -q "skipped:"; then
-            echo "::error::wgpu found no adapter on SwiftShader: the GPU tests would only print skipped"
-            exit 1
-          fi
-
-      # --no-fail-fast: every failing test binary in one run, not only the first
-      - name: Rust tests
-        run: cargo test --workspace --exclude rustradar --locked --no-fail-fast
-
-      # The shots the GPU tests drew (target/shots), to look at beside docs/port/reference.
-      - uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() }}
-        with:
-          name: native-shots
-          path: target/shots
-          if-no-files-found: warn
-
-      # (before the lavapipe run, so a slow or cut-off lavapipe run cannot skip it)
-      - name: Clippy
-        if: ${{ !cancelled() }}
-        run: cargo clippy --locked --all-targets -p rustradar-core -p rustradar-backend -p rustradar-scene -p rustradar-map -p rustradar-app -p xtask -- -D warnings
-
-      # A second rasteriser, as every real GPU is one: a failure here (an annotation; the
-      # job stays green) is a test that holds on SwiftShader only, for its owner to
-      # loosen to what section 8 asks (properties that hold across rasterisers).
-      - name: Rust tests on lavapipe (not required)
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        run: VK_ICD_FILENAMES="$LAVAPIPE_ICD" cargo test --workspace --exclude rustradar --locked --no-fail-fast
-
-  # The native app keeps compiling for the other platforms it will ship on, each
-  # on a runner with that platform's C and C++ compilers: the build scripts of
-  # aws-lc-sys, zstd-sys and basisu_c_sys (C++, and bindgen over libclang) run
-  # under `cargo check` too, so a Linux host without them cannot check these
-  # targets. Android goes through cargo-ndk and the NDK, as the phone shells do
-  # (platform/android/build-rust.sh); iOS as platform/ios/build-rust.sh does.
-  native-targets:
-    name: Native port (check ${{ matrix.target }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-ios
-            os: macos-latest
-          - target: aarch64-linux-android
-            os: ubuntu-24.04
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        if: ${{ matrix.target == 'aarch64-linux-android' }}
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - uses: android-actions/setup-android@v3
-        if: ${{ matrix.target == 'aarch64-linux-android' }}
-        with:
-          packages: platform-tools
-
-      - name: Android NDK
-        if: ${{ matrix.target == 'aarch64-linux-android' }}
-        run: |
-          sdkmanager "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
-
-      # the native job's Rust
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.97.0"
-          targets: ${{ matrix.target }}
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target"
-          key: check-${{ matrix.target }}
-
-      - name: cargo-ndk
-        if: ${{ matrix.target == 'aarch64-linux-android' }}
-        run: cargo install cargo-ndk --version 4.1.2 --locked
-
-      - name: cargo check
-        env:
-          TARGET: ${{ matrix.target }}
-          # The Windows runner has no NASM: aws-lc-sys's prebuilt NASM objects
-          # instead (read only for x86_64 Windows).
-          AWS_LC_SYS_PREBUILT_NASM: "1"
-        run: |
-          case "$TARGET" in
-            # -P 24: the API level of minSdk, as build-rust.sh passes
-            aarch64-linux-android)
-              cargo ndk -t arm64-v8a -P 24 check -p rustradar-app --locked ;;
-            # the iOS SDK through xcrun, at the app's deployment target
-            aarch64-apple-ios)
-              env -u SDKROOT IPHONEOS_DEPLOYMENT_TARGET=15.0 cargo check -p rustradar-app --locked --target "$TARGET" ;;
-            *)
-              cargo check -p rustradar-app --locked --target "$TARGET" ;;
-          esac
+        run: cargo test -p rustradar -p fr24 --locked
 
   # The version a release publishes, worked out once for every platform: the
   # files' version, or the next patch after the latest release if that one is
   # already out (installed apps only update to a newer version).
+  #   version  that version (scripts/release-version.sh), as today
+  #   package  the version the native packages carry: on a v* tag the files' (a tag publishes the
+  #            version it holds), else `version` (written into the files by `cargo xtask bump`)
+  #   tag      the release's tag: the pushed tag, else v<version>
   version:
     name: Release version
-    # not on a push to rust-port (see `on.push`)
-    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/rust-port') }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pick.outputs.version }}
+      package: ${{ steps.pick.outputs.package }}
+      tag: ${{ steps.pick.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+
+      # release-version.sh reads the files' version through `cargo xtask version`
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: xtask
+
       - id: pick
         run: |
           version="$(bash scripts/release-version.sh)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Release version: $version (files say $(node -p 'require("./package.json").version'))" >> "$GITHUB_STEP_SUMMARY"
+          files="$(cargo --quiet xtask version)"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            package="$files" tag="$GITHUB_REF_NAME"
+            if [ "$tag" != "v$files" ]; then
+              echo "::warning::The tag $tag is not v$files, the version its files hold: the release is $files under $tag."
+            fi
+          else
+            package="$version" tag="v$version"
+          fi
+          {
+            echo "version=$version"
+            echo "package=$package"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release version: $version (files say $files); the native packages: $package, tag $tag" >> "$GITHUB_STEP_SUMMARY"
 
   # Installers for every platform via tauri-action.
   bundle:
@@ -594,3 +517,798 @@ jobs:
             exit 0
           fi
           gh release upload "$TAG" "${files[@]}" --clobber --repo "${{ github.repository }}"
+
+  # ---------------------------------------------------------------------------------------------
+  # The native app (docs/port). Its jobs use the Rust its engineers check it with, not the newest
+  # stable: each release's clippy adds lints, and -D warnings would turn them red with no change on
+  # the branch. Raise "1.97.0" everywhere below with the code.
+
+  # The workspace's tests on a software Vulkan driver, so the GPU tests run instead of printing
+  # "skipped", then clippy on the port's crates. The Tauri shim is left out: `check` tests it, with
+  # the WebKitGTK and frontend build it needs. A native release waits for this job.
+  native:
+    name: Native port (test & clippy)
+    runs-on: ubuntu-24.04
+    # the SwiftShader step alone takes about 80 min since stages 8-10 (the map crate's GPU tests an
+    # hour); the limit leaves room for a cold build and for the suite to grow
+    timeout-minutes: 240
+    env:
+      # line tables only: stack traces with lines, and a target folder that fits the runner's disk
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      # SwiftShader, from the runner's Google Chrome, is the CPU Vulkan driver the tests must pass on:
+      # the port's engineers check them with it (plan section 8).
+      - name: Software Vulkan (SwiftShader)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends vulkan-tools
+          swiftshader="$(find /opt/google/chrome -name vk_swiftshader_icd.json -print -quit)"
+          test -f "$swiftshader"
+          {
+            echo "VK_ICD_FILENAMES=$swiftshader"
+            echo "WGPU_BACKEND=vulkan"
+          } >> "$GITHUB_ENV"
+          # fails unless the driver loads and lists a device
+          VK_ICD_FILENAMES="$swiftshader" vulkaninfo --summary | grep -E "deviceName|driverInfo"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          components: clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: native
+
+      # A GPU test with no adapter prints `skipped: …` and passes, so a driver that wgpu
+      # cannot open would leave the rendering untested with every test green. One GPU test,
+      # its output shown: it names the adapter, or the step fails. (--lib: the same build as
+      # the next step's, so nothing is compiled twice.)
+      - name: The GPU tests have an adapter
+        run: |
+          out="$(cargo test --workspace --exclude rustradar --locked --lib -- --nocapture --exact gpu::tests::the_device_asks_for_the_texture_compression_the_adapter_has 2>&1)"
+          printf '%s\n' "$out" | grep -E "compression|skipped"
+          if printf '%s\n' "$out" | grep -q "skipped:"; then
+            echo "::error::wgpu found no adapter on SwiftShader: the GPU tests would only print skipped"
+            exit 1
+          fi
+
+      # --no-fail-fast: every failing test binary in one run, not only the first
+      - name: Rust tests
+        run: cargo test --workspace --exclude rustradar --locked --no-fail-fast
+
+      # The shots the GPU tests drew (target/shots), to look at beside docs/port/reference.
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: native-shots
+          path: target/shots
+          if-no-files-found: warn
+
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --all-targets -p rustradar-core -p rustradar-backend -p rustradar-scene -p rustradar-map -p rustradar-app -p xtask -- -D warnings
+
+  # A second rasteriser, as every real GPU is one: a failure here is a test that holds on SwiftShader
+  # only, for its owner to loosen to what plan section 8 asks (properties that hold across
+  # rasterisers). Not required, and only when asked for (Actions > Build > Run workflow > lavapipe):
+  # it took as long as the required run (about 85 min) and doubled the `native` job, which then hit
+  # its time limit before Clippy ran (stages 8-10 fix 4); the failures it reports are known (stages
+  # 8-10 gap 8: 10 map tests and 4 app tests that compare exact colours or counts) and wait for their
+  # owners, so running it on every push only queued pushes behind it. Its own job: it can no longer
+  # hold back `native` or a release.
+  native-lavapipe:
+    name: Native port (tests on lavapipe, not required)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.lavapipe }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    continue-on-error: true
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      # lavapipe's ICD file is lvp_icd.json or lvp_icd.x86_64.json, depending on the Mesa version
+      - name: Software Vulkan (lavapipe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          lavapipe=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          test -f "${lavapipe[0]}"
+          {
+            echo "VK_ICD_FILENAMES=${lavapipe[0]}"
+            echo "WGPU_BACKEND=vulkan"
+          } >> "$GITHUB_ENV"
+          VK_ICD_FILENAMES="${lavapipe[0]}" vulkaninfo --summary | grep -E "deviceName|driverInfo"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: native
+          save-if: false
+
+      - name: Rust tests on lavapipe
+        run: cargo test --workspace --exclude rustradar --locked --no-fail-fast
+
+  # The native app keeps compiling for the other platforms it ships on, each on a runner with that
+  # platform's C and C++ compilers (the build scripts of aws-lc-sys, zstd-sys and basisu_c_sys run
+  # under `cargo check` too): minutes, where the release builds below take an hour. Android goes
+  # through cargo-ndk and the NDK (platform/android/build-rust.sh); iOS as platform/ios/build-rust.sh.
+  native-targets:
+    name: Native port (check ${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-ios
+            os: macos-latest
+          - target: aarch64-linux-android
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        if: ${{ matrix.target == 'aarch64-linux-android' }}
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        if: ${{ matrix.target == 'aarch64-linux-android' }}
+        with:
+          packages: platform-tools
+
+      - name: Android NDK
+        if: ${{ matrix.target == 'aarch64-linux-android' }}
+        run: |
+          sdkmanager "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: check-${{ matrix.target }}
+
+      - name: cargo-ndk
+        if: ${{ matrix.target == 'aarch64-linux-android' }}
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: cargo check
+        env:
+          TARGET: ${{ matrix.target }}
+          # The Windows runner has no NASM: aws-lc-sys's prebuilt NASM objects
+          # instead (read only for x86_64 Windows).
+          AWS_LC_SYS_PREBUILT_NASM: "1"
+        run: |
+          case "$TARGET" in
+            # -P 24: the API level of minSdk, as build-rust.sh passes
+            aarch64-linux-android)
+              cargo ndk -t arm64-v8a -P 24 check -p rustradar-app --locked ;;
+            # the iOS SDK through xcrun, at the app's deployment target
+            aarch64-apple-ios)
+              env -u SDKROOT IPHONEOS_DEPLOYMENT_TARGET=15.0 cargo check -p rustradar-app --locked --target "$TARGET" ;;
+            *)
+              cargo check -p rustradar-app --locked --target "$TARGET" ;;
+          esac
+
+  # The desktop packages, as today's release has them (doc 07 §13, items P5-P7): `cargo xtask
+  # package` builds the release binary (`cargo build --release --locked`), writes each package's
+  # installer kind into it and packs it under today's names, for one platform per leg. Unsigned:
+  # the updater's .sig files are made in one place, `updater`, the only job a signing key reaches.
+  package:
+    name: Package (${{ matrix.name }})
+    needs: [tree, version]
+    if: ${{ needs.tree.outputs.native == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # NSIS -setup.exe and MSI (WiX 3, Windows only); the C runtime linked statically, as
+          # the packaging requires (no Visual C++ Redistributable on the user's machine, P5)
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            formats: nsis msi
+            rustflags: -C target-feature=+crt-static
+            exe: .exe
+          # .app.tar.gz (the updater's) and .dmg per architecture, sealed ad hoc, macOS 11 (P6);
+          # both from the arm64 runner
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            formats: app dmg
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            formats: app dmg
+          # .deb, .rpm and AppImage (P7), on the oldest Ubuntu the packages support: the deb asks
+          # for the glibc the binary was linked against
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            formats: deb rpm appimage
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.version.outputs.package }}
+      XTASK: target/debug/xtask${{ matrix.exe }}
+      # The Windows runner has no NASM (read only for x86_64 Windows)
+      AWS_LC_SYS_PREBUILT_NASM: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      # the libraries the AppImage carries, copied from this machine (package.rs checks they exist)
+      - name: Linux libraries for the AppImage
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon0 libxkbcommon-x11-0 libxcb-xkb1
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: package-${{ matrix.name }}
+
+      # the versions package.rs asks for (kept in ~/.cargo/bin by the cache)
+      - name: Packers
+        run: |
+          cargo install --locked cargo-packager@0.11.8
+          if [ "$RUNNER_OS" = Linux ]; then cargo install --locked cargo-generate-rpm@0.21.1; fi
+
+      # xtask built on its own, without the package step's RUSTFLAGS
+      - name: xtask
+        run: cargo build -p xtask --locked
+
+      # The release's version into the version files (nothing is committed): the next patch after
+      # the latest release on a push to main, the tag's on a tag, and on a dry run what a push to
+      # main would publish.
+      - name: Release version
+        run: '"$XTASK" bump "$VERSION"'
+
+      - name: Package
+        env:
+          # (applies to the target only: the build passes --target)
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          "$XTASK" package ${{ matrix.formats }} --target ${{ matrix.target }} --out dist
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The updater's half of the release, made once for all the packages (tauri-action merged it across
+  # its matrix legs): every package of today's release is there, each one the updater installs gets
+  # its .sig (`cargo xtask sign`), and one latest.json lists them all (`cargo xtask latest-json`, its
+  # signatures checked against the public key first). With the release's key
+  # (TAURI_SIGNING_PRIVATE_KEY and its password, by today's names) only on a run that publishes,
+  # checked against the key the app has built in; on a dry run with a throwaway key made here.
+  updater:
+    name: Updater signatures and latest.json
+    needs: [tree, version, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.version.outputs.package }}
+      TAG: ${{ needs.version.outputs.tag }}
+      PUBLISH: ${{ needs.tree.outputs.publish }}
+      XTASK: target/debug/xtask
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: xtask
+
+      # built in a step without the key: its dependencies' build scripts are third-party code
+      - name: xtask
+        run: cargo build -p xtask --locked
+
+      # the version the packages carry, which `sign` writes into each signature's trusted comment
+      - name: Release version
+        run: '"$XTASK" bump "$VERSION"'
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: dist
+
+      # Fail in seconds, naming the mistake. Prints only lengths, never the key.
+      - name: Check signing key
+        if: env.PUBLISH == 'true'
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bash scripts/check-signing-key.sh
+
+      - name: Sign with the release's key
+        if: env.PUBLISH == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          bash scripts/ci/sign-updater-artifacts.sh dist "$VERSION"
+          # the key the app checks updates with (update::PUBKEY, tauri.conf.json's)
+          pubkey="$(sed -n 's/^pub const PUBKEY: &str = "\(.*\)";$/\1/p' crates/app/src/update/mod.rs)"
+          test -n "$pubkey"
+          echo "PUBKEY=$pubkey" >> "$GITHUB_ENV"
+
+      - name: Sign with a throwaway key (dry run)
+        if: env.PUBLISH != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+          key="$RUNNER_TEMP/throwaway-updater-key"
+          bash scripts/ci/throwaway-updater-key.sh "$key"
+          TAURI_SIGNING_PRIVATE_KEY="$key/updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat "$key/password")" \
+            bash scripts/ci/sign-updater-artifacts.sh dist "$VERSION"
+          echo "PUBKEY=$(cat "$key/updater.key.pub")" >> "$GITHUB_ENV"
+          rm -rf "$key"
+
+      - name: latest.json
+        run: |
+          "$XTASK" latest-json dist --version "$VERSION" --pubkey "$PUBKEY" \
+            --url-base "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" --out latest.json
+          cat latest.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: updater
+          path: |
+            dist/*.sig
+            latest.json
+          if-no-files-found: error
+
+  # The .deb installed in a fresh ubuntu:22.04 and its binary started headless (P7's acceptance,
+  # platform/linux/install-check.sh), and the AppImage started here, each drawing Europe from the
+  # committed fixtures on Mesa's lavapipe. A native release waits for this job.
+  linux-install:
+    name: Linux packages installed and started
+    needs: [version, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.version.outputs.package }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-linux-x86_64
+          path: dist
+
+      - name: The .deb in ubuntu:22.04
+        run: |
+          mkdir -p shots
+          docker run --rm -v "$PWD:/src" -w /src ubuntu:22.04 \
+            bash platform/linux/install-check.sh "dist/RustRadar_${VERSION}_amd64.deb" shots/deb-ubuntu-22.04.png
+
+      - name: The AppImage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
+          bash scripts/ci/appimage-check.sh "dist/RustRadar_${VERSION}_amd64.AppImage" shots/appimage.png
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: install-shots
+          path: shots
+          if-no-files-found: warn
+
+  # The GitHub release, created once with every desktop package, its .sig and latest.json (doc 07
+  # §14.1; tauri-action created it from whichever leg came first), after the tests and the install
+  # check. Only for a push to main or a v* tag of a native tree.
+  release:
+    name: Publish the release
+    needs: [tree, version, native, package, updater, linux-install]
+    if: ${{ needs.tree.outputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.package }}
+      TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - name: Only main and v* tags publish
+        run: |
+          case "$GITHUB_REF" in
+            refs/heads/main | refs/tags/v*) ;;
+            *) echo "::error::$GITHUB_REF publishes nothing"; exit 1 ;;
+          esac
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: updater
+          path: dist
+
+      # Not a draft: `releases/latest/download/latest.json` only sees published releases. An
+      # existing release (a re-run) gets the files again.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          files=(dist/*)
+          ls -l dist
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "RustRadar v$VERSION" \
+              --notes "Installed copies update to this version automatically the next time they open."
+          fi
+          echo "**Release:** [RustRadar v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG)" >> "$GITHUB_STEP_SUMMARY"
+
+  # Android: the release APK (P8, `cargo xtask android-release`): the four ABIs, Gradle's release
+  # build, checked with aapt2 and named RustRadar_<version>.apk. Signed with today's keystore
+  # (ANDROID_KEYSTORE, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS) only on a run that publishes;
+  # elsewhere unsigned, RustRadar_<version>_unsigned.apk, which a release never carries.
+  android-release:
+    name: Android release APK (native)
+    needs: [tree, version]
+    if: ${{ needs.tree.outputs.native == 'true' }}
+    runs-on: ubuntu-24.04
+    # four LTO release builds of the app
+    timeout-minutes: 180
+    env:
+      VERSION: ${{ needs.version.outputs.package }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Android NDK
+        run: |
+          sdkmanager "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: android-release
+
+      - name: cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      # built in a step without the secrets: its dependencies' build scripts are third-party code
+      - name: xtask
+        run: cargo build -p xtask --locked
+
+      - name: Release version
+        run: target/debug/xtask bump "$VERSION"
+
+      # (the xtask writes the keystore only after the Rust build and keeps the secrets out of every
+      # child process; empty values mean no secrets)
+      - name: Release APK
+        id: apk
+        env:
+          ANDROID_KEYSTORE: ${{ needs.tree.outputs.publish == 'true' && secrets.ANDROID_KEYSTORE || '' }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ needs.tree.outputs.publish == 'true' && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+          ANDROID_KEY_ALIAS: ${{ needs.tree.outputs.publish == 'true' && secrets.ANDROID_KEY_ALIAS || '' }}
+        run: |
+          target/debug/xtask android-release --version "$VERSION" --out dist
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-android-apk
+          path: dist/*.apk
+          if-no-files-found: error
+
+  # The APK as Android reads it (P8's acceptance): `aapt dump badging` shows com.felix.rustradar, the
+  # version and versionCode major*1000000 + minor*1000 + patch, minSdk 24 and the four ABIs.
+  apk-check:
+    name: APK badging
+    needs: [version, android-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.version.outputs.package }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-android-apk
+          path: dist
+
+      - name: aapt dump badging
+        run: |
+          shopt -s nullglob
+          # RustRadar_<version>.apk, or RustRadar_<version>_unsigned.apk without the signing secrets
+          apks=(dist/RustRadar_"$VERSION"*.apk)
+          test ${#apks[@]} -eq 1
+          bash scripts/ci/check-apk.sh "${apks[0]}" "$VERSION"
+
+  # iOS: the release IPA (P9, `cargo xtask ios-release`): xcodegen's project, the Release archive
+  # for devices. On a run that publishes, with the App Store Connect secrets (APPLE_API_ISSUER,
+  # APPLE_API_KEY_ID, APPLE_API_KEY, APPLE_DEVELOPMENT_TEAM), the App Store build, signed through App
+  # Store Connect (`testflight` uploads it once the tests pass); without them, and on every other
+  # run, the unsigned IPA for sideloading tools.
+  ios-release:
+    name: iOS release IPA (native)
+    needs: [tree, version]
+    if: ${{ needs.tree.outputs.native == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      VERSION: ${{ needs.version.outputs.package }}
+    outputs:
+      signed: ${{ steps.store.outputs.signed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          targets: aarch64-apple-ios
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: ios-release
+
+      - name: xcodegen
+        run: brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+      # built in a step without the secrets: its dependencies' build scripts are third-party code
+      - name: xtask
+        run: cargo build -p xtask --locked
+
+      - name: Release version
+        run: target/debug/xtask bump "$VERSION"
+
+      - name: Unsigned IPA
+        if: needs.tree.outputs.publish != 'true'
+        run: |
+          target/debug/xtask ios-release --unsigned --version "$VERSION" --out dist
+          ls -l dist
+
+      # (the xtask writes the key only after the archive, keeps the secrets out of every child
+      # process, and refuses an App Store build anywhere but main and v* tags)
+      - name: App Store build
+        id: store
+        if: needs.tree.outputs.publish == 'true'
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+        run: |
+          target/debug/xtask ios-release --version "$VERSION" --out dist
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-ios-ipa
+          path: dist/*.ipa
+          if-no-files-found: error
+
+  # The App Store build to TestFlight, once the tests have passed (today's upload: altool with the
+  # App Store Connect key). Only on a run that publishes, with a signed IPA.
+  testflight:
+    name: Upload to TestFlight
+    needs: [tree, version, native, ios-release]
+    if: ${{ needs.tree.outputs.publish == 'true' && needs.ios-release.outputs.signed == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.version.outputs.package }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-ios-ipa
+          path: dist
+
+      - name: Upload to TestFlight
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          ipa="dist/RustRadar_${VERSION}.ipa"
+          test -f "$ipa"
+          mkdir -p ~/.appstoreconnect/private_keys
+          key="$HOME/.appstoreconnect/private_keys/AuthKey_$APPLE_API_KEY_ID.p8"
+          (umask 077 && printf '%s\n' "$APPLE_API_KEY" > "$key")
+          status=0
+          xcrun altool --upload-app --type ios --file "$ipa" --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER" || status=$?
+          rm -f "$key"
+          exit "$status"
+
+  # The phone builds on the release `release` created (one phone's failure doesn't hold back the
+  # other's): the signed APK if its badging passed (never an *_unsigned.apk: Android installs none,
+  # and the app's update check takes a release's first .apk) and the IPA, as today.
+  phones-release:
+    name: Attach phone builds (native)
+    needs: [tree, version, release, android-release, apk-check, ios-release]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.tree.outputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        if: ${{ needs.apk-check.result == 'success' }}
+        continue-on-error: true
+        with:
+          name: native-android-apk
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: native-ios-ipa
+          path: dist
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          shopt -s nullglob
+          files=(dist/*.ipa)
+          for apk in dist/*.apk; do
+            [[ "$apk" == *_unsigned.apk ]] || files+=("$apk")
+          done
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::No phone builds to attach."
+            exit 0
+          fi
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # The phone shells for people with devices (docs/port/device-notes.md; plan item E19, folded in
+  # from phone-shells.yml): a debug APK, signed with the debug key so that it installs (the dry run's
+  # release APK is unsigned), and an unsigned simulator app.
+  phone-android-debug:
+    name: Android debug APK (phone shell)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # line tables only: stack traces with lines, and a debug library of a sensible size
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Android NDK
+        run: |
+          sdkmanager "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          targets: aarch64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: phone-android
+
+      - name: cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Rust library (arm64-v8a)
+        run: platform/android/build-rust.sh arm64-v8a
+
+      - name: Gradle
+        working-directory: platform/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Collect the APK
+        run: |
+          mkdir -p dist
+          cp platform/android/app/build/outputs/apk/debug/app-debug.apk dist/RustRadar_native_debug.apk
+          ls -l dist platform/android/app/src/main/jniLibs/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-native-debug-apk
+          path: dist/*.apk
+
+  phone-ios-simulator:
+    name: iOS simulator app (phone shell)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: phone-ios
+
+      - name: Xcode project
+        working-directory: platform/ios
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcodegen generate
+
+      - name: Simulator app (unsigned)
+        working-directory: platform/ios
+        run: |
+          xcodebuild -project RustRadar.xcodeproj -scheme RustRadar -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+
+      - name: Collect the app
+        run: |
+          mkdir -p dist
+          app=platform/ios/build/Build/Products/Debug-iphonesimulator/RustRadar.app
+          plutil -p "$app/Info.plist"
+          ditto -c -k --keepParent "$app" dist/RustRadar_native_simulator.app.zip
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-native-simulator-app
+          path: dist/*.zip

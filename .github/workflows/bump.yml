@@ -1,8 +1,10 @@
 name: Bump version
 
-# Actions > Bump version > Run workflow: changes the version in all four files
-# (scripts/version.mjs) and commits it to the branch picked under "Use workflow
-# from", with no clone needed. Merging that to main then publishes the release.
+# Actions > Bump version > Run workflow: changes the version in every file that
+# carries it (`cargo xtask bump`, crates/xtask/src/bump.rs: today's four while
+# the Tauri app is in the tree, the native app's Cargo.toml and its Cargo.lock
+# entry too) and commits it to the branch picked under "Use workflow from",
+# with no clone needed. Merging that to main then publishes the release.
 on:
   workflow_dispatch:
     inputs:
@@ -17,6 +19,9 @@ permissions:
 concurrency:
   group: bump-${{ github.ref }}
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   bump:
     name: Bump version
@@ -24,14 +29,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+
+      # the release workflow's cache of xtask (rust.yml, job `version`)
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: xtask
+          save-if: false
+
       - name: Change the version
         env:
           BUMP: ${{ inputs.bump }}
-        run: node scripts/version.mjs "$(printf '%s' "$BUMP" | tr -d '[:space:]')"
+        run: cargo --quiet xtask bump "$(printf '%s' "$BUMP" | tr -d '[:space:]')"
 
       - name: Commit and push
         run: |
-          version="$(node -p 'require("./package.json").version')"
+          version="$(cargo --quiet xtask version)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "Version $version"

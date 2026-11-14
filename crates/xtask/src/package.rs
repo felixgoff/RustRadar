@@ -418,7 +418,9 @@ fn template_path(path: &Path) -> Result<String, String> {
     if text.contains(['$', '"', '{', '}', '<', '>', '&']) {
         return Err(format!("{text}: a path the installer templates cannot name (no $ \" {{ }} < > &)"));
     }
-    Ok(text.to_owned())
+    // makensis on Windows splits an !include path at backslashes only, so `D:\repo` joined with
+    // `platform/windows/utils.nsh` is not found there (CI run 319): Windows' separator throughout
+    Ok(if cfg!(windows) { text.replace('/', "\\") } else { text.to_owned() })
 }
 
 /// Fills in what cargo-packager's data lacks or derives otherwise in `platform/windows/installer.nsi`

@@ -82,6 +82,7 @@ jobs:
             echo "native=$native"
             echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
+          echo "Tauri app: $tauri; native packages built: $native; published: $publish"
           echo "**Tree:** Tauri app: $tauri; native packages built: $native; published: $publish" >> "$GITHUB_STEP_SUMMARY"
 
   # Fast feedback: frontend type-check + Rust tests of the Tauri app.

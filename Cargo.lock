@@ -5160,6 +5160,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "embed-resource",
  "env_logger",
  "flate2",
  "fr24",

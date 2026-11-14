@@ -86,3 +86,31 @@ libs = ["libxkbcommon.so.0", "libxkbcommon-x11.so.0", "libxcb-xkb.so.1"]
 # file is called (Tauri's AppImage had RustRadar.desktop there; the name inside an AppImage is read by
 # no updater or package manager).
 files = { "platform/linux/RustRadar.desktop" = "usr/share/applications/rustradar.desktop" }
+
+# ---- Windows (P5) --------------------------------------------------------------------------------
+
+# The NSIS installer and the MSI are made from tauri-bundler 2.10.1's templates (platform/windows), the
+# ones that made today's RustRadar_<version>_x64-setup.exe and RustRadar_<version>_x64_en-US.msi, so that
+# each upgrades today's install in place and the old Tauri updater can run it (doc 07 §7.2, §12.1, §13.1,
+# §13.6). `cargo xtask package nsis msi` stages the binary as rustradar.exe (today's: $INSTDIR\rustradar.exe,
+# the uninstall key's MainBinaryName), fills in what cargo-packager does not derive as tauri-bundler did
+# (each template's head says what) and points `template` at that copy. No WebView2 bootstrapper: the
+# native app has no webview. The publisher is the identifier's second part, `felix`, as both bundlers
+# derive it (today's Manufacturer, CompanyName and Software\felix\RustRadar).
+[windows]
+# tauri-bundler's default, written out: cargo-packager hands the NSIS template no value without it.
+allow-downgrades = true
+
+[nsis]
+template = "platform/windows/installer.nsi"
+# Per user, $LOCALAPPDATA\RustRadar, HKCU, no elevation: tauri.conf.json sets no bundle.windows.nsis, and
+# this is tauri-bundler's default.
+installer-mode = "currentUser"
+compression = "lzma"
+languages = ["English"]
+# tauri-bundler's English strings (its template's messages; cargo-packager's own file lacks some).
+custom-language-file = { English = "platform/windows/English.nsh" }
+
+[wix]
+template = "platform/windows/main.wxs"
+languages = ["en-US"]

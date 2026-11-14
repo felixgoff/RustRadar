@@ -71,6 +71,14 @@ pub fn window_attributes(options: &Options) -> WindowAttributes {
     // Tauri window's were.
     #[cfg(target_os = "linux")]
     let attributes = attributes.with_name("rustradar", "rustradar");
+    // The title bar's and the taskbar's icon on Windows: the executable's own, icon group 32512 that
+    // build.rs embeds (tauri-build's id, item P5), as the Tauri window showed it.
+    #[cfg(target_os = "windows")]
+    let attributes = {
+        use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
+        let icon = || winit::window::Icon::from_resource(32512, None).ok();
+        attributes.with_window_icon(icon()).with_taskbar_icon(icon())
+    };
     attributes
 }
 

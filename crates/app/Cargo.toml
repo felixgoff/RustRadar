@@ -49,6 +49,12 @@ fr24 = { workspace = true }
 [dev-dependencies]
 png = "0.18"
 
+# build.rs's Windows resources (icon, version information, manifest; item P5), compiled with the crate
+# tauri-winres compiles with. A cfg on build dependencies is the host's, so only a Windows host builds
+# it: Linux, Android and iOS builds never do.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.12"
+
 # Desktop: X11 + Wayland, system clipboard (arboard), opening links.
 # arboard does not build for iOS (it falls into its Linux/Wayland branch) and
 # has no Android backend, so mobile gets egui's in-process clipboard until a

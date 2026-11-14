@@ -380,6 +380,76 @@ pub fn wix_template(text: &str, product_name: &str) -> Result<String, String> {
     Ok(filled)
 }
 
+/// The DLLs a Windows executable (PE32+) imports, as its import directory names them.
+pub fn windows_imports(binary: &[u8]) -> Result<Vec<String>, String> {
+    let bad = || "not a 64-bit Windows executable (PE32+)".to_owned();
+    let u16_at = |at: usize| binary.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]])).ok_or_else(bad);
+    let u32_at = |at: usize| binary.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).ok_or_else(bad);
+    if !binary.starts_with(b"MZ") {
+        return Err(bad());
+    }
+    let pe = u32_at(0x3c)? as usize;
+    if binary.get(pe..pe + 4) != Some(b"PE\0\0") {
+        return Err(bad());
+    }
+    let sections = u16_at(pe + 6)? as usize;
+    let optional = pe + 24;
+    let optional_len = u16_at(pe + 20)? as usize;
+    if u16_at(optional)? != 0x20b {
+        return Err(bad());
+    }
+    // data directory 1 (imports) of PE32+'s optional header
+    let imports = u32_at(optional + 112 + 8)? as usize;
+    // a virtual address to its place in the file, through the section table
+    let table = optional + optional_len;
+    let file_at = |rva: usize| -> Result<usize, String> {
+        for i in 0..sections {
+            let header = table + i * 40;
+            let (size, address, raw) = (u32_at(header + 8)? as usize, u32_at(header + 12)? as usize, u32_at(header + 20)? as usize);
+            if (address..address + size.max(1)).contains(&rva) {
+                return Ok(raw + rva - address);
+            }
+        }
+        Err(format!("address {rva:#x} is in no section"))
+    };
+    let mut names = Vec::new();
+    if imports == 0 {
+        return Ok(names);
+    }
+    let mut descriptor = file_at(imports)?;
+    loop {
+        let name = u32_at(descriptor + 12)? as usize;
+        if name == 0 {
+            break;
+        }
+        let at = file_at(name)?;
+        let len = binary[at..].iter().position(|b| *b == 0).ok_or_else(bad)?;
+        names.push(String::from_utf8_lossy(&binary[at..at + len]).into_owned());
+        descriptor += 20;
+    }
+    Ok(names)
+}
+
+/// Refuses a Windows binary that needs the Visual C++ Redistributable: today's `rustradar.exe` imports
+/// neither `vcruntime140.dll` nor `msvcp140.dll` (tauri-build linked the Visual C++ runtime statically),
+/// only Windows' own DLLs and the Universal CRT, so it starts on a Windows without the redistributable.
+pub fn check_windows_imports(binary: &[u8]) -> Result<(), String> {
+    let redistributable: Vec<String> = windows_imports(binary)?
+        .into_iter()
+        .filter(|dll| ["vcruntime", "msvcp", "concrt", "vccorlib"].iter().any(|p| dll.to_ascii_lowercase().starts_with(p)))
+        .collect();
+    if redistributable.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the executable imports {}, which come with the Visual C++ Redistributable and not with Windows (today's imports none): \
+             build it with RUSTFLAGS=\"-C target-feature=+crt-static\" so that the C and C++ dependencies link their runtime statically too \
+             (crates/app/build.rs links the Visual C++ runtime statically, as tauri-build did)",
+            redistributable.join(", ")
+        ))
+    }
+}
+
 /// Refuses a Windows binary without the resources `crates/app/build.rs` embeds (a cross build without
 /// a resource compiler leaves them out): the manifest as written, and the version information at
 /// `version`.
@@ -567,6 +637,7 @@ fn pack(root: &Path, work: &Path, format: Format, binary: &[u8], version: &str, 
     // the binary as this package installs it, its installer kind written in
     if format.windows() {
         check_windows_resources(binary, version)?;
+        check_windows_imports(binary)?;
     }
     let mut patched = binary.to_vec();
     patch_marker(&mut patched, format.marker())?;
@@ -1127,6 +1198,48 @@ mod tests {
         let error = check_windows_resources(&bare, "0.3.16").unwrap_err();
         assert!(error.contains("its manifest and its version information"), "{error}");
         assert!(check_windows_resources(b"\x7fELF", "0.3.16").unwrap_err().contains("not a Windows executable"));
+    }
+
+    /// A minimal PE32+ importing `dlls` (one section at 0x1000, its import descriptors first).
+    fn pe_importing(dlls: &[&str]) -> Vec<u8> {
+        let mut pe = vec![0u8; 0x600];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        pe[0x40..0x44].copy_from_slice(b"PE\0\0");
+        pe[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes());
+        pe[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
+        pe[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
+        let optional = 0x58;
+        pe[optional..optional + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+        pe[optional + 120..optional + 124].copy_from_slice(&0x1000u32.to_le_bytes());
+        let section = optional + 240;
+        pe[section..section + 5].copy_from_slice(b".idat");
+        for (at, value) in [(8, 0x400u32), (12, 0x1000), (16, 0x400), (20, 0x200)] {
+            pe[section + at..section + at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (i, dll) in dlls.iter().enumerate() {
+            let name = 0x100 + i * 0x40;
+            pe[0x200 + i * 20 + 12..0x200 + i * 20 + 16].copy_from_slice(&(0x1000 + name as u32).to_le_bytes());
+            pe[0x200 + name..0x200 + name + dll.len()].copy_from_slice(dll.as_bytes());
+        }
+        pe
+    }
+
+    /// The executable's imports are read off its import directory; the Visual C++ Redistributable's
+    /// DLLs are refused (v0.3.16's rustradar.exe imports Windows' DLLs and the Universal CRT only, read
+    /// with objdump -p).
+    #[test]
+    fn a_windows_binary_needs_no_redistributable() {
+        let today = ["KERNEL32.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "comctl32.dll", "user32.dll"];
+        assert_eq!(windows_imports(&pe_importing(&today)).unwrap(), today);
+        check_windows_imports(&pe_importing(&today)).unwrap();
+        check_windows_imports(&pe_importing(&[])).unwrap();
+        for dll in ["MSVCP140.dll", "VCRUNTIME140.dll", "vcruntime140_1.dll"] {
+            let error = check_windows_imports(&pe_importing(&["KERNEL32.dll", dll])).unwrap_err();
+            assert!(error.contains(dll) && error.contains("+crt-static"), "{error}");
+        }
+        assert!(windows_imports(b"MZ").is_err());
+        assert!(windows_imports(b"\x7fELF").is_err());
     }
 
     /// The whole flow on a stand-in binary: each package built, named and laid out as today's. Run by

@@ -3,7 +3,14 @@
 //! as icon group 32512), the version information (from this crate's version, which `cargo xtask bump`
 //! writes: item F5) and the application manifest (Common Controls 6, per-monitor-v2 DPI awareness, the
 //! invoker's execution level), linked into the binaries only. The resources themselves are
-//! `platform/windows/resources.rs`'s.
+//! `platform/windows/resources.rs`'s. For MSVC it also links the Visual C++ runtime statically, as
+//! tauri-build does by default (`build.windows.staticVCRuntime`, its `static_vcruntime.rs`): today's
+//! executable imports no `vcruntime140.dll`, only the Universal CRT that every Windows 10 has, so it
+//! starts without the Visual C++ Redistributable installed (doc 07 §13.1 asked to decide this; the
+//! answer is today's). The C++ dependencies (basisu) compiled `/MD` still import `msvcp140.dll` from
+//! the redistributable, so the release build is made with `-C target-feature=+crt-static`, which links
+//! every part's runtime statically; the hybrid is then left out (`cargo xtask package nsis msi`
+//! refuses an executable that imports the redistributable's DLLs).
 //!
 //! On every other target it does nothing, so Linux, Android and iOS builds compile no resource tool:
 //! `embed-resource` (the crate tauri-winres compiles with) is a build dependency on Windows hosts only.
@@ -22,6 +29,37 @@ fn main() {
     println!("cargo:rerun-if-changed=../../platform/windows/resources.rs");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         windows_resources();
+        // with `+crt-static` rustc links the whole C runtime statically already (and the C and C++
+        // dependencies follow it, which the hybrid below cannot make them do)
+        let crt_static = env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|f| f.split(',').any(|f| f == "crt-static"));
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") && !crt_static {
+            static_vc_runtime();
+        }
+    }
+}
+
+/// tauri-build 2.7.1's `static_vcruntime::build` (from ChrisDenton's static_vcruntime): the static
+/// vcruntime and C runtime start-up (libvcruntime, libcmt) with the dynamic Universal CRT (ucrt), and an
+/// empty `msvcrt.lib` first on the library path in place of the one rustc names.
+fn static_vc_runtime() {
+    let machine: &[u8] = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86_64") => &[0x64, 0x86],
+        Ok("x86") => &[0x4C, 0x01],
+        _ => return,
+    };
+    let bytes: &[u8] = &[
+        1, 0, 94, 3, 96, 98, 60, 0, 0, 0, 1, 0, 0, 0, 0, 0, 132, 1, 46, 100, 114, 101, 99, 116, 118, 101, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 16, 0, 46, 100, 114, 101, 99, 116, 118, 101, 0,
+        0, 0, 0, 1, 0, 0, 0, 3, 0, 4, 0, 0, 0,
+    ];
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    std::fs::write(out.join("msvcrt.lib"), [machine, bytes].concat()).unwrap_or_else(|e| panic!("msvcrt.lib: {e}"));
+    println!("cargo:rustc-link-search=native={}", out.display());
+    for lib in ["libvcruntimed.lib", "vcruntime.lib", "vcruntimed.lib", "libcmtd.lib", "msvcrt.lib", "msvcrtd.lib", "libucrt.lib", "libucrtd.lib"] {
+        println!("cargo:rustc-link-arg=/NODEFAULTLIB:{lib}");
+    }
+    for lib in ["libcmt.lib", "libvcruntime.lib", "ucrt.lib"] {
+        println!("cargo:rustc-link-arg=/DEFAULTLIB:{lib}");
     }
 }
 

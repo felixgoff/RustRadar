@@ -678,8 +678,8 @@ jobs:
       - name: Android NDK
         if: ${{ matrix.target == 'aarch64-linux-android' }}
         run: |
-          sdkmanager "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          sdkmanager "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -1012,10 +1012,15 @@ jobs:
         with:
           packages: platform-tools
 
+      # NDK r28c (clang 19) for the native app, where today's Tauri job has r27 (27.0.12077973):
+      # r27's clang 18 (r27d's too) crashes compiling basisu's transcoder (basisu_c_sys) for
+      # armeabi-v7a at -O2 and -O3 on some of the runners' CPUs (SIGSEGV or SIGILL in its optimizer,
+      # CI runs 320 and 321; the same on an Intel Xeon with AVX-512 here), while r28c compiles it. The
+      # other Android jobs below use the same NDK.
       - name: Android NDK
         run: |
-          sdkmanager "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          sdkmanager "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -1036,18 +1041,6 @@ jobs:
 
       - name: Release version
         run: target/debug/xtask bump "$VERSION"
-
-      # The four libraries first, as the release builds them (android-release then finds them built),
-      # once more if the first try fails: the NDK's clang 18 crashed (SIGSEGV, in its optimizer)
-      # compiling basisu's transcoder for armeabi-v7a in CI run 320, where run 319 had built the same
-      # file at the same commit's settings.
-      - name: Rust libraries (four ABIs)
-        run: |
-          for attempt in 1 2; do
-            platform/android/build-rust.sh --release --locked arm64-v8a armeabi-v7a x86 x86_64 && exit 0
-            echo "::warning::The Android Rust build failed (try $attempt of 2)."
-          done
-          exit 1
 
       # (the xtask writes the keystore only after the Rust build and keeps the secrets out of every
       # child process; empty values mean no secrets)
@@ -1252,8 +1245,8 @@ jobs:
 
       - name: Android NDK
         run: |
-          sdkmanager "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          sdkmanager "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@master
         with:

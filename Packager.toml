@@ -114,3 +114,30 @@ custom-language-file = { English = "platform/windows/English.nsh" }
 [wix]
 template = "platform/windows/main.wxs"
 languages = ["en-US"]
+
+# ---- macOS (P6) ----------------------------------------------------------------------------------
+
+# One .app per architecture (aarch64 and x86_64, not universal), as today's release ships them:
+# RustRadar_<version>_{aarch64,x64}.app.tar.gz (the updater's archive, with its .sig) and
+# RustRadar_<version>_{aarch64,x64}.dmg. `cargo xtask package app dmg` makes RustRadar.app with
+# cargo-packager (RustRadar.app/Contents/{Info.plist, MacOS/rustradar, Resources/icon.icns}: today's
+# layout, the icon the .icns of `icons` above), seals it ad hoc with `codesign` (on macOS), archives it
+# as tauri-bundler 2.10.1 archives it for the updater, and makes the disk image with tauri-bundler's
+# own dmg script (platform/macos/bundle_dmg.sh) from the sealed bundle; cargo-packager's dmg would
+# bundle an unsealed .app and skip today's Finder layout on CI. The binary keeps its installer kind
+# unpatched (tauri-bundler patches nothing on macOS; the unknown kind is the .app there).
+[macos]
+# The deployment target the release is built for (MACOSX_DEPLOYMENT_TARGET, as the Tauri CLI set it
+# from this setting) and the Info.plist's LSMinimumSystemVersion (plan section 9, question 5).
+minimum-system-version = "11.0"
+# The bundle's Info.plist, filled in with the version by `cargo xtask package` (its head says what).
+info-plist-path = "platform/macos/Info.plist"
+
+# Today's disk image (read off v0.3.16's RustRadar_0.3.16_aarch64.dmg: its .DS_Store): a 660 x 400
+# window, RustRadar.app at (180, 170) and the Applications link at (480, 170), tauri-bundler's
+# defaults; 128 px icons, 16 px text, no background, the volume named RustRadar with the app's icon.
+# cargo-packager's own default window is 600 x 400. Its names for these keys.
+[dmg]
+window-size = { width = 660, height = 400 }
+app-position = { x = 180, y = 170 }
+application-folder-position = { x = 480, y = 170 }

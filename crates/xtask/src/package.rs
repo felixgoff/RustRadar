@@ -1,7 +1,7 @@
 //! `cargo xtask package <format>...`: the desktop packages (plan stage 11, rows P5–P7; doc 07 §13).
 //!
 //! ```text
-//! cargo xtask package deb rpm appimage [--target TRIPLE] [--binary FILE] [--out DIR] [--sign]
+//! cargo xtask package <deb|rpm|appimage|nsis|msi|app|dmg>... [--target TRIPLE] [--binary FILE] [--out DIR] [--sign]
 //! ```
 //!
 //! Builds the app's release binary (`cargo build --release --locked` of the package `crates/app` is,
@@ -70,9 +70,40 @@
 //! ([`upgrade_code`]: today's `{C73F46FF-44DC-5F3E-AB93-388B09B92DEC}`). The MSI is made on Windows only
 //! (WiX 3); the NSIS installer also elsewhere, with `makensis` on the path.
 //!
-//! **For P6** (macOS): its formats become variants of [`Format`] with their marker and today's asset
-//! names (`RustRadar_0.3.16_{x64,aarch64}.app.tar.gz` and `.dmg`), and their tables go into
-//! `Packager.toml`; [`packager_config`], the build, the patch and the move to `--out` are the same.
+//! **macOS** (item P6; doc 07 §7.2, §12.1, §13.2, §13.6): `app` and `dmg`, one per architecture
+//! (`--target aarch64-apple-darwin` and `x86_64-apple-darwin`, as today's release ships them, not
+//! universal), the release built for the deployment target `Packager.toml`'s
+//! `[macos] minimum-system-version` names (`MACOSX_DEPLOYMENT_TARGET`, as the Tauri CLI set it):
+//!
+//! | format | made by | package (v0.3.16's asset) | installer kind |
+//! |---|---|---|---|
+//! | `app` | cargo-packager's `.app`, sealed ad hoc, archived as tauri-bundler archives it | `RustRadar_0.3.16_aarch64.app.tar.gz`, `…_x64.app.tar.gz` | left `…_UNK` |
+//! | `dmg` | the same `.app` in tauri-bundler 2.10.1's disk image (`platform/macos/bundle_dmg.sh`) | `RustRadar_0.3.16_aarch64.dmg`, `…_x64.dmg` | left `…_UNK` |
+//!
+//! The bundle is today's: `RustRadar.app/Contents/{Info.plist, MacOS/rustradar, Resources/icon.icns}`,
+//! its `Info.plist` `platform/macos/Info.plist` at the release version ([`info_plist`]; the file's head
+//! says which keys are today's and which are new), its icon `src-tauri/icons/icon.icns`; the binary
+//! must be a Mach-O for the architecture named ([`check_macos_binary`]). The installer kind is left as
+//! it is: tauri-bundler's `patch_binary` skips the `.app` and the dmg, and an unknown kind is the `.app`
+//! on macOS (tauri-utils' `bundle_type`, the app's `Installer::from_marker`), where `_APP` would say
+//! AppImage. On macOS the bundle is then sealed ad hoc ([`sign_app`]: `codesign --force --deep --sign -`,
+//! verified with `--strict`, so that the bundle's seal covers its `Info.plist` and icon, doc 07 §13.2;
+//! deviation: today's bundle carries only the linker's ad hoc signature on its executable and no
+//! `_CodeSignature`); elsewhere it is left as cargo-packager made it, with a warning.
+//! [`check_app_bundle`] checks the layout and the `Info.plist` before and after.
+//!
+//! The updater's archive is `RustRadar.app` in a `.tar.gz` as tauri-bundler 2.10.1's `create_tar` makes
+//! it ([`app_archive`]: the tar crate's `append_dir_all` under the bundle's own name, symlinks kept,
+//! flate2's default gzip), which the old Tauri updater and the app's (P3) unpack with the top folder
+//! dropped. With `--sign` it is signed as `RustRadar.app.tar.gz`, the name tauri-bundler gave it and
+//! v0.3.16's `.sig` files name in their trusted comment, then moved to its asset name with its `.sig`.
+//! The disk image is made on macOS only (`hdiutil`, and the Finder through `osascript` for its layout):
+//! tauri-bundler's script and AppleScript, byte for byte, with tauri-bundler's arguments for today's
+//! configuration ([`dmg_args`]: `Packager.toml`'s `[dmg]` layout, the volume named after the product
+//! with the app's icon), without `--skip-jenkins`, which tauri-bundler adds when `CI=true` unless
+//! `TAURI_BUNDLER_DMG_IGNORE_CI=true`, which tauri-action sets: today's CI ran the Finder's layout on
+//! GitHub's macOS runner, and v0.3.16's dmg has it. It gets no `.sig`, as today. cargo-packager's own
+//! dmg is not used: it makes its own unsealed `.app` and passes `--skip-jenkins` on CI.
 
 use crate::bump;
 use crate::sign;
@@ -98,6 +129,9 @@ pub const RPM_TOML: &str = "platform/linux/rpm.toml";
 pub const NSIS_TEMPLATE: &str = "platform/windows/installer.nsi";
 pub const NSIS_UTILS: &str = "platform/windows/utils.nsh";
 pub const WIX_TEMPLATE: &str = "platform/windows/main.wxs";
+pub const INFO_PLIST: &str = "platform/macos/Info.plist";
+pub const DMG_SCRIPT: &str = "platform/macos/bundle_dmg.sh";
+pub const DMG_APPLESCRIPT: &str = "platform/macos/template.applescript";
 
 /// The Windows executable's resources, which `crates/app/build.rs` writes (shared with it).
 #[allow(dead_code)]
@@ -112,13 +146,16 @@ pub enum Format {
     AppImage,
     Nsis,
     Msi,
+    App,
+    Dmg,
 }
 
 impl Format {
     #[cfg_attr(not(test), allow(dead_code))]
     pub const LINUX: [Format; 3] = [Format::Deb, Format::Rpm, Format::AppImage];
     pub const WINDOWS: [Format; 2] = [Format::Nsis, Format::Msi];
-    pub const ALL: [Format; 5] = [Format::Deb, Format::Rpm, Format::AppImage, Format::Nsis, Format::Msi];
+    pub const MACOS: [Format; 2] = [Format::App, Format::Dmg];
+    pub const ALL: [Format; 7] = [Format::Deb, Format::Rpm, Format::AppImage, Format::Nsis, Format::Msi, Format::App, Format::Dmg];
 
     /// Its name on the command line (cargo-packager's, for those it packs, but `msi` for its `wix`).
     pub fn name(self) -> &'static str {
@@ -128,13 +165,17 @@ impl Format {
             Format::AppImage => "appimage",
             Format::Nsis => "nsis",
             Format::Msi => "msi",
+            Format::App => "app",
+            Format::Dmg => "dmg",
         }
     }
 
-    /// Its name in cargo-packager's `formats`.
+    /// Its name in cargo-packager's `formats`: `app` for the dmg too, which is made from
+    /// cargo-packager's `.app` with tauri-bundler's script (the module's docs say why).
     pub fn packager_name(self) -> &'static str {
         match self {
             Format::Msi => "wix",
+            Format::Dmg => "app",
             other => other.name(),
         }
     }
@@ -148,7 +189,14 @@ impl Format {
         Format::WINDOWS.contains(&self)
     }
 
-    /// What tauri-bundler's `patch_binary` writes over [`MARKER`] for this package.
+    /// Whether this is made from the macOS `.app`.
+    pub fn macos(self) -> bool {
+        Format::MACOS.contains(&self)
+    }
+
+    /// What tauri-bundler's `patch_binary` writes over [`MARKER`] for this package: [`MARKER`] itself
+    /// for the macOS ones, which it leaves as they are (the unknown kind is the `.app` on macOS; `_APP`
+    /// is the AppImage).
     pub fn marker(self) -> &'static [u8; 27] {
         match self {
             Format::Deb => b"__TAURI_BUNDLE_TYPE_VAR_DEB",
@@ -156,6 +204,7 @@ impl Format {
             Format::AppImage => b"__TAURI_BUNDLE_TYPE_VAR_APP",
             Format::Nsis => b"__TAURI_BUNDLE_TYPE_VAR_NSS",
             Format::Msi => b"__TAURI_BUNDLE_TYPE_VAR_MSI",
+            Format::App | Format::Dmg => MARKER,
         }
     }
 
@@ -167,6 +216,8 @@ impl Format {
             Format::AppImage => ".AppImage",
             Format::Nsis => "-setup.exe",
             Format::Msi => ".msi",
+            Format::App => ".app.tar.gz",
+            Format::Dmg => ".dmg",
         }
     }
 
@@ -179,8 +230,21 @@ impl Format {
     /// `{product}_{version}_{arch}` with Debian's architecture names, the rpm
     /// `{product}-{version}-{release}.{arch}` with RPM's, the NSIS installer
     /// `{product}_{version}_{arch}-setup.exe` and the MSI `{product}_{version}_{arch}_{language}.msi` with
-    /// Windows' names), for `arch` as Rust names it.
+    /// Windows' names; the `.app.tar.gz` and the dmg `{product}_{version}_{arch}` with `x64` for x86_64,
+    /// the dmg's name and the one tauri-action gave the archive), for `arch` as Rust names it.
     pub fn asset_name(self, version: &str, arch: &str) -> Result<String, String> {
+        if self.macos() {
+            let arch = match arch {
+                "x86_64" => "x64",
+                "aarch64" => "aarch64",
+                "universal" => "universal",
+                other => return Err(format!("no macOS package is made for {other} (aarch64 and x86_64 are shipped, universal named as Tauri names it)")),
+            };
+            return Ok(match self {
+                Format::App => format!("RustRadar_{version}_{arch}.app.tar.gz"),
+                _ => format!("RustRadar_{version}_{arch}.dmg"),
+            });
+        }
         if self.windows() {
             let arch = match arch {
                 "x86_64" => "x64",
@@ -504,6 +568,229 @@ fn nsis_plugin(cache: &Path, dir: &Path) -> Result<(), String> {
     fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))
 }
 
+/// `platform/macos/Info.plist` (its text) at `version`: the bundle's two version strings
+/// (`CFBundleShortVersionString` and `CFBundleVersion`, both the release version as in today's bundle).
+pub fn info_plist(text: &str, version: &str) -> Result<String, String> {
+    if version.is_empty() || !version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')) {
+        return Err(format!("`{version}` is no version an Info.plist can carry as it is"));
+    }
+    let filled = text.replace("@@VERSION@@", version);
+    if filled.contains("@@") {
+        return Err(format!("{INFO_PLIST} names a value `cargo xtask package` does not fill in"));
+    }
+    Ok(filled)
+}
+
+/// The keys of a flat XML property list (one `dict` of strings and booleans, as an app's `Info.plist`)
+/// with their values, in their order; a boolean's value is `true` or `false`. Anything else in the
+/// `dict` is refused.
+pub fn plist_entries(text: &str) -> Result<Vec<(String, String)>, String> {
+    let text = Regex::new(r"(?s)<!--.*?-->").expect("a valid pattern").replace_all(text, "");
+    let body = text
+        .split_once("<dict>")
+        .and_then(|(_, rest)| rest.rsplit_once("</dict>"))
+        .map(|(body, _)| body)
+        .ok_or_else(|| "not a property list with a <dict>".to_owned())?;
+    let entry = Regex::new(r"^\s*<key>([^<]*)</key>\s*(?:<string>([^<]*)</string>|<(true|false)/>)").expect("a valid pattern");
+    let mut entries = Vec::new();
+    let mut rest = body;
+    while !rest.trim().is_empty() {
+        let found = entry.captures(rest).ok_or_else(|| format!("not a flat dictionary of strings and booleans at `{}`", rest.trim().lines().next().unwrap_or_default()))?;
+        let value = found.get(2).or_else(|| found.get(3)).map_or("", |m| m.as_str());
+        entries.push((found[1].to_owned(), value.to_owned()));
+        rest = &rest[found[0].len()..];
+    }
+    Ok(entries)
+}
+
+/// The architecture a Mach-O executable is built for, as Rust names it (`universal` for a fat one).
+pub fn macho_arch(binary: &[u8]) -> Option<&'static str> {
+    let word = |at: usize| binary.get(at..at + 4).map(|b| [b[0], b[1], b[2], b[3]]);
+    match word(0)? {
+        // MH_MAGIC_64, little-endian, then the CPU type
+        [0xcf, 0xfa, 0xed, 0xfe] => match u32::from_le_bytes(word(4)?) {
+            0x0100_0007 => Some("x86_64"),
+            0x0100_000c => Some("aarch64"),
+            _ => None,
+        },
+        [0xca, 0xfe, 0xba, 0xbe] => Some("universal"),
+        _ => None,
+    }
+}
+
+/// Refuses a binary that is not a macOS executable for `arch` (each architecture's bundle is its own
+/// release, as today's two).
+pub fn check_macos_binary(binary: &[u8], arch: &str) -> Result<(), String> {
+    match macho_arch(binary) {
+        Some(found) if found == arch => Ok(()),
+        Some(found) => Err(format!("the binary is a Mach-O for {found}, and this package is for {arch}: build it with --target {arch}-apple-darwin")),
+        None => Err("the binary is not a 64-bit macOS executable (Mach-O)".to_owned()),
+    }
+}
+
+/// The files under `dir`, as `/`-separated paths relative to it.
+fn files_under(dir: &Path) -> Result<Vec<String>, String> {
+    let mut files = Vec::new();
+    let mut folders = vec![dir.to_owned()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).map_err(|e| format!("{}: {e}", folder.display()))? {
+            let path = entry.map_err(|e| format!("{}: {e}", folder.display()))?.path();
+            if path.is_dir() && !path.is_symlink() {
+                folders.push(path);
+            } else {
+                let relative = path.strip_prefix(dir).map_err(|e| e.to_string())?;
+                files.push(relative.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"));
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// Refuses a `.app` that is not today's layout (`Contents/Info.plist`, `Contents/MacOS/<executable>`
+/// and `Contents/Resources/<icon>`, and `Contents/_CodeSignature/CodeResources` once `sealed`), whose
+/// executable cannot be run, or whose `Info.plist` lacks a key of `plist` (the filled-in
+/// `platform/macos/Info.plist`) or gives it another value.
+pub fn check_app_bundle(app: &Path, plist: &str, sealed: bool) -> Result<(), String> {
+    let ours = plist_entries(plist).map_err(|e| format!("{INFO_PLIST}: {e}"))?;
+    let path = app.join("Contents/Info.plist");
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let theirs = plist_entries(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    for (key, value) in &ours {
+        match theirs.iter().find(|(k, _)| k == key) {
+            Some((_, v)) if v == value => {}
+            Some((_, v)) => return Err(format!("the bundle's Info.plist has {key} `{v}`, {INFO_PLIST} `{value}`")),
+            None => return Err(format!("the bundle's Info.plist lacks {key}")),
+        }
+    }
+    let get = |key: &str| ours.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()).ok_or_else(|| format!("{INFO_PLIST} names no {key}"));
+    let executable = format!("Contents/MacOS/{}", get("CFBundleExecutable")?);
+    let mut layout = vec!["Contents/Info.plist".to_owned(), executable.clone(), format!("Contents/Resources/{}", get("CFBundleIconFile")?)];
+    if sealed {
+        layout.push("Contents/_CodeSignature/CodeResources".to_owned());
+    }
+    layout.sort();
+    let found = files_under(app)?;
+    if found != layout {
+        return Err(format!("{} holds {found:?}, today's bundle {layout:?}", app.display()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(app.join(&executable)).map_err(|e| e.to_string())?.permissions().mode();
+        if mode & 0o111 == 0 {
+            return Err(format!("{executable} is not executable"));
+        }
+    }
+    Ok(())
+}
+
+/// Seals `app` ad hoc as doc 07 §13.2 says, on macOS: its extended attributes cleared first (as both
+/// bundlers do before `codesign`), `codesign --force --deep --sign -`, then checked with
+/// `codesign --verify --deep --strict`. Elsewhere `codesign` is not to be had: the bundle is left as it
+/// is, with a warning. Whether it was sealed.
+pub fn sign_app(app: &Path) -> Result<bool, String> {
+    if !cfg!(target_os = "macos") {
+        eprintln!("warning: {} is not sealed: codesign runs on macOS only (its executable keeps the linker's signature, if any)", app.display());
+        return Ok(false);
+    }
+    let mut clear = Command::new("xattr");
+    clear.arg("-cr").arg(app);
+    run_command(clear, "xattr -cr")?;
+    let mut sign = Command::new("codesign");
+    sign.args(["--force", "--deep", "--sign", "-"]).arg(app);
+    run_command(sign, "codesign --sign -")?;
+    let mut verify = Command::new("codesign");
+    verify.args(["--verify", "--deep", "--strict", "--verbose=2"]).arg(app);
+    run_command(verify, "codesign --verify")?;
+    Ok(true)
+}
+
+/// The updater's archive of `app` at `to`, as tauri-bundler 2.10.1's `create_tar` writes it on macOS:
+/// the tar crate's `append_dir_all` of the bundle under its own name (`RustRadar.app/…`, symlinks kept
+/// as links) through flate2's gzip at its default level.
+pub fn app_archive(app: &Path, to: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let name = app.file_name().ok_or_else(|| format!("{}: no bundle name", app.display()))?;
+    let file = fs::File::create(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::default()));
+    tar.follow_symlinks(false);
+    tar.append_dir_all(name, app).map_err(|e| format!("{}: {e}", app.display()))?;
+    let gzip = tar.into_inner().map_err(|e| format!("{}: {e}", to.display()))?;
+    let mut file = gzip.finish().map_err(|e| format!("{}: {e}", to.display()))?;
+    file.flush().map_err(|e| format!("{}: {e}", to.display()))
+}
+
+/// tauri-bundler 2.10.1's arguments to its dmg script (`bundle_dmg.sh`, run in the folder holding the
+/// `.app`) for `config` (cargo-packager's configuration: the product name and `[dmg]`'s layout, by
+/// cargo-packager's names, tauri-bundler's defaults for any it lacks), the volume's icon `icns` and the
+/// disk image `dmg_name`; never `--skip-jenkins` (module docs).
+pub fn dmg_args(config: &Value, icns: &Path, dmg_name: &str) -> Result<Vec<String>, String> {
+    let product = config["product-name"].as_str().ok_or_else(|| format!("{PACKAGER_TOML} names no product-name"))?;
+    let app = format!("{product}.app");
+    let dmg = config.get("dmg").cloned().unwrap_or_else(|| json!({}));
+    let known = ["window-size", "windowSize", "window_size", "app-position", "appPosition", "app_position", "application-folder-position", "appFolderPosition", "application_folder_position", "windowPosition"];
+    if let Some(other) = dmg.as_object().into_iter().flat_map(|o| o.keys()).find(|k| !known.contains(&k.as_str())) {
+        return Err(format!("{PACKAGER_TOML}: [dmg] {other} is not passed to the dmg script"));
+    }
+    // a [dmg] pair by any of cargo-packager's names for it, if set
+    let pair = |names: &[&str], (a, b): (&str, &str)| -> Result<Option<[String; 2]>, String> {
+        match names.iter().find_map(|n| dmg.get(*n)) {
+            Some(value) => match (value[a].as_u64(), value[b].as_u64()) {
+                (Some(x), Some(y)) => Ok(Some([x.to_string(), y.to_string()])),
+                _ => Err(format!("{PACKAGER_TOML}: [dmg] {} needs {a} and {b}", names[0])),
+            },
+            None => Ok(None),
+        }
+    };
+    let or = |set: Option<[String; 2]>, (x, y): (u32, u32)| set.unwrap_or_else(|| [x.to_string(), y.to_string()]);
+    let [app_x, app_y] = or(pair(&["app-position", "appPosition", "app_position"], ("x", "y"))?, (180, 170));
+    let [folder_x, folder_y] = or(pair(&["application-folder-position", "appFolderPosition", "application_folder_position"], ("x", "y"))?, (480, 170));
+    let [width, height] = or(pair(&["window-size", "windowSize", "window_size"], ("width", "height"))?, (660, 400));
+    let mut args: Vec<String> = ["--volname", product, "--icon", &app, &app_x, &app_y, "--app-drop-link", &folder_x, &folder_y, "--window-size", &width, &height, "--hide-extension", &app]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some([x, y]) = pair(&["windowPosition"], ("x", "y"))? {
+        args.extend(["--window-pos".to_owned(), x, y]);
+    }
+    let icns = icns.to_str().ok_or_else(|| format!("{}: not UTF-8", icns.display()))?;
+    args.extend(["--volicon", icns, dmg_name, &app].map(str::to_owned));
+    Ok(args)
+}
+
+/// tauri-bundler's dmg script and its AppleScript laid out in `tools` as tauri-bundler lays them out
+/// (the script finds its support files in `../share/create-dmg/support`); the script's path.
+fn dmg_tools(root: &Path, tools: &Path) -> Result<PathBuf, String> {
+    let script = tools.join("bin/bundle_dmg.sh");
+    let support = tools.join("share/create-dmg/support");
+    for folder in [tools.join("bin"), support.clone()] {
+        fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    }
+    fs::copy(root.join(DMG_SCRIPT), &script).map_err(|e| format!("{DMG_SCRIPT}: {e}"))?;
+    set_executable(&script)?;
+    fs::copy(root.join(DMG_APPLESCRIPT), support.join("template.applescript")).map_err(|e| format!("{DMG_APPLESCRIPT}: {e}"))?;
+    Ok(script)
+}
+
+/// Runs tauri-bundler's dmg script with `args` in `dir`, the folder holding the sealed `.app`.
+fn make_dmg(root: &Path, tools: &Path, dir: &Path, args: &[String]) -> Result<(), String> {
+    let mut command = Command::new(dmg_tools(root, tools)?);
+    command.current_dir(dir).args(args);
+    run_command(command, "bundle_dmg.sh")
+}
+
+/// `Packager.toml`'s `[macos] minimum-system-version`: the deployment target the macOS release is built
+/// for and its Info.plist's LSMinimumSystemVersion.
+pub fn minimum_system_version(text: &str) -> Result<String, String> {
+    let config: Value = toml::from_str(text).map_err(|e| format!("{PACKAGER_TOML}: {e}"))?;
+    config
+        .pointer("/macos/minimum-system-version")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{PACKAGER_TOML} names no [macos] minimum-system-version"))
+}
+
 /// The command line.
 #[derive(Debug, Default, PartialEq)]
 pub struct Args {
@@ -514,7 +801,7 @@ pub struct Args {
     pub sign: bool,
 }
 
-pub const USAGE: &str = "usage: cargo xtask package <deb|rpm|appimage|nsis|msi>... [--target TRIPLE] [--binary FILE] [--out DIR] [--sign]";
+pub const USAGE: &str = "usage: cargo xtask package <deb|rpm|appimage|nsis|msi|app|dmg>... [--target TRIPLE] [--binary FILE] [--out DIR] [--sign]";
 
 pub fn parse(args: &[String]) -> Result<Args, String> {
     let mut parsed = Args::default();
@@ -592,6 +879,13 @@ fn build(root: &Path, target_dir: &Path, target: Option<&str>) -> Result<PathBuf
     if let Some(target) = target {
         command.args(["--target", target]);
     }
+    // a macOS release is built for the bundle's minimum system version, as the Tauri CLI built it for
+    // bundle.macOS.minimumSystemVersion (the C and C++ dependencies too)
+    let macos = target.map_or(cfg!(target_os = "macos"), |t| t.contains("apple-darwin"));
+    if macos && std::env::var_os("MACOSX_DEPLOYMENT_TARGET").is_none() {
+        let text = fs::read_to_string(root.join(PACKAGER_TOML)).map_err(|e| format!("{PACKAGER_TOML}: {e}"))?;
+        command.env("MACOSX_DEPLOYMENT_TARGET", minimum_system_version(&text)?);
+    }
     run_command(command, "cargo build --release")?;
     let mut dir = target_dir.to_owned();
     if let Some(target) = target {
@@ -639,6 +933,9 @@ fn pack(root: &Path, work: &Path, format: Format, binary: &[u8], version: &str, 
         check_windows_resources(binary, version)?;
         check_windows_imports(binary)?;
     }
+    if format.macos() {
+        check_macos_binary(binary, &arch)?;
+    }
     let mut patched = binary.to_vec();
     patch_marker(&mut patched, format.marker())?;
     let staged = bin_dir.join(format.binary_name());
@@ -646,7 +943,7 @@ fn pack(root: &Path, work: &Path, format: Format, binary: &[u8], version: &str, 
     set_executable(&staged)?;
 
     match format {
-        Format::Deb | Format::AppImage | Format::Nsis | Format::Msi => {
+        Format::Deb | Format::AppImage | Format::Nsis | Format::Msi | Format::App | Format::Dmg => {
             let text = fs::read_to_string(root.join(PACKAGER_TOML)).map_err(|e| format!("{PACKAGER_TOML}: {e}"))?;
             let depends: Vec<String> = match (format, glibc_needed(binary)) {
                 (Format::Deb, Some(v)) => vec![format!("libc6 (>= {})", v.iter().map(u32::to_string).collect::<Vec<_>>().join("."))],
@@ -675,6 +972,16 @@ fn pack(root: &Path, work: &Path, format: Format, binary: &[u8], version: &str, 
                 fs::write(&path, filled).map_err(|e| format!("{}: {e}", path.display()))?;
                 config[table]["template"] = json!(path);
             }
+            // the bundle's Info.plist at this version, whose keys cargo-packager puts over its own
+            let plist = if format.macos() {
+                let plist = info_plist(&read(INFO_PLIST)?, version)?;
+                let path = work.join("Info.plist");
+                fs::write(&path, &plist).map_err(|e| format!("{}: {e}", path.display()))?;
+                config["macos"]["info-plist-path"] = json!(path);
+                Some(plist)
+            } else {
+                None
+            };
             if format == Format::AppImage {
                 let missing = missing_libs(&config, &arch);
                 if !missing.is_empty() {
@@ -692,6 +999,31 @@ fn pack(root: &Path, work: &Path, format: Format, binary: &[u8], version: &str, 
             // linuxdeploy and its plugin are AppImages themselves: run them without FUSE
             command.env("APPIMAGE_EXTRACT_AND_RUN", "1");
             run_command(command, &format!("cargo packager ({})", format.name()))?;
+            if let Some(plist) = plist {
+                let product = config["product-name"].as_str().ok_or_else(|| format!("{PACKAGER_TOML} names no product-name"))?.to_owned();
+                let app = out_dir.join(format!("{product}.app"));
+                check_app_bundle(&app, &plist, false)?;
+                let sealed = sign_app(&app)?;
+                check_app_bundle(&app, &plist, sealed)?;
+                if format == Format::App {
+                    // named and signed as tauri-bundler named it (the .sig's trusted comment says
+                    // RustRadar.app.tar.gz, as v0.3.16's), moved to the asset's name with its .sig below
+                    let archive = out_dir.join(format!("{product}.app.tar.gz"));
+                    app_archive(&app, &archive)?;
+                    if args.sign {
+                        sign::run(&[archive.display().to_string()])?;
+                    }
+                } else {
+                    let icns = config["icons"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .find(|i| i.ends_with(".icns"))
+                        .ok_or_else(|| format!("{PACKAGER_TOML}'s icons have no .icns for the volume"))?;
+                    make_dmg(root, &work.join("dmg-tools"), &out_dir, &dmg_args(&config, &root.join(icns), &name)?)?;
+                }
+            }
         }
         Format::Rpm => {
             let text = fs::read_to_string(root.join(RPM_TOML)).map_err(|e| format!("{RPM_TOML}: {e}"))?;
@@ -712,6 +1044,11 @@ fn pack(root: &Path, work: &Path, format: Format, binary: &[u8], version: &str, 
     let made = the_output(&out_dir, format.extension())?;
     let to = out.join(&name);
     move_file(&made, &to)?;
+    // the .app.tar.gz's signature, made before the move
+    let sig = PathBuf::from(format!("{}.sig", made.display()));
+    if sig.is_file() {
+        move_file(&sig, &out.join(format!("{name}.sig")))?;
+    }
     let _ = fs::remove_dir_all(work);
     Ok(to)
 }
@@ -730,11 +1067,14 @@ fn set_executable(_: &Path) -> Result<(), String> {
 pub fn run(args: &[String]) -> Result<(), String> {
     let args = parse(args)?;
     let root = bump::repo_root();
-    if args.formats.iter().any(|f| matches!(f, Format::Deb | Format::AppImage | Format::Nsis | Format::Msi)) {
+    if args.formats.iter().any(|f| matches!(f, Format::Deb | Format::AppImage | Format::Nsis | Format::Msi | Format::App | Format::Dmg)) {
         check_tool("packager", PACKAGER)?;
     }
     if args.formats.contains(&Format::Msi) && !cfg!(windows) {
         return Err("the MSI is made on Windows (cargo-packager runs WiX 3 there only)".to_owned());
+    }
+    if args.formats.contains(&Format::Dmg) && !cfg!(target_os = "macos") {
+        return Err("the dmg is made on macOS (hdiutil, and the Finder for its layout)".to_owned());
     }
     if args.formats.contains(&Format::Rpm) {
         check_tool("generate-rpm", GENERATE_RPM)?;
@@ -754,10 +1094,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let work = target_dir.join("package-work").join(format.name());
         let package = pack(&root, &work, *format, &bytes, &version, &args, &out)?;
         println!("packed {}", package.display());
-        made.push(package.display().to_string());
+        // the .app.tar.gz was signed as it was packed, under tauri-bundler's name; the dmg has no .sig
+        // (as today)
+        if !format.macos() {
+            made.push(package.display().to_string());
+        }
     }
     let _ = fs::remove_dir(target_dir.join("package-work"));
-    if args.sign {
+    if args.sign && !made.is_empty() {
         sign::run(&made)?;
     }
     Ok(())
@@ -777,7 +1121,9 @@ mod tests {
 
     #[test]
     fn the_marker_is_patched_in_place() {
-        for format in Format::ALL {
+        // every format whose packages tauri-bundler patches (the macOS ones keep the marker:
+        // macos_packages_keep_the_marker)
+        for format in Format::ALL.into_iter().filter(|f| !f.macos()) {
             let mut binary = b"\x7fELF....".to_vec();
             binary.extend_from_slice(b"__TAURI_BUNDLE_TYPE_VAR_DEB__TAURI_BUNDLE_TYPE_VAR_RPM");
             binary.extend_from_slice(MARKER);
@@ -1344,6 +1690,368 @@ mod tests {
         check_windows_resources(&installed, &version).unwrap();
         let plugin = fs::read(dir.join("unpacked/$PLUGINSDIR/nsis_tauri_utils.dll")).unwrap();
         assert_eq!(sha1_hex(&plugin), NSIS_TAURI_UTILS.1, "today's plugin, not cargo-packager's 0.2.1");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `RustRadar.app/Contents/Info.plist` of v0.3.16 (its `RustRadar_0.3.16_aarch64.app.tar.gz`, the
+    /// same in the x64 one and in both dmgs), byte for byte.
+    const TODAYS_INFO_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleDevelopmentRegion</key>\n\t<string>English</string>\n\t<key>CFBundleDisplayName</key>\n\t<string>RustRadar</string>\n\t<key>CFBundleExecutable</key>\n\t<string>rustradar</string>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.felix.rustradar</string>\n\t<key>CFBundleInfoDictionaryVersion</key>\n\t<string>6.0</string>\n\t<key>CFBundleName</key>\n\t<string>RustRadar</string>\n\t<key>CFBundlePackageType</key>\n\t<string>APPL</string>\n\t<key>CFBundleShortVersionString</key>\n\t<string>0.3.16</string>\n\t<key>CFBundleVersion</key>\n\t<string>0.3.16</string>\n\t<key>CSResourcesFileMapped</key>\n\t<true/>\n\t<key>LSMinimumSystemVersion</key>\n\t<string>10.13</string>\n\t<key>CFBundleIconFile</key>\n\t<string>icon.icns</string>\n\t<key>LSRequiresCarbon</key>\n\t<true/>\n\t<key>NSHighResolutionCapable</key>\n\t<true/>\n</dict>\n</plist>";
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A Mach-O header for `arch` with the marker after it (enough for the packing; no Mach-O runs here).
+    fn mach_o(arch: &str) -> Vec<u8> {
+        let cpu: u32 = match arch {
+            "x86_64" => 0x0100_0007,
+            "aarch64" => 0x0100_000c,
+            other => panic!("{other}"),
+        };
+        let mut binary = vec![0xcf, 0xfa, 0xed, 0xfe];
+        binary.extend_from_slice(&cpu.to_le_bytes());
+        binary.extend_from_slice(&[0; 24]);
+        binary.extend_from_slice(b"... __TAURI_BUNDLE_TYPE_VAR_DEB__TAURI_BUNDLE_TYPE_VAR_APP ...");
+        binary.extend_from_slice(MARKER);
+        binary
+    }
+
+    /// The macOS packages' names, as v0.3.16's release has them and `latest-json` reads the archive's
+    /// back (the dmg is no updater artifact).
+    #[test]
+    fn the_macos_packages_have_todays_names() {
+        let names: Vec<String> = ["aarch64", "x86_64"].iter().flat_map(|arch| Format::MACOS.map(|f| f.asset_name("0.3.16", arch).unwrap())).collect();
+        assert_eq!(names, ["RustRadar_0.3.16_aarch64.app.tar.gz", "RustRadar_0.3.16_aarch64.dmg", "RustRadar_0.3.16_x64.app.tar.gz", "RustRadar_0.3.16_x64.dmg"]);
+        for (name, arch) in [(&names[0], "aarch64"), (&names[2], "x86_64")] {
+            assert_eq!(crate::manifest::bundle(name), Some(("darwin", "app")), "{name}");
+            assert_eq!(crate::manifest::arch(name), Some(arch), "{name}");
+        }
+        assert_eq!(crate::manifest::bundle(&names[1]), None, "the dmg is no updater artifact");
+        assert_eq!(Format::App.asset_name("1.2.3", "universal").unwrap(), "RustRadar_1.2.3_universal.app.tar.gz");
+        assert!(Format::Dmg.asset_name("1.2.3", "riscv64").is_err());
+        assert_eq!(Format::MACOS.map(Format::binary_name), ["rustradar", "rustradar"]);
+        assert_eq!(Format::MACOS.map(Format::packager_name), ["app", "app"], "the dmg is made from cargo-packager's .app");
+        let args = parse(&["app".to_owned(), "dmg".to_owned(), "--target".to_owned(), "aarch64-apple-darwin".to_owned()]).unwrap();
+        assert_eq!(args.formats, Format::MACOS);
+        assert!(USAGE.contains("app|dmg"));
+        assert_eq!(Format::ALL.iter().filter(|f| f.macos()).count(), 2);
+    }
+
+    /// The macOS packages keep the binary's installer kind as it is, as tauri-bundler 2.10.1 does
+    /// (v0.3.16's aarch64 `rustradar` holds `__TAURI_BUNDLE_TYPE_VAR_UNK` once, beside the five kinds'
+    /// names), because the app takes the unknown kind for the `.app` on macOS and `_APP` for an
+    /// AppImage (update::manifest's reader, as tauri-utils' `bundle_type`).
+    #[test]
+    fn macos_packages_keep_the_marker() {
+        let reader = fs::read_to_string(root().join("crates/app/src/update/manifest.rs")).unwrap();
+        assert!(reader.contains("_ if cfg!(target_os = \"macos\") => Some(Installer::App),"));
+        assert!(reader.contains("\"__TAURI_BUNDLE_TYPE_VAR_APP\" => Some(Installer::AppImage),"));
+        for format in Format::MACOS {
+            assert_eq!(format.marker(), MARKER);
+            let binary = mach_o("aarch64");
+            let mut patched = binary.clone();
+            patch_marker(&mut patched, format.marker()).unwrap();
+            assert_eq!(patched, binary, "nothing written");
+            // still the app's binary: one marker, not none or two
+            let mut none = binary[..binary.len() - MARKER.len()].to_vec();
+            assert!(patch_marker(&mut none, format.marker()).is_err());
+            let mut two = [&binary[..], &MARKER[..]].concat();
+            assert!(patch_marker(&mut two, format.marker()).is_err());
+        }
+    }
+
+    /// The binary must be a Mach-O for the package's architecture.
+    #[test]
+    fn a_macos_binary_is_a_mach_o_for_its_architecture() {
+        assert_eq!(macho_arch(&mach_o("aarch64")), Some("aarch64"));
+        assert_eq!(macho_arch(&mach_o("x86_64")), Some("x86_64"));
+        assert_eq!(macho_arch(&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2]), Some("universal"));
+        check_macos_binary(&mach_o("x86_64"), "x86_64").unwrap();
+        let wrong = check_macos_binary(&mach_o("aarch64"), "x86_64").unwrap_err();
+        assert!(wrong.contains("for aarch64") && wrong.contains("--target x86_64-apple-darwin"), "{wrong}");
+        for other in [&b"\x7fELF\x02\x01\x01\0"[..], b"MZ\x90\0", b"\xcf\xfa\xed\xfe\x12\0\0\x01", b"\xcf\xfa"] {
+            assert!(check_macos_binary(other, "aarch64").unwrap_err().contains("not a 64-bit macOS executable"));
+        }
+    }
+
+    /// `platform/macos/Info.plist` is v0.3.16's, key for key and in its order, at the release version and
+    /// macOS 11, with doc 07 §13.2's two more keys; its identity is tauri.conf.json's, its executable and
+    /// icon the package's, its minimum system the deployment target the release is built for.
+    #[test]
+    fn the_info_plist_is_todays_with_doc_07s_keys() {
+        let text = fs::read_to_string(root().join(INFO_PLIST)).unwrap();
+        let ours = plist_entries(&text).unwrap();
+        let today = plist_entries(TODAYS_INFO_PLIST).unwrap();
+        assert_eq!(today.len(), 14);
+        for ((key, value), (today_key, today_value)) in ours.iter().zip(&today) {
+            assert_eq!(key, today_key, "today's keys in today's order");
+            let expected = match key.as_str() {
+                "CFBundleShortVersionString" | "CFBundleVersion" => "@@VERSION@@",
+                "LSMinimumSystemVersion" => "11.0",
+                _ => today_value,
+            };
+            assert_eq!(value, expected, "{key}");
+        }
+        let added: Vec<(&str, &str)> = ours[today.len()..].iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(added, [("NSPrincipalClass", "NSApplication"), ("LSApplicationCategoryType", "public.app-category.travel")]);
+
+        let value = |key: &str| ours.iter().find(|(k, _)| k == key).unwrap().1.clone();
+        let conf: Value = serde_json::from_str(&fs::read_to_string(root().join("src-tauri/tauri.conf.json")).unwrap()).unwrap();
+        assert_eq!(value("CFBundleIdentifier"), conf["identifier"].as_str().unwrap());
+        assert_eq!(value("CFBundleName"), conf["productName"].as_str().unwrap());
+        assert_eq!(value("CFBundleDisplayName"), conf["productName"].as_str().unwrap());
+        assert_eq!(value("CFBundleExecutable"), Format::App.binary_name());
+        let config = packager_toml();
+        let icns = config["icons"].as_array().unwrap().iter().filter_map(Value::as_str).find(|i| i.ends_with(".icns")).unwrap();
+        assert_eq!(value("CFBundleIconFile"), Path::new(icns).file_name().unwrap().to_str().unwrap(), "cargo-packager copies the .icns under its own name");
+        let packager = fs::read_to_string(root().join(PACKAGER_TOML)).unwrap();
+        assert_eq!(value("LSMinimumSystemVersion"), minimum_system_version(&packager).unwrap());
+
+        // filled in: the version twice, nothing left over, the same keys
+        let filled = info_plist(&text, "0.3.16").unwrap();
+        assert!(!filled.contains("@@"));
+        let entries = plist_entries(&filled).unwrap();
+        assert_eq!(entries.len(), ours.len());
+        assert_eq!(entries[..today.len()].iter().filter(|(k, v)| today.contains(&(k.clone(), v.clone()))).count(), 13, "all but the minimum system as today's");
+        assert!(info_plist(&text, "1.0.0</string>").is_err());
+        assert!(info_plist("<string>@@BUILD@@</string>", "1.0.0").is_err());
+        assert!(plist_entries("<plist><dict><key>A</key><array/></dict></plist>").unwrap_err().contains("not a flat dictionary"));
+        assert!(plist_entries("no plist").is_err());
+    }
+
+    /// `Packager.toml`'s macOS part and the dmg script's arguments: tauri-bundler 2.10.1's for today's
+    /// configuration (the layout v0.3.16's dmg has in its .DS_Store: a 660 x 400 window, the app at
+    /// (180, 170), Applications at (480, 170); the volume RustRadar with the app's icon), and no
+    /// `--skip-jenkins`.
+    #[test]
+    fn the_macos_configuration_is_todays() {
+        let config = packager_toml();
+        assert_eq!(config["macos"]["minimum-system-version"], "11.0");
+        assert_eq!(config["macos"]["info-plist-path"], INFO_PLIST);
+        assert_eq!(config["dmg"], json!({ "window-size": { "width": 660, "height": 400 }, "app-position": { "x": 180, "y": 170 }, "application-folder-position": { "x": 480, "y": 170 } }));
+        assert!(config["macos"].get("signing-identity").is_none(), "cargo-packager signs nothing: the ad hoc seal is sign_app's");
+        let text = fs::read_to_string(root().join(PACKAGER_TOML)).unwrap();
+        let (bin, out) = (Path::new("/w/bin"), Path::new("/w/out"));
+        for format in Format::MACOS {
+            let made = packager_config(&text, format, "0.3.16", bin, out, &[]).unwrap();
+            assert_eq!(made["formats"], json!(["app"]));
+            assert_eq!(made["binaries"], json!([{ "path": BINARY, "main": true }]));
+        }
+        let icns = Path::new("/repo/src-tauri/icons/icon.icns");
+        let args = dmg_args(&config, icns, "RustRadar_0.3.16_aarch64.dmg").unwrap();
+        let today = [
+            "--volname", "RustRadar", "--icon", "RustRadar.app", "180", "170", "--app-drop-link", "480", "170", "--window-size", "660", "400",
+            "--hide-extension", "RustRadar.app", "--volicon", "/repo/src-tauri/icons/icon.icns", "RustRadar_0.3.16_aarch64.dmg", "RustRadar.app",
+        ];
+        assert_eq!(args, today);
+        // tauri-bundler's defaults without a [dmg] table; a window position as cargo-packager names it
+        let mut bare = config.clone();
+        bare.as_object_mut().unwrap().remove("dmg");
+        assert_eq!(dmg_args(&bare, icns, "RustRadar_0.3.16_aarch64.dmg").unwrap(), today);
+        let mut placed = config.clone();
+        placed["dmg"]["windowPosition"] = json!({ "x": 10, "y": 60 });
+        let args = dmg_args(&placed, icns, "x.dmg").unwrap();
+        assert_eq!(&args[14..17], ["--window-pos", "10", "60"]);
+        let mut background = config.clone();
+        background["dmg"]["background"] = json!("bg.png");
+        assert!(dmg_args(&background, icns, "x.dmg").unwrap_err().contains("[dmg] background"));
+        let mut broken = config.clone();
+        broken["dmg"]["app-position"] = json!({ "x": 1 });
+        assert!(dmg_args(&broken, icns, "x.dmg").unwrap_err().contains("needs x and y"));
+        // the volume's icon is the bundle's (v0.3.16's .VolumeIcon.icns is icon.icns)
+        assert!(config["icons"].as_array().unwrap().contains(&json!("src-tauri/icons/icon.icns")));
+        assert!(minimum_system_version("[macos]\n").is_err());
+    }
+
+    /// The dmg script and its AppleScript are tauri-bundler 2.10.1's (src/bundle/macos/dmg/bundle_dmg
+    /// and template.applescript in its crate), byte for byte: the script that made v0.3.16's dmgs.
+    #[test]
+    fn the_dmg_script_is_tauri_bundlers() {
+        let read = |file: &str| fs::read_to_string(root().join(file)).unwrap().replace("\r\n", "\n");
+        let script = read(DMG_SCRIPT);
+        assert_eq!(sha256_hex(script.as_bytes()), "dce473d510339f1a3f8009d84191ad2bf716d8cdbe12eb6e1f821771cf8f960f");
+        assert_eq!(sha256_hex(read(DMG_APPLESCRIPT).as_bytes()), "13727c7930c50be639a1eb191e893f1ebc72c270268d4611391b41410a3e862a");
+        for line in ["CDMG_VERSION='1.2.1'", "WINX=10", "WINY=60", "ICON_SIZE=128", "TEXT_SIZE=16", "FORMAT=\"UDZO\"", "FILESYSTEM=\"HFS+\"", "\tCDMG_SUPPORT_DIR=\"$prefix_dir/share/create-dmg/support\""] {
+            assert!(script.lines().any(|l| l == line), "{line}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(fs::metadata(root().join(DMG_SCRIPT)).unwrap().permissions().mode() & 0o111, 0, "executable, as tauri-bundler makes it");
+        }
+    }
+
+    /// tauri-bundler's script, laid out as `cargo xtask package dmg` lays it out, takes today's
+    /// arguments: it finds its support files, knows every option, and asks `hdiutil` for today's image
+    /// (HFS+, the bundle as the source, the volume RustRadar). `hdiutil` and `sw_vers` are stand-ins that
+    /// stop it there; the rest of the script is macOS's (CI's dmg, a person's check).
+    #[test]
+    #[cfg(unix)]
+    fn the_dmg_script_takes_todays_arguments() {
+        let dir = std::env::temp_dir().join(format!("xtask-dmg-script-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let bin = dir.join("stand-ins");
+        fs::create_dir_all(&bin).unwrap();
+        let asked = dir.join("hdiutil-args");
+        fs::write(bin.join("sw_vers"), "#!/bin/sh\nprintf 'ProductName:\\tmacOS\\nProductVersion:\\t14.5\\nBuildVersion:\\t23F79\\n'\n").unwrap();
+        fs::write(bin.join("hdiutil"), format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 3\n", asked.display())).unwrap();
+        for tool in ["sw_vers", "hdiutil"] {
+            set_executable(&bin.join(tool)).unwrap();
+        }
+        let plist = info_plist(&fs::read_to_string(root().join(INFO_PLIST)).unwrap(), "0.3.16").unwrap();
+        let app = a_bundle(&dir, &plist);
+        let script = dmg_tools(&root(), &dir.join("dmg-tools")).unwrap();
+        let args = dmg_args(&packager_toml(), &root().join("src-tauri/icons/icon.icns"), "RustRadar_0.3.16_aarch64.dmg").unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let output = Command::new(&script).current_dir(&dir).args(&args).env("PATH", path).output().unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.status.code(), Some(3), "stopped by the stand-in hdiutil: {said}");
+        assert!(!said.contains("Unknown option") && !said.contains("Cannot find support"), "{said}");
+        let asked = fs::read_to_string(&asked).unwrap();
+        let asked: Vec<&str> = asked.lines().collect();
+        let canonical = app.canonicalize().unwrap();
+        assert_eq!(asked[..10], ["create", "-srcfolder", canonical.to_str().unwrap(), "-volname", "RustRadar", "-fs", "HFS+", "-fsargs", "-c c=64,a=16,e=16", "-format"]);
+        assert_eq!(asked[10], "UDRW");
+        assert!(asked[11].ends_with(".RustRadar_0.3.16_aarch64.dmg") && asked[11].contains("/rw."), "{}", asked[11]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A bundle laid out as cargo-packager lays it out (`plist` its Info.plist), under `dir`.
+    fn a_bundle(dir: &Path, plist: &str) -> PathBuf {
+        let app = dir.join("RustRadar.app");
+        for folder in ["Contents/MacOS", "Contents/Resources"] {
+            fs::create_dir_all(app.join(folder)).unwrap();
+        }
+        fs::write(app.join("Contents/Info.plist"), plist).unwrap();
+        fs::write(app.join("Contents/MacOS/rustradar"), mach_o("aarch64")).unwrap();
+        set_executable(&app.join("Contents/MacOS/rustradar")).unwrap();
+        fs::copy(root().join("src-tauri/icons/icon.icns"), app.join("Contents/Resources/icon.icns")).unwrap();
+        app
+    }
+
+    /// The bundle is checked against today's layout and the filled-in Info.plist.
+    #[test]
+    fn an_app_bundle_is_checked() {
+        let dir = std::env::temp_dir().join(format!("xtask-app-check-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let plist = info_plist(&fs::read_to_string(root().join(INFO_PLIST)).unwrap(), "0.3.16").unwrap();
+        let app = a_bundle(&dir, &plist);
+        check_app_bundle(&app, &plist, false).unwrap();
+        // sealed: codesign's CodeResources is expected, and nothing else
+        assert!(check_app_bundle(&app, &plist, true).unwrap_err().contains("today's bundle"));
+        fs::create_dir_all(app.join("Contents/_CodeSignature")).unwrap();
+        fs::write(app.join("Contents/_CodeSignature/CodeResources"), "<plist/>").unwrap();
+        check_app_bundle(&app, &plist, true).unwrap();
+        assert!(check_app_bundle(&app, &plist, false).is_err());
+        fs::remove_dir_all(app.join("Contents/_CodeSignature")).unwrap();
+        // a stray file, a missing icon, a value or key the bundle lacks, an executable that cannot run
+        fs::write(app.join("Contents/Resources/extra.txt"), "x").unwrap();
+        assert!(check_app_bundle(&app, &plist, false).unwrap_err().contains("extra.txt"));
+        fs::remove_file(app.join("Contents/Resources/extra.txt")).unwrap();
+        fs::rename(app.join("Contents/Resources/icon.icns"), dir.join("icon.icns")).unwrap();
+        assert!(check_app_bundle(&app, &plist, false).is_err());
+        fs::rename(dir.join("icon.icns"), app.join("Contents/Resources/icon.icns")).unwrap();
+        fs::write(app.join("Contents/Info.plist"), plist.replace("<string>11.0</string>", "<string>10.13</string>")).unwrap();
+        assert!(check_app_bundle(&app, &plist, false).unwrap_err().contains("LSMinimumSystemVersion `10.13`"));
+        fs::write(app.join("Contents/Info.plist"), plist.replace("<string>0.3.16</string>", "<string>0.3.15</string>")).unwrap();
+        assert!(check_app_bundle(&app, &plist, false).unwrap_err().contains("CFBundleShortVersionString `0.3.15`"));
+        fs::write(app.join("Contents/Info.plist"), plist.replace("\t<key>NSPrincipalClass</key>\n\t<string>NSApplication</string>\n", "")).unwrap();
+        assert!(check_app_bundle(&app, &plist, false).unwrap_err().contains("lacks NSPrincipalClass"));
+        fs::write(app.join("Contents/Info.plist"), &plist).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(app.join("Contents/MacOS/rustradar"), fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(check_app_bundle(&app, &plist, false).unwrap_err().contains("not executable"));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The updater's archive is tauri-bundler's: gzip as v0.3.16's (no name, no time, OS unknown), one
+    /// top folder `RustRadar.app` holding today's files with their modes, which the Tauri updater
+    /// (tauri-plugin-updater 2.13.2's macOS install) and the app's take with that folder dropped.
+    #[test]
+    fn the_updater_archive_is_tauri_bundlers() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("xtask-app-archive-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let plist = info_plist(&fs::read_to_string(root().join(INFO_PLIST)).unwrap(), "0.3.16").unwrap();
+        let app = a_bundle(&dir, &plist);
+        let archive = dir.join("RustRadar.app.tar.gz");
+        app_archive(&app, &archive).unwrap();
+        let bytes = fs::read(&archive).unwrap();
+        // v0.3.16's RustRadar_0.3.16_aarch64.app.tar.gz starts 1f8b 08 00 00000000 00 ff
+        assert_eq!(&bytes[..10], [0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0xff]);
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
+        let mut entries = Vec::new();
+        for entry in tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let mode = entry.header().mode().unwrap();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            // what the updaters unpack it to: the path less its first part
+            let unpacked: PathBuf = Path::new(&path).iter().skip(1).collect();
+            entries.push((path, mode, unpacked, data));
+        }
+        assert_eq!(entries[0].0.trim_end_matches('/'), "RustRadar.app", "the bundle's folder first");
+        assert!(entries.iter().all(|(p, ..)| p.starts_with("RustRadar.app")), "one top folder");
+        let mut paths: Vec<String> = entries.iter().map(|(p, ..)| p.trim_end_matches('/').to_owned()).collect();
+        paths.sort();
+        // v0.3.16's archive lists these seven entries
+        assert_eq!(paths, ["RustRadar.app", "RustRadar.app/Contents", "RustRadar.app/Contents/Info.plist", "RustRadar.app/Contents/MacOS", "RustRadar.app/Contents/MacOS/rustradar", "RustRadar.app/Contents/Resources", "RustRadar.app/Contents/Resources/icon.icns"]);
+        let file = |name: &str| entries.iter().find(|(p, ..)| p == name).unwrap();
+        let binary = file("RustRadar.app/Contents/MacOS/rustradar");
+        assert_eq!(binary.1 & 0o777, 0o755);
+        assert_eq!(binary.2, Path::new("Contents/MacOS/rustradar"));
+        assert_eq!(binary.3, mach_o("aarch64"));
+        assert_eq!(file("RustRadar.app/Contents/Info.plist").3, plist.as_bytes());
+        assert_eq!(file("RustRadar.app/Contents/Resources/icon.icns").3, fs::read(root().join("src-tauri/icons/icon.icns")).unwrap());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The `.app.tar.gz` of a stand-in Mach-O, built by cargo-packager on this machine: today's layout,
+    /// the filled-in Info.plist, the marker as it was, the archive under today's name; the dmg is
+    /// refused off macOS. Run by hand with cargo-packager installed (`cargo test -p xtask -- --ignored
+    /// packs_an_app`); the sealed bundle and the dmg are CI's (macOS).
+    #[test]
+    #[ignore = "needs cargo-packager 0.11.8"]
+    fn packs_an_app_from_a_stand_in() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("xtask-package-app-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let arch = std::env::consts::ARCH;
+        let stand_in = dir.join("stand-in");
+        fs::write(&stand_in, mach_o(arch)).unwrap();
+        let out = dir.join("out");
+        let args = |formats: &[&str], binary: &Path| -> Vec<String> {
+            formats.iter().copied().chain(["--binary", binary.to_str().unwrap(), "--out", out.to_str().unwrap()]).map(str::to_owned).collect()
+        };
+        let elf = dir.join("elf");
+        fs::write(&elf, [&b"\x7fELF"[..], &MARKER[..]].concat()).unwrap();
+        assert!(run(&args(&["app"], &elf)).unwrap_err().contains("not a 64-bit macOS executable"));
+        if !cfg!(target_os = "macos") {
+            assert!(run(&args(&["dmg"], &stand_in)).unwrap_err().contains("made on macOS"));
+        }
+
+        run(&args(&["app"], &stand_in)).unwrap();
+        let version = bump::current().unwrap();
+        let archive = out.join(Format::App.asset_name(&version, arch).unwrap());
+        assert!(archive.is_file(), "{}", archive.display());
+        assert!(!out.join(format!("{}.sig", archive.file_name().unwrap().to_str().unwrap())).exists(), "no --sign, no .sig");
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(fs::File::open(&archive).unwrap()));
+        tar.unpack(dir.join("unpacked")).unwrap();
+        let app = dir.join("unpacked/RustRadar.app");
+        let plist = info_plist(&fs::read_to_string(root().join(INFO_PLIST)).unwrap(), &version).unwrap();
+        check_app_bundle(&app, &plist, cfg!(target_os = "macos")).unwrap();
+        let mut binary = Vec::new();
+        fs::File::open(app.join("Contents/MacOS/rustradar")).unwrap().read_to_end(&mut binary).unwrap();
+        if !cfg!(target_os = "macos") {
+            assert_eq!(binary, mach_o(arch), "the binary as it was, its marker unpatched");
+        }
+        let entries = plist_entries(&fs::read_to_string(app.join("Contents/Info.plist")).unwrap()).unwrap();
+        assert!(entries.contains(&("CFBundleVersion".to_owned(), version.clone())), "the release version, not cargo-packager's build time");
         fs::remove_dir_all(&dir).unwrap();
     }
 }

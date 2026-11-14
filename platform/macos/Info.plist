@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  RustRadar.app/Contents/Info.plist (doc 07 section 13.2, plan stage 11 row P6).
+
+  `cargo xtask package app dmg` (crates/xtask/src/package.rs) writes the release version (the version
+  files' one, crates/app's CARGO_PKG_VERSION) into both version strings below (the two placeholders)
+  and hands this file to cargo-packager as
+  [macos] info-plist-path, whose keys win over the ones cargo-packager writes itself.
+
+  The first fourteen keys are v0.3.16's Info.plist (the Tauri bundle's, read off
+  RustRadar_0.3.16_aarch64.app.tar.gz), in its order, with the identity of src-tauri/tauri.conf.json
+  (doc 07 section 13.6) and the binary's name, so that the bundle replaces today's in place. Changed:
+  LSMinimumSystemVersion is 11.0 (Tauri's default was 10.13; wgpu draws through Metal, plan section 9
+  question 5). Added, as doc 07 section 13.2 lists them: NSPrincipalClass and
+  LSApplicationCategoryType (today's bundle names no category).
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleDisplayName</key>
+	<string>RustRadar</string>
+	<key>CFBundleExecutable</key>
+	<string>rustradar</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.felix.rustradar</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>RustRadar</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@@VERSION@@</string>
+	<key>CFBundleVersion</key>
+	<string>@@VERSION@@</string>
+	<key>CSResourcesFileMapped</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>CFBundleIconFile</key>
+	<string>icon.icns</string>
+	<key>LSRequiresCarbon</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.travel</string>
+</dict>
+</plist>

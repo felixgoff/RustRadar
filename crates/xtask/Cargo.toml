@@ -15,8 +15,9 @@ rustradar-scene = { workspace = true }
 rustradar-backend = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
-# PMTiles directories are gzip'd (the Overture extract).
+# PMTiles directories are gzip'd (the Overture extract); the macOS updater archive is a .tar.gz.
 flate2 = { workspace = true }
+tar = { workspace = true }
 wuff = { workspace = true }
 resvg = { workspace = true }
 serde_json = { workspace = true }

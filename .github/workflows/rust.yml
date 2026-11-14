@@ -885,15 +885,16 @@ jobs:
       - name: latest.json
         run: |
           "$XTASK" latest-json dist --version "$VERSION" --pubkey "$PUBKEY" \
-            --url-base "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" --out latest.json
-          cat latest.json
+            --url-base "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" --out dist/latest.json
+          cat dist/latest.json
 
+      # (all from dist/, so that the artifact holds the files themselves, as `release` uploads them)
       - uses: actions/upload-artifact@v4
         with:
           name: updater
           path: |
             dist/*.sig
-            latest.json
+            dist/latest.json
           if-no-files-found: error
 
   # The .deb installed in a fresh ubuntu:22.04 and its binary started headless (P7's acceptance,
@@ -973,6 +974,10 @@ jobs:
         run: |
           files=(dist/*)
           ls -l dist
+          # the packages, their .sig files and latest.json, side by side (scripts/ci/sign-updater-artifacts.sh
+          # checked the packages' names)
+          for f in "${files[@]}"; do test -f "$f"; done
+          test -f dist/latest.json
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
           else

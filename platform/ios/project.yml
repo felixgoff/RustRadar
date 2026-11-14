@@ -2,9 +2,19 @@
 # (not committed). One app target: main.m calls rustradar_ios_main in librustradar_app.a, which
 # build-rust.sh builds with cargo before each build. No CocoaPods, no Swift.
 #
-#   cd platform/ios && xcodegen generate
-#   xcodebuild -project RustRadar.xcodeproj -scheme RustRadar -sdk iphonesimulator \
-#     -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+# Today's identity (the project `tauri ios init` generated from tauri.conf.json, Tauri CLI 2.12.1):
+# bundle id com.felix.rustradar, product RustRadar (RustRadar.app, executable RustRadar), iOS 15.0
+# (the CLI's default minimumSystemVersion), its LaunchScreen.storyboard and 18 app icons
+# (src-tauri/icons/ios, flattened onto white), ITSAppUsesNonExemptEncryption = false, the same
+# orientations and device capabilities. The version comes from the build's command line:
+# MARKETING_VERSION is CFBundleShortVersionString, CURRENT_PROJECT_VERSION CFBundleVersion.
+#
+#   simulator (the phone shells' CI):
+#     cd platform/ios && xcodegen generate
+#     xcodebuild -project RustRadar.xcodeproj -scheme RustRadar -sdk iphonesimulator \
+#       -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+#   release (an unsigned IPA, or the App Store build and TestFlight upload on main and v* tags):
+#     cargo xtask ios-release [--unsigned | --app-store] [--upload]   (crates/xtask/src/ios.rs)
 name: RustRadar
 options:
   bundleIdPrefix: com.felix
@@ -12,7 +22,8 @@ options:
     iOS: "15.0"
 settings:
   base:
-    # CI passes the release's MARKETING_VERSION and CURRENT_PROJECT_VERSION (P9)
+    # stand-ins for a build from Xcode: cargo xtask ios-release passes the release's
+    # MARKETING_VERSION and CURRENT_PROJECT_VERSION
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
 targets:
@@ -23,6 +34,10 @@ targets:
     sources:
       - path: Sources
       - path: Assets.xcassets
+      - path: LaunchScreen.storyboard
+    # empty, as today's: the App Store export signs with what the provisioning profile gives
+    entitlements:
+      path: RustRadar.entitlements
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.felix.rustradar
@@ -31,11 +46,15 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
+        # as today's project (Rust's static library carries no bitcode)
+        ENABLE_BITCODE: NO
         # build-rust.sh leaves librustradar_app.a beside the app
         LIBRARY_SEARCH_PATHS: ["$(inherited)", "$(BUILT_PRODUCTS_DIR)"]
         # the Basis transcoder is C++; Rust's own #[link] frameworks do not travel with a
         # static library, hence the list under dependencies
         OTHER_LDFLAGS: ["$(inherited)", "-lrustradar_app", "-lc++"]
+        # devices are arm64 only (aarch64-apple-ios), as today's project
+        "EXCLUDED_ARCHS[sdk=iphoneos*]": x86_64
         # only Apple silicon simulators (aarch64-apple-ios-sim)
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         # the build phase writes into the workspace's target/ folder

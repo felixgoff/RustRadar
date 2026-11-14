@@ -5,6 +5,7 @@ mod bump;
 mod fixtures;
 mod fonts;
 mod icons;
+mod ios;
 mod manifest;
 mod package;
 mod sign;
@@ -26,7 +27,8 @@ release (run by CI):
   package        build and pack the desktop packages (deb, rpm, appimage), --sign to sign them
   sign           sign updater artifacts (TAURI_SIGNING_PRIVATE_KEY, ..._PASSWORD)
   testflight-age days since the newest TestFlight build (APPLE_API_*)
-  android-release  build, check and name the release APK (ANDROID_KEYSTORE, ..._PASSWORD, ANDROID_KEY_ALIAS)";
+  android-release  build, check and name the release APK (ANDROID_KEYSTORE, ..._PASSWORD, ANDROID_KEY_ALIAS)
+  ios-release    build the unsigned IPA, or the App Store build and its TestFlight upload (APPLE_API_*)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -42,6 +44,7 @@ fn main() -> ExitCode {
         Some("sign") => sign::run(rest),
         Some("testflight-age") => testflight::run(rest),
         Some("android-release") => android::run(rest),
+        Some("ios-release") => ios::run(rest),
         Some("help" | "--help" | "-h") | None => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;

@@ -20,7 +20,8 @@ profile_dir=debug
 flags=()
 if [ "$configuration" = "Release" ]; then
   profile_dir=release
-  flags=(--release)
+  # a release builds exactly the committed Cargo.lock
+  flags=(--release --locked)
 fi
 
 # Xcode runs build phases without the login shell's PATH

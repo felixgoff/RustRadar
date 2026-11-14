@@ -1032,6 +1032,18 @@ jobs:
       - name: Release version
         run: target/debug/xtask bump "$VERSION"
 
+      # The four libraries first, as the release builds them (android-release then finds them built),
+      # once more if the first try fails: the NDK's clang 18 crashed (SIGSEGV, in its optimizer)
+      # compiling basisu's transcoder for armeabi-v7a in CI run 320, where run 319 had built the same
+      # file at the same commit's settings.
+      - name: Rust libraries (four ABIs)
+        run: |
+          for attempt in 1 2; do
+            platform/android/build-rust.sh --release --locked arm64-v8a armeabi-v7a x86 x86_64 && exit 0
+            echo "::warning::The Android Rust build failed (try $attempt of 2)."
+          done
+          exit 1
+
       # (the xtask writes the keystore only after the Rust build and keeps the secrets out of every
       # child process; empty values mean no secrets)
       - name: Release APK

@@ -1623,7 +1623,7 @@ fn stream_client() -> Result<&'static reqwest::Client, String> {
         return Ok(c);
     }
     let c = fr24::client_builder()
-        .user_agent(concat!("RustRadar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/felixgoff/RustRadar)"))
+        .user_agent(crate::USER_AGENT)
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(STREAM_IDLE)
         .build()

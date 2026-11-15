@@ -192,7 +192,7 @@ impl Tiles {
         let http = match config.client {
             Some(client) => client,
             None => fr24::client_builder()
-                .user_agent(concat!("RustRadar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/felixgoff/RustRadar)"))
+                .user_agent(crate::USER_AGENT)
                 .connect_timeout(CONNECT_TIMEOUT)
                 .timeout(TIMEOUT)
                 .build()

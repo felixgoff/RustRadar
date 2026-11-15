@@ -16,7 +16,7 @@ use tokio::task::AbortHandle;
 use crate::trafikverket::TrainEvent;
 use crate::{CmdResult, Following, Wake, now_ms};
 
-const USER_AGENT: &str = concat!(
+pub(crate) const USER_AGENT: &str = concat!(
     "RustRadar/",
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/felixgoff/RustRadar)"

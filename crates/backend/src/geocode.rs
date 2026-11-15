@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::CmdResult;
 
 const URL: &str = "https://photon.komoot.io/api/";
-const USER_AGENT: &str = concat!(
+pub(crate) const USER_AGENT: &str = concat!(
     "RustRadar/",
     env!("CARGO_PKG_VERSION"),
     " (desktop flight radar; place search; +https://github.com/felixgoff/RustRadar)"

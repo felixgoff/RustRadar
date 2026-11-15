@@ -18,16 +18,22 @@
 //!   version too (item F5): the native app compares its own `CARGO_PKG_VERSION` with the releases'
 //!   (`update::current_version`, `update::android::VERSION`) as today's app compares
 //!   `tauri.conf.json`'s, so it must carry the version CI writes before a release build;
-//! - `Cargo.lock`'s entry for [`APP_PACKAGE`], then, listed as `Cargo.lock (rustradar-app)`, its entry
-//!   for [`NATIVE_PACKAGE`] while that package is a member.
+//! - while a member is the package [`BACKEND_PACKAGE`] (`crates/backend`, before and after stage 12),
+//!   its `[package]` version too (item A2): its requests' User-Agent is `RustRadar/{its version}`
+//!   (`backend::USER_AGENT`), which today's app sent with the release version (the `src-tauri`
+//!   modules read the Tauri app's), and both apps link it, the Tauri shim and the native app;
+//! - `Cargo.lock`'s entry for [`APP_PACKAGE`], then, listed as `Cargo.lock (rustradar-app)` and
+//!   `Cargo.lock (rustradar-backend)`, its entries for [`NATIVE_PACKAGE`] and [`BACKEND_PACKAGE`] while
+//!   those packages are members.
 //!
-//! That is six places on `rust-port`, today's four in a tree without the native crate (`main`), and
-//! two after stage 12 (`crates/app/Cargo.toml` and `Cargo.lock`), so the tool needs no change when
-//! stage 12 lands.
+//! That is eight places on `rust-port`, today's four in a tree without the native crates (`main`),
+//! and four after stage 12 (`crates/app/Cargo.toml`, `crates/backend/Cargo.toml` and their two
+//! `Cargo.lock` entries), so the tool needs no change when stage 12 lands.
 //!
-//! Deviations from `version.mjs`: the native crate's two places (the script knows today's four, so
-//! `bun run bump` and the workflow steps that still run the script leave `crates/app` behind, which
-//! `cargo xtask bump --check` then reports); an exact version may repair files that disagree (the
+//! Deviations from `version.mjs`: the native crate's two places (the script knows today's four and,
+//! while `crates/backend` exists, the backend's two, so `bun run bump` and the workflow steps that
+//! still run the script leave `crates/app` behind, which `cargo xtask bump --check` then reports); an
+//! exact version may repair files that disagree (the
 //! script refused every change then, while its message said to set an exact version); a current
 //! version that is not `x.y.z` is an error instead of `NaN` arithmetic; the closing `Updated …` line
 //! names the files written, by their paths where two share a name, instead of a fixed four.
@@ -42,6 +48,9 @@ pub const APP_PACKAGE: &str = "rustradar";
 /// The native app's package until item D2 renames it to [`APP_PACKAGE`]; until then it carries the
 /// release version beside the Tauri app's files (item F5).
 pub const NATIVE_PACKAGE: &str = "rustradar-app";
+
+/// The backend both apps link: its version is its requests' User-Agent's (item A2).
+pub const BACKEND_PACKAGE: &str = "rustradar-backend";
 
 /// The repository root: `crates/xtask` is two levels below it.
 pub(crate) fn repo_root() -> PathBuf {
@@ -89,13 +98,16 @@ pub fn places(root: &Path) -> Result<Vec<Place>, String> {
     let members = members(root)?;
     let app = member(&members, APP_PACKAGE)?.ok_or_else(|| format!("no workspace member is the package {APP_PACKAGE}"))?;
     let native = member(&members, NATIVE_PACKAGE)?;
+    let backend = member(&members, BACKEND_PACKAGE)?;
     found.push(place(root, &app, app.clone(), pattern(TOML_VERSION))?);
-    if let Some(native) = &native {
-        found.push(place(root, native, native.clone(), pattern(TOML_VERSION))?);
+    for crate_toml in [&native, &backend].into_iter().flatten() {
+        found.push(place(root, crate_toml, crate_toml.clone(), pattern(TOML_VERSION))?);
     }
     found.push(place(root, "Cargo.lock", "Cargo.lock".to_owned(), lock_entry(APP_PACKAGE))?);
-    if native.is_some() {
-        found.push(place(root, "Cargo.lock", format!("Cargo.lock ({NATIVE_PACKAGE})"), lock_entry(NATIVE_PACKAGE))?);
+    for (package, crate_toml) in [(NATIVE_PACKAGE, &native), (BACKEND_PACKAGE, &backend)] {
+        if crate_toml.is_some() {
+            found.push(place(root, "Cargo.lock", format!("Cargo.lock ({package})"), lock_entry(package))?);
+        }
     }
     Ok(found)
 }
@@ -279,17 +291,26 @@ pub fn run_version(args: &[String]) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// The six places of `rust-port`, as they are listed.
-    const SIX: [&str; 6] = [
+    /// The eight places of `rust-port`, as they are listed.
+    const EIGHT: [&str; 8] = [
         "package.json",
         "src-tauri/tauri.conf.json",
         "src-tauri/Cargo.toml",
         "crates/app/Cargo.toml",
+        "crates/backend/Cargo.toml",
         "Cargo.lock",
         "Cargo.lock (rustradar-app)",
+        "Cargo.lock (rustradar-backend)",
     ];
     /// The files they are in.
-    const FILES: [&str; 5] = ["package.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "crates/app/Cargo.toml", "Cargo.lock"];
+    const FILES: [&str; 6] = [
+        "package.json",
+        "src-tauri/tauri.conf.json",
+        "src-tauri/Cargo.toml",
+        "crates/app/Cargo.toml",
+        "crates/backend/Cargo.toml",
+        "Cargo.lock",
+    ];
 
     /// A folder of its own under the system's temp folder, removed when dropped.
     struct Tree(PathBuf);
@@ -302,14 +323,18 @@ mod tests {
             Tree(root)
         }
 
-        /// A repository root with today's six places at `versions`: `package.json`, `tauri.conf.json`,
-        /// `src-tauri/Cargo.toml`, `crates/app/Cargo.toml`, and `Cargo.lock`'s `rustradar` and
-        /// `rustradar-app` entries (the first with a CRLF, as a checkout on Windows may have it).
-        fn new(name: &str, versions: [&str; 6]) -> Tree {
+        /// A repository root with today's eight places at `versions`: `package.json`,
+        /// `tauri.conf.json`, `src-tauri/Cargo.toml`, `crates/app/Cargo.toml`,
+        /// `crates/backend/Cargo.toml`, and `Cargo.lock`'s `rustradar`, `rustradar-app` and
+        /// `rustradar-backend` entries (the first with a CRLF, as a checkout on Windows may have it).
+        fn new(name: &str, versions: [&str; 8]) -> Tree {
             let tree = Tree::empty(name);
-            let [package, conf, toml, app, lock, app_lock] = versions;
+            let [package, conf, toml, app, backend, lock, app_lock, backend_lock] = versions;
             let files = [
-                ("Cargo.toml", "[workspace]\nresolver = \"3\"\nmembers = [\n    \"src-tauri\",\n    \"crates/core\",\n    \"crates/app\",\n]\n".to_owned()),
+                (
+                    "Cargo.toml",
+                    "[workspace]\nresolver = \"3\"\nmembers = [\n    \"src-tauri\",\n    \"crates/core\",\n    \"crates/backend\",\n    \"crates/app\",\n]\n".to_owned(),
+                ),
                 ("package.json", format!("{{\n  \"name\": \"rustradar\",\n  \"version\": \"{package}\",\n  \"type\": \"module\"\n}}\n")),
                 ("src-tauri/tauri.conf.json", format!("{{\n  \"productName\": \"RustRadar\",\n  \"version\": \"{conf}\",\n  \"plugins\": {{ \"x\": {{ \"version\": \"9.9.9\" }} }}\n}}\n")),
                 ("src-tauri/Cargo.toml", format!("[package]\nname = \"rustradar\"\nversion = \"{toml}\"\nedition = \"2024\"\n\n[lib]\nname = \"rustradar_lib\"\n\n[dependencies]\nserde = {{ version = \"1\" }}\n")),
@@ -318,8 +343,12 @@ mod tests {
                     format!("[package]\nname = \"rustradar-app\"\nversion = \"{app}\"\nedition = \"2024\"\n\n[lib]\nname = \"rustradar_app\"\n\n[[bin]]\nname = \"rustradar-app\"\n\n[dependencies]\nwinit = {{ version = \"0.30.13\" }}\n\n[dependencies.png]\nversion = \"0.18\"\n"),
                 ),
                 (
+                    "crates/backend/Cargo.toml",
+                    format!("[package]\nname = \"rustradar-backend\"\nversion = \"{backend}\"\nedition = \"2024\"\n\n[dependencies]\nfr24 = {{ workspace = true }}\n\n[dependencies.regex]\nversion = \"1\"\n"),
+                ),
+                (
                     "Cargo.lock",
-                    format!("version = 4\n\n[[package]]\nname = \"rustradar\"\r\nversion = \"{lock}\"\n\n[[package]]\nname = \"rustradar-app\"\nversion = \"{app_lock}\"\n\n[[package]]\nname = \"rustradar-backend\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"other\"\nversion = \"{lock}\"\n"),
+                    format!("version = 4\n\n[[package]]\nname = \"rustradar\"\r\nversion = \"{lock}\"\n\n[[package]]\nname = \"rustradar-app\"\nversion = \"{app_lock}\"\n\n[[package]]\nname = \"rustradar-backend\"\nversion = \"{backend_lock}\"\n\n[[package]]\nname = \"rustradar-core\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"other\"\nversion = \"{lock}\"\n"),
                 ),
             ];
             for (file, text) in files {
@@ -384,55 +413,78 @@ mod tests {
     }
 
     #[test]
-    fn finds_the_six_places_with_the_native_crate() {
-        let tree = Tree::new("six", ["0.3.0"; 6]);
-        assert_eq!(tree.names(), SIX);
+    fn finds_the_eight_places_with_the_native_crates() {
+        let tree = Tree::new("eight", ["0.3.0"; 8]);
+        assert_eq!(tree.names(), EIGHT);
         let found = places(&tree.0).unwrap();
-        assert_eq!(found.iter().map(|p| p.file.as_str()).collect::<Vec<_>>(), [&FILES[..], &["Cargo.lock"]].concat());
+        assert_eq!(found.iter().map(|p| p.file.as_str()).collect::<Vec<_>>(), [&FILES[..], &["Cargo.lock", "Cargo.lock"]].concat());
         assert!(tree.all_at("0.3.0"));
         assert_eq!(agreed(&found).unwrap(), "0.3.0");
-        // the closing line names the two manifests by their folders
-        assert_eq!(written(&found), ["package.json", "tauri.conf.json", "src-tauri/Cargo.toml", "crates/app/Cargo.toml", "Cargo.lock"]);
-        assert_eq!(and_list(&written(&found)), "package.json, tauri.conf.json, src-tauri/Cargo.toml, crates/app/Cargo.toml and Cargo.lock");
+        // the closing line names the three manifests by their folders
+        assert_eq!(
+            written(&found),
+            ["package.json", "tauri.conf.json", "src-tauri/Cargo.toml", "crates/app/Cargo.toml", "crates/backend/Cargo.toml", "Cargo.lock"]
+        );
+        assert_eq!(
+            and_list(&written(&found)),
+            "package.json, tauri.conf.json, src-tauri/Cargo.toml, crates/app/Cargo.toml, crates/backend/Cargo.toml and Cargo.lock"
+        );
     }
 
     #[test]
-    fn without_the_native_crate_todays_four_places_count() {
-        // main's tree: no crates/app member, so version.mjs's four places and its closing line
-        let tree = Tree::new("four", ["0.3.0", "0.3.0", "0.3.0", "0.1.0", "0.3.0", "0.1.0"]);
+    fn a_dry_runs_version_reaches_the_backend() {
+        // CI's dry run writes the next patch (`cargo xtask bump 0.3.17`) before building: the
+        // backend's requests then say `RustRadar/0.3.17`, as the Tauri app's did (backend::USER_AGENT)
+        let tree = Tree::new("dry-run", ["0.3.0"; 8]);
+        bump(&tree.0, Some("0.3.17")).unwrap();
+        assert!(tree.all_at("0.3.17"));
+        assert!(tree.read("crates/backend/Cargo.toml").starts_with("[package]\nname = \"rustradar-backend\"\nversion = \"0.3.17\"\n"));
+        assert!(tree.read("Cargo.lock").contains("name = \"rustradar-backend\"\nversion = \"0.3.17\"\n"));
+    }
+
+    #[test]
+    fn without_the_native_crates_todays_four_places_count() {
+        // main's tree: no crates/app or crates/backend member, so version.mjs's four places and its
+        // closing line
+        let tree = Tree::new("four", ["0.3.0", "0.3.0", "0.3.0", "0.1.0", "0.1.0", "0.3.0", "0.1.0", "0.1.0"]);
         tree.write("Cargo.toml", "[workspace]\nresolver = \"3\"\nmembers = [\n    \"src-tauri\",\n]\n");
         assert_eq!(tree.names(), ["package.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "Cargo.lock"]);
         let found = places(&tree.0).unwrap();
         assert_eq!(and_list(&written(&found)), "package.json, tauri.conf.json, Cargo.toml and Cargo.lock");
-        let (app, lock) = (tree.read("crates/app/Cargo.toml"), tree.read("Cargo.lock"));
+        let (app, backend, lock) = (tree.read("crates/app/Cargo.toml"), tree.read("crates/backend/Cargo.toml"), tree.read("Cargo.lock"));
         bump(&tree.0, Some("patch")).unwrap();
         assert!(tree.all_at("0.3.1"));
         assert_eq!(tree.read("crates/app/Cargo.toml"), app, "not a member: not counted");
-        assert_eq!(tree.read("Cargo.lock"), lock.replacen("0.3.0", "0.3.1", 1), "nor its lock entry");
+        assert_eq!(tree.read("crates/backend/Cargo.toml"), backend, "not a member: not counted");
+        assert_eq!(tree.read("Cargo.lock"), lock.replacen("0.3.0", "0.3.1", 1), "nor their lock entries");
     }
 
     #[test]
     fn bump_rewrites_only_the_apps_versions() {
-        let tree = Tree::new("rewrite", ["0.3.0"; 6]);
+        let tree = Tree::new("rewrite", ["0.3.0"; 8]);
         let before: Vec<String> = FILES.iter().map(|f| tree.read(f)).collect();
         bump(&tree.0, Some("patch")).unwrap();
         assert!(tree.all_at("0.3.1"));
         // nothing else changed: the nested "version", the dependencies' versions, the other packages,
-        // the CRLF entry; Cargo.lock's two entries are its first two 0.3.0s
+        // the CRLF entry; Cargo.lock's three entries are its first three 0.3.0s
         let after: Vec<String> = FILES.iter().map(|f| tree.read(f)).collect();
         for ((file, b), a) in FILES.iter().zip(&before).zip(&after) {
-            let places_in_it = if *file == "Cargo.lock" { 2 } else { 1 };
+            let places_in_it = if *file == "Cargo.lock" { 3 } else { 1 };
             assert_eq!(b.replacen("0.3.0", "0.3.1", places_in_it), *a, "{file}");
         }
         let lock = tree.read("Cargo.lock");
         assert!(lock.contains("name = \"rustradar\"\r\nversion = \"0.3.1\""));
         assert!(lock.contains("name = \"rustradar-app\"\nversion = \"0.3.1\""));
-        assert!(lock.contains("name = \"rustradar-backend\"\nversion = \"0.1.0\""));
+        assert!(lock.contains("name = \"rustradar-backend\"\nversion = \"0.3.1\""));
+        assert!(lock.contains("name = \"rustradar-core\"\nversion = \"0.1.0\""));
         assert!(lock.contains("name = \"other\"\nversion = \"0.3.0\""));
         assert!(tree.read("src-tauri/tauri.conf.json").contains("\"version\": \"9.9.9\""));
         let app = tree.read("crates/app/Cargo.toml");
         assert!(app.starts_with("[package]\nname = \"rustradar-app\"\nversion = \"0.3.1\"\n"));
         assert!(app.ends_with("winit = { version = \"0.30.13\" }\n\n[dependencies.png]\nversion = \"0.18\"\n"));
+        let backend = tree.read("crates/backend/Cargo.toml");
+        assert!(backend.starts_with("[package]\nname = \"rustradar-backend\"\nversion = \"0.3.1\"\n"));
+        assert!(backend.ends_with("[dependencies.regex]\nversion = \"1\"\n"));
         bump(&tree.0, Some("minor")).unwrap();
         assert!(tree.all_at("0.4.0"));
         bump(&tree.0, Some("major")).unwrap();
@@ -448,7 +500,7 @@ mod tests {
 
     #[test]
     fn disagreeing_files_fail_the_check_and_take_only_an_exact_version() {
-        let tree = Tree::new("disagree", ["0.3.0", "0.3.0", "0.3.1", "0.3.0", "0.3.0", "0.3.0"]);
+        let tree = Tree::new("disagree", ["0.3.0", "0.3.0", "0.3.1", "0.3.0", "0.3.0", "0.3.0", "0.3.0", "0.3.0"]);
         assert!(bump(&tree.0, Some("--check")).unwrap_err().contains("The versions disagree"));
         assert!(bump(&tree.0, None).is_err());
         assert!(current_under(&tree.0).is_err(), "`version` prints nothing the files do not agree on");
@@ -462,9 +514,9 @@ mod tests {
 
     #[test]
     fn the_check_catches_any_one_place_out_of_step() {
-        // each of the six, the native crate's two among them (what `bun run bump` leaves behind)
-        for (i, name) in SIX.iter().enumerate() {
-            let mut versions = ["0.3.0"; 6];
+        // each of the eight, the native crate's two among them (what `bun run bump` leaves behind)
+        for (i, name) in EIGHT.iter().enumerate() {
+            let mut versions = ["0.3.0"; 8];
             versions[i] = "0.1.0";
             let tree = Tree::new(&format!("step-{i}"), versions);
             assert_eq!(tree.versions()[i], (name.to_string(), "0.1.0".to_owned()));
@@ -510,6 +562,9 @@ mod tests {
         let names: Vec<String> = places(&repo_root()).unwrap().into_iter().map(|p| p.name).collect();
         assert_eq!(tree.names(), names);
         assert!(names.iter().any(|n| n == "crates/app/Cargo.toml"), "the native app carries the release version (F5)");
+        for name in ["crates/backend/Cargo.toml", "Cargo.lock (rustradar-backend)"] {
+            assert!(names.iter().any(|n| n == name), "the backend's user agent carries it too (A2)");
+        }
         let mut paths: Vec<String> = Vec::new();
         for p in places(&tree.0).unwrap() {
             if !paths.contains(&p.file) {
@@ -553,29 +608,39 @@ mod tests {
     }
 
     #[test]
-    fn after_stage_12_two_places_follow_the_renamed_package() {
-        // D2: the JSON files are gone and crates/app is the package `rustradar`
-        let tree = Tree::new("stage12", ["0.3.0"; 6]);
+    fn after_stage_12_four_places_follow_the_renamed_package() {
+        // D2: the JSON files are gone and crates/app is the package `rustradar`; the backend stays
+        let tree = Tree::new("stage12", ["0.3.0"; 8]);
         fs::remove_file(tree.0.join("package.json")).unwrap();
         fs::remove_file(tree.0.join("src-tauri/tauri.conf.json")).unwrap();
-        tree.write("Cargo.toml", "[workspace]\nmembers = [\"crates/core\", \"crates/app\"]\n");
+        tree.write("Cargo.toml", "[workspace]\nmembers = [\"crates/core\", \"crates/backend\", \"crates/app\"]\n");
         tree.write("crates/app/Cargo.toml", "[package]\nname = \"rustradar\"\nversion = \"0.3.20\"\nedition = \"2024\"\n\n[[bin]]\nname = \"rustradar\"\n");
-        tree.write("Cargo.lock", "version = 4\n\n[[package]]\nname = \"rustradar\"\nversion = \"0.3.20\"\n");
+        tree.write("crates/backend/Cargo.toml", "[package]\nname = \"rustradar-backend\"\nversion = \"0.3.20\"\nedition = \"2024\"\n");
+        tree.write(
+            "Cargo.lock",
+            "version = 4\n\n[[package]]\nname = \"rustradar\"\nversion = \"0.3.20\"\n\n[[package]]\nname = \"rustradar-backend\"\nversion = \"0.3.20\"\n",
+        );
         let found = tree.versions();
-        assert_eq!(found, [("crates/app/Cargo.toml".to_owned(), "0.3.20".to_owned()), ("Cargo.lock".to_owned(), "0.3.20".to_owned())]);
-        assert_eq!(and_list(&written(&places(&tree.0).unwrap())), "Cargo.toml and Cargo.lock");
+        let at = |name: &str| (name.to_owned(), "0.3.20".to_owned());
+        assert_eq!(found, [at("crates/app/Cargo.toml"), at("crates/backend/Cargo.toml"), at("Cargo.lock"), at("Cargo.lock (rustradar-backend)")]);
+        assert_eq!(and_list(&written(&places(&tree.0).unwrap())), "crates/app/Cargo.toml, crates/backend/Cargo.toml and Cargo.lock");
         bump(&tree.0, Some("patch")).unwrap();
         assert!(tree.read("crates/app/Cargo.toml").contains("version = \"0.3.21\""));
-        assert!(tree.read("Cargo.lock").contains("version = \"0.3.21\""));
+        assert!(tree.read("crates/backend/Cargo.toml").contains("version = \"0.3.21\""));
+        assert_eq!(tree.read("Cargo.lock").matches("version = \"0.3.21\"").count(), 2);
     }
 
     #[test]
     fn a_missing_package_or_version_is_an_error() {
-        let tree = Tree::new("missing", ["0.3.0"; 6]);
+        let tree = Tree::new("missing", ["0.3.0"; 8]);
         tree.write("Cargo.lock", "version = 4\n\n[[package]]\nname = \"rustradar\"\nversion = \"0.3.0\"\n");
         assert_eq!(places(&tree.0).err().unwrap(), "no version found in Cargo.lock (rustradar-app)");
+        tree.write("Cargo.lock", "version = 4\n\n[[package]]\nname = \"rustradar\"\nversion = \"0.3.0\"\n\n[[package]]\nname = \"rustradar-app\"\nversion = \"0.3.0\"\n");
+        assert_eq!(places(&tree.0).err().unwrap(), "no version found in Cargo.lock (rustradar-backend)");
         tree.write("Cargo.lock", "version = 4\n");
         assert_eq!(places(&tree.0).err().unwrap(), "no version found in Cargo.lock");
+        tree.write("crates/backend/Cargo.toml", "[package]\nname = \"rustradar-backend\"\nedition = \"2024\"\n");
+        assert_eq!(places(&tree.0).err().unwrap(), "no version found in crates/backend/Cargo.toml");
         tree.write("crates/app/Cargo.toml", "[package]\nname = \"rustradar-app\"\nedition = \"2024\"\n");
         assert_eq!(places(&tree.0).err().unwrap(), "no version found in crates/app/Cargo.toml");
         tree.write("crates/core/Cargo.toml", "[package]\nname = \"rustradar-app\"\nversion = \"0.3.0\"\n");
@@ -590,8 +655,9 @@ mod tests {
         let root = repo_root();
         let found = places(&root).unwrap();
         assert!(found.iter().any(|p| p.file == "Cargo.lock"));
-        // the native app's crate is among them, before and after stage 12 (F5)
+        // the native app's crate is among them, before and after stage 12 (F5), and the backend's (A2)
         assert!(found.iter().any(|p| p.file == "crates/app/Cargo.toml"));
+        assert!(found.iter().any(|p| p.file == "crates/backend/Cargo.toml"));
         assert_eq!(agreed(&found).unwrap(), current().unwrap());
         assert!(is_exact(&current().unwrap()));
     }

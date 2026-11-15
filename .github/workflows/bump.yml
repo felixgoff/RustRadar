@@ -2,8 +2,8 @@ name: Bump version
 
 # Actions > Bump version > Run workflow: changes the version in every file that
 # carries it (`cargo xtask bump`, crates/xtask/src/bump.rs: today's four while
-# the Tauri app is in the tree, the native app's Cargo.toml and its Cargo.lock
-# entry too) and commits it to the branch picked under "Use workflow from",
+# the Tauri app is in the tree, the native app's and the backend's Cargo.toml and
+# Cargo.lock entries too) and commits it to the branch picked under "Use workflow from",
 # with no clone needed. Merging that to main then publishes the release.
 on:
   workflow_dispatch:

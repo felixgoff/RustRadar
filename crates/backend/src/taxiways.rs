@@ -25,7 +25,7 @@ const URLS: [&str; 2] = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
 ];
-const USER_AGENT: &str = concat!(
+pub(crate) const USER_AGENT: &str = concat!(
     "RustRadar/",
     env!("CARGO_PKG_VERSION"),
     " (desktop flight radar; airport taxiways for ground traffic; +https://github.com/felixgoff/RustRadar)"

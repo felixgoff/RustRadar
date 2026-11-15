@@ -149,7 +149,7 @@ fn client() -> Option<&'static reqwest::Client> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::REFERER, reqwest::header::HeaderValue::from_static(REFERER));
         fr24::client_builder()
-            .user_agent(concat!("RustRadar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/felixgoff/RustRadar)"))
+            .user_agent(crate::USER_AGENT)
             .default_headers(headers)
             .timeout(Duration::from_secs(20))
             .build()

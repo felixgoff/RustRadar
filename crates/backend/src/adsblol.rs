@@ -19,7 +19,7 @@ use serde_json::Value;
 use crate::CmdResult;
 
 const BASE: &str = "https://api.adsb.lol/v2";
-const USER_AGENT: &str = concat!(
+pub(crate) const USER_AGENT: &str = concat!(
     "RustRadar/",
     env!("CARGO_PKG_VERSION"),
     " (desktop flight radar; +https://github.com/felixgoff/RustRadar)"

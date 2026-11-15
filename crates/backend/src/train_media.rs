@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 
-const USER_AGENT: &str =
+pub(crate) const USER_AGENT: &str =
     concat!("RustRadar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/felixgoff/RustRadar; train pictures)");
 const PHOTO_WIDTH: u32 = 640;
 const LOGO_WIDTH: u32 = 240;

@@ -76,6 +76,15 @@ pub(crate) const OFFLINE: bool = cfg!(test);
 /// The app's identifier: its folders are named after it, as Tauri named them.
 pub const APP_ID: &str = "com.felix.rustradar";
 
+/// The User-Agent of the app's own requests (tiles, rail, Trafikverket, canopy, clouds, Overture,
+/// land cover, RainViewer, trains), as today's app sends it: `RustRadar/{version}` with the release
+/// version. The version is this crate's, which the version tools keep at the app's (`cargo xtask
+/// bump` and `scripts/version.mjs` count `crates/backend`), so a build carries the version CI writes
+/// into the files before building it, as today's `src-tauri` modules carried the Tauri app's. The
+/// requests with a purpose of their own name it in their module (`adsblol`, `geocode`, `taxiways`,
+/// `train_media`).
+pub const USER_AGENT: &str = concat!("RustRadar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/felixgoff/RustRadar)");
+
 /// Unix milliseconds now.
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
@@ -1184,5 +1193,61 @@ mod tests {
         assert!(!second.is_finished());
         backend.unfollow_flight();
         assert!(ended(&second).await, "nor is any once unfollowed");
+    }
+
+    /// The version a build publishes: the app package's (`rustradar`, the Tauri app now and the
+    /// native app after stage 12) as `Cargo.lock` holds it; CI writes the release version there
+    /// (`cargo xtask bump`, `scripts/version.mjs`) before building.
+    fn release_version() -> String {
+        let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock")).unwrap();
+        let mut lines = lock.lines().map(str::trim_end);
+        while let Some(line) = lines.next() {
+            if line == r#"name = "rustradar""# {
+                let version = lines.next().and_then(|l| l.strip_prefix(r#"version = ""#)?.strip_suffix('"'));
+                return version.expect("the app's Cargo.lock entry has a version").to_owned();
+            }
+        }
+        panic!("Cargo.lock has no entry for the package rustradar");
+    }
+
+    #[test]
+    fn the_user_agents_carry_the_release_version() {
+        let release = release_version();
+        assert_eq!(env!("CARGO_PKG_VERSION"), release, "this crate's version is the app's: `cargo xtask bump {release}`");
+        // byte for byte today's (src-tauri/src at v0.3.16), with the version the build publishes
+        let agent = |about: &str| format!("RustRadar/{release} ({about})");
+        let repository = "+https://github.com/felixgoff/RustRadar";
+        assert_eq!(USER_AGENT, agent(repository));
+        assert_eq!(trains::USER_AGENT, agent(repository));
+        assert_eq!(adsblol::USER_AGENT, agent(&format!("desktop flight radar; {repository}")));
+        assert_eq!(geocode::USER_AGENT, agent(&format!("desktop flight radar; place search; {repository}")));
+        assert_eq!(
+            taxiways::USER_AGENT,
+            agent(&format!("desktop flight radar; airport taxiways for ground traffic; {repository}"))
+        );
+        assert_eq!(train_media::USER_AGENT, agent(&format!("{repository}; train pictures")));
+    }
+
+    #[test]
+    fn every_user_agent_is_built_from_this_crates_version() {
+        // a `"RustRadar/…` literal anywhere outside the tests is followed by this crate's version,
+        // so no request can carry another (the app's version is this crate's, the test above)
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sites = 0;
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let code = text.split("#[cfg(test)]\nmod tests").next().unwrap();
+            for (at, needle) in code.match_indices("\"RustRadar/") {
+                let rest: String = code[at + needle.len()..].chars().filter(|c| !c.is_whitespace()).take(28).collect();
+                assert_eq!(rest, r#"",env!("CARGO_PKG_VERSION"),"#, "{}: a user agent with another version", path.display());
+                sites += 1;
+            }
+        }
+        // the crate's, trains' and the four with a purpose of their own at least
+        assert!(sites >= 6, "{sites}");
     }
 }

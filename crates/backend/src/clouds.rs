@@ -95,7 +95,7 @@ fn client() -> Option<&'static reqwest::Client> {
     static C: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     C.get_or_init(|| {
         fr24::client_builder()
-            .user_agent(concat!("RustRadar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/felixgoff/RustRadar)"))
+            .user_agent(crate::USER_AGENT)
             .timeout(TIMEOUT)
             .build()
             .ok()

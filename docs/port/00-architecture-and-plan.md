@@ -2604,7 +2604,7 @@ Run 326 (`5b05690`) is green the same way (every job, 3055 passed); its artifact
   `build-rust.sh` (`librustradar_app.a`) and `ios.rs`, if the `[lib]` name changes; move `src-tauri/icons` and
   update `crates/app/build.rs`'s icon path, `Packager.toml`'s icons and the dmg's volume icon, and the tests that
   read `src-tauri/tauri.conf.json`, `src-tauri/icons` or `src-tauri/gen/android` (Pk5–Pk8 name them); after it,
-  `cargo xtask bump` counts two places, and `testflight-refresh.yml` builds the native tree once the newest tag is
+  `cargo xtask bump` counts four places (the app's two and the backend's, A2), and `testflight-refresh.yml` builds the native tree once the newest tag is
   native.
 - **Before the first native release**: decide K14 (gap 1) and the backend's user agent (gap 3); after the first
   main push of the native tree, read its run: `release` created once, `latest.json` signed with the real key (the

@@ -26,8 +26,13 @@
 //! `--pubkey` (Tauri's form, base64 of the `.pub` file, or the bare minisign key) checks every
 //! signature against the artifact's bytes before anything is written, so that a release signed with
 //! another key never reaches `releases/latest`.
+//!
+//! `--rehearsal OWNER/REPO` (plan P11, [`crate::rehearsal`]): the manifest of the upgrade rehearsal's
+//! pre-release in that test repository (never felixgoff/RustRadar), its signatures checked with the
+//! key installed copies hold unless `--pubkey` names another, each signed for `--version`.
 
 use crate::bump;
+use crate::rehearsal;
 use crate::sign;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -188,11 +193,12 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-const USAGE: &str =
-    "usage: cargo xtask latest-json <dir> [--version x.y.z] [--url-base URL] [--notes TEXT] [--pubkey KEY] [--out FILE]";
+const USAGE: &str = "usage: cargo xtask latest-json <dir> [--version x.y.z] [--url-base URL | --rehearsal OWNER/REPO] [--notes TEXT] [--pubkey KEY] [--out FILE]";
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let (mut dir, mut version, mut url_base, mut notes, mut pubkey, mut out) = (None, None, None, NOTES.to_owned(), None, PathBuf::from("latest.json"));
+    // the upgrade rehearsal's test repository (crate::rehearsal, docs/port/upgrade-rehearsal.md)
+    let mut rehearsal = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or_else(|| format!("{arg} needs a value\n{USAGE}"));
@@ -202,6 +208,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--notes" => notes = value()?,
             "--pubkey" => pubkey = Some(value()?),
             "--out" => out = PathBuf::from(value()?),
+            "--rehearsal" => rehearsal = Some(rehearsal::test_repository(&value()?)?),
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}\n{USAGE}")),
             path if dir.is_none() => dir = Some(PathBuf::from(path)),
             _ => return Err(USAGE.to_owned()),
@@ -212,6 +219,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Some(v) => v,
         None => bump::current()?,
     };
+    if let Some(repo) = &rehearsal {
+        if url_base.is_some() {
+            return Err(format!("--rehearsal serves the files from {repo}'s release: leave out --url-base"));
+        }
+        url_base = Some(rehearsal::download_base(repo, &version));
+        if pubkey.is_none() {
+            pubkey = Some(rehearsal::installed_key(&bump::repo_root())?);
+        } else {
+            println!("note: checking with the key given, not the one installed copies hold ({})", rehearsal::KEY_SOURCE);
+        }
+    }
     let url_base = url_base.unwrap_or_else(|| {
         let repo = std::env::var("GITHUB_REPOSITORY").ok().filter(|r| !r.is_empty()).unwrap_or_else(|| REPOSITORY.to_owned());
         format!("https://github.com/{repo}/releases/download/v{version}")
@@ -222,9 +240,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
         for (path, artifact) in &found {
             let data = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
             sign::verify(&key, &artifact.signature, data).map_err(|e| format!("{}: {e}", artifact.name))?;
+            if rehearsal.is_some() {
+                rehearsal::check_signed_version(&artifact.signature, &version).map_err(|e| format!("{}: {e}", artifact.name))?;
+            }
             println!("signature verified: {}", artifact.name);
         }
     }
+    let paths: Vec<PathBuf> = found.iter().flat_map(|(path, a)| [path.clone(), path.with_file_name(format!("{}.sig", a.name))]).collect();
     let list: Vec<Artifact> = found.into_iter().map(|(_, a)| a).collect();
     let manifest = manifest(&version, &notes, &iso_string(rustradar_backend::now_ms())?, &url_base, &list)?;
     fs::write(&out, to_json(&manifest)).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -232,6 +254,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         println!("{key:<24} {}", entry.url);
     }
     println!("wrote {} for v{version}", out.display());
+    if let Some(repo) = &rehearsal {
+        print!("{}", rehearsal::next_steps(repo, &version, &[paths, vec![out.clone()]].concat()));
+    }
     Ok(())
 }
 

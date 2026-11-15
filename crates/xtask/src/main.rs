@@ -8,6 +8,7 @@ mod icons;
 mod ios;
 mod manifest;
 mod package;
+mod rehearsal;
 mod sign;
 mod testflight;
 
@@ -28,7 +29,11 @@ release (run by CI):
   sign           sign updater artifacts (TAURI_SIGNING_PRIVATE_KEY, ..._PASSWORD)
   testflight-age days since the newest TestFlight build (APPLE_API_*)
   android-release  build, check and name the release APK (ANDROID_KEYSTORE, ..._PASSWORD, ANDROID_KEY_ALIAS)
-  ios-release    build the unsigned IPA, or the App Store build and its TestFlight upload (APPLE_API_*)";
+  ios-release    build the unsigned IPA, or the App Store build and its TestFlight upload (APPLE_API_*)
+
+upgrade rehearsal (docs/port/upgrade-rehearsal.md; publishes nothing):
+  latest-json <dir> --rehearsal OWNER/REPO   the manifest of a test repository's pre-release
+  rehearsal-check <latest.json URL>          read a release as installed copies do and check every download";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -45,6 +50,7 @@ fn main() -> ExitCode {
         Some("testflight-age") => testflight::run(rest),
         Some("android-release") => android::run(rest),
         Some("ios-release") => ios::run(rest),
+        Some("rehearsal-check") => rehearsal::run_check(rest),
         Some("help" | "--help" | "-h") | None => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;

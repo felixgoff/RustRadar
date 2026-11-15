@@ -933,7 +933,7 @@ are.
 | ☑ | Earth picture and night lights on the globe; clouds | 04 §5.1, §9 | R10 |
 | ☑ | Rain streaks; tilt-shift; map scale cap 1.5 | 04 §10; 01 §1.4, §2.5 | R11 |
 | ☑ | Hillshade on all basemaps | 04 §14.2 | R12, Z3 |
-| ☐ | 3D terrain surface, draped ground, objects standing on it, camera ground follow | 04 §14 | Z1–Z4 |
+| ☑ | 3D terrain surface, draped ground, objects standing on it, camera ground follow | 04 §14 | Z1–Z4, G3 |
 
 **UI**
 
@@ -963,7 +963,8 @@ are.
 | ☐ | Open links, reveal exported files | 07 §11.2 | U20 |
 | ☐ | Desktop self-update with splash, hourly check, toast | 07 §7.1, §12 | P2, P3 |
 | ☐ | Android update notice | 07 §7.3 | P4 |
-| ☐ | Installers: NSIS, MSI, dmg, deb, rpm, AppImage, APK, IPA / TestFlight | 07 §13 | P5–P9 |
+| ☑ | Installers built by CI with today's names and identity: NSIS, MSI, `.app.tar.gz` and dmg for both Macs, deb, rpm, AppImage, the release APK and the IPA (unsigned off a release); the deb installs and starts in `ubuntu:22.04` (stage 11 status) | 07 §13 | P5–P10 |
+| ☐ | Installs on each OS (person checks), the signed APK and the TestFlight upload (only a release makes them) | 07 §13 | P5–P9 |
 | ☐ | Old Tauri installs update themselves to the native build | 07 §12.1 | P11 |
 
 ---
@@ -2406,3 +2407,212 @@ bridges; the raised decks were in the coarser tiles further out) and read the it
 binaries it held 23 GB, 16 GB left free on `/`. The app's integration binaries were deleted after each batch and the
 map crate's test binary after its run; no release or cross build was made. The review's logs and scripts are in the
 scratchpad only.
+
+---
+
+## Stage 11 status
+
+Checked on 2026-11-15 on `rust-port` at `5b05690` by the stage 11 review (the item that owns no files), after the
+stage 11 rows P5–P11 (run as Pk5–Pk11, as P1–P4 were Pk1–Pk4) and the follow-ups F3, F4, F5 and G3 had reported.
+This section is in the commit after `5b05690`.
+
+**In short.**
+- Stage 11 is done as code, tests and CI. On every push that is not a Tauri release (so on every `rust-port`
+  push) CI builds today's whole release with the native app:
+  the NSIS installer and the MSI, the updater's `.app.tar.gz` and the `.dmg` for both Macs, the `.deb`, `.rpm` and
+  AppImage, the four-ABI release APK and the device IPA; it signs the desktop packages for the updater (with a
+  throwaway key off a release), writes and checks one `latest.json` with v0.3.16's eleven platform keys, installs
+  the `.deb` in a fresh `ubuntu:22.04` and starts it, starts the AppImage and reads the APK's badging. On
+  `rust-port` that is a dry run at the version a push to `main` would publish (0.3.17): workflow artifacts only.
+- Nothing can publish from `rust-port`, and a push to `main` or a `v*` tag still releases today's Tauri app while
+  `src-tauri/tauri.conf.json` exists (read line by line below). The native release publishes only from a tree
+  without it, that is after stage 12's D2 reaches `main`.
+- Not done, and only a person or a real release can do it: every install on a real Windows, Mac, Linux desktop,
+  Android phone and iPhone; the signed APK and the TestFlight upload (both only on a release, which this run may
+  not make); and P11's rehearsal itself (procedure and tools written; `docs/port/upgrade-rehearsal.md` section 10 is
+  the gate stage 12 waits on).
+- The follow-ups: F3 gives shots and the window `--set KEY=VALUE` for every setting (stages 8-10 gap 10 closed);
+  F4 finds V3's 4–5 px offset in the reference pictures' renderer, not in the camera (visual difference 2
+  closed); F5 carries the release version in the app crate (gap 6's first half closed; the packages patch the
+  installer kind, its second half); G3 drapes the radar's ground layers, the signal blocks, the train route and
+  the trail's shadow over the 3D terrain (gap 3 closed).
+- Section 4: 65 lines ticked, 12 not (63 and 12 before; the installers row is now two): the 3D terrain line
+  (gap 3 was all that held it) and the installers as far as CI builds them (the row is split: installs stay a
+  person check).
+- No fixes were needed: the workspace compiles, every test passes here and on CI, Clippy is clean, every CI job is
+  green and nothing in the workflows can publish from `rust-port`. This review changed only this document (the two
+  ticks, the split row, this section).
+
+**Checks**
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | clean, no warnings |
+| `cargo test --workspace` (SwiftShader) | 3057 passed, 0 failed, 28 ignored (the backend's 22, the app's 2, xtask's 3 packaging tests, the map's doc block), crate by crate with the CI's `line-tables-only` debug info, the app's 47 integration files in four batches (binaries deleted between them); no GPU test skipped; about 1 h 50 min on 4 vCPUs, the map crate's tests 69 min of it |
+| `cargo clippy --workspace --all-targets` | no warnings |
+| `cargo check -p rustradar` (shim) | passes (its 2 tests pass) |
+| `bun run check` | 0 errors, 0 warnings (5589 files) |
+| `bun test src` | 394 pass |
+| xtask's 3 ignored packaging tests, `--ignored` | all 3 pass here (cargo-packager 0.11.8, cargo-generate-rpm 0.21.1, makensis 3.09, clang, lld-link, llvm-rc, 7z, dpkg-deb, rpm, unsquashfs present): the deb, rpm and AppImage, the NSIS installer and the `.app` from stand-ins |
+| `shellcheck` on `scripts/ci/*.sh`, `platform/linux/install-check.sh`, both `build-rust.sh`, `scripts/check-signing-key.sh`, `scripts/release-version.sh` | clean but for one note on P1's `release-version.sh` (SC2086 on `$tags`, whose word splitting is meant) |
+| `actionlint` | not run here (fetching its binary was refused in this container); Pk10 ran 1.7.7 clean, and GitHub runs all three files' jobs |
+| CI "Build" on `rust-port` | runs 323 (`f703ff7`), 324 (`615d4db`) and 325 (`510bfb9`) green; 326 (`5b05690`, the head this section was checked at) green too, 3055 passed |
+
+The passing tests, by crate (here; CI run 325 counts the same, without the shim):
+
+| Crate | Passed | Ignored | Since the stages 8-10 status |
+|---|---|---|---|
+| core | 603 unit + 2 in `tests/motion.rs` | 0 | – |
+| scene | 647 + 3 in `tests/deck_placement.rs` | 0 | +4 (F4's 3, G3's 1) |
+| map | 476 unit + 9 + 2 + 2 (`fixture_tiles`, `reference_placement`, `tile_plumbing`) | 1 doc block | +9 unit (G3), +2 (F4's `reference_placement`) |
+| backend | 270 | 22 (as in stage 2) | – |
+| app | 690 unit + 175 in 47 integration files | 2 (P2's network test, P3's window test) | +8 unit (F3's 7, G3's 1; F5 replaced P3's version test), +4 integration (F3's `tests/set_flag.rs`) |
+| xtask | 158 | 3 (the packaging tests above; they need the packers) | +90 (F5, Pk5–Pk9, Pk11) |
+| fr24 | 17 + 1 doc-test | 0 | – |
+| shim | 2 | 0 | – |
+
+**Per item**
+
+| Item | Verdict | Evidence, and what differs from the row |
+|---|---|---|
+| F3 | done | `--set` for all 16 settings by their `settings.json` names, strict values, the last one winning, nothing saved; 7 unit tests, 4 shots through the binary's path (`tests/set_flag.rs`: Zermatt's mountainside raised by `terrain=true`, the rain preset's streaks, the fixture's radar at V2 through the real binary, a wrong `--set` refused). This review's own Zermatt shots went through it (G3). |
+| F4 | done; nothing to fix in the app | the camera equals deck's CPU viewport to 2.4e-10 px (`scene/tests/deck_placement.rs`, 20 views × 81 points); the reference pictures' globe stands 4.7 px higher because SwiftShader's `sin`/`cos` in deck's globe vertex shader are off by up to 2e-4 (`scripts/port/deck-placement.mjs` records it into `scene/tests/data/deck/placement.json`); `map/tests/reference_placement.rs` checks dark V3 at both sizes: plain fit = SwiftShader's predicted shift within 0.35 px, moved by it 0 px and over 98 % agreement. This review read CI run 325's `f4-dark-v3-1440x900.png` beside `dark-v3-1440x900.png` and fit the two water masks itself: best whole-pixel offset (0, −5), the reference higher, as F4 found. |
+| F5 | done | `crates/app` is 0.3.0 with the other five places; `cargo xtask bump --check` passes here; the updater, the Android check and the user agent read the app crate's version; bump tests on a copy of the repository's files. |
+| G3 | done | radar ground layers, signal-block lines, the train route, the trail's shadow and the filed route drawn into the covers (`Drape::Part`), platforms standing per vertex, signal picks at the ground's height, covers redrawn only where a layer changed (a train's step 1 cover, a new scan 4 of 22); 11 tests. This review rendered Zermatt through the binary (F3's view `46.0207,7.7491,16,60,0`, 800 × 500, realistic) with `--set terrain=true --set weather=true`, from a scratch copy of the fixtures with one RainViewer z7 tile over the valley made from the z6 fixture tile's echoes (the fixtures hold no radar there; nothing committed), and again with `terrain=false` and with `weather=false`: on the raised mountainside the radar's band lies on the slope, shaded with it, under the trees and the village (95 % of the picture changes against the radar off); with the terrain off it lies on the flat map under the buildings. Before G3 it was drawn at sea level, under the raised ground. CI's `g3-*` shots read too. |
+| P5 (Pk5) | done; **person checks pending** | CI run 325's `RustRadar_0.3.17_x64-setup.exe` (NSIS: `nsis_tauri_utils`, `rustradar.exe` with `_NSS`, `uninstall.exe`) and `RustRadar_0.3.17_x64_en-US.msi` (UpgradeCode `{C73F46FF-44DC-5F3E-AB93-388B09B92DEC}`, which Pk5 read off v0.3.16's MSI, Manufacturer felix, `rustradar.exe` with `_MSI`) read here; the exe has icon group 32512, version information and the manifest, and imports Windows' DLLs only (no Visual C++ runtime). Installing is the person check. |
+| P6 (Pk6) | done; **person checks pending** | run 325's `RustRadar_0.3.17_aarch64.app.tar.gz` (RustRadar.app with `_CodeSignature`, Info.plist `com.felix.rustradar` 0.3.17, `LSMinimumSystemVersion` 11.0, arm64, the installer kind left unpatched as tauri-bundler leaves it) and `.dmg` (HFS+ volume RustRadar, its icon, the Applications link, Finder layout) read here; `codesign --verify` "valid on disk" and the Finder AppleScript in the job's log; the x64 pair comes from its own leg (green, not downloaded here). Opening them on a Mac is the person check. |
+| P7 (Pk7) | done | run 325's deb (`rust-radar` 0.3.17, `Depends: libc6 (>= 2.35)` … `ca-certificates`, today's files, `_DEB`), rpm (`_RPM`) and AppImage (`_APP`, xkbcommon bundled) read here; the job "Linux packages installed and started" installed the deb in `ubuntu:22.04` with apt and drew dark V2 with it (llvmpipe), and started the AppImage: both pictures looked at, the reference's map. |
+| P8 (Pk8) | done as far as a dry run goes; **signed APK on the first release** | run 325 built `RustRadar_0.3.17_unsigned.apk` (four ABIs, R8 with GameActivity's keep rules) and `aapt dump badging` shows `com.felix.rustradar`, versionCode 3017, versionName 0.3.17, minSdk 24, INTERNET, MainActivity, the four ABIs. The signed path (keystore from the three secrets, `apksigner` against v0.3.16's certificate) runs through stand-ins in its tests only: the row's "CI produces a signed APK" can only happen on a release. 220 MB, over K14's 150 MB trigger (gaps). |
+| P9 (Pk9) | done as far as a dry run goes; **TestFlight on a tag** | run 325's `RustRadar_0.3.17_unsigned.ipa` read here: `Payload/RustRadar.app`, `com.felix.rustradar` 0.3.17, iOS 15.0, arm64, devices 1 and 2, today's launch storyboard and icons; App Store build and upload refused off `main`/`v*` by the xtask and gated in the workflows; exercised only through stand-ins. |
+| P10 (Pk10) | done | runs 323–325 green with every job the dry run promises (below); the publishing jobs skipped on `rust-port`; `testflight-refresh.yml` now runs only from `main` or a `v*` tag (it could upload from any branch by hand before); `bump.yml` and `testflight-refresh.yml` were never run (forbidden here). |
+| P11 (Pk11) | procedure done; **the rehearsal is the owner's** | `docs/port/upgrade-rehearsal.md` (route A: the released Tauri apps unchanged behind a per-process proxy that rewrites only `latest.json` to a public, code-free test repository's pre-release; rows G0–G2, W1, W2, M1–M3, L1–L3, A1, I1; results table, gate, fallback), `cargo xtask latest-json --rehearsal`, `cargo xtask rehearsal-check` (9 tests; refuses `felixgoff/RustRadar`); `rehearsal-check` against today's real v0.3.16 found every key, signature and package as installed copies would. |
+
+**CI runs and artifacts** (`rust-port`). Run 325 (`510bfb9`), every job green: Tauri or native tree (tauri
+true, native packages true, published false), Release version (0.3.17), Native port (test & clippy) (SwiftShader,
+3055 passed, 0 failed, 28 ignored, no GPU test skipped, Clippy clean, 79 min), the four target checks (Windows,
+macOS, iOS, Android), Package (windows-x86_64, macos-aarch64, macos-x86_64, linux-x86_64), Updater signatures and
+latest.json (7 signatures verified with the run's throwaway key, then `latest.json`), Linux packages installed and
+started, Android release APK, APK badging, iOS release IPA, the two phone shells. Skipped, as they must be on
+`rust-port`: Publish the release, Upload to TestFlight, Attach phone builds (native), today's Tauri jobs (Check &
+test, Bundle, Android APK, iOS, Attach phone builds) and the lavapipe run (on request only). Its 11 artifacts:
+`desktop-{windows-x86_64,macos-aarch64,macos-x86_64,linux-x86_64}`, `updater`, `install-shots`,
+`native-android-apk`, `native-ios-ipa`, `android-native-debug-apk`, `ios-native-simulator-app`, `native-shots`.
+This review downloaded and read `updater`, `install-shots`, three of the four `desktop-*` and `native-ios-ipa`
+(the facts in the table above), and read the logs of the install, badging, updater, macOS package and iOS jobs.
+Run 326 (`5b05690`) is green the same way (every job, 3055 passed); its artifacts were not downloaded.
+
+**Publishing, read line by line** (`.github/workflows/rust.yml` as of `5b05690`):
+- `tree` sets `tauri` from `src-tauri/tauri.conf.json`; `publish` is true only for a push to `main` or a `v*` tag of
+  a tree without it, and a `case` on `GITHUB_REF` sets it false anywhere else. On `rust-port`: tauri true, native
+  true, publish false.
+- Today's Tauri jobs: `check` runs only for a Tauri tree and never on `rust-port`; `bundle`, `android` and `ios`
+  need it, so they are skipped on `rust-port`; `mobile-release` needs `bundle`'s success and a push to `main` or a
+  tag. These four jobs are byte for byte `main`'s; `check` differs only in its condition and in testing
+  `-p rustradar -p fr24` (today's two workspace members) instead of `--workspace`, and `version` in reading the
+  files' version through `cargo xtask version` (P1). So a push to `main` or a `v*` tag of a tree that still holds
+  `src-tauri/tauri.conf.json` publishes today's Tauri release as before (tauri-action, `latest.json`, the phone
+  builds), and none of the native publishing jobs runs (`native` is false there, `publish` false).
+- The native publishing jobs (`release`, `testflight`, `phones-release`) all require `publish`; `release` also
+  checks `GITHUB_REF` itself. Every signing or store secret is referenced by today's names only (the same names
+  as on `main`): by the Tauri jobs exactly as `main`'s do, and by the native jobs only in steps or jobs gated on
+  `publish` (the APK job passes them as `publish && secrets.X || ''`). The xtask refuses an App Store build or an upload off `main`/`v*`.
+- `testflight-refresh.yml` runs its jobs only for `main` or a `v*` tag; `bump.yml` commits to the branch it is run
+  from (never run here).
+- Secrets: no key, keystore, password or token is in any file committed since `fd9277a` (the forbidden strings and
+  key material grepped in the diff: none); only public keys (the updater's, and test keys) are in the tree.
+
+**Gaps** (by item)
+1. **P8, K14: the release APK is 220 MB** (today's 151 MB; the x86 and x86_64 libraries alone are 58 MB each), over K14's 150 MB trigger: move
+   the assets to the APK's `assets/` folder (read through `AAssetManager`) before the first native release, or
+   accept it (owner). The arm64 library has 4 KB page alignment, as today's (only Play or 16 KB-page devices care).
+2. **P8, P9: the signed APK and the App Store build have never run** (only on a release): their first run is the
+   first native release (or P11's I1 on a D2 branch); both are tested through stand-ins only.
+3. **F5: the backend crate's user agents say 0.1.0** (`RustRadar/0.1.0` from `rustradar-backend`'s own version in
+   geocode, trains, adsb.lol, taxiways, tiles, rail, canopy, clouds, Overture, land cover, RainViewer,
+   Trafikverket, train media), where today's app sent its release version: `cargo xtask bump` does not know the
+   backend crate. Stage 12 (D2) or a small follow-up: bump it with the app, or pass the app's version in.
+4. **P9: `docs/port/device-notes.md` is stale for iOS**: its iOS project row and checklist row 1 expect "the map's
+   ink" before the first frame; the IPA now carries today's launch storyboard (the system background, white or
+   black), as the Tauri app did.
+5. **P6: deviations to confirm** (recorded in `platform/macos/Info.plist` and `Packager.toml`):
+   `LSMinimumSystemVersion` 11.0 (today's 10.13; plan section 9 question 5's default), `NSPrincipalClass` and
+   `LSApplicationCategoryType` travel added, an ad hoc seal (today's had only the linker's signature).
+6. **P5: deviations** (recorded in `platform/windows/*`): NSIS 3.09 (cargo-packager's) where tauri-bundler used
+   3.11; no WebView2 anywhere; per-monitor-v2 DPI awareness and asInvoker added to the manifest; the C runtime
+   linked statically.
+7. **P11: the rehearsal's open points** (its section 12): the MSI may never have updated quietly even today (per
+   machine); `pkexec dpkg -i` installs no new `Depends`, and the native deb depends on more than the Tauri one
+   (xkbcommon-x11, xcb-xkb, Vulkan and EGL loaders, D-Bus, root certificates).
+8. **G3: recorded deviations**: the selected flight's trail and the route estimates stay at their true height
+   (section 6 #3), the radar's lifted layers and walls stand (Z3's deviation, deck flattens them into the covers).
+   Stages 8-10 gap 4 (tile selection against sea level, owner's call) stands.
+9. **F4: an open lead** (not F4's): satellite V7 keeps a uniform (−1.0, +1.2) px after SwiftShader's error is taken
+   out; suspects deck's BitmapLayer f32 Mercator lookup on the globe, or texel alignment (B6).
+10. **F3: "ZermaM"** (F3's observation): enlarged 8×, CI's shot reads Zermatt; the two t's touch at 1× (Overpass at
+    the place label's size), not a glyph fault.
+11. Stages 8-10 gaps now: 3 closed (G3), 6 closed (F5, and the packages patch the installer kind: `_NSS`, `_MSI`,
+    `_DEB`, `_RPM`, `_APP` read in run 325's packages; macOS left unpatched as today), 7 closed as far as can be
+    checked without an install (Pk11: both URL forms answer the updater's request with one redirect to the same
+    object), 8 decided (lavapipe on request only, Pk10), 10 closed (F3); 1, 2, 4, 5 and 9 stand. Visual difference
+    2 closed (F4).
+
+**Pending for the owner (person checks)** — each with its steps:
+- **The upgrade rehearsal (P11)**: `docs/port/upgrade-rehearsal.md` sections 4–9, every required row (G0, G1, G2,
+  W1, W2, M1, M2, L1, L2, A1, I1), results into its section 9; its section 10 is the gate: no D2 on `main`, no
+  `v*` tag of a native tree, no native release by hand until they pass.
+- **Windows (P5)**, with run 325's (or a later run's) `desktop-windows-x86_64`: the seven checks in Pk5's report,
+  restated: (1) over an installed v0.3.16 NSIS install, double-click the new `-setup.exe`: one RustRadar in
+  Settings > Apps, publisher felix, the new version, in `%LOCALAPPDATA%\RustRadar`, the Start-menu shortcut opens
+  the native app; (2) `RustRadar_<v>_x64-setup.exe /S /UPDATE /R /ARGS --updated` from cmd: silent, relaunches, no
+  desktop shortcut re-created; (3) window and taskbar icon, Explorer > Properties > Details (description, versions,
+  product name), crisp at 150 % and across monitors; (4) on a Windows without the Visual C++ Redistributable
+  (Windows Sandbox) the app starts; (5) uninstall removes files, shortcuts and the uninstall key (and the app data
+  when ticked); (6) over an installed v0.3.16 MSI, the new MSI upgrades in place (one entry, `C:\Program
+  Files\RustRadar\rustradar.exe` replaced) and `msiexec /i … /passive AUTOLAUNCHAPP=True LAUNCHAPPARGS=--updated`
+  relaunches it; (7) P11's W1 and W2.
+- **macOS (P6)**, with `desktop-macos-aarch64` and `desktop-macos-x86_64`: (1) the dmg opens a 660 × 400 Finder
+  window, the app at left and Applications at right, volume RustRadar with the app's icon; (2) drag over an
+  installed 0.3.16, first launch says it cannot verify the developer (not "damaged"), Open from the context menu
+  or Privacy & Security; window, Dock icon, menu name, Retina text; settings and keys kept; (3) `codesign --verify
+  --deep --strict --verbose=2 /Applications/RustRadar.app` valid, `codesign -dv` adhoc and `com.felix.rustradar`,
+  `plutil -p …/Info.plist` the version and 11.0, `vtool -show-build` minos 11.0, `file` arm64 (x86_64 for the x64
+  build); (4) the x64 dmg on an Intel Mac or under Rosetta; (5) P11's M1–M3.
+- **Linux (P7)**: install `desktop-linux-x86_64`'s deb on an Ubuntu 22.04 or later desktop (`sudo apt install
+  ./RustRadar_<v>_amd64.deb`) and the rpm on Fedora (`sudo dnf install ./RustRadar-<v>-1.x86_64.rpm`), launch
+  from the menu: the icon, the window grouped under RustRadar on X11 and Wayland; double-click the AppImage
+  (`chmod +x` first); P11's L1–L3.
+- **Android (P8, P4)**: on the first release, install the signed `RustRadar_<v>.apk` over an installed Tauri
+  v0.3.x APK: it updates in place, `keys.json` and sign-in survive, the release build starts (R8) and typing works;
+  the update notice opens the APK link in the browser (P4); P11's A1.
+- **iOS (P9)**: on the first native `v*` tag (after D2): the tag's iOS log says the App Store build was uploaded
+  (`xcodebuild -exportArchive` with cloud signing, `altool` "No errors uploading"); App Store Connect processes
+  build X.Y.Z with no ITMS errors and no compliance question; TestFlight installs over the Tauri build with keys
+  and sign-in kept; a forced `testflight-refresh` run from `main` uploads X.Y.Z (YYYYMMDDHH); the unsigned IPA
+  side-loads (AltStore or Sideloadly) and starts; P11's I1. Also the E19, K3 and K4 checklists in
+  `docs/port/device-notes.md` (iOS row 1: today's launch storyboard, not the map's ink, gap 4).
+- Everything under "Pending for the owner" in the stages 8-10, 5-7, 3-4 and stage 2 status (the realistic map on
+  a real GPU, K8 on hardware, phone input and lifecycle).
+
+**What stage 12 needs**
+- **Entry**: P11 passed (the gate above) and the parity checklist of section 4 complete; the unticked lines now:
+  the camera and input lines (limits, pan, trackpad and touch, `fly_to` timings, cursor: interactive person checks
+  of the earlier stages), measured volumes (DWD dead, stages 8-10 gap 2), the phone layout (device checks), open
+  links and reveal (U20, person check), the desktop self-update and the Android notice (P2–P4, real installs and
+  P11), installs on each OS with the signed APK and TestFlight, and old Tauri installs updating (P11).
+- **D2** must, besides its row: rename `rustradar-app` to `rustradar` in `platform/android/build-rust.sh` (`-p`),
+  the Android manifest's `lib_name` and `android::LIBRARY`, `platform/ios/project.yml` (`-lrustradar_app`) and
+  `build-rust.sh` (`librustradar_app.a`) and `ios.rs`, if the `[lib]` name changes; move `src-tauri/icons` and
+  update `crates/app/build.rs`'s icon path, `Packager.toml`'s icons and the dmg's volume icon, and the tests that
+  read `src-tauri/tauri.conf.json`, `src-tauri/icons` or `src-tauri/gen/android` (Pk5–Pk8 name them); after it,
+  `cargo xtask bump` counts two places, and `testflight-refresh.yml` builds the native tree once the newest tag is
+  native.
+- **Before the first native release**: decide K14 (gap 1) and the backend's user agent (gap 3); after the first
+  main push of the native tree, read its run: `release` created once, `latest.json` signed with the real key (the
+  job checks it against `update::PUBKEY` first), the signed APK attached (`*_unsigned.apk` never is), the IPA
+  uploaded; Pk11 suggests `cargo xtask rehearsal-check https://github.com/felixgoff/RustRadar/releases/download/<tag>/latest.json`
+  right after it.
+- **D1, D3, D4** as their rows; D4's audit starts from the visual differences of the stages 8-10 status (1, 3, 4, 5
+  stand; 2 closed by F4) and gaps 1, 2, 4, 5, 9 there.
+
+**Disk.** The review's test build used the CI's `line-tables-only` debug info; the app's integration test binaries
+were deleted after each batch. The CI artifacts it read were downloaded into the scratchpad and deleted after.

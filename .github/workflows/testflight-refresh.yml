@@ -32,6 +32,10 @@ env:
 jobs:
   check:
     name: Newest build's age
+    # Only from main (the schedule's branch) or a v* tag, as rust.yml publishes: a run by hand from
+    # another branch (rust-port) would hand the App Store Connect key to that branch's code and
+    # upload to TestFlight. `upload` follows this job through `needs`.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     outputs:
       due: ${{ steps.due.outputs.due }}
@@ -86,7 +90,7 @@ jobs:
   upload:
     name: Upload a new build
     needs: check
-    if: needs.check.outputs.due == 'true'
+    if: needs.check.outputs.due == 'true' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

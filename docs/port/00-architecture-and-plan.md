@@ -427,9 +427,14 @@ devices in scope.
 
 ### 1.6 Assets
 
-All of `static/` (27 MB) is embedded with `include_bytes!` on every platform, through one module per crate
-(`map::assets`, `app::assets`) so that paths appear in one place. The files stay in `static/` while the Tauri
-build exists and move to `assets/` in stage 12.
+The files the app reads (all of `static/`, 27 MB, the fonts and the backend's rail data: 35 files, 29.6 MB) are
+listed once, in `core::assets`, and every crate reads them through it, so that paths appear in one place. On
+desktop and iOS they are embedded with `include_bytes!`. On Android they are not (K14 triggered: the release APK
+was 220 MB with them compiled into each of its four libraries): the APK carries them once, stored, in `assets/`,
+and `android_main` hands them to `core::assets` through `AAssetManager` before anything reads them (core's
+feature `apk-assets`, on for the Android app only; `cargo xtask android-assets` copies and checks them; item A1,
+CI run 330: 129.3 MB). The WGSL shaders, the Lucide icons and the two licence texts stay embedded everywhere
+(0.2 MB). The files stay in `static/` while the Tauri build exists and move to `assets/` in stage 12.
 
 ---
 
@@ -833,7 +838,7 @@ Entry condition: the parity checklist of section 4 is complete and P11 has passe
 
 | Id | Item | Files | Acceptance |
 |---|---|---|---|
-| D1 | Move `static/**` to `assets/**` (drop `updater.html`), update `map::assets` and `app::assets`, update the offline scripts' output paths | `assets/**`, two `assets.rs` files, `scripts/*` | workspace builds; all shots unchanged |
+| D1 | Move `static/**` to `assets/**` (drop `updater.html`), update `core::assets` (its `static` root), update the offline scripts' output paths | `assets/**`, `crates/core/src/assets.rs`, `scripts/*` | workspace builds; all shots unchanged |
 | D2 | Delete `src/`, `src-tauri/`, `package.json`, `bun.lock`, `patches/`, `svelte.config.js`, `vite.config.js`, `tsconfig.json`, `scripts/version.mjs`, `scripts/testflight-age.mjs`, `scripts/port/`; rename package `rustradar-app` to `rustradar` (binary `rustradar`), carrying the version on from the last Tauri release | repository root, `crates/app/Cargo.toml`, `Cargo.lock` | `git ls-files '*.ts' '*.svelte' '*.js' '*.mjs'` lists only the offline asset generators kept under `scripts/` (section 9, question 7); `cargo tree` has no `tauri`, `wry` or `webkit` |
 | D3 | `README.md`, `PRODUCT.md`, `.gitignore`, third-party notices (Overpass OFL, Lucide ISC, Streets GL MIT, Basis Universal Apache-2.0, tile fixtures) | documents | build instructions work from a clean clone |
 | D4 | Final parity audit: walk section 4 against the reference pictures and the last Tauri build; record every remaining difference in section 6 | this document | signed off by the owner |
@@ -986,7 +991,7 @@ are.
 | K11 | **Motion model fidelity** (3 400 lines of numerics with sentinels and shared scratch) | medium / high | Transliteration, 46 tests, golden poses from the TypeScript (S1.17) | – |
 | K12 | **Third-party endpoints**: `tiles.streets.gl` (one person's server, z16 only), keyless Esri imagery, RainViewer's palette and API, Mapterhorn, EUMETView, Planetary Computer, source.coop, OpenFreeMap | medium / medium (already true today) | All through `backend` with disk caches, a polite User-Agent, per-host limits and back-off; every layer degrades to "not drawn"; attribution strings carried over | – |
 | K13 | **egui text and layout fidelity** against Chromium | certain / low | Judge on layout, sizes and colours; exact weights through the variable axis; reference pictures for side-by-side review | – |
-| K14 | **Binary size and build time**: 27 MB of assets per binary and per Android ABI; wgpu and naga add about 70 s to a cold build; LTO | certain / low | Accept for the first release; measure APK size in P8 | If the APK exceeds 150 MB, move assets to the APK's `assets/` folder (read through `AAssetManager`) |
+| K14 | **Binary size and build time**: 27 MB of assets per binary and per Android ABI; wgpu and naga add about 70 s to a cold build; LTO | certain / low | Accept for the first release; measure APK size in P8 | If the APK exceeds 150 MB, move assets to the APK's `assets/` folder (read through `AAssetManager`). Triggered (P8: 220 MB) and done (A1, section 1.6): 129.3 MB |
 | K15 | **`tokio::spawn` outside the runtime** aborts the process | medium / high | `backend::rt()`; the grep check in S1.3; a debug assertion in `rt()` | – |
 | K16 | **Remote image hosts** may want a Referer or a browser-like User-Agent | medium / low | U18 tries each host (JetPhotos, FR24 logos, VesselFinder, Wikimedia) and records the headers needed in `backend::images` | A host that refuses shows the placeholder |
 | K17 | **Zone names and locale**: abbreviations differ from the tz database's | low / low | Generated table from today's code (S1.11); English formatting everywhere | – |
@@ -1148,7 +1153,7 @@ non-Latin labels.
 | Signing and notarisation | Unsigned, as today |
 | Minimum OS versions | macOS 11, iOS 15, Android `minSdk 24` |
 | Exports on phones | Desktop only in the first native release |
-| Assets | All embedded with `include_bytes!`; revisit for Android only if K14 triggers |
+| Assets | All embedded with `include_bytes!`; revisit for Android only if K14 triggers. K14 triggered: on Android they are in the APK's `assets/` once (A1, section 1.6) |
 | First native release installable by the old updater | P11 rehearsal is a release gate |
 | Android `versionCode` | `major·1 000 000 + minor·1000 + patch`, checked against a released APK in P8 |
 | `tokio::spawn` off the runtime | `backend::rt()` everywhere (K15) |
@@ -2482,7 +2487,7 @@ The passing tests, by crate (here; CI run 325 counts the same, without the shim)
 | P5 (Pk5) | done; **person checks pending** | CI run 325's `RustRadar_0.3.17_x64-setup.exe` (NSIS: `nsis_tauri_utils`, `rustradar.exe` with `_NSS`, `uninstall.exe`) and `RustRadar_0.3.17_x64_en-US.msi` (UpgradeCode `{C73F46FF-44DC-5F3E-AB93-388B09B92DEC}`, which Pk5 read off v0.3.16's MSI, Manufacturer felix, `rustradar.exe` with `_MSI`) read here; the exe has icon group 32512, version information and the manifest, and imports Windows' DLLs only (no Visual C++ runtime). Installing is the person check. |
 | P6 (Pk6) | done; **person checks pending** | run 325's `RustRadar_0.3.17_aarch64.app.tar.gz` (RustRadar.app with `_CodeSignature`, Info.plist `com.felix.rustradar` 0.3.17, `LSMinimumSystemVersion` 11.0, arm64, the installer kind left unpatched as tauri-bundler leaves it) and `.dmg` (HFS+ volume RustRadar, its icon, the Applications link, Finder layout) read here; `codesign --verify` "valid on disk" and the Finder AppleScript in the job's log; the x64 pair comes from its own leg (green, not downloaded here). Opening them on a Mac is the person check. |
 | P7 (Pk7) | done | run 325's deb (`rust-radar` 0.3.17, `Depends: libc6 (>= 2.35)` … `ca-certificates`, today's files, `_DEB`), rpm (`_RPM`) and AppImage (`_APP`, xkbcommon bundled) read here; the job "Linux packages installed and started" installed the deb in `ubuntu:22.04` with apt and drew dark V2 with it (llvmpipe), and started the AppImage: both pictures looked at, the reference's map. |
-| P8 (Pk8) | done as far as a dry run goes; **signed APK on the first release** | run 325 built `RustRadar_0.3.17_unsigned.apk` (four ABIs, R8 with GameActivity's keep rules) and `aapt dump badging` shows `com.felix.rustradar`, versionCode 3017, versionName 0.3.17, minSdk 24, INTERNET, MainActivity, the four ABIs. The signed path (keystore from the three secrets, `apksigner` against v0.3.16's certificate) runs through stand-ins in its tests only: the row's "CI produces a signed APK" can only happen on a release. 220 MB, over K14's 150 MB trigger (gaps). |
+| P8 (Pk8) | done as far as a dry run goes; **signed APK on the first release** | run 325 built `RustRadar_0.3.17_unsigned.apk` (four ABIs, R8 with GameActivity's keep rules) and `aapt dump badging` shows `com.felix.rustradar`, versionCode 3017, versionName 0.3.17, minSdk 24, INTERNET, MainActivity, the four ABIs. The signed path (keystore from the three secrets, `apksigner` against v0.3.16's certificate) runs through stand-ins in its tests only: the row's "CI produces a signed APK" can only happen on a release. 220 MB, over K14's 150 MB trigger (gaps); 129.3 MB after A1 (run 330). |
 | P9 (Pk9) | done as far as a dry run goes; **TestFlight on a tag** | run 325's `RustRadar_0.3.17_unsigned.ipa` read here: `Payload/RustRadar.app`, `com.felix.rustradar` 0.3.17, iOS 15.0, arm64, devices 1 and 2, today's launch storyboard and icons; App Store build and upload refused off `main`/`v*` by the xtask and gated in the workflows; exercised only through stand-ins. |
 | P10 (Pk10) | done | runs 323–325 green with every job the dry run promises (below); the publishing jobs skipped on `rust-port`; `testflight-refresh.yml` now runs only from `main` or a `v*` tag (it could upload from any branch by hand before); `bump.yml` and `testflight-refresh.yml` were never run (forbidden here). |
 | P11 (Pk11) | procedure done; **the rehearsal is the owner's** | `docs/port/upgrade-rehearsal.md` (route A: the released Tauri apps unchanged behind a per-process proxy that rewrites only `latest.json` to a public, code-free test repository's pre-release; rows G0–G2, W1, W2, M1–M3, L1–L3, A1, I1; results table, gate, fallback), `cargo xtask latest-json --rehearsal`, `cargo xtask rehearsal-check` (9 tests; refuses `felixgoff/RustRadar`); `rehearsal-check` against today's real v0.3.16 found every key, signature and package as installed copies would. |
@@ -2522,7 +2527,8 @@ Run 326 (`5b05690`) is green the same way (every job, 3055 passed); its artifact
   key material grepped in the diff: none); only public keys (the updater's, and test keys) are in the tree.
 
 **Gaps** (by item)
-1. **P8, K14: the release APK is 220 MB** (today's 151 MB; the x86 and x86_64 libraries alone are 58 MB each), over K14's 150 MB trigger: move
+1. **Closed by A1**: CI run 330's release APK is 129.3 MB (libraries arm64-v8a 23.7, armeabi-v7a 17.7, x86 28.3, x86_64 28.5 MB, each 30.1 MB smaller; `assets/` once, stored; section 1.6).
+   Was: **P8, K14: the release APK is 220 MB** (today's 151 MB; the x86 and x86_64 libraries alone are 58 MB each), over K14's 150 MB trigger: move
    the assets to the APK's `assets/` folder (read through `AAssetManager`) before the first native release, or
    accept it (owner). The arm64 library has 4 KB page alignment, as today's (only Play or 16 KB-page devices care).
 2. **P8, P9: the signed APK and the App Store build have never run** (only on a release): their first run is the
@@ -2606,7 +2612,7 @@ Run 326 (`5b05690`) is green the same way (every job, 3055 passed); its artifact
   read `src-tauri/tauri.conf.json`, `src-tauri/icons` or `src-tauri/gen/android` (Pk5–Pk8 name them); after it,
   `cargo xtask bump` counts four places (the app's two and the backend's, A2), and `testflight-refresh.yml` builds the native tree once the newest tag is
   native.
-- **Before the first native release**: decide K14 (gap 1) and the backend's user agent (gap 3); after the first
+- **Before the first native release**: K14 is done (gap 1, A1); decide the backend's user agent (gap 3); after the first
   main push of the native tree, read its run: `release` created once, `latest.json` signed with the real key (the
   job checks it against `update::PUBKEY` first), the signed APK attached (`*_unsigned.apk` never is), the IPA
   uploaded; Pk11 suggests `cargo xtask rehearsal-check https://github.com/felixgoff/RustRadar/releases/download/<tag>/latest.json`

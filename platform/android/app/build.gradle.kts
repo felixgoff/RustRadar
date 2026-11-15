@@ -80,7 +80,7 @@ android {
     // so AAssetManager maps them from the APK as the library's own data is mapped: the KTX2
     // textures would not shrink, and inflating the rest would cost memory and start-up time.
     androidResources {
-        noCompress += listOf("ktx2", "bin", "json", "ttf")
+        noCompress.addAll(listOf("ktx2", "bin", "json", "ttf"))
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8

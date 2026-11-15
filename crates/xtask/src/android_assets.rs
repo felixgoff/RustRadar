@@ -20,8 +20,9 @@
 //!   `AAssetManager` maps them from the APK as the library's own data was mapped: no inflating at
 //!   start, no copy in memory. Deflate would save 4.4 MB of the 29.6 (the KTX2 textures, 21.6 MB,
 //!   are supercompressed already; the meshes, JSON and fonts shrink) and cost both.
-//! - **Check** ([`check_apk`]): the APK's `assets/` holds exactly [`FILES`], each stored and the
-//!   repository's file byte for byte (size and CRC-32). `cargo xtask android-release` runs it on
+//! - **Check** ([`check_apk`]): the APK's `assets/` holds exactly [`FILES`] (and Gradle's own
+//!   baseline profiles under `dexopt/`), each stored and the repository's file byte for byte (size
+//!   and CRC-32). `cargo xtask android-release` runs it on
 //!   the release APK, CI's phone shell job on the debug one: an asset the app would miss at start
 //!   fails the build instead.
 //!
@@ -194,6 +195,11 @@ pub fn zip_entries(path: &Path) -> Result<Vec<ZipEntry>, String> {
     Ok(entries)
 }
 
+/// What Gradle itself puts in a release APK's `assets/`: ART's baseline profiles
+/// (`dexopt/baseline.prof` and `.profm`, from androidx's profile installer), as in v0.3.17's
+/// dry-run APK before the app's files moved there.
+const GRADLES_OWN: &str = "assets/dexopt/";
+
 /// The CRC-32 of `bytes` (the zip format's).
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = flate2::Crc::new();
@@ -205,7 +211,10 @@ fn crc32(bytes: &[u8]) -> u32 {
 /// repository's file at `root` (see the module's docs).
 pub fn check_apk(root: &Path, apk: &Path) -> Result<Summary, String> {
     let entries = zip_entries(apk)?;
-    let assets: Vec<&ZipEntry> = entries.iter().filter(|e| e.name.starts_with("assets/") && !e.name.ends_with('/')).collect();
+    let assets: Vec<&ZipEntry> = entries
+        .iter()
+        .filter(|e| e.name.starts_with("assets/") && !e.name.ends_with('/') && !e.name.starts_with(GRADLES_OWN))
+        .collect();
     let mut problems = Vec::new();
     let mut summary = Summary { files: 0, bytes: 0, written: 0, removed: 0 };
     for entry in FILES {
@@ -341,7 +350,13 @@ mod tests {
         let dir = temp("check");
         let assets = apk_assets();
         let entries = |skip: Option<&str>, extra: &[(&str, &[u8])]| -> Vec<u8> {
-            let mut list: Vec<(&str, &[u8])> = vec![("AndroidManifest.xml", b"<manifest/>"), ("lib/arm64-v8a/librustradar_app.so", b"\x7fELF")];
+            let mut list: Vec<(&str, &[u8])> = vec![
+                ("AndroidManifest.xml", b"<manifest/>"),
+                ("lib/arm64-v8a/librustradar_app.so", b"\x7fELF"),
+                // Gradle's own, in every release APK
+                ("assets/dexopt/baseline.prof", b"pro"),
+                ("assets/dexopt/baseline.profm", b"prm"),
+            ];
             list.extend(assets.iter().filter(|(n, _)| Some(n.as_str()) != skip).map(|(n, b)| (n.as_str(), b.as_slice())));
             list.extend_from_slice(extra);
             stored_zip(&list)
@@ -351,7 +366,7 @@ mod tests {
         fs::write(&apk, entries(None, &[])).unwrap();
         let good = check_apk(&root, &apk).unwrap();
         assert_eq!(good.files, FILES.len());
-        assert_eq!(zip_entries(&apk).unwrap().len(), FILES.len() + 2);
+        assert_eq!(zip_entries(&apk).unwrap().len(), FILES.len() + 4);
 
         fs::write(&apk, entries(Some("assets/realistic/ground.color.ktx2"), &[("assets/old.bin", b"x")])).unwrap();
         let err = check_apk(&root, &apk).unwrap_err();

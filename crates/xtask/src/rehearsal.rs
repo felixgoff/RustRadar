@@ -436,7 +436,9 @@ fn hop_lines(log: &mut String, answer: &Fetched) {
 }
 
 /// `latest-json --rehearsal`'s last words: the commands that come next (docs/port/upgrade-rehearsal.md).
-pub fn next_steps(repo: &str, version: &str, files: &[PathBuf]) -> String {
+/// `installed_key`: the signatures were checked with the key installed copies hold (else with one
+/// given by `--pubkey`, which installed copies would refuse).
+pub fn next_steps(repo: &str, version: &str, files: &[PathBuf], installed_key: bool) -> String {
     let quoted: Vec<String> = files
         .iter()
         .map(|f| {
@@ -445,7 +447,8 @@ pub fn next_steps(repo: &str, version: &str, files: &[PathBuf]) -> String {
         })
         .collect();
     let mut text = String::new();
-    let _ = writeln!(text, "\nrehearsal: latest.json for {repo}'s release v{version}, every signature checked with the key installed copies hold");
+    let key = if installed_key { "the key installed copies hold" } else { "the key given, NOT the one installed copies hold: they would refuse these packages" };
+    let _ = writeln!(text, "\nrehearsal: latest.json for {repo}'s release v{version}, every signature checked with {key}");
     let _ = writeln!(text, "next, the pre-release in the test repository (nothing else: --repo names it):");
     let _ = writeln!(
         text,
@@ -932,7 +935,10 @@ mod tests {
 
     #[test]
     fn the_next_steps_name_the_test_repository_and_only_it() {
-        let text = next_steps("me/RustRadar-rehearsal", "0.3.17", &[PathBuf::from("dist/RustRadar_0.3.17_amd64.deb"), PathBuf::from("my dist/latest.json")]);
+        let files = [PathBuf::from("dist/RustRadar_0.3.17_amd64.deb"), PathBuf::from("my dist/latest.json")];
+        assert!(next_steps("me/R", "0.3.17", &files, false).contains("NOT the one installed copies hold"));
+        let text = next_steps("me/RustRadar-rehearsal", "0.3.17", &files, true);
+        assert!(text.contains("every signature checked with the key installed copies hold\n"), "{text}");
         assert!(text.contains("gh release create v0.3.17 --repo me/RustRadar-rehearsal --prerelease --title \"RustRadar v0.3.17\""), "{text}");
         assert!(text.contains("    dist/RustRadar_0.3.17_amd64.deb \\\n    'my dist/latest.json'\n"), "{text}");
         assert!(text.contains("cargo xtask rehearsal-check https://github.com/me/RustRadar-rehearsal/releases/download/v0.3.17/latest.json"));

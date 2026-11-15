@@ -198,7 +198,7 @@ const USAGE: &str = "usage: cargo xtask latest-json <dir> [--version x.y.z] [--u
 pub fn run(args: &[String]) -> Result<(), String> {
     let (mut dir, mut version, mut url_base, mut notes, mut pubkey, mut out) = (None, None, None, NOTES.to_owned(), None, PathBuf::from("latest.json"));
     // the upgrade rehearsal's test repository (crate::rehearsal, docs/port/upgrade-rehearsal.md)
-    let mut rehearsal = None;
+    let (mut rehearsal, mut installed_key) = (None, false);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or_else(|| format!("{arg} needs a value\n{USAGE}"));
@@ -224,9 +224,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
             return Err(format!("--rehearsal serves the files from {repo}'s release: leave out --url-base"));
         }
         url_base = Some(rehearsal::download_base(repo, &version));
-        if pubkey.is_none() {
-            pubkey = Some(rehearsal::installed_key(&bump::repo_root())?);
-        } else {
+        let installed = rehearsal::installed_key(&bump::repo_root())?;
+        let given = pubkey.get_or_insert_with(|| installed.clone());
+        installed_key = sign::public_key(given)?.to_base64() == sign::public_key(&installed)?.to_base64();
+        if !installed_key {
             println!("note: checking with the key given, not the one installed copies hold ({})", rehearsal::KEY_SOURCE);
         }
     }
@@ -255,7 +256,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     println!("wrote {} for v{version}", out.display());
     if let Some(repo) = &rehearsal {
-        print!("{}", rehearsal::next_steps(repo, &version, &[paths, vec![out.clone()]].concat()));
+        print!("{}", rehearsal::next_steps(repo, &version, &[paths, vec![out.clone()]].concat(), installed_key));
     }
     Ok(())
 }

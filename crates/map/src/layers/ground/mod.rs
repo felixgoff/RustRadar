@@ -199,26 +199,29 @@ impl LineMesh {
 
 // ------------------------------------------------------------------ textures
 
-/// The realistic map's files, embedded (plan 1.6): the bytes of `path` (a `textures::TextureFile`
-/// path under `static/`), `None` for any other.
+/// The realistic map's files (plan 1.6; [`rustradar_core::assets`], embedded or, on Android, from
+/// the APK): the bytes of `path` (a `textures::TextureFile` path under `static/`), `None` for any
+/// other.
 pub fn texture_bytes(path: &str) -> Option<Bytes> {
-    let bytes: &'static [u8] = match path {
-        "realistic/building.color.ktx2" => include_bytes!("../../../../../static/realistic/building.color.ktx2"),
-        "realistic/building.normal.ktx2" => include_bytes!("../../../../../static/realistic/building.normal.ktx2"),
-        "realistic/building.mask.ktx2" => include_bytes!("../../../../../static/realistic/building.mask.ktx2"),
-        "realistic/building.glow.ktx2" => include_bytes!("../../../../../static/realistic/building.glow.ktx2"),
-        "realistic/ground.color.ktx2" => include_bytes!("../../../../../static/realistic/ground.color.ktx2"),
-        "realistic/ground.normal.ktx2" => include_bytes!("../../../../../static/realistic/ground.normal.ktx2"),
-        "realistic/tree.color.ktx2" => include_bytes!("../../../../../static/realistic/tree.color.ktx2"),
-        "realistic/tree.normal.ktx2" => include_bytes!("../../../../../static/realistic/tree.normal.ktx2"),
-        "realistic/tree.mask.ktx2" => include_bytes!("../../../../../static/realistic/tree.mask.ktx2"),
-        "realistic/water.normal.ktx2" => include_bytes!("../../../../../static/realistic/water.normal.ktx2"),
-        "realistic/earth.color.ktx2" => include_bytes!("../../../../../static/realistic/earth.color.ktx2"),
-        "realistic/tree-volume.normal.ktx2" => include_bytes!("../../../../../static/realistic/tree-volume.normal.ktx2"),
-        "realistic/earth.night.ktx2" => include_bytes!("../../../../../static/realistic/earth.night.ktx2"),
-        _ => return None,
-    };
-    Some(Cow::Borrowed(bytes))
+    use rustradar_core::assets as a;
+    [
+        &a::BUILDING_COLOR,
+        &a::BUILDING_NORMAL,
+        &a::BUILDING_MASK,
+        &a::BUILDING_GLOW,
+        &a::GROUND_COLOR,
+        &a::GROUND_NORMAL,
+        &a::TREE_COLOR,
+        &a::TREE_NORMAL,
+        &a::TREE_MASK,
+        &a::WATER_NORMAL,
+        &a::EARTH_COLOR,
+        &a::TREE_VOLUME_NORMAL,
+        &a::EARTH_NIGHT,
+    ]
+    .into_iter()
+    .find(|file| file.key == path)
+    .map(|file| Cow::Borrowed(file.bytes()))
 }
 
 /// Starts the realistic textures loading on the worker pool (the first time; for this device's

@@ -5,6 +5,7 @@
 
 pub mod adsb;
 pub mod airac;
+pub mod assets;
 pub mod export;
 pub mod filters;
 pub mod flightpath;

@@ -1,19 +1,22 @@
-//! The files the app embeds (plan 1.6), named in one place: the UI's fonts and the Lucide icons
-//! of `assets/` (vendored by `cargo xtask vendor-fonts` and `vendor-icons`, plan 1.5).
+//! The UI's files (plan 1.6): the fonts and the Lucide icons of `assets/` (vendored by
+//! `cargo xtask vendor-fonts` and `vendor-icons`, plan 1.5).
 //!
 //! - [`FONTS`]: Overpass and Overpass Mono as variable TTFs (`wght` 100–900, default 400; Mono
 //!   300–700, default 300), one file per subset, in the fallback order the fonts' CSS gives them
 //!   (`@fontsource-variable/overpass`'s `unicode-range`s: latin, latin-ext, cyrillic, cyrillic-ext,
 //!   vietnamese). [`crate::ui::fonts`] makes the egui families of them. Overpass's latin subset
 //!   also comes as Overpass with tabular figures (`overpass-tnum-latin.ttf`, item F1), for
-//!   `font-variant-numeric: tabular-nums`.
+//!   `font-variant-numeric: tabular-nums`. The bytes are [`rustradar_core::assets`]'s, which the
+//!   map's labels share: embedded, or on Android read from the APK (risk K14).
 //! - [`ICONS`]: the Lucide icons in use (doc 06 §26), as Lucide's SVG files, for `ui::icons`
-//!   (U2) to rasterise. An icon added to `assets/icons/lucide/` gets a line here (a test checks
-//!   the two agree).
+//!   (U2) to rasterise, embedded on every platform (19 KB). An icon added to
+//!   `assets/icons/lucide/` gets a line here (a test checks the two agree).
 //!
 //! Licences: `assets/fonts/OFL.txt` (SIL Open Font License 1.1) and
 //! `assets/icons/lucide/LICENSE` (ISC), both also embedded ([`FONTS_LICENSE`], [`ICONS_LICENSE`])
 //! for an about box.
+
+use rustradar_core::assets::{self as core_assets, File};
 
 /// Which of the two font families a file belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -33,28 +36,29 @@ pub struct Font {
     pub file: FontFile,
     /// `latin`, `latin-ext`, `cyrillic`, `cyrillic-ext` or `vietnamese`.
     pub subset: &'static str,
-    pub bytes: &'static [u8],
+    /// The TTF ([`rustradar_core::assets`]; reads as `&'static [u8]`).
+    pub bytes: &'static File,
 }
 
 macro_rules! font {
-    ($file:ident, $subset:literal, $path:literal) => {
-        Font { file: FontFile::$file, subset: $subset, bytes: include_bytes!(concat!("../../../assets/fonts/", $path)) }
+    ($file:ident, $subset:literal, $font:ident) => {
+        Font { file: FontFile::$file, subset: $subset, bytes: &core_assets::$font }
     };
 }
 
 /// Every font file, each family's subsets in their fallback order.
 pub static FONTS: [Font; 11] = [
-    font!(Overpass, "latin", "overpass-latin.ttf"),
-    font!(Overpass, "latin-ext", "overpass-latin-ext.ttf"),
-    font!(Overpass, "cyrillic", "overpass-cyrillic.ttf"),
-    font!(Overpass, "cyrillic-ext", "overpass-cyrillic-ext.ttf"),
-    font!(Overpass, "vietnamese", "overpass-vietnamese.ttf"),
-    font!(OverpassMono, "latin", "overpass-mono-latin.ttf"),
-    font!(OverpassMono, "latin-ext", "overpass-mono-latin-ext.ttf"),
-    font!(OverpassMono, "cyrillic", "overpass-mono-cyrillic.ttf"),
-    font!(OverpassMono, "cyrillic-ext", "overpass-mono-cyrillic-ext.ttf"),
-    font!(OverpassMono, "vietnamese", "overpass-mono-vietnamese.ttf"),
-    font!(OverpassTabular, "latin", "overpass-tnum-latin.ttf"),
+    font!(Overpass, "latin", OVERPASS_LATIN),
+    font!(Overpass, "latin-ext", OVERPASS_LATIN_EXT),
+    font!(Overpass, "cyrillic", OVERPASS_CYRILLIC),
+    font!(Overpass, "cyrillic-ext", OVERPASS_CYRILLIC_EXT),
+    font!(Overpass, "vietnamese", OVERPASS_VIETNAMESE),
+    font!(OverpassMono, "latin", OVERPASS_MONO_LATIN),
+    font!(OverpassMono, "latin-ext", OVERPASS_MONO_LATIN_EXT),
+    font!(OverpassMono, "cyrillic", OVERPASS_MONO_CYRILLIC),
+    font!(OverpassMono, "cyrillic-ext", OVERPASS_MONO_CYRILLIC_EXT),
+    font!(OverpassMono, "vietnamese", OVERPASS_MONO_VIETNAMESE),
+    font!(OverpassTabular, "latin", OVERPASS_TNUM_LATIN),
 ];
 
 /// The fonts' licence (SIL OFL 1.1).

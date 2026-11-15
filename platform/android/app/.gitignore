@@ -1,2 +1,4 @@
 # librustradar_app.so, built by ../build-rust.sh (cargo-ndk)
 /src/main/jniLibs/**/*.so
+# the app's files, copied by ../build-rust.sh (cargo xtask android-assets)
+/src/main/assets/

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Builds the app's Rust library, librustradar_app.so, into app/src/main/jniLibs/<abi>/ for Gradle
-# (doc 07 §13.4). Needs cargo-ndk 4 (`cargo install cargo-ndk --locked`), the Rust targets of the
-# ABIs and an NDK (ANDROID_NDK_HOME, or the newest under $ANDROID_HOME/ndk).
+# (doc 07 §13.4), and copies the files it reads from the APK (its fonts, textures, models and
+# data: rustradar_core::assets, plan risk K14) into app/src/main/assets/, once for every ABI.
+# Needs cargo-ndk 4 (`cargo install cargo-ndk --locked`), the Rust targets of the ABIs and an NDK
+# (ANDROID_NDK_HOME, or the newest under $ANDROID_HOME/ndk).
 #
 #   platform/android/build-rust.sh [--release] [--locked] [ABI ...]   ABIs: arm64-v8a (default),
 #                                                                       armeabi-v7a, x86, x86_64
@@ -25,3 +27,7 @@ cd "$here/../.."
 # -P: the API level of minSdk (app/build.gradle.kts). The C++ of GameActivity and of the Basis
 # transcoder links libc++ statically, so no libc++_shared.so is packaged.
 cargo ndk "${targets[@]}" -P 24 -o "$here/app/src/main/jniLibs" build ${flags[@]+"${flags[@]}"} -p rustradar-app --lib
+# the host's xtask (built already by `cargo xtask android-release`), with the same lock rule
+locked=()
+for flag in ${flags[@]+"${flags[@]}"}; do [ "$flag" = "--locked" ] && locked=(--locked); done
+cargo run -q ${locked[@]+"${locked[@]}"} -p xtask -- android-assets "$here/app/src/main/assets"

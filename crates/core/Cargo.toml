@@ -12,3 +12,8 @@ jiff = { workspace = true }
 unicode-normalization = { workspace = true }
 regex = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
+
+[features]
+# The Android app's build (rustradar-app turns it on for Android only): the files of `assets` are
+# read from the APK's assets/ folder at startup instead of embedded in the library (risk K14).
+apk-assets = []

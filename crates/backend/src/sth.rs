@@ -26,7 +26,7 @@ struct File {
 
 fn index() -> &'static Lines<Limits> {
     static I: OnceLock<Lines<Limits>> = OnceLock::new();
-    I.get_or_init(|| build(include_str!("../data/sth.json")))
+    I.get_or_init(|| build(rustradar_core::assets::STH.text()))
 }
 
 fn build(json: &str) -> Lines<Limits> {

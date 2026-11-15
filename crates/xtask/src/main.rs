@@ -1,6 +1,7 @@
 //! Developer and release tooling: `cargo xtask <command>`. Never shipped, never cross-compiled.
 
 mod android;
+mod android_assets;
 mod bump;
 mod fixtures;
 mod fonts;
@@ -29,6 +30,7 @@ release (run by CI):
   sign           sign updater artifacts (TAURI_SIGNING_PRIVATE_KEY, ..._PASSWORD)
   testflight-age days since the newest TestFlight build (APPLE_API_*)
   android-release  build, check and name the release APK (ANDROID_KEYSTORE, ..._PASSWORD, ANDROID_KEY_ALIAS)
+  android-assets DIR | --check APK   copy the files the Android app reads from its APK, or check an APK's
   ios-release    build the unsigned IPA, or the App Store build and its TestFlight upload (APPLE_API_*)
 
 upgrade rehearsal (docs/port/upgrade-rehearsal.md; publishes nothing):
@@ -49,6 +51,7 @@ fn main() -> ExitCode {
         Some("sign") => sign::run(rest),
         Some("testflight-age") => testflight::run(rest),
         Some("android-release") => android::run(rest),
+        Some("android-assets") => android_assets::run(rest),
         Some("ios-release") => ios::run(rest),
         Some("rehearsal-check") => rehearsal::run_check(rest),
         Some("help" | "--help" | "-h") | None => {

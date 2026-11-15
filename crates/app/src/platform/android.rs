@@ -18,6 +18,8 @@
 //! go to the background).
 //!
 //! The frame loop's part (on Android only):
+//! - `install_assets(&android_app)` first thing in `android_main`: the app's fonts, textures,
+//!   models and data from the APK's `assets/` ([`rustradar_core::assets`], risk K14);
 //! - `init(event_loop.android_app(), wake)` before the backend starts, then `dirs` for it;
 //! - each frame, after egui-winit's `take_egui_input`: `before_frame(ctx, &mut raw_input,
 //!   pixels_per_point)`. It sets the safe area, turns the keyboard's edits into egui events and
@@ -592,12 +594,58 @@ mod glue {
         APP.lock().ok()?.clone()
     }
 
-    /// The activity is up (`android_main` may run again for a new activity in the same process):
-    /// logcat logging, the activity for the calls below, and the event loop's wake.
-    pub fn init(app: &AndroidApp, wake: Wake) {
+    /// logcat logging (once per process).
+    fn logcat() {
         android_logger::init_once(
             android_logger::Config::default().with_tag("rustradar").with_max_level(log::LevelFilter::Info),
         );
+    }
+
+    /// The app's files ([`rustradar_core::assets::FILES`]) from the APK's `assets/`, before
+    /// anything reads them (risk K14). Each is opened through the application's `AAssetManager`
+    /// and kept open for the process, so its bytes stay where the asset manager put them: mapped
+    /// from the APK, which stores them uncompressed, as the library's own data is. Once per
+    /// process (`android_main` may run again for a new activity).
+    ///
+    /// # Panics
+    /// If the APK lacks a file, after logging which: the app cannot draw without them.
+    pub fn install_assets(app: &AndroidApp) {
+        logcat();
+        let started = std::time::Instant::now();
+        let manager = app.asset_manager();
+        let (mut read, mut mapped) = (0usize, 0usize);
+        let installed = rustradar_core::assets::install(|entry| {
+            let name = std::ffi::CString::new(entry.key).map_err(|e| e.to_string())?;
+            let asset = manager.open(&name).ok_or("not in the APK")?;
+            // never closed: its buffer is the file's bytes for the rest of the process
+            let asset = Box::leak(Box::new(asset));
+            let ptr = asset.ptr();
+            let bytes = asset.buffer().map_err(|e| format!("unreadable: {e}"))?;
+            read += 1;
+            // SAFETY: the asset is open (leaked above)
+            if unsafe { winit::platform::android::activity::ndk_sys::AAsset_isAllocated(ptr.as_ptr()) } == 0 {
+                mapped += 1;
+            }
+            Ok(bytes)
+        });
+        match installed {
+            Ok(loaded) => log::info!(
+                "assets: {} files, {:.1} MB, from the APK in {} ms ({read} read now, {mapped} of them mapped)",
+                loaded.files,
+                loaded.bytes as f64 / 1e6,
+                started.elapsed().as_millis()
+            ),
+            Err(e) => {
+                log::error!("{e}");
+                panic!("{e}");
+            }
+        }
+    }
+
+    /// The activity is up (`android_main` may run again for a new activity in the same process):
+    /// logcat logging, the activity for the calls below, and the event loop's wake.
+    pub fn init(app: &AndroidApp, wake: Wake) {
+        logcat();
         if let Ok(mut a) = APP.lock() {
             *a = Some(app.clone());
         }
@@ -713,7 +761,7 @@ mod glue {
 }
 
 #[cfg(target_os = "android")]
-pub use glue::{after_frame, before_frame, dirs, init, leave};
+pub use glue::{after_frame, before_frame, dirs, init, install_assets, leave};
 
 #[cfg(test)]
 mod tests {

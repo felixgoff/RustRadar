@@ -2,9 +2,9 @@
 //! the published models' meshes at both levels of detail with their landing gear, the built-in
 //! procedural models, and the two silhouette atlases.
 //!
-//! - [`published`]: `static/aircraft/index.json` and `meshes.bin`, embedded ([`INDEX_JSON`],
-//!   [`MESHES_BIN`]), read once per process into `scene`'s [`AircraftModels`]
-//!   (`aircraftModels.load()`). The scene builder looks flights up in it (`forFlight`, a model's
+//! - [`published`]: `static/aircraft/index.json` and `meshes.bin` ([`INDEX_JSON`], [`MESHES_BIN`]:
+//!   [`rustradar_core::assets`], embedded or, on Android, from the APK), read once per process
+//!   into `scene`'s [`AircraftModels`] (`aircraftModels.load()`). The scene builder looks flights up in it (`forFlight`, a model's
 //!   size, its gear's `attachZ`, a mesh's lowest point), and its `is_some()` is today's
 //!   `aircraftModels.loaded`. If the files cannot be read it is `None`, with a warning, and as
 //!   today the built-in models draw every aircraft and icons are never used.
@@ -51,6 +51,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::OnceLock;
 
+use rustradar_core::assets::{self, File};
 use rustradar_core::liveries::Part;
 use rustradar_scene::aircraft_assets::{AircraftModels, IconCell, IndexedMesh, ModelLod};
 use rustradar_scene::aircraft_models::{self, MODEL_KINDS, ModelKind, ModelMeshes};
@@ -63,22 +64,22 @@ use crate::textures::{AIRCRAFT_ICONS, AIRCRAFT_ICONS_OUTLINE, Ktx2Texture, LoadO
 
 /// `static/aircraft/index.json`: the models, the lookups by type and icon class, the atlases'
 /// layout ([`rustradar_scene::aircraft_assets::INDEX_FILE`]).
-pub static INDEX_JSON: &[u8] = include_bytes!("../../../../../static/aircraft/index.json");
+pub static INDEX_JSON: &File = &assets::AIRCRAFT_INDEX;
 /// `static/aircraft/meshes.bin`: every mesh the index points into.
-pub static MESHES_BIN: &[u8] = include_bytes!("../../../../../static/aircraft/meshes.bin");
+pub static MESHES_BIN: &File = &assets::AIRCRAFT_MESHES;
 /// `static/aircraft/icons.ktx2`: the silhouettes, 7 × 6 cells of 128 px.
-pub static ICONS_KTX2: &[u8] = include_bytes!("../../../../../static/aircraft/icons.ktx2");
+pub static ICONS_KTX2: &File = &assets::AIRCRAFT_ICONS;
 /// `static/aircraft/icons-outline.ktx2`: their borders, 7 × 6 cells of 152 px.
-pub static OUTLINE_KTX2: &[u8] = include_bytes!("../../../../../static/aircraft/icons-outline.ktx2");
+pub static OUTLINE_KTX2: &File = &assets::AIRCRAFT_OUTLINE;
 
 /// The embedded bytes of an aircraft file by its path under `static/` (the paths of
 /// [`rustradar_scene::aircraft_assets`] and of the [`TextureFile`]s).
 pub fn embedded(path: &str) -> Option<&'static [u8]> {
     Some(match path {
-        "aircraft/index.json" => INDEX_JSON,
-        "aircraft/meshes.bin" => MESHES_BIN,
-        "aircraft/icons.ktx2" => ICONS_KTX2,
-        "aircraft/icons-outline.ktx2" => OUTLINE_KTX2,
+        "aircraft/index.json" => INDEX_JSON.bytes(),
+        "aircraft/meshes.bin" => MESHES_BIN.bytes(),
+        "aircraft/icons.ktx2" => ICONS_KTX2.bytes(),
+        "aircraft/icons-outline.ktx2" => OUTLINE_KTX2.bytes(),
         _ => return None,
     })
 }
@@ -392,10 +393,10 @@ mod tests {
         for path in ["aircraft/index.json", "aircraft/meshes.bin", AIRCRAFT_ICONS.path, AIRCRAFT_ICONS_OUTLINE.path] {
             assert!(embedded(path).unwrap() == static_file(path).as_slice(), "{path}");
         }
-        assert_eq!(embedded(rustradar_scene::aircraft_assets::INDEX_FILE), Some(INDEX_JSON));
-        assert_eq!(embedded(rustradar_scene::aircraft_assets::MESHES_FILE), Some(MESHES_BIN));
-        assert_eq!(embedded(rustradar_scene::aircraft_assets::ICON_ATLAS), Some(ICONS_KTX2));
-        assert_eq!(embedded(rustradar_scene::aircraft_assets::OUTLINE_ATLAS), Some(OUTLINE_KTX2));
+        assert_eq!(embedded(rustradar_scene::aircraft_assets::INDEX_FILE), Some(INDEX_JSON.bytes()));
+        assert_eq!(embedded(rustradar_scene::aircraft_assets::MESHES_FILE), Some(MESHES_BIN.bytes()));
+        assert_eq!(embedded(rustradar_scene::aircraft_assets::ICON_ATLAS), Some(ICONS_KTX2.bytes()));
+        assert_eq!(embedded(rustradar_scene::aircraft_assets::OUTLINE_ATLAS), Some(OUTLINE_KTX2.bytes()));
         assert_eq!(embedded("aircraft/other.bin"), None);
     }
 

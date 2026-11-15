@@ -581,6 +581,11 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --exclude rustradar --locked --no-fail-fast
 
+      # The Android app's files read from its APK instead of embedded (risk K14): rustradar-core's
+      # feature apk-assets, which only the Android build turns on, installed as android_main does.
+      - name: Rust tests (the Android build's assets)
+        run: cargo test -p rustradar-core --locked --features apk-assets --lib assets
+
       # The shots the GPU tests drew (target/shots), to look at beside docs/port/reference.
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
@@ -1273,6 +1278,8 @@ jobs:
           mkdir -p dist
           cp platform/android/app/build/outputs/apk/debug/app-debug.apk dist/RustRadar_native_debug.apk
           ls -l dist platform/android/app/src/main/jniLibs/*
+          # the app's files, which the library reads from the APK at start (risk K14)
+          cargo run -q -p xtask -- android-assets --check dist/RustRadar_native_debug.apk
 
       - uses: actions/upload-artifact@v4
         with:

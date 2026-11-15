@@ -272,6 +272,8 @@ fn parse_view(text: &str) -> Result<ViewState, String> {
 #[unsafe(no_mangle)]
 fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
     use winit::platform::android::EventLoopBuilderExtAndroid;
+    // the fonts, textures, models and data, from the APK, before anything reads them
+    platform::android::install_assets(&android_app);
     let mut builder = winit::event_loop::EventLoop::<app::UserEvent>::with_user_event();
     builder.with_android_app(android_app);
     if let Err(e) = app::run_with(builder, Options::default()) {

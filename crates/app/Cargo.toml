@@ -73,6 +73,9 @@ egui-winit = { version = "0.37", default-features = false, features = ["links"] 
 
 [target.'cfg(target_os = "android")'.dependencies]
 egui-winit = { version = "0.37", default-features = false, features = ["links"] }
+# The fonts, textures, models and data are not compiled into each ABI's library but read from the
+# APK's assets/ at startup (rustradar_core::assets; risk K14).
+rustradar-core = { workspace = true, features = ["apk-assets"] }
 # winit refuses to build for Android without choosing an activity backend: GameActivity, whose
 # GameTextInput the text bridge reads (platform/android.rs; plan 1.5). Its Java half is
 # androidx.games:games-activity 4.4.0 in platform/android, the version android-activity 0.6 glues.

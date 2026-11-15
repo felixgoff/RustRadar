@@ -32,13 +32,17 @@
 //!    update only over a copy signed with the same key, so another key is refused unless `--any-key`.
 //! 4. **Native libraries**: `platform/android/build-rust.sh --release --locked <ABI>...` (cargo-ndk 4,
 //!    API level 24) for the four ABIs today's release has ([`ABIS`], `RustPlugin.kt`'s
-//!    `defaultAbiList`: one universal APK), after any `.so` left in `jniLibs` is removed.
+//!    `defaultAbiList`: one universal APK), after any `.so` left in `jniLibs` is removed. It also
+//!    copies the app's files into the project's assets (`cargo xtask android-assets`, risk K14):
+//!    the libraries no longer carry them, the APK does, once.
 //! 5. **Gradle**: `./gradlew assembleRelease --no-daemon -PversionName=<version>` in `platform/android`.
 //! 6. **Checks**, with the SDK's build tools (`$ANDROID_HOME`, `$ANDROID_SDK_ROOT` or `local.properties`'
 //!    `sdk.dir`; Gradle installs the build tools there): `aapt2 dump badging` must show
 //!    `com.felix.rustradar`, the version, its code, minSdk 24, the INTERNET permission, the launcher
-//!    activity `com.felix.rustradar.MainActivity` and exactly the ABIs built ([`check_badging`]); a
-//!    signed APK must pass `apksigner verify` with today's certificate.
+//!    activity `com.felix.rustradar.MainActivity` and exactly the ABIs built ([`check_badging`]); its
+//!    `assets/` must hold exactly the app's files, stored, as the repository has them
+//!    ([`crate::android_assets::check_apk`]); a signed APK must pass `apksigner verify` with
+//!    today's certificate. An APK over [`SIZE_BUDGET`] gets a warning (risk K14's trigger).
 //! 7. **Name**: copied to `--out` (default `<target dir>/android`) as `RustRadar_{version}.apk`, today's
 //!    asset name (the app's update check takes a release's first `.apk`), or, unsigned,
 //!    `RustRadar_{version}_unsigned.apk` ([`apk_name`]): Android installs no unsigned APK, so a release
@@ -86,6 +90,9 @@ pub const RELEASE_CERT_SHA256: &str = "a77966fb7f61d9465bf7c7d63918b13bf270cfb7d
 pub const LIBRARY: &str = "librustradar_app.so";
 /// The largest versionCode Android (and the Tauri CLI) accepts.
 const MAX_VERSION_CODE: u64 = 2_100_000_000;
+/// Risk K14's trigger: today's Tauri APK is 151 MB; the native one was 220 MB with every file in
+/// each library, about 130 MB with them in `assets/` once.
+pub const SIZE_BUDGET: u64 = 150_000_000;
 
 /// The versionCode of `version`: major·1 000 000 + minor·1000 + patch, the Tauri CLI's rule, between 1
 /// and 2 100 000 000 as it requires. Only a plain `x.y.z` (the release tags' scheme) is taken.
@@ -497,6 +504,8 @@ fn release(root: &Path, args: &Args, env: &Env) -> Result<Option<PathBuf>, Strin
         }
     }
     check_badging(&parse_badging(&badging_text)?, &version, code, &abis)?;
+    let assets = crate::android_assets::check_apk(root, &apk)?;
+    println!("  assets/: the app's {} files, {:.1} MB, stored, as the repository's", assets.files, assets.bytes as f64 / 1e6);
     if signing.signed() {
         let mut apksigner = Command::new(build_tool(&sdk, "apksigner")?);
         apksigner.args(["verify", "--print-certs"]).arg(&apk);
@@ -513,8 +522,12 @@ fn release(root: &Path, args: &Args, env: &Env) -> Result<Option<PathBuf>, Strin
     fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
     let dest = out.join(&name);
     fs::copy(&apk, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
-    let mb = fs::metadata(&dest).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0);
+    let size = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    let mb = size as f64 / 1e6;
     println!("{} ({mb:.1} MB)", dest.display());
+    if size > SIZE_BUDGET {
+        warn(env, &format!("{name} is {mb:.1} MB, over risk K14's {} MB", SIZE_BUDGET / 1_000_000));
+    }
     github_file(env, "GITHUB_OUTPUT", &format!("apk={}\nname={name}\nsigned={}\n", dest.display(), signing.signed()))?;
     github_file(
         env,
@@ -783,13 +796,21 @@ mkdir -p "$out"
 if [ -e "$here/keystore.properties" ]; then
   echo "keys $(sed 's/=.*//' "$here/keystore.properties" | tr '\n' ' ')" >> "$here/../../log"
   echo "keystore of $(wc -c < "$(sed -n 's/^storeFile=//p' "$here/keystore.properties")") bytes" >> "$here/../../log"
-  echo apk > "$out/app-release.apk"
+  cp "$here/../../built.apk" "$out/app-release.apk"
 else
-  echo apk > "$out/app-release-unsigned.apk"
+  cp "$here/../../built.apk" "$out/app-release-unsigned.apk"
 fi
 "#,
         );
         write("sdk/build-tools/36.0.0/badging.txt", badging);
+        // the app's files, which the APK's assets/ is checked against, and the APK Gradle makes
+        for folder in ["static", "assets", "crates/backend"] {
+            std::os::unix::fs::symlink(bump::repo_root().join(folder), dir.join(folder)).unwrap();
+        }
+        let assets = crate::android_assets::apk_assets();
+        let mut entries: Vec<(&str, &[u8])> = vec![("AndroidManifest.xml", b"<manifest/>")];
+        entries.extend(assets.iter().map(|(name, bytes)| (name.as_str(), bytes.as_slice())));
+        fs::write(dir.join("built.apk"), crate::android_assets::stored_zip(&entries)).unwrap();
         write("sdk/build-tools/36.0.0/aapt2", "#!/bin/sh\ncat \"$(dirname \"$0\")/badging.txt\"\n");
         write("sdk/build-tools/36.0.0/apksigner", &format!("#!/bin/sh\n{apksigner}\n"));
         dir
@@ -890,6 +911,18 @@ fi
         let dry = Args { dry_run: true, ..release_args(&dir) };
         assert_eq!(release(&dir, &dry, &staged_env(&dir, true)), Ok(None));
         assert!(!dir.join("log").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_release_without_the_apps_files_is_refused() {
+        // Gradle packed no assets: the app would stop at start (risk K14)
+        let dir = stage("assets", &badging_0317(), TODAYS_SIGNER);
+        fs::write(dir.join("built.apk"), crate::android_assets::stored_zip(&[("AndroidManifest.xml", b"<manifest/>")])).unwrap();
+        let err = release(&dir, &release_args(&dir), &staged_env(&dir, false)).unwrap_err();
+        assert!(err.contains("assets/realistic/ground.color.ktx2 is missing"), "{err}");
+        assert!(!dir.join("out").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 

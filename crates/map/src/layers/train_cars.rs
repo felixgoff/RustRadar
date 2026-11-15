@@ -47,6 +47,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use glam::DVec3;
+use rustradar_core::assets::File;
 use rustradar_scene::train_models::{CarMesh, TrainModels, car_mesh};
 use rustradar_scene::trains::{CAR_HIGHLIGHT, CarLayers, CarShape, DrawnCar};
 
@@ -57,9 +58,9 @@ use crate::state::DrawState;
 
 /// `static/trains/index.json`: each model's three cars, their lengths and their sections of
 /// [`MESHES_BIN`] ([`rustradar_scene::train_models::INDEX_FILE`]).
-pub static INDEX_JSON: &[u8] = include_bytes!("../../../../static/trains/index.json");
+pub static INDEX_JSON: &File = &rustradar_core::assets::TRAIN_INDEX;
 /// `static/trains/meshes.bin`: every model car's triangles.
-pub static MESHES_BIN: &[u8] = include_bytes!("../../../../static/trains/meshes.bin");
+pub static MESHES_BIN: &File = &rustradar_core::assets::TRAIN_MESHES;
 
 /// The operator models, read from the embedded files once per process (`loadTrainModels()`);
 /// `None` if they cannot be read (logged once: "train models unavailable"), when plain cars are

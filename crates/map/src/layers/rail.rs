@@ -97,8 +97,8 @@ use crate::state::DrawState;
 /// source name the app's fetcher maps to `backend::rail::tile`, and a fixture folder's name.
 pub const RAIL_TILES: &str = "openrailwaymap";
 
-/// `static/rail/railroads.bin`, the overview (doc 02 §8.3).
-pub static RAILROADS: &[u8] = include_bytes!("../../../../static/rail/railroads.bin");
+/// `static/rail/railroads.bin`, the overview (doc 02 §8.3; [`rustradar_core::assets`]).
+pub static RAILROADS: &rustradar_core::assets::File = &rustradar_core::assets::RAILROADS;
 
 /// The speed labels' face: Overpass at 650 for today's Inter (plan section 6, item 5).
 pub const SPEED_LABEL_FACE: Face = Face::new(Family::Overpass, SPEED_LABEL_WEIGHT);

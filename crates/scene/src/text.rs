@@ -3,13 +3,13 @@
 //! the result.
 //!
 //! - **Fonts.** [`OVERPASS`] and [`OVERPASS_MONO`] are the TTFs of `assets/fonts/` (five subsets
-//!   each, in their fallback order), embedded. A [`Face`] is a family at one `wght` (the axis is
-//!   clamped to the font's range: Overpass 100–900, Mono 300–700). [`FontCanvas`] is the 2D canvas
-//!   TinySDF and deck draw on, for one face at the atlas's font size: `measureText` from the skrifa
-//!   outline's control box and advance, `fillText` as a tiny-skia anti-aliased fill (non-zero
-//!   winding) of that outline. A character takes the first subset that maps it; one no subset has
-//!   is skipped, with no advance (plan section 6, deviation 13: the browser fell back to a system
-//!   font).
+//!   each, in their fallback order), embedded (on Android, read from the APK). A [`Face`] is a
+//!   family at one `wght` (the axis is clamped to the font's range: Overpass 100–900, Mono
+//!   300–700). [`FontCanvas`] is the 2D canvas TinySDF and deck draw on, for one face at the
+//!   atlas's font size: `measureText` from the skrifa outline's control box and advance,
+//!   `fillText` as a tiny-skia anti-aliased fill (non-zero winding) of that outline. A character
+//!   takes the first subset that maps it; one no subset has is skipped, with no advance (plan
+//!   section 6, deviation 13: the browser fell back to a system font).
 //! - **Atlas.** [`GlyphAtlas`] is deck's `FontAtlasManager` for one [`FontSettings`] (deck's
 //!   `fontSettings`: font size 64, buffer, SDF or not, radius, cutoff, smoothing) and any number of
 //!   faces, packed on demand into one `R8Unorm` picture ([`ATLAS_SIZE`]² texels) as deck's
@@ -51,6 +51,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::LazyLock;
 
 use skrifa::instance::{Location, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
@@ -60,23 +61,29 @@ use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 use crate::sdf::{Canvas, Region, TextMetrics, TinySdf};
 
 /// Overpass (the variable `wght` font, 100–900, default 400): latin, latin-ext, cyrillic,
-/// cyrillic-ext, vietnamese.
-pub const OVERPASS: [&[u8]; 5] = [
-    include_bytes!("../../../assets/fonts/overpass-latin.ttf"),
-    include_bytes!("../../../assets/fonts/overpass-latin-ext.ttf"),
-    include_bytes!("../../../assets/fonts/overpass-cyrillic.ttf"),
-    include_bytes!("../../../assets/fonts/overpass-cyrillic-ext.ttf"),
-    include_bytes!("../../../assets/fonts/overpass-vietnamese.ttf"),
-];
+/// cyrillic-ext, vietnamese ([`rustradar_core::assets`]: embedded, or on Android from the APK).
+pub static OVERPASS: LazyLock<[&'static [u8]; 5]> = LazyLock::new(|| {
+    use rustradar_core::assets as a;
+    [
+        a::OVERPASS_LATIN.bytes(),
+        a::OVERPASS_LATIN_EXT.bytes(),
+        a::OVERPASS_CYRILLIC.bytes(),
+        a::OVERPASS_CYRILLIC_EXT.bytes(),
+        a::OVERPASS_VIETNAMESE.bytes(),
+    ]
+});
 
 /// Overpass Mono (`wght` 300–700, default 300), the same subsets.
-pub const OVERPASS_MONO: [&[u8]; 5] = [
-    include_bytes!("../../../assets/fonts/overpass-mono-latin.ttf"),
-    include_bytes!("../../../assets/fonts/overpass-mono-latin-ext.ttf"),
-    include_bytes!("../../../assets/fonts/overpass-mono-cyrillic.ttf"),
-    include_bytes!("../../../assets/fonts/overpass-mono-cyrillic-ext.ttf"),
-    include_bytes!("../../../assets/fonts/overpass-mono-vietnamese.ttf"),
-];
+pub static OVERPASS_MONO: LazyLock<[&'static [u8]; 5]> = LazyLock::new(|| {
+    use rustradar_core::assets as a;
+    [
+        a::OVERPASS_MONO_LATIN.bytes(),
+        a::OVERPASS_MONO_LATIN_EXT.bytes(),
+        a::OVERPASS_MONO_CYRILLIC.bytes(),
+        a::OVERPASS_MONO_CYRILLIC_EXT.bytes(),
+        a::OVERPASS_MONO_VIETNAMESE.bytes(),
+    ]
+});
 
 /// A font family of `assets/fonts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

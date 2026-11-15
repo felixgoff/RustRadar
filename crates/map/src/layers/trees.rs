@@ -224,8 +224,8 @@ pub fn canopy_grid(bytes: &[u8]) -> Option<CanopyGrid> {
     (size > 0 && size * size == bytes.len()).then(|| CanopyGrid { size, heights: bytes.to_vec() })
 }
 
-static MALMO: LazyLock<Option<Town>> = LazyLock::new(|| parse_town(include_bytes!("../../../../static/street-trees/malmo.bin")));
-static UMEA: LazyLock<Option<Town>> = LazyLock::new(|| parse_town(include_bytes!("../../../../static/street-trees/umea.bin")));
+static MALMO: LazyLock<Option<Town>> = LazyLock::new(|| parse_town(&rustradar_core::assets::STREET_TREES_MALMO));
+static UMEA: LazyLock<Option<Town>> = LazyLock::new(|| parse_town(&rustradar_core::assets::STREET_TREES_UMEA));
 
 /// The towns' registered trees in `tile` (`streetTrees`): each town's whose register the tile
 /// meets, in the towns' order, read once from the embedded files.

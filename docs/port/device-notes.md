@@ -11,12 +11,12 @@ Plan references: section 5, risks K3 (surface lifecycle) and K4 (text input, saf
 
 | Piece | Where | What it does |
 |---|---|---|
-| Android project | `platform/android` | The Tauri Gradle project (`src-tauri/gen/android`) with Tauri taken out: no `buildSrc` rust plugin, no `tauri.*` files, no WebView or FileProvider. `MainActivity` extends `GameActivity` (`androidx.games:games-activity:4.4.0`, the version android-activity 0.6 glues). The manifest's `android.app.lib_name` is `rustradar_app`. Version from `-PversionName` / `-PversionCode` (default 1.0 / 1). The window starts in the map's ink colour. |
-| Android Rust build | `platform/android/build-rust.sh [--release] [ABI…]` | cargo-ndk 4: `librustradar_app.so` into `app/src/main/jniLibs/<abi>/`, API level 24. GameActivity's C++ and the Basis transcoder link libc++ statically, so no `libc++_shared.so` is packaged. |
-| iOS project | `platform/ios/project.yml` | xcodegen spec: one app target, bundle id `com.felix.rustradar`, iOS 15, `Info.plist` with `ITSAppUsesNonExemptEncryption = false` and a launch screen in the map's ink, the 1024 px icon (no alpha) from `src-tauri/icons/ios`. `Sources/main.m` calls `rustradar_ios_main`. A pre-build phase runs `build-rust.sh`, which builds `librustradar_app.a` with cargo for the platform being built. |
+| Android project | `platform/android` | The Tauri Gradle project (`src-tauri/gen/android`) with Tauri taken out: no `buildSrc` rust plugin, no `tauri.*` files, no WebView or FileProvider. `MainActivity` extends `GameActivity` (`androidx.games:games-activity:4.4.0`, the version android-activity 0.6 glues). The manifest's `android.app.lib_name` is `rustradar_app`. The version from `-PversionName` / `-PversionCode`, else `crates/app`'s version with today's versionCode, major·1 000 000 + minor·1000 + patch (P8). A release build type with R8 and GameActivity's keep rules, signed from `keystore.properties` when `cargo xtask android-release` writes one (only on a release). The window starts in the map's ink colour. |
+| Android Rust build | `platform/android/build-rust.sh [--release] [--locked] [ABI…]` | cargo-ndk 4: `librustradar_app.so` into `app/src/main/jniLibs/<abi>/`, API level 24; the release builds the four ABIs today's universal APK has. GameActivity's C++ and the Basis transcoder link libc++ statically, so no `libc++_shared.so` is packaged. |
+| iOS project | `platform/ios/project.yml` | xcodegen spec: one app target, bundle id `com.felix.rustradar`, iOS 15, iPhone and iPad, `Info.plist` with today's keys (`ITSAppUsesNonExemptEncryption = false` among them), today's `LaunchScreen.storyboard` (the Tauri CLI's template: the system background, white, or black in dark mode, as the Tauri app shows) and today's 18 app icons from `src-tauri/icons/ios` (no alpha) in `Assets.xcassets` (P9). `Sources/main.m` calls `rustradar_ios_main`. A pre-build phase runs `build-rust.sh`, which builds `librustradar_app.a` with cargo for the platform being built (`--release --locked` for a Release build). `cargo xtask ios-release` archives the Release build into an unsigned IPA, or, on a release, the App Store build that is uploaded to TestFlight. |
 | Android glue | `crates/app/src/platform/android.rs` | The Tauri build's folders; the window insets; the text bridge between egui and GameTextInput; back and the keyboard's Done key; logcat logging. |
 | iOS glue | `crates/app/src/platform/ios.rs` | The Tauri build's folders and the log. The safe area, the keyboard and typed text come from winit and egui-winit on iOS. |
-| CI | `.github/workflows/phone-shells.yml` | Builds a debug APK (arm64-v8a) and an unsigned simulator app, as artifacts. It also builds the iPhone library, but nothing is signed or packaged for devices (that is P8 and P9). |
+| CI | `.github/workflows/rust.yml` (workflow "Build"; `phone-shells.yml` was folded into it, P10) | The phone shells: a debug APK (arm64-v8a) and an unsigned simulator app. The release builds: the four-ABI release APK and the device IPA, both unsigned except on a release (P8, P9). All as artifacts. |
 
 ## 2. Before the checks: wiring the app loop
 
@@ -69,9 +69,8 @@ Each single-line text field (U8 search, U9 filter text, token inputs, U17 keys d
 
 ## 3. Getting a build
 
-**From CI.** Open the run of "Phone shells" for the commit (Actions tab). It runs on pushes to `rust-port` and
-`main` that touch `platform/**`, `crates/app/Cargo.toml`, `crates/app/src/lib.rs` or `crates/app/src/platform/**`,
-or by hand with "Run workflow". It has two artifacts:
+**From CI.** Open the run of "Build" for the commit (Actions tab). It runs on every push to `rust-port` and `main`,
+on pull requests, and by hand with "Run workflow". Its phone artifacts:
 
 - `android-native-debug-apk`: `RustRadar_native_debug.apk`, arm64-v8a, a debug build signed with the CI runner's debug key.
   - Install it with `adb install -r RustRadar_native_debug.apk`.
@@ -81,6 +80,8 @@ or by hand with "Run workflow". It has two artifacts:
   2. `xcrun simctl boot "iPhone 16"`;
   3. `xcrun simctl install booted RustRadar.app`;
   4. `xcrun simctl launch --console booted com.felix.rustradar`.
+- `native-android-apk`: `RustRadar_<version>_unsigned.apk` on every run but a release (job "Android release APK (native)"): the release build, all four ABIs. Android installs no unsigned APK; it is there for `aapt2 dump badging` and the size. A release's is `RustRadar_<version>.apk`, signed with today's key.
+- `native-ios-ipa`: `RustRadar_<version>_unsigned.ipa` (job "iOS release IPA (native)"), for side-loading tools (AltStore, Sideloadly), which sign it themselves.
 
 **On an iPhone.** Build from Xcode:
 
@@ -89,7 +90,8 @@ or by hand with "Run workflow". It has two artifacts:
 3. Set your team under Signing & Capabilities (a free personal team signs for 7 days).
 4. Pick the phone and Run. The first build compiles the whole workspace for iOS, which takes several minutes.
 
-**Android, locally.** You need cargo-ndk 4, NDK 27 (`ANDROID_NDK_HOME`), JDK 17 and the SDK:
+**Android, locally.** You need cargo-ndk 4, NDK r28c (`ANDROID_NDK_HOME`; CI uses 28.2.13676358, because r27's clang crashes
+compiling the Basis transcoder for armeabi-v7a), JDK 17 and the SDK:
 
 ```sh
 rustup target add aarch64-linux-android
@@ -97,6 +99,9 @@ platform/android/build-rust.sh            # debug, arm64-v8a
 cd platform/android && ./gradlew assembleDebug && adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb logcat -s rustradar                   # the app's log
 ```
+
+The release APK, as CI builds it: `cargo xtask android-release --out dist` (the four ABIs, `assembleRelease`, the
+badging checked; unsigned without the three signing secrets, `crates/xtask/src/android.rs`).
 
 ## 4. Checklist K3: surface lifecycle
 
@@ -109,7 +114,7 @@ Expected throughout:
 
 | # | Step | Expected | Android | iPhone |
 |---|---|---|---|---|
-| 1 | Cold start | The globe (view V1) within a few seconds. The screen is the map's ink before the first frame, not white. The log names the adapter and the backend (Vulkan or GL on Android, Metal on iOS), then "map MSAA x4". | ☐ | ☐ |
+| 1 | Cold start | The globe (view V1) within a few seconds. Before the first frame: on Android the map's ink, not white; on iOS today's launch screen (the system background, white, or black in dark mode), as the Tauri app shows. The log names the adapter and the backend (Vulkan or GL on Android, Metal on iOS), then "map MSAA x4". | ☐ | ☐ |
 | 2 | Home, then back from recents, 20 times | The globe each time within a second, at the same view. Android drops and remakes the surface each time; iOS keeps its view. | ☐ | ☐ |
 | 3 | Rotate portrait, landscape, portrait, 10 times | The globe fills the screen at once, with the view centre kept and nothing stretched. | ☐ | ☐ |
 | 4 | Lock with the power button, then unlock, while open | As 2. | ☐ | ☐ |
@@ -187,19 +192,19 @@ These are deliberate, or left for a later item.
 - **The Done key is a soft Enter.** The keyboard is set to plain text with a Done key; each field decides what Enter does.
 - **Exports are not available on phones**, so there is no Downloads folder (plan section 7).
 - **The CI build is limited.**
-  - The debug APK holds arm64-v8a only. P8 builds all four ABIs, signed with the release key.
+  - The debug APK holds arm64-v8a only. The release APK (P8) holds all four ABIs, signed with the release key only on a release.
   - The simulator app is for Apple silicon only.
-  - Nothing is signed for an iPhone (P9).
+  - Nothing is signed for an iPhone off a release: the IPA is unsigned. The App Store build and its TestFlight upload run only for a push to `main` or a `v*` tag of a tree without `src-tauri` (P9, P10).
 - **No local Android build was made here.** No item has built this Gradle project outside CI.
   - This container has no Android SDK or NDK.
   - Installing the SDK means accepting Google's SDK licence, which is for the owner to do.
   - The Rust side was checked with `cargo check` and clippy for `aarch64-linux-android` and `aarch64-apple-ios`, through stand-in C compilers (E17's recipe). The CI run is the first real build.
 - **The first CI run** (run 42865363833, commit `314b0d0`) built both artifacts:
-  - **The debug APK: 155 MB.** It holds a debug `librustradar_app.so` of 149 MB: unoptimised code, line tables, and the 27 MB of embedded assets. A release library (optimised, LTO, stripped) is far smaller; risk K14 measures that in P8.
-  - **The simulator app** (39 MB zipped), with the iPhone library alongside it. The app's `Info.plist` came out as specified: `com.felix.rustradar`, iOS 15, the ink launch screen, `ITSAppUsesNonExemptEncryption = false`.
+  - **The debug APK: 155 MB.** It holds a debug `librustradar_app.so` of 149 MB: unoptimised code, line tables, and the 27 MB of embedded assets. A release library (optimised, LTO, stripped) is far smaller; P8's release APK is measured in the plan's stage 11 status (gap 1, risk K14).
+  - **The simulator app** (39 MB zipped), with the iPhone library alongside it. The app's `Info.plist` came out as specified: `com.felix.rustradar`, iOS 15, the ink launch screen (since replaced by today's storyboard, P9), `ITSAppUsesNonExemptEncryption = false`.
 - **Still to check on a downloaded APK:**
   - `unzip -l` shows only `lib/arm64-v8a/librustradar_app.so` (no `libc++_shared.so`).
-  - For Play only, 16 KB pages: `zipalign -c -P 16 -v 4` passes and `llvm-readelf -l librustradar_app.so` shows LOAD alignment 0x4000.
+  - For Play only, 16 KB pages: `zipalign -c -P 16 -v 4` passes and `llvm-readelf -l librustradar_app.so` shows LOAD alignment 0x4000. The release APK's arm64 library has 4 KB alignment, as today's (stage 11 status, gap 1), so this does not pass yet; only Play and 16 KB-page devices need it.
 
 ## 8. Checklist U19: the phone layout
 

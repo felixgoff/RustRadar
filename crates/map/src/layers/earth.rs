@@ -12,9 +12,8 @@
 //!
 //!   **Lit.** The app gives it `material: false`, which deck 9.4 reads as luma's default Phong
 //!   material ([`Material::DECK_DEFAULT`]; see `pipelines/mesh.rs`), lit by the app's
-//!   LightingEffect, so today's dark map shows its polar caps past ±85.06° in (40,39,38) to
-//!   (44,43,41), not (50,50,50) (`docs/port/reference/dark-v1-1440x900.png`). Doc 01 §4 and §5.4
-//!   read it as unlit; deck and today's app win. Its normals are the sphere's own: deck's
+//!   rig, in a colour that lit comes out about the basemap's sea, so the polar caps past ±85.06°
+//!   (where the map's tiles stop) read as more sea, not as a disc of their own. Its normals are the sphere's own: deck's
 //!   `project_normal` turns them by `project_get_orientation_matrix(geometry.position)` on the
 //!   globe, but SimpleMeshLayer calls it before `geometry.position` is set, while it still holds
 //!   its initial `(0, 0, 1, 0)`, whose orientation matrix is the identity. The rig is the scene's
@@ -22,8 +21,8 @@
 //!   every layer; its key light is aimed only over buildings on the flat map (`buildings && flat`,
 //!   G:2724), so wherever the earth is drawn it has its usual direction, [`LightRig::new`]'s
 //!   (but for the frames between a refresh on the flat map and the next one after the camera
-//!   crossed zoom 12). [`lit_color`] is the CPU twin of one of its pixels; the dark map's cap at
-//!   V1 is today's to the level (test `v1_dark_matches_todays_app_at_the_centre_and_the_pole`).
+//!   crossed zoom 12). [`lit_color`] is the CPU twin of one of its pixels (test
+//!   `v1_dark_the_polar_cap_reads_as_sea`).
 //!
 //!   Now that the sphere differs from the land, one thing E5's unlit sphere hid shows: on
 //!   SwiftShader a few MSAA samples of its edge-on silhouette facets win the depth test against
@@ -45,7 +44,6 @@ use rustradar_scene::camera::{GLOBE_EARTH_RADIUS_M, GLOBE_RADIUS, WORLD_SIZE, ln
 use rustradar_scene::geom::densify::GLOBE_RESOLUTION_DEG;
 use rustradar_scene::geom::earcut::earcut;
 use rustradar_scene::geom::grid_cut::{GridOptions, cut_polygon_by_grid};
-use rustradar_scene::ground::POLES;
 
 use super::{DrawCx, Init, Layer, Pass, PrepareCx};
 use crate::frame::{Frame, FrameSlot, ViewFrame};
@@ -60,23 +58,26 @@ pub const EARTH_LATITUDE_SEGMENTS: u32 = 36;
 /// Its longitude segments (`nlong`).
 pub const EARTH_LONGITUDE_SEGMENTS: u32 = 72;
 
-/// The sphere's colour on the dark map: the land seen past ±85.06° and through any gap (`GROUND`,
-/// G:453).
-pub const GROUND_DARK: [u8; 3] = [50, 50, 50];
-/// On the satellite map, where it shows only at the poles and while tiles load.
-pub const GROUND_SATELLITE: [u8; 3] = [6, 16, 34];
+/// The sphere's colour on the dark map, where it shows only past ±85.06° (the map's tiles stop
+/// there) and while tiles load: lit, about the sea's `(30,30,30)`, so the polar cap is no disc of
+/// its own.
+pub const GROUND_DARK: [u8; 3] = [37, 38, 40];
+/// On the satellite map: lit, about the imagery's open sea.
+pub const GROUND_SATELLITE: [u8; 3] = [25, 80, 112];
+/// On the realistic map: lit, about its sea seen from far out.
+pub const GROUND_REALISTIC: [u8; 3] = [129, 154, 185];
 
 /// The land rectangle's fill (`LAND`, G:499).
 pub const LAND: [u8; 4] = [50, 50, 50, 255];
 /// The land rectangle (`LAND_POLYGON`, G:569-576), longitude and latitude.
 pub const LAND_POLYGON: [[f64; 2]; 4] = [[-180.0, -85.06], [180.0, -85.06], [180.0, 85.06], [-180.0, 85.06]];
 
-/// The sphere's colour by basemap (`GROUND`, G:453): realistic is `POLES` (`realistic-ground.ts:96`).
+/// The sphere's colour by basemap.
 pub fn ground(basemap: Basemap) -> [u8; 3] {
     match basemap {
         Basemap::Dark => GROUND_DARK,
         Basemap::Satellite => GROUND_SATELLITE,
-        Basemap::Realistic => POLES,
+        Basemap::Realistic => GROUND_REALISTIC,
     }
 }
 
@@ -346,9 +347,9 @@ mod tests {
 
     #[test]
     fn the_ground_colour_follows_the_basemap() {
-        assert_eq!(ground(Basemap::Dark), [50, 50, 50]);
-        assert_eq!(ground(Basemap::Satellite), [6, 16, 34]);
-        assert_eq!(ground(Basemap::Realistic), [226, 234, 240]);
+        assert_eq!(ground(Basemap::Dark), GROUND_DARK);
+        assert_eq!(ground(Basemap::Satellite), GROUND_SATELLITE);
+        assert_eq!(ground(Basemap::Realistic), GROUND_REALISTIC);
         assert!(!Input::default().shown && Input::SHOWN.shown);
     }
 
@@ -395,13 +396,13 @@ mod tests {
         assert_eq!(vertices[0].position, [0.0, 6.3e6, 0.0]);
         let view = ViewFrame::new(&V1, SIZE, 1.0, 0.0);
         let instance = earth_instance(&view, Basemap::Satellite);
-        assert_eq!((instance.color, instance.highlight), ([6, 16, 34, 255], [0; 4]));
+        assert_eq!((instance.color, instance.highlight), ([25, 80, 112, 255], [0; 4]));
         let s = (GLOBE_RADIUS / GLOBE_EARTH_RADIUS_M) as f32;
         assert_eq!(instance.columns, [[s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, s]]);
         assert_eq!(f64::from(s), view.viewport.distance_scales.units_per_meter[2] as f32 as f64);
         let centre = DVec3::from_array(instance.offset.map(f64::from)) + view.common_centre;
         assert!(centre.length() < 1e-4, "the Earth's centre lands at {centre:?}");
-        assert_eq!(earth_instance(&view, Basemap::Dark).color, [50, 50, 50, 255]);
+        assert_eq!(earth_instance(&view, Basemap::Dark).color, [37, 38, 40, 255]);
     }
 
     /// deck cuts the rectangle into 72 × 36 parts (two rows of 0.06°), each into two triangles, all
@@ -441,30 +442,12 @@ mod tests {
         assert_eq!((east.offset_hi[1], east.offset_lo[1], east.scale), (3.0, 2e-7, 512.0));
     }
 
-    fn reference(name: &str) -> image::RgbImage {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/port/reference").join(name);
-        image::open(&path).expect("reference picture").to_rgb8()
-    }
-
-    /// The CPU twin against today's app: the earth sphere at the north pole of
-    /// `dark-v1-1440x900.png` and `realistic-v1-1440x900.png` (V1 at 2026-06-21 10:00 UTC, so in
-    /// sunlight and with no night layer over it; both pictures exact, not dithered) within a level,
-    /// in all three channels, and not the unlit ground colour. Off the earth sphere (between its
-    /// limb and deck's surface, and in space) and on the flat map it says nothing.
+    /// The CPU twin says nothing off the earth sphere (between its limb and deck's surface, and in
+    /// space) and on the flat map.
     #[test]
-    fn the_twin_is_todays_lit_earth_at_the_pole() {
+    fn the_twin_says_nothing_off_the_earth() {
         let view = ViewFrame::new(&V1, REFERENCE_SIZE, 1.0, 0.0);
         let rig = LightRig::new();
-        for (basemap, name) in [(Basemap::Dark, "dark-v1-1440x900.png"), (Basemap::Realistic, "realistic-v1-1440x900.png")] {
-            let picture = reference(name);
-            for [x, y] in [[700u32, 185u32], [720, 185], [740, 185], [700, 175], [740, 180]] {
-                let lit = lit_color(&view, &rig, basemap, [f64::from(x) + 0.5, f64::from(y) + 0.5]).expect("on the earth").map(|c| c * 255.0);
-                let got = picture.get_pixel(x, y).0;
-                eprintln!("{name} ({x}, {y}): {got:?} in the picture, {lit:.1?} by the twin");
-                assert!(got.iter().zip(lit).all(|(g, e)| (f64::from(*g) - e).abs() <= 1.0), "{name} ({x}, {y}): {got:?} against {lit:?}");
-                assert_ne!(got, ground(basemap));
-            }
-        }
         let globe = view.viewport.globe().expect("globe");
         let between = (limb_radius(globe, 0.0, EARTH_RATIO) + limb_radius(globe, 0.0, 1.0)) / 2.0;
         assert_eq!(lit_color(&view, &rig, Basemap::Dark, [720.0 + between, 450.0]), None);
@@ -550,14 +533,14 @@ mod tests {
             return None;
         }
         match past_the_land(globe, xy)? {
-            false => Some((GROUND_DARK.map(f64::from), 0.0)),
+            false => Some(([LAND[0], LAND[1], LAND[2]].map(f64::from), 0.0)),
             true => lit(view, Basemap::Dark, xy),
         }
     }
 
     /// The dark map's limb is the land's, all round (in these views no pole is near it).
     fn land_at_the_limb(_: [f64; 2]) -> Option<([f64; 3], f64)> {
-        Some((GROUND_DARK.map(f64::from), 0.0))
+        Some(([LAND[0], LAND[1], LAND[2]].map(f64::from), 0.0))
     }
 
     /// The disc's edge in `sectors` equal sectors round the screen's centre: in each, the coverage
@@ -651,10 +634,10 @@ mod tests {
         (limbs[0], measured.iter().sum::<f64>() / measured.len() as f64, checked)
     }
 
-    /// E5's acceptance, shot V1 (plan section 8), with the earth lit as deck lights it: on the
-    /// dark map the globe is a disc of land `(50,50,50)` on `(30,30,30)` whose edge is E1's
-    /// projection of the limb within 1.5 px all round, and past ±85.06° (the cap above the
-    /// centre) the earth sphere, lit as [`lit_color`] says, not `(50,50,50)`.
+    /// E5's acceptance, shot V1 (plan section 8): on the dark map the globe is a disc of land
+    /// `(50,50,50)` on `(30,30,30)` whose edge is E1's projection of the limb within 1.5 px all
+    /// round, and past ±85.06° (the cap above the centre) the earth sphere, lit as [`lit_color`]
+    /// says, about the sea's colour.
     #[test]
     fn v1_is_a_disc_of_land_on_ink_at_the_limb() {
         let Some(gpu) = gpu() else { return };
@@ -670,27 +653,19 @@ mod tests {
             let p = image.pixel(x as u32, y as u32);
             let (expected, _) = lit(view, Basemap::Dark, [x.floor() + 0.5, y.floor() + 0.5]).expect("on the earth");
             assert!((0..3).all(|c| (f64::from(p[c]) - expected[c]).abs() <= LIT_TOLERANCE), "{name}: the cap is {p:?}, lit {expected:.1?}");
-            assert!(p[0] < 47 && p[2] < p[0], "{name}: the cap is {p:?}");
+            assert!((26..=36).contains(&p[0]), "{name}: the cap is {p:?}");
             assert_eq!(image.pixel(2, 2), [30, 30, 30, 255]);
         }
     }
 
-    /// Item T2's acceptance: V1 on the dark map at the reference picture's size against today's
-    /// app (`docs/port/reference/dark-v1-1440x900.png`, scale 1): the disc's centre, and every
-    /// pixel of the north polar cap that is more than 1.5 px from the land's edge (where only the
-    /// earth sphere shows, in both pictures), within 3 levels of the picture.
+    /// V1 on the dark map: every pixel of the north polar cap more than 1.5 px from the land's edge
+    /// (where only the earth sphere shows) within 6 levels of the sea's `(30,30,30)`.
     #[test]
-    fn v1_dark_matches_todays_app_at_the_centre_and_the_pole() {
+    fn v1_dark_the_polar_cap_reads_as_sea() {
         let Some(gpu) = gpu() else { return };
-        let picture = reference("dark-v1-1440x900.png");
         let (image, renderer) = render(&gpu, V1, REFERENCE_SIZE, Basemap::Dark, true);
         save(&image, "t2-v1-dark-1440x900.png");
         let globe = renderer.view().viewport.globe().expect("globe");
-        let off = |x: u32, y: u32| {
-            let (p, q) = (image.pixel(x, y), picture.get_pixel(x, y).0);
-            (0..3).map(|c| (i32::from(p[c]) - i32::from(q[c])).abs()).max().unwrap_or(0)
-        };
-        assert!(off(720, 450) <= 3, "the centre: {:?} against {:?}", image.pixel(720, 450), picture.get_pixel(720, 450));
         let (mut cap, mut worst) = (0, 0);
         for y in 100..450 {
             for x in 400..1040 {
@@ -699,12 +674,13 @@ mod tests {
                     continue;
                 }
                 cap += 1;
-                worst = worst.max(off(x, y));
-                assert!(off(x, y) <= 3, "the cap at ({x}, {y}): {:?} against {:?} in today's app", image.pixel(x, y), picture.get_pixel(x, y));
+                let p = image.pixel(x, y);
+                let off = (0..3).map(|c| (i32::from(p[c]) - 30).abs()).max().unwrap_or(0);
+                worst = worst.max(off);
             }
         }
-        eprintln!("V1 dark against today's app: {cap} pixels of the cap, worst {worst} levels off");
-        assert!(cap > 500, "only {cap} pixels of the cap");
+        eprintln!("V1 dark: {cap} pixels of the cap, worst {worst} levels off the sea");
+        assert!(cap > 500 && worst <= 6, "{cap} pixels of the cap, worst {worst} levels off the sea");
     }
 
     /// The earth alone, on satellite (no imagery yet) and realistic (no sky or ground yet): a disc

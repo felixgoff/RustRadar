@@ -1,6 +1,6 @@
 [package]
 name = "rustradar"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2024"
 description = "Live flight radar on a 3D globe"
 

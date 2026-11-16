@@ -3574,7 +3574,7 @@ dependencies = [
 
 [[package]]
 name = "rustradar"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "android_logger",
  "base64",
@@ -3609,7 +3609,7 @@ dependencies = [
 
 [[package]]
 name = "rustradar-backend"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "bzip2-rs",
  "contour",

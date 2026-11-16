@@ -1,37 +1,9 @@
-//! Label decluttering (docs 01 §5.9, 03 §7.5): the CPU stand-in for deck.gl's
-//! `CollisionFilterExtension`.
-//!
-//! deck draws every label's collision footprint to an off-screen map in priority order and hides
-//! a label whose anchor a more important label covers. Its `collision_fade` is how much of a 5 × 5
-//! patch round the anchor the label holds, so it is spatial, not timed. The plan replaces that
-//! (doc 00 §1.4.10, deviation 4) with a greedy pass per collision group: highest priority first,
-//! a label is kept when its claimed rectangle meets no rectangle kept before it. Each label's fade
-//! then eases towards shown or hidden over [`FADE_MS`], so labels still ease in and out as things
-//! move.
-//!
-//! - A [`Group`] is one collision group (deck's `collisionGroup`): [`Group::labels`] for place
-//!   names and airport codes (`"labels"`, G:749), [`Group::aircraft_labels`] for callsigns
-//!   (`"aircraft-labels"`, G:781). Groups never hide one another's labels, and each keeps its own
-//!   fades.
-//! - [`claim`] builds a label's rectangle the way deck sizes its footprint in the collision pass:
-//!   the text box at the test's size scale, moved by the pixel offset, grown by the background
-//!   padding. Place labels are tested at [`LABELS_TEST_SCALE`]; aircraft labels at the label size
-//!   setting, with the padding of doc 03 §7.5.
-//! - [`Group::place`] runs at a scene refresh with the local clock's `now_ms`. The [`Placement`]
-//!   it returns gives each label's alpha at any later frame without placing again, so fades stay
-//!   smooth when refreshes are 150 or 500 ms apart (doc 00 §1.4.9).
-//! - Alpha is the fade itself for place labels ([`Curve::Linear`], deck's `color.a *=
-//!   collision_fade`), and `smoothstep(0.3, 0.65, fade)` for aircraft labels ([`Curve::Crisp`],
-//!   G:788-803).
-//!
-//! Where this differs from deck, as the plan accepts:
-//! - the whole claimed box is tested, not the patch round the anchor, so kept labels never
-//!   overlap;
-//! - only kept labels hide others (in deck a hidden label's footprint still covers);
-//! - between two equal priorities the label already shown wins, then the one given first (deck:
-//!   whichever its depth test lets through);
-//! - a label seen for the first time is shown or hidden at once, as deck shows it; only a change of
-//!   verdict fades.
+//! Label decluttering, one greedy pass per collision group: highest priority first, a label is
+//! kept when its claimed rectangle meets no rectangle kept before it, so kept labels never overlap.
+//! Between equal priorities the label already shown wins, then the one given first, so labels hold
+//! still as the camera moves. Place labels (`crate::labels_map`) and aircraft labels
+//! (`crate::aircraft_labels`) each keep a [`Group`]. A [`Placement`] also carries each label's
+//! fade over [`FADE_MS`] for a caller that eases labels in and out.
 
 use std::collections::HashMap;
 use std::hash::Hash;

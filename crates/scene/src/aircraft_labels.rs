@@ -37,19 +37,11 @@
 //!   `spread = 1 + 0.6·clamp01((7 − zoom)/3)`, `padY = (half + 2·line + 4·scale)·spread` and
 //!   `reserve = 60·scale·spread`: a box about one callsign wide left of the aircraft too, and the
 //!   label's height again above and below, wider apart zoomed out.
-//! - **Collision** ([`collision_fades`]): deck 9.4's `CollisionFilterExtension` for the group
-//!   `"aircraft-labels"`, done on the CPU in [`CollisionMap`] as B4 does it for the place labels
-//!   (`crate::labels_map`), not as the plan's whole-box greedy pass (`crate::declutter`). The
-//!   collision pass draws, into a map at half the canvas's resolution with the depth test sorting
-//!   by priority (between equals the one drawn later wins), the group's three sublayers in deck's
-//!   order: every label's background box (`aircraft-label-names`' TextBackgroundLayer, drawn
-//!   before its characters), then every callsign's glyph quads, then every height's; all at the
-//!   collision test's `sizeScale`, which is the label size setting itself (`collisionTestProps`).
-//!   Both lines and the box share their aircraft's row, as deck's picking colours do, so the two
-//!   lines show and hide together. Each label's fade is then its share of the 5 × 5 patch round
-//!   its aircraft, to the power 2.2. So, as today and unlike the greedy pass, only the aircraft's
-//!   point is tested: an aircraft inside a more important label's box loses its label, and a label
-//!   hidden this way still hides less important ones (the reserve counts once, not on both boxes).
+//! - **Collision** ([`collision_fades`]): highest priority first, a label is shown when its
+//!   claim meets no claim shown before it (`crate::declutter::Group`, which keeps a label already
+//!   shown ahead of an equal one, so labels hold still as aircraft move). A claim is the callsign's
+//!   and the height line's glyphs and the aircraft itself ([`AIRCRAFT_CLEAR`] each way), grown by
+//!   [`LABEL_MARGIN`]: shown labels never overlap one another or another labelled aircraft.
 //! - **Crisp fade** ([`alpha`]): the fill colours' alpha times `smoothstep(0.3, 0.65, fade)`
 //!   instead of the fade itself (G:788-803); the halo is not faded (deck multiplies the instance
 //!   colour only), and a label under a fade of 0.0001 is not drawn at all.
@@ -71,8 +63,8 @@ use rustradar_core::model::LiveFlight;
 use rustradar_core::num::{clamp01, js_round, smoothstep};
 
 use crate::aircraft::{AircraftScene, Frame};
-use crate::declutter::{CRISP_FROM, CRISP_TO, DRAWN_MIN_FADE};
-use crate::labels_map::{CollisionMap, glyph_quads};
+use crate::declutter::{CRISP_FROM, CRISP_TO, DRAWN_MIN_FADE, Group, Label, Rect};
+use crate::labels_map::{LABEL_MARGIN, bounds, glyph_quads};
 use crate::text::{LaidText, TextLayout};
 
 /// From here a second, dimmer line gives the height (`AIRCRAFT_LABEL_HEIGHT_ZOOM`): zoom > 7.
@@ -453,33 +445,29 @@ pub struct Placing<'a> {
     pub height: Option<&'a LaidText>,
 }
 
-/// deck's collision filter for the group `"aircraft-labels"` in one frame: `placings` (one per
-/// label of `labels`, in the set's order) drawn into `map` over a canvas of `canvas` CSS pixels at
-/// `map_scale` device pixels each, the backgrounds first, then the callsigns, then the heights;
-/// then each label's fade (0 to 1; under [`DRAWN_MIN_FADE`] it is not drawn).
-pub fn collision_fades(map: &mut CollisionMap, canvas: [f64; 2], map_scale: f64, labels: &AircraftLabels, placings: &[Placing<'_>]) -> Vec<f64> {
-    let device = [(canvas[0] * map_scale).round(), (canvas[1] * map_scale).round()];
-    map.begin(device);
-    let (kx, ky) = (device[0] / canvas[0], device[1] / canvas[1]);
-    let to_device = move |[x0, y0, x1, y1]: [f64; 4]| [x0 * kx, y0 * ky, x1 * kx, y1 * ky];
-    let rows = || placings.iter().enumerate().filter_map(|(i, p)| p.anchor.map(|anchor| (i, anchor, p)));
-    // `aircraft-label-names-background`
-    for (i, anchor, p) in rows() {
-        map.draw(i, labels.priority(i), [to_device(labels.background(i, anchor, p.perspective, p.name))]);
-    }
-    // `aircraft-label-names-characters`
-    for (i, anchor, p) in rows() {
-        map.draw(i, labels.priority(i), labels.name_quads(i, anchor, p.perspective, p.name).map(to_device));
-    }
-    // `aircraft-label-heights-characters`
-    if labels.with_height() {
-        for (i, anchor, p) in rows() {
-            if let Some(height) = p.height {
-                map.draw(i, labels.priority(i), labels.height_quads(i, anchor, p.perspective, height).map(to_device));
-            }
-        }
-    }
-    placings.iter().enumerate().map(|(i, p)| p.anchor.map_or(0.0, |[x, y]| map.fade(i, [x * kx, y * ky]))).collect()
+/// Half the square round an aircraft that its label claims, px.
+pub const AIRCRAFT_CLEAR: f64 = 8.0;
+
+/// Which labels are shown this frame (1) and which are hidden (0): see the module's docs.
+pub fn collision_fades(group: &mut Group<u64>, labels: &AircraftLabels, placings: &[Placing<'_>]) -> Vec<f64> {
+    let offered: Vec<Label<u64>> = placings
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let claim = p.anchor.and_then(|anchor| {
+                let c = AIRCRAFT_CLEAR * p.perspective;
+                let mut quads: Vec<[f64; 4]> = labels.name_quads(i, anchor, p.perspective, p.name).collect();
+                if let (true, Some(height)) = (labels.with_height(), p.height) {
+                    quads.extend(labels.height_quads(i, anchor, p.perspective, height));
+                }
+                quads.push([anchor[0] - c, anchor[1] - c, anchor[0] + c, anchor[1] + c]);
+                bounds(quads).map(|r| Rect::new(r.x0 - LABEL_MARGIN, r.y0 - LABEL_MARGIN, r.x1 + LABEL_MARGIN, r.y1 + LABEL_MARGIN))
+            });
+            Label { id: u64::from(labels.set.ids[i]), priority: labels.priority(i), claim: claim.unwrap_or(Rect::new(f64::NAN, f64::NAN, f64::NAN, f64::NAN)) }
+        })
+        .collect();
+    let placed = group.place(&offered, 0.0);
+    (0..placings.len()).map(|i| if placed.kept(i) { 1.0 } else { 0.0 }).collect()
 }
 
 /// The "crisp" curve (`CrispCollisionFilterExtension`): the alpha factor of a label of `fade`,
@@ -778,77 +766,26 @@ mod tests {
         assert_close!(heights[3][2], 500.0 + gap + (116.0 + 20.0) * 10.0 / 64.0, 9);
     }
 
-    const CANVAS: [f64; 2] = [800.0, 400.0];
-
     fn fades(labels: &AircraftLabels, anchors: &[[f64; 2]], name: &LaidText) -> Vec<f64> {
         let placings: Vec<Placing<'_>> = anchors.iter().map(|&a| Placing { anchor: Some(a), perspective: 1.0, name, height: Some(name) }).collect();
-        collision_fades(&mut CollisionMap::new(), CANVAS, 1.0, labels, &placings)
+        collision_fades(&mut Group::aircraft_labels(), labels, &placings)
     }
 
     #[test]
-    fn an_aircraft_inside_a_more_important_labels_box_loses_its_label() {
+    fn shown_labels_never_overlap_and_the_selected_wins() {
         let name = laid(4);
-        // the second aircraft 40 px left of the first, which is selected: inside its reserve
         let labels = labels_for(&[1, 2], Some(1));
-        assert_eq!(fades(&labels, &[[400.0, 200.0], [360.0, 200.0]], &name), [1.0, 0.0]);
-        // 70 px left: past the reserve, both shown although the second's text runs into the first's box
-        assert_eq!(fades(&labels, &[[400.0, 200.0], [330.0, 200.0]], &name), [1.0, 1.0]);
-        // 30 px right of it: under its callsign, hidden
+        // the second aircraft under the first's callsign: hidden
         assert_eq!(fades(&labels, &[[400.0, 200.0], [430.0, 200.0]], &name), [1.0, 0.0]);
-        // 42 px right: the box ends 4 px after the text, at 441.9, so of the patch's columns (one
-        // canvas pixel apart, at the half-resolution map's texels 220, 220, 221, 221, 222) the
-        // last three are the second's own
-        let f = fades(&labels, &[[400.0, 200.0], [442.0, 200.0]], &name);
-        assert_close!(f[1], 0.6f64.powf(2.2), 12);
-        // 16 px below: inside the box, which reaches 5.5 + 21.5 below the callsign's middle, 6 px
-        // above the aircraft (so 21 px below it)
-        assert_eq!(fades(&labels, &[[400.0, 200.0], [400.0, 216.0]], &name), [1.0, 0.0]);
-        // 30 px below: clear (its own box covers the first aircraft, which is more important)
-        assert_eq!(fades(&labels, &[[400.0, 200.0], [400.0, 230.0]], &name), [1.0, 1.0]);
+        // far apart: both shown
+        assert_eq!(fades(&labels, &[[400.0, 200.0], [400.0, 300.0]], &name), [1.0, 1.0]);
         // the other way round: the second selected, the first loses
         let labels = labels_for(&[1, 2], Some(2));
-        assert_eq!(fades(&labels, &[[400.0, 200.0], [360.0, 200.0]], &name), [0.0, 1.0]);
+        assert_eq!(fades(&labels, &[[400.0, 200.0], [430.0, 200.0]], &name), [0.0, 1.0]);
     }
 
     #[test]
-    fn a_hidden_label_still_hides_less_important_ones() {
-        let name = laid(4);
-        // 1 (selected) hides 2, 40 px left; 2 (a larger priority than 3) hides 3, 40 px further
-        // left, outside 1's box: in deck the hidden label's box still covers
-        let flights = [flight(1, "SAS", 3_000, false), flight(2, "SAS", 3_000, false), flight(3, "SAS", 40_000, false)];
-        let mut labeller = Labeller::new();
-        labeller.update(1, flights.iter().map(|f| (f, [0.0; 3], 38.0)), true);
-        let labels = labeller.labels(&frame_at(9.0), Some(1), 1.0);
-        assert!(labels.priority(1) > labels.priority(2));
-        assert_eq!(fades(&labels, &[[400.0, 200.0], [360.0, 200.0], [320.0, 200.0]], &name), [1.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn between_equal_priorities_the_later_drawn_wins_and_glyphs_beat_boxes() {
-        let name = laid(4);
-        let labels = labels_for(&[1, 2], None);
-        assert_eq!(labels.priority(0), labels.priority(1));
-        // both on the same spot: the later row's box covers the earlier's, and its glyphs
-        assert_eq!(fades(&labels, &[[400.0, 200.0], [400.0, 200.0]], &name), [0.0, 1.0]);
-        // the second's aircraft under the first's callsign: the first's glyphs (drawn after every
-        // box) win there, so the second loses its label though its own box came later; and the
-        // second's box, drawn after the first's, covers the first aircraft: both lose theirs
-        let f = fades(&labels, &[[400.0, 206.0], [420.0, 200.0]], &name);
-        assert_eq!(f, [0.0, 0.0]);
-        // with the first selected, it keeps its label and the second still loses
-        let labels = labels_for(&[1, 2], Some(1));
-        assert_eq!(fades(&labels, &[[400.0, 206.0], [420.0, 200.0]], &name), [1.0, 0.0]);
-    }
-
-    #[test]
-    fn a_label_half_covered_fades_crisply() {
-        let name = laid(4);
-        let labels = labels_for(&[1, 2], Some(1));
-        // the second's anchor on the left edge of the first's box: of the 5 × 5 patch, columns
-        // left of the edge stay its own
-        let [x0, ..] = labels.background(0, [400.0, 200.0], 1.0, &name);
-        let f = fades(&labels, &[[400.0, 200.0], [x0, 200.0]], &name);
-        assert!(f[1] > 0.0 && f[1] < 1.0, "{f:?}");
+    fn the_crisp_curve() {
         // the crisp curve: nothing under 0.3, everything from 0.65
         assert_eq!((alpha(0.0), alpha(0.3), alpha(0.65), alpha(1.0)), (0.0, 0.0, 1.0, 1.0));
         assert_close!(alpha(0.475), 0.5, 12);
@@ -864,6 +801,6 @@ mod tests {
         let name = laid(4);
         let labels = labels_for(&[1, 2], Some(1));
         let placings = [Placing { anchor: None, perspective: 1.0, name: &name, height: None }, Placing { anchor: Some([400.0, 200.0]), perspective: 1.0, name: &name, height: None }];
-        assert_eq!(collision_fades(&mut CollisionMap::new(), CANVAS, 2.0, &labels, &placings), [0.0, 1.0]);
+        assert_eq!(collision_fades(&mut Group::aircraft_labels(), &labels, &placings), [0.0, 1.0]);
     }
 }

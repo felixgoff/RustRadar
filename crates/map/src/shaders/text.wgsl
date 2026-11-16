@@ -9,8 +9,8 @@
 // label's anchor in atlas pixels (`instanceOffsets`), the label's pixel offset, angle and colour.
 // The quad is the frame around that offset, scaled by size / font size, turned anticlockwise by
 // the angle, moved by the pixel offset (CSS pixels, y down), then y flipped; then, as for icons
-// (`icon.wgsl`), a billboard adds it in clip space at the view centre's depth (deck's
-// `project_pixel_size_to_clipspace` with `focalDistance`) and a ground-plane label lays it in the
+// (`icon.wgsl`), a billboard adds it in clip space at its own depth (the same size on the screen
+// near and far) and a ground-plane label lays it in the
 // plane of east and north at the label. The fragment is deck's: with an SDF atlas, the fill is
 // `smoothstep(buffer − gamma, buffer + gamma, d)`; with an outline, the colour is the outline's
 // mixed into the fill's by that, and the alpha is the outline's own smoothstep at `outline_buffer`.
@@ -136,8 +136,8 @@ fn ground_frame(centre: vec3<f32>, position: vec3<f32>) -> mat3x3<f32> {
 fn place(position: vec3<f32>, pixel_offset: vec2<f32>, billboard: u32, focal_w: f32, centre: vec3<f32>) -> vec4<f32> {
     if (billboard != 0u) {
         let clip = project_common(position);
-        // `project_pixel_size_to_clipspace`
-        let offset = pixel_offset / globals.viewport.xy * 2.0 * focal_w;
+        // the same size on the screen near and far: text shrunk with distance soon can't be read
+        let offset = pixel_offset / globals.viewport.xy * 2.0 * clip.w;
         return vec4<f32>(clip.xy + offset, clip.zw);
     }
     // `project_pixel_size`: CSS pixels to common units at the view centre's scale

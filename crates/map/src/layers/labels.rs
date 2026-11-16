@@ -26,14 +26,10 @@
 //!   airport with a marker of its own ([`Input::marked`]). Both filters read the scene refresh's
 //!   view, as `buildLayers` does; the collision filter reads each frame's camera, as deck's effect
 //!   does.
-//! - **Collision** (`CollisionFilterExtension`, group `"labels"`). deck's collision map, done on the
-//!   CPU as deck does it on the GPU (`labels_map::collision_fades`; see that module for the
-//!   details): every label's glyph quads at `sizeScale` 1.3, whatever the label size setting, drawn
-//!   in data order into a map at half the canvas's resolution with the depth test sorting by
-//!   priority, then each label's fade from the 5 × 5 patch round its anchor. A label under a fade of
-//!   0.0001 is not drawn and not picked; a fade below 1 multiplies its fill colour's alpha (not the
-//!   halo's). It is recomputed whenever the camera, the canvas, the labels or the label size change,
-//!   as deck redraws its map whenever the viewport changes.
+//! - **Collision** (`labels_map::collision_fades`): highest priority first, a label is drawn
+//!   when its text box (grown by a small margin) meets no label drawn before it, so labels never
+//!   overlap. It is recomputed whenever the camera, the canvas, the labels or the label size
+//!   change.
 //! - **Text** (`labels` TextLayer): Overpass at weight 600 from an SDF atlas (64 px, buffer 6),
 //!   size `labelSize` px × `sizeScale = labelScale` ([`Input::label_scale`]), colour `labelColor`,
 //!   halo 3 SDF px in `[6,12,19,220]`, anchored in the middle and centred vertically on the point
@@ -50,10 +46,6 @@
 //! - the collision fade is applied to the colour's 8-bit alpha (deck multiplies the float);
 //! - on the flat map a label is drawn on the world copy nearest the view (deck: the one its
 //!   longitude names, which only matters across the antimeridian above zoom 12);
-//! - the plan's whole-box greedy declutter (plan 1.4.10, section 6 item 17) is not used for these
-//!   labels: deck's anchor-patch test is ported instead, so the density is today's (labels may
-//!   overlap where today's do, "DENMARK" over "Copenhagen" at V2); the plan's 150 ms fade is not
-//!   deck's and is not reproduced either.
 //!
 //! The scene builder fills [`Input`] at each scene refresh: `shown` from the label setting,
 //! `label_scale` from the label size setting, `marked` from the focused airport and the selected
@@ -63,7 +55,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use glam::DVec4;
 use rustradar_scene::declutter::Rect;
-use rustradar_scene::labels_map::{self, CollisionMap, InView, MapLabel, Placing};
+use rustradar_scene::declutter::Group;
+use rustradar_scene::labels_map::{self, InView, MapLabel, Placing};
 use rustradar_scene::pick::{DepthTest, PickList};
 use rustradar_scene::text::{Face, FontSettings, GlyphAtlas, LaidText, TextLayout};
 use rustradar_scene::tiles::VECTOR_TILES;
@@ -71,7 +64,6 @@ use rustradar_scene::tiles::VECTOR_TILES;
 use super::{DeckSelect, DrawCx, Drape, Init, Layer, Pass, PrepareCx, Source, TileSet, TileSetOptions};
 use crate::frame::ViewFrame;
 use crate::io;
-use crate::pipelines::icon::focal_w;
 use crate::pipelines::text::{AtlasTexture, BackgroundStyle, Glyph, Label, TextBatch, TextPipeline, TextStyle};
 use crate::state::DrawState;
 
@@ -199,7 +191,7 @@ pub struct Labels {
     texture: AtlasTexture,
     pipeline: TextPipeline,
     batch: TextBatch,
-    collision: CollisionMap,
+    collision: Group<u64>,
     placed: Option<Placed>,
     /// Whether this frame draws.
     shown: bool,
@@ -230,7 +222,7 @@ impl Labels {
             texture,
             pipeline,
             batch,
-            collision: CollisionMap::new(),
+            collision: Group::labels(),
             placed: None,
             shown: false,
         }
@@ -283,10 +275,9 @@ fn wrap_world_x(dx: f64) -> f64 {
 }
 
 /// Where a label at `[lon, lat]` (`h` metres up: 0, or the 3D terrain's ground there) is drawn in
-/// `view`: its anchor in CSS pixels from the top left, the focal depth's clip w over its own (a
-/// billboard's pixel offsets shrink by that), and its NDC depth; `None` when it is not in front of
-/// the camera.
-fn place_anchor(view: &ViewFrame, focal: f64, [lon, lat]: [f64; 2], h: f64) -> Option<([f64; 2], f64, f64)> {
+/// `view`: its anchor in CSS pixels from the top left, its scale (1: text keeps its size on the
+/// screen near and far), and its NDC depth; `None` when it is not in front of the camera.
+fn place_anchor(view: &ViewFrame, [lon, lat]: [f64; 2], h: f64) -> Option<([f64; 2], f64, f64)> {
     let mut p = view.viewport.project_position([lon, lat, h]);
     let vp = &*view.viewport;
     if !view.is_globe() {
@@ -298,7 +289,7 @@ fn place_anchor(view: &ViewFrame, focal: f64, [lon, lat]: [f64; 2], h: f64) -> O
         return None;
     }
     let ndc = clip.truncate() / clip.w;
-    Some(([(ndc.x + 1.0) / 2.0 * vp.width, (1.0 - ndc.y) / 2.0 * vp.height], focal / clip.w, ndc.z))
+    Some(([(ndc.x + 1.0) / 2.0 * vp.width, (1.0 - ndc.y) / 2.0 * vp.height], 1.0, ndc.z))
 }
 
 impl Layer for Labels {
@@ -356,14 +347,13 @@ impl Layer for Labels {
             return;
         }
         // the collision pass for this camera, then the labels it leaves
-        let focal = focal_w(cx.view);
         let ground = &cx.scene.stands_on;
         let anchors: Vec<_> = placed
             .data
             .iter()
             .map(|&i| {
                 let at = [self.features[i].lon, self.features[i].lat];
-                place_anchor(cx.view, focal, at, ground.at(at))
+                place_anchor(cx.view, at, ground.at(at))
             })
             .collect();
         let empty = LaidText { glyphs: Vec::new(), rect: [0.0; 4], font_size: FontSettings::LABELS.font_size, generation: 0 };
@@ -374,15 +364,16 @@ impl Layer for Labels {
             .map(|(&i, at)| {
                 let f = &self.features[i];
                 Placing {
+                    key: f.key(),
                     anchor: at.map(|(anchor, _, _)| anchor),
                     perspective: at.map_or(1.0, |(_, k, _)| k),
                     priority: f.priority,
-                    size: f.size,
+                    size: f.size * label_scale,
                     text: self.laid[i].as_ref().unwrap_or(&empty),
                 }
             })
             .collect();
-        let fades = labels_map::collision_fades(&mut self.collision, cx.view.size, cx.view.map_scale, &placings);
+        let fades = labels_map::collision_fades(&mut self.collision, cx.view.size, &placings);
         let mut glyphs: Vec<Glyph> = Vec::new();
         let mut shown = Vec::new();
         for ((placing, &fade), (&i, at)) in placings.iter().zip(&fades).zip(placed.data.iter().zip(&anchors)) {
@@ -429,7 +420,7 @@ mod tests {
 
     use rustradar_core::geo::{Basemap, cos_angle};
     use rustradar_scene::camera::ViewState;
-    use rustradar_scene::labels_map::{AIRPORT_COLOR, CITY_COLOR, COLLISION_SIZE_SCALE};
+    use rustradar_scene::labels_map::{AIRPORT_COLOR, CITY_COLOR};
 
     use super::*;
     use crate::gpu::testing::gpu;
@@ -482,12 +473,6 @@ mod tests {
         image.save_png(&shots_dir().join(name)).expect("the shot written");
     }
 
-    fn reference(name: &str) -> Image {
-        let path = FilePath::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/port/reference").join(name);
-        let rgba = image::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).into_rgba8();
-        Image { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() }
-    }
-
     /// `scene` rendered once nothing is loading any more: [`render_with`] again on the same
     /// renderer (its tiles carry over) while a layer is still pending after its wait, as a debug
     /// build on a busy machine can take longer than one wait.
@@ -516,49 +501,8 @@ mod tests {
         Some((image, drawn.labels()))
     }
 
-    /// The map in today's pictures at 1440 × 900: right of the sidebar, left of the map controls,
-    /// under the mode bar and the dev readout, over the attribution.
+    /// The map at 1440 × 900 clear of the UI's places.
     const MAP: [u32; 4] = [360, 80, 1370, 880];
-
-    /// A pixel of a label's fill: light grey to white (the place colours), or the airports' blue.
-    /// Roads, borders and runways are darker or not grey; the halo is darker still.
-    fn is_text(p: [u8; 4]) -> bool {
-        let [r, g, b, _] = p;
-        let (lo, hi) = (r.min(g).min(b), r.max(g).max(b));
-        (lo >= 110 && hi >= 140) || (b >= 170 && u16::from(b) > u16::from(r) + 80)
-    }
-
-    /// Whether `image` has a text pixel within `reach` pixels of `(x, y)`.
-    fn text_near(image: &Image, x: i32, y: i32, reach: i32) -> bool {
-        (-reach..=reach).any(|dy| (-reach..=reach).any(|dx| {
-            let (px, py) = (x + dx, y + dy);
-            px >= 0 && py >= 0 && (px as u32) < image.width && (py as u32) < image.height && is_text(image.pixel(px as u32, py as u32))
-        }))
-    }
-
-    /// How alike the labels of `ours` and `today` are inside [`MAP`], at the best shift within 6 px
-    /// (today's pictures stand about 4.5 px higher than deck's viewport; T1): the share of today's
-    /// text pixels with one of ours within 1 px, the share of ours with one of today's within 1 px
-    /// (glyphs sit up to 1 px apart, plan section 6 item 16), today's and our text pixel counts,
-    /// and the shift.
-    fn text_agreement(ours: &Image, today: &Image) -> (f64, f64, usize, usize, [i32; 2]) {
-        let [x0, y0, x1, y1] = MAP;
-        let pixels = |image: &Image| -> Vec<(i32, i32)> {
-            (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| is_text(image.pixel(x, y))).map(|(x, y)| (x as i32, y as i32)).collect()
-        };
-        let (theirs, mine) = (pixels(today), pixels(ours));
-        let mut best = (0.0, 0.0, [0, 0]);
-        for dy in -6..=6 {
-            for dx in -6..=6 {
-                let recall = theirs.iter().filter(|&&(x, y)| text_near(ours, x + dx, y + dy, 1)).count() as f64 / theirs.len().max(1) as f64;
-                let precision = mine.iter().filter(|&&(x, y)| text_near(today, x - dx, y - dy, 1)).count() as f64 / mine.len().max(1) as f64;
-                if recall + precision > best.0 + best.1 {
-                    best = (recall, precision, [dx, dy]);
-                }
-            }
-        }
-        (best.0, best.1, theirs.len(), mine.len(), best.2)
-    }
 
     fn named<'a>(drawn: &'a [Shown], text: &str) -> &'a Shown {
         drawn.iter().find(|s| s.text == text).unwrap_or_else(|| panic!("{text:?} is not drawn"))
@@ -570,34 +514,13 @@ mod tests {
         (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| image.pixel(x, y)[..3].iter().zip(rgb).all(|(&a, b)| a.abs_diff(b) <= tolerance)).count()
     }
 
-    /// deck's collision filter as drawn: no label is drawn whose anchor lies inside the middle row
-    /// of a more important drawn label's footprint at 1.3 (its rectangle grown 1.3 times about its
-    /// anchor, kept clear of its ends by 4 px and of its anchor's row by 1 px: the 5 × 5 patch
-    /// round such an anchor is the other label's, so its fade is 0). Their boxes may overlap, as
-    /// today's do; how many pairs do is returned.
-    fn assert_collision_filtered(drawn: &[Shown]) -> usize {
-        let mut overlapping = 0;
-        for a in drawn {
-            let k = COLLISION_SIZE_SCALE;
-            let [ax, ay] = a.anchor;
-            let (x0, x1) = (ax + (a.rect.x0 - ax) * k + 4.0, ax + (a.rect.x1 - ax) * k - 4.0);
-            for b in drawn {
-                if std::ptr::eq(a, b) {
-                    continue;
-                }
-                let [bx, by] = b.anchor;
-                assert!(
-                    !(a.priority > b.priority && (x0..=x1).contains(&bx) && (by - ay).abs() <= 1.0),
-                    "{:?} (priority {}) is drawn under {:?} (priority {})",
-                    b.text,
-                    b.priority,
-                    a.text,
-                    a.priority
-                );
-                overlapping += usize::from(a.rect.overlaps(&b.rect));
+    /// No two labels drawn overlap.
+    fn assert_no_overlaps(drawn: &[Shown]) {
+        for (i, a) in drawn.iter().enumerate() {
+            for b in &drawn[i + 1..] {
+                assert!(!a.rect.overlaps(&b.rect), "{:?} overlaps {:?}", a.text, b.text);
             }
         }
-        overlapping / 2
     }
 
     /// The decode step on a V3 fixture tile: Stockholm's name and Bromma's code with today's text,
@@ -618,56 +541,33 @@ mod tests {
         assert!(labels[first_airport..].iter().all(|l| l.iata.is_some()));
     }
 
-    /// Plan B4, V2 (Europe, zoom 4.5): country and city names in today's colours, and the same
-    /// labels as today's picture: of today's text pixels 99.6 % have one of ours within 1 px, of
-    /// ours 99.4 % one of today's, as many pixels within 2 % (plan section 6 item 17: deck's own
-    /// collision test, not the whole-box greedy pass, keeps today's density). As today, two labels'
-    /// boxes may overlap ("DENMARK" under "Copenhagen"), and a label half under another fades
-    /// ("Amsterdam").
+    /// V2 (Europe, zoom 4.5): country and city names in their colours, none overlapping.
     #[test]
-    fn v2_draws_today_s_country_and_city_names() {
+    fn v2_draws_country_and_city_names() {
         let Some((image, drawn)) = shot(v2(), Input::shown(), "b4-dark-v2-1440x900.png") else { return };
-        let (recall, precision, theirs, mine, shift) = text_agreement(&image, &reference("dark-v2-1440x900.png"));
         let cities = near(&image, [241, 238, 231], 2);
         let countries = near(&image, [162, 172, 183], 2);
-        let overlapping = assert_collision_filtered(&drawn);
-        eprintln!(
-            "V2: {} labels, {overlapping} pairs of boxes overlapping; city pixels {cities}, country {countries}; today's text {theirs} px, ours {mine}: {recall:.3} of today's and {precision:.3} of ours matched at {shift:?}",
-            drawn.len()
-        );
+        eprintln!("V2: {} labels; city pixels {cities}, country {countries}", drawn.len());
+        assert_no_overlaps(&drawn);
         assert!(cities > 1_000 && countries > 200, "city {cities}, country {countries}");
-        for text in ["Berlin", "Copenhagen", "DENMARK", "Stockholm", "Paris", "London", "GERMANY"] {
+        for text in ["Berlin", "Paris", "London", "GERMANY"] {
             assert_eq!(named(&drawn, text).fade, 1.0, "{text}");
         }
-        let amsterdam = named(&drawn, "Amsterdam");
-        assert!(amsterdam.fade < 0.5, "Amsterdam is half hidden today: {amsterdam:?}");
-        assert!(named(&drawn, "DENMARK").rect.overlaps(&named(&drawn, "Copenhagen").rect));
-        assert!(recall > 0.97 && precision > 0.97, "{recall} of today's, {precision} of ours");
-        assert!((mine as f64 / theirs as f64 - 1.0).abs() < 0.05, "{mine} text pixels, today {theirs}");
     }
 
-    /// Plan B4, V3 (Stockholm, zoom 9): the city's name in `(241,238,231)`, Bromma's code in
-    /// `(55,142,240)`, and today's labels: 98.6 % of today's text pixels and 97.6 % of ours
-    /// matched at today's 5 px offset. The pick list gives Bromma's code under its label.
+    /// V3 (Stockholm, zoom 9): the city's name in `(241,238,231)`, Bromma's code in
+    /// `(55,142,240)`, none overlapping. The pick list gives Bromma's code under its label.
     #[test]
-    fn v3_draws_today_s_names_and_bromma_s_code() {
+    fn v3_draws_the_city_s_name_and_bromma_s_code() {
         let Some((image, drawn)) = shot(v3(), Input::shown(), "b4-dark-v3-1440x900.png") else { return };
-        let (recall, precision, theirs, mine, shift) = text_agreement(&image, &reference("dark-v3-1440x900.png"));
         let cities = near(&image, [241, 238, 231], 2);
         let airports = near(&image, [55, 142, 240], 0);
-        let overlapping = assert_collision_filtered(&drawn);
-        eprintln!(
-            "V3: {} labels, {overlapping} pairs of boxes overlapping; city pixels {cities}, airport {airports}; today's text {theirs} px, ours {mine}: {recall:.3} of today's and {precision:.3} of ours matched at {shift:?}",
-            drawn.len()
-        );
+        eprintln!("V3: {} labels; city pixels {cities}, airport {airports}", drawn.len());
+        assert_no_overlaps(&drawn);
         assert!(cities > 100 && airports > 15, "city {cities}, airport {airports}");
         let stockholm = named(&drawn, "Stockholm");
         let bromma = named(&drawn, "BMA");
         assert_eq!((stockholm.fade, stockholm.color, bromma.fade, bromma.iata.as_deref()), (1.0, CITY_COLOR, 1.0, Some("BMA")));
-        // today: "Sundbyberg", "Solna" and "BMA" crowd each other, all drawn
-        assert!(named(&drawn, "Sundbyberg").rect.overlaps(&named(&drawn, "Solna").rect));
-        assert!(recall > 0.96 && precision > 0.96, "{recall} of today's, {precision} of ours");
-        assert!((mine as f64 / theirs as f64 - 1.0).abs() < 0.05, "{mine} text pixels, today {theirs}");
         // picking: Bromma's code at its anchor, Stockholm's name (a place: no code) at its own
         let frame = ViewFrame::new(&v3(), SIZE, 1.0, 0.0);
         let picks = Input::shown().drawn.picks();
@@ -682,9 +582,8 @@ mod tests {
         assert_eq!((drawn[hit.index].text.as_str(), hit.key), ("Stockholm", &None));
     }
 
-    /// The label size setting scales the text drawn, not the collision test (`sizeScale: 1.3`
-    /// whatever `labelScale` is): the same labels with the same fades, each 1.5 times as wide. A
-    /// marked airport loses its label.
+    /// The label size setting scales the text drawn and the room it takes: larger labels, each 1.5
+    /// times as wide, no more of them, none overlapping. A marked airport loses its label.
     #[test]
     fn the_size_setting_scales_the_text_and_marked_airports_lose_their_labels() {
         let Some(gpu) = gpu() else { return };
@@ -697,12 +596,12 @@ mod tests {
         let normal = run(Input::shown());
         let large = run(Input { label_scale: 1.5, ..Input::shown() });
         let marked = run(Input { marked: vec!["BMA".into(), "ARN".into()], ..Input::shown() });
-        let key = |d: &[Shown]| d.iter().map(|s| (s.text.clone(), s.fade)).collect::<Vec<_>>();
-        assert_eq!(key(&large), key(&normal), "the setting moved the collision test");
-        for (a, b) in normal.iter().zip(&large) {
+        assert!(large.len() <= normal.len(), "{} large, {} normal", large.len(), normal.len());
+        assert_no_overlaps(&large);
+        for b in &large {
+            let Some(a) = normal.iter().find(|a| a.text == b.text && a.anchor == b.anchor) else { continue };
             let (wa, wb) = (a.rect.width(), b.rect.width());
             assert!((wb - 1.5 * wa).abs() < 1e-6, "{}: {wa} → {wb}", a.text);
-            assert_eq!(a.anchor, b.anchor);
         }
         assert!(normal.iter().any(|s| s.iata.as_deref() == Some("BMA")));
         assert!(marked.iter().all(|s| s.iata.as_deref() != Some("BMA")), "BMA is marked");
@@ -711,19 +610,14 @@ mod tests {
 
     /// V1 (the whole globe, zoom 1.9): only labels facing the camera (`cosAngle > 0.42` from the
     /// view's centre), so nothing on the far side shows through the globe; country names and big
-    /// cities, today's (97 % of today's text pixels matched and of ours).
+    /// cities, none overlapping.
     #[test]
     fn far_out_only_labels_facing_the_camera_are_drawn() {
-        let Some((image, drawn)) = shot(v1(), Input::shown(), "b4-dark-v1-1440x900.png") else { return };
+        let Some((_image, drawn)) = shot(v1(), Input::shown(), "b4-dark-v1-1440x900.png") else { return };
         let v = v1();
-        let (recall, precision, theirs, mine, shift) = text_agreement(&image, &reference("dark-v1-1440x900.png"));
-        eprintln!(
-            "V1: {} labels; today's text {theirs} px, ours {mine}: {recall:.3} of today's and {precision:.3} of ours matched at {shift:?}: {:?}",
-            drawn.len(),
-            drawn.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
-        );
+        eprintln!("V1: {} labels: {:?}", drawn.len(), drawn.iter().map(|s| s.text.as_str()).collect::<Vec<_>>());
         assert!(drawn.len() > 10 && drawn.iter().any(|s| s.color == labels_map::COUNTRY_COLOR), "{drawn:?}");
-        assert!(recall > 0.95 && precision > 0.95, "{recall} of today's, {precision} of ours");
+        assert_no_overlaps(&drawn);
         for s in &drawn {
             assert!(cos_angle(s.lon, s.lat, v.longitude, v.latitude) > labels_map::HORIZON_MIN_COS, "{s:?}");
         }
@@ -841,8 +735,8 @@ mod tests {
         gate.open(Some(TileIndex::new(279, 150, 9)));
         frames(&mut renderer, east, &|r| !r.pending());
         let after = drawn.labels();
-        let eskilstuna = named(&after, "Eskilstuna");
-        assert!(z9([eskilstuna.lon, eskilstuna.lat]) == new_tile, "{eskilstuna:?}");
+        let new = |s: &&Shown| z9([s.lon, s.lat]) == new_tile && !during.iter().any(|d| d.text == s.text);
+        assert!(after.iter().any(|s| new(&s)), "none of the new tile's labels: {after:?}");
     }
 
     /// The labels show on every basemap while the setting is on; off, nothing is asked for and

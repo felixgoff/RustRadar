@@ -31,12 +31,12 @@ use std::sync::Arc;
 use glam::DVec4;
 use rustradar_scene::aircraft_labels::{self as rules, AIRCRAFT_LABEL_HEIGHT_SIZE, AIRCRAFT_LABEL_SIZE, LAYOUT, LabelSet, Placing};
 use rustradar_scene::declutter::Rect;
-use rustradar_scene::labels_map::{CollisionMap, bounds};
+use rustradar_scene::labels_map::bounds;
+use rustradar_scene::declutter::Group;
 use rustradar_scene::text::{Face, FontSettings, GlyphAtlas, LaidText};
 
 use crate::frame::ViewFrame;
 use crate::layers::{DrawCx, Init, Pass, PrepareCx};
-use crate::pipelines::icon::focal_w;
 use crate::pipelines::text::{AtlasTexture, BackgroundStyle, Glyph, Label, TextBatch, TextPipeline, TextStyle};
 use crate::state::DrawState;
 
@@ -56,8 +56,7 @@ pub struct Shown {
     pub height: String,
     /// Its aircraft on the screen, CSS px from the canvas's top left.
     pub anchor: [f64; 2],
-    /// The focal depth's clip w over the anchor's: a billboard's pixel offsets and glyphs are
-    /// drawn this many times their size (above 1 for an aircraft high up, nearer the camera).
+    /// The scale its glyphs and offsets are drawn at (1: text keeps its size on the screen).
     pub perspective: f64,
     /// deck's collision fade, `[0.0001, 1]`.
     pub fade: f64,
@@ -137,7 +136,7 @@ pub struct Labels {
     /// `aircraft-label-names`, `aircraft-label-heights`.
     names: TextBatch,
     heights: TextBatch,
-    collision: CollisionMap,
+    collision: Group<u64>,
     laid: Laid,
     placed: Option<Key>,
     placements: Vec<Placement>,
@@ -154,8 +153,9 @@ fn wrap_world_x(dx: f64) -> f64 {
 }
 
 /// Where an aircraft at `[lon, lat, metres]` is on the screen in `view`: CSS px from the top left,
-/// and the focal depth's clip w over its own; `None` when it is not in front of the camera.
-pub fn project(view: &ViewFrame, focal: f64, [lon, lat, h]: [f64; 3]) -> Option<([f64; 2], f64)> {
+/// and its scale (1: text keeps its size on the screen); `None` when it is not in front of the
+/// camera.
+pub fn project(view: &ViewFrame, [lon, lat, h]: [f64; 3]) -> Option<([f64; 2], f64)> {
     let vp = &*view.viewport;
     let mut p = view.viewport.project_position([lon, lat, h]);
     if !view.is_globe() {
@@ -167,7 +167,7 @@ pub fn project(view: &ViewFrame, focal: f64, [lon, lat, h]: [f64; 3]) -> Option<
         return None;
     }
     let ndc = clip.truncate() / clip.w;
-    Some(([(ndc.x + 1.0) / 2.0 * vp.width, (1.0 - ndc.y) / 2.0 * vp.height], focal / clip.w))
+    Some(([(ndc.x + 1.0) / 2.0 * vp.width, (1.0 - ndc.y) / 2.0 * vp.height], 1.0))
 }
 
 impl Labels {
@@ -183,7 +183,7 @@ impl Labels {
             pipeline,
             names,
             heights,
-            collision: CollisionMap::new(),
+            collision: Group::aircraft_labels(),
             laid: Laid::default(),
             placed: None,
             placements: Vec::new(),
@@ -256,8 +256,7 @@ impl Labels {
             return;
         }
         // the collision pass for this camera, then the labels it leaves
-        let focal = focal_w(cx.view);
-        let at: Vec<Option<([f64; 2], f64)>> = input.positions.iter().map(|p| p.and_then(|p| project(cx.view, focal, p))).collect();
+        let at: Vec<Option<([f64; 2], f64)>> = input.positions.iter().map(|p| p.and_then(|p| project(cx.view, p))).collect();
         let placings: Vec<Placing<'_>> = (0..input.len())
             .map(|i| Placing {
                 anchor: at[i].map(|(anchor, _)| anchor),
@@ -266,7 +265,7 @@ impl Labels {
                 height: self.laid.heights.get(i),
             })
             .collect();
-        let fades = rules::collision_fades(&mut self.collision, cx.view.size, cx.view.map_scale, input, &placings);
+        let fades = rules::collision_fades(&mut self.collision, input, &placings);
         self.placements = placings
             .iter()
             .zip(&fades)

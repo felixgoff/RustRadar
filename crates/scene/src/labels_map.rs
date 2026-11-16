@@ -19,39 +19,17 @@
 //!   new tiles arrive (`labelsInView`, `onLabelTiles`).
 //! - **Marked airports** ([`without_marked`]): an airport whose code has a marker of its own (the
 //!   focused airport, the selected flight's origin and destination) loses its label.
-//! - **Collision** ([`CollisionMap`], [`collision_fades`]): deck.gl 9.4's `CollisionFilterExtension`
-//!   for the group `"labels"`, done on the CPU the way deck does it on the GPU, not as the greedy
-//!   pass of `crate::declutter`:
-//!   1. the collision pass draws every label of the layer's data, in data order, into a map at
-//!      half the canvas's resolution (`DOWNSCALE = 2`), each label's glyph quads (the whole atlas
-//!      frame of each glyph, its SDF buffer included) at `collisionTestProps.sizeScale = 1.3`
-//!      ([`COLLISION_SIZE_SCALE`], whatever the label size setting) in the label's own colour, at
-//!      the depth `−0.001 · priority` with depth test `less-equal` and depth written (16 bits): at
-//!      each texel the most important label wins, between equals the one drawn later. A label whose
-//!      priority lies outside ±1000 falls outside clip space and draws nothing. The pass is
-//!      scissored one texel in from each edge.
-//!   2. each label then samples a 5 × 5 patch of the map around its anchor, one canvas pixel
-//!      apart (nearest texel, clamped at the edges), and counts the samples that hold its own
-//!      colour: its fade is `(count / 25)^2.2`. The fade multiplies the fill colour's alpha (not
-//!      the halo's), and a label under a fade of 0.0001 is not drawn at all (nor picked).
-//!
-//!   So, as in today's app and unlike the greedy pass, only a label's anchor is tested: two shown
-//!   labels' text can overlap ("DENMARK" over "Copenhagen" at V2), a label hidden by a more
-//!   important one still hides the less important ones under its quads, a label half covered is
-//!   drawn half transparent, and nothing fades over time (deck redraws the map whenever the view
-//!   moves, so a label shows or hides in the frame its anchor is uncovered or covered). This is
-//!   what makes the port's labels as dense as today's (plan section 6, item 17: the greedy pass
-//!   made them sparser; B4 drops it for the place labels). The plan's 150 ms fade (1.4.10) is not
-//!   deck's and is not reproduced here.
-//!
-//! Positions in the collision pass are the canvas's device pixels (CSS pixels × the map scale),
-//! from its top-left corner; the map's texels count rows from the bottom, as WebGL's do.
+//! - **Collision** ([`collision_fades`]): highest priority first, a label is shown when its text
+//!   box, grown by [`LABEL_MARGIN`], meets no box shown before it (`crate::declutter::Group`, which
+//!   also keeps a label already shown ahead of an equal one, so labels hold still as the camera
+//!   moves). Shown labels never overlap, none is cut by the canvas's edge, and a copy of a place
+//!   from a neighbouring tile is hidden by the first.
 
 use rustradar_core::geo::cos_angle;
 use rustradar_core::mvt::{self, GeomType, Value};
 use rustradar_core::num::{js_round, js_string};
 
-use crate::declutter::{DRAWN_MIN_FADE, Rect};
+use crate::declutter::{DRAWN_MIN_FADE, Group, Label, Rect};
 use crate::text::LaidText;
 use crate::tiles::TileIndex;
 
@@ -80,16 +58,8 @@ pub const CITY_COLOR: [u8; 4] = [241, 238, 231, 245];
 /// A town's, village's or suburb's name.
 pub const PLACE_COLOR: [u8; 4] = [179, 191, 204, 235];
 
-/// The size the collision pass draws labels at, whatever the label size setting
-/// (`LABEL_COLLISION_PROPS = { sizeScale: 1.3 }`, G:727).
-pub const COLLISION_SIZE_SCALE: f64 = crate::declutter::LABELS_TEST_SCALE;
-/// How much coarser than the canvas the collision map is (`collision-filter-effect.js`
-/// `DOWNSCALE`).
-pub const COLLISION_DOWNSCALE: f64 = 2.0;
-/// The visibility test samples `(2·N + 1)²` points round the anchor (`collision_isVisible`).
-pub const COLLISION_PATCH_N: i32 = 2;
-/// The exponent of the visibility test: `pow(matches / 25, 2.2)`.
-pub const COLLISION_FADE_POWER: f64 = 2.2;
+/// Room kept clear round a label's text, CSS pixels.
+pub const LABEL_MARGIN: f64 = 3.0;
 
 // ---------------------------------------------------------------------------------------------
 // Properties as JavaScript has them
@@ -344,6 +314,16 @@ impl MapLabel {
     }
 }
 
+impl MapLabel {
+    /// The same for every copy of this label, whichever tile it came from.
+    pub fn key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&self.text, self.lon.to_bits(), self.lat.to_bits()).hash(&mut h);
+        h.finish()
+    }
+}
+
 /// loaders.gl's `projectToLngLat`: a point in tile units (`extent` across) of `tile` to longitude
 /// and latitude.
 pub fn tile_point_to_lng_lat(tile: TileIndex, extent: f64, [px, py]: [f64; 2]) -> [f64; 2] {
@@ -445,140 +425,11 @@ pub fn bounds(quads: impl IntoIterator<Item = [f64; 4]>) -> Option<Rect> {
     })
 }
 
-/// deck's collision map for one group: the canvas at half resolution, each texel holding the
-/// label drawn on top there (its row in the layer's data, plus 1; 0 for none) and that label's
-/// 16-bit depth.
-#[derive(Clone, Debug, Default)]
-pub struct CollisionMap {
-    /// The canvas, device pixels (the main pass's `viewportSize`).
-    canvas: [f64; 2],
-    /// Texels across and down.
-    size: [usize; 2],
-    /// Rows from the bottom, as WebGL's.
-    depth: Vec<u16>,
-    label: Vec<u32>,
-}
-
-impl CollisionMap {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Starts a collision pass over a canvas of `canvas` device pixels: the map `canvas / 2` texels
-    /// (rounded down), cleared (no label, depth 1).
-    pub fn begin(&mut self, canvas: [f64; 2]) {
-        let texels = |v: f64| if v.is_finite() && v > 0.0 { (v / COLLISION_DOWNSCALE).floor() as usize } else { 0 };
-        self.canvas = canvas;
-        self.size = [texels(canvas[0]), texels(canvas[1])];
-        let n = self.size[0] * self.size[1];
-        self.depth.clear();
-        self.depth.resize(n, u16::MAX);
-        self.label.clear();
-        self.label.resize(n, 0);
-    }
-
-    /// Texels across and down.
-    pub fn size(&self) -> [usize; 2] {
-        self.size
-    }
-
-    /// The label on top at texel `[i, row]` (`row` from the bottom), `None` for none.
-    pub fn at(&self, [i, row]: [usize; 2]) -> Option<usize> {
-        let k = row * self.size[0] + i;
-        self.label.get(k).and_then(|&l| l.checked_sub(1)).map(|l| l as usize)
-    }
-
-    /// The depth buffer value a label of `priority` is drawn at (`position.z = −0.001 · priority ·
-    /// w`, to a 16-bit depth), `None` when that falls outside clip space (|priority| > 1000, NaN).
-    pub fn depth_of(priority: f64) -> Option<u16> {
-        let z = -0.001 * priority;
-        (-1.0..=1.0).contains(&z).then(|| ((z + 1.0) / 2.0 * f64::from(u16::MAX)).round() as u16)
-    }
-
-    /// The collision pass for label `row` of the data: its glyph quads (device pixels from the
-    /// canvas's top left, y down) at its priority's depth, `less-equal` and written, inside the
-    /// scissor one texel in from each edge.
-    pub fn draw(&mut self, row: usize, priority: f64, quads: impl IntoIterator<Item = [f64; 4]>) {
-        let Some(depth) = Self::depth_of(priority) else { return };
-        let [w, h] = self.size;
-        if w < 3 || h < 3 {
-            return;
-        }
-        let id = row as u32 + 1;
-        let (sx, sy) = (w as f64 / self.canvas[0], h as f64 / self.canvas[1]);
-        for [x0, y0, x1, y1] in quads {
-            if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) {
-                continue;
-            }
-            // texels, rows from the bottom; a texel is covered when its centre is in the quad
-            let (tx0, tx1) = (x0.min(x1) * sx, x0.max(x1) * sx);
-            let (ty0, ty1) = ((self.canvas[1] - y0.max(y1)) * sy, (self.canvas[1] - y0.min(y1)) * sy);
-            let first = |t: f64, lo: usize| (ceil(t - 0.5).max(lo as f64)) as usize;
-            let end = |t: f64, hi: usize| (ceil(t - 0.5).clamp(0.0, hi as f64)) as usize;
-            let (i0, i1) = (first(tx0, 1), end(tx1, w - 1));
-            let (r0, r1) = (first(ty0, 1), end(ty1, h - 1));
-            if i1 <= i0 {
-                continue;
-            }
-            // (each row's span as slices: no index checks in the texel loop, P1)
-            for r in r0..r1 {
-                let span = r * w + i0..r * w + i1;
-                for (d, l) in self.depth[span.clone()].iter_mut().zip(&mut self.label[span]) {
-                    if depth <= *d {
-                        *d = depth;
-                        *l = id;
-                    }
-                }
-            }
-        }
-    }
-
-    /// `collision_isVisible` for label `row` anchored at `anchor` (device pixels from the canvas's
-    /// top left): of the 5 × 5 samples one canvas pixel apart round the anchor (nearest texel,
-    /// clamped to the edge), the share holding this label, to the power 2.2.
-    pub fn fade(&self, row: usize, anchor: [f64; 2]) -> f64 {
-        let [w, h] = self.size;
-        if w == 0 || h == 0 || ![anchor[0], anchor[1]].iter().all(|v| v.is_finite()) {
-            return 0.0;
-        }
-        let id = row as u32 + 1;
-        let u = anchor[0] / self.canvas[0];
-        let v = 1.0 - anchor[1] / self.canvas[1];
-        let (step_u, step_v) = (1.0 / self.canvas[0], 1.0 / self.canvas[1]);
-        let texel = |t: f64, n: usize| ((t * n as f64).floor().max(0.0) as usize).min(n - 1);
-        // the patch's columns once, not once per row (P1)
-        let mut columns = [0usize; (2 * COLLISION_PATCH_N + 1) as usize];
-        for (c, i) in columns.iter_mut().zip(-COLLISION_PATCH_N..=COLLISION_PATCH_N) {
-            *c = texel(u + f64::from(i) * step_u, w);
-        }
-        let mut matches = 0u32;
-        for j in -COLLISION_PATCH_N..=COLLISION_PATCH_N {
-            let row = &self.label[texel(v + f64::from(j) * step_v, h) * w..][..w];
-            for &c in &columns {
-                matches += u32::from(row[c] == id);
-            }
-        }
-        let side = f64::from(2 * COLLISION_PATCH_N + 1);
-        (f64::from(matches) / (side * side)).powf(COLLISION_FADE_POWER)
-    }
-}
-
-/// `x.ceil()` as a texel bound: without a call into libm (baseline x86-64 has no rounding
-/// instruction, and the collision pass asks four for every glyph quad, P1). Below 2^52 in
-/// magnitude a whole number is exact as an `i64`; it differs from `ceil` only in the sign of a
-/// zero, which the bounds' casts to `usize` do not see.
-fn ceil(x: f64) -> f64 {
-    if x.abs() < 4_503_599_627_370_496.0 {
-        let t = x as i64 as f64;
-        if t < x { t + 1.0 } else { t }
-    } else {
-        x.ceil()
-    }
-}
-
 /// One label of the layer's data for [`collision_fades`].
 #[derive(Clone, Copy, Debug)]
 pub struct Placing<'a> {
+    /// Stays the same while the same place is labelled ([`MapLabel::key`]).
+    pub key: u64,
     /// Where its anchor is drawn: CSS pixels from the canvas's top left; `None` when it is not in
     /// front of the camera (nothing of it is drawn).
     pub anchor: Option<[f64; 2]>,
@@ -586,25 +437,27 @@ pub struct Placing<'a> {
     pub perspective: f64,
     /// [`MapLabel::priority`].
     pub priority: f64,
-    /// [`MapLabel::size`] (deck's `getSize`), CSS pixels.
+    /// The size it is drawn at, CSS pixels.
     pub size: f64,
     pub text: &'a LaidText,
 }
 
-/// deck's collision filter for one frame: `labels` (the layer's data, in order) drawn into `map`
-/// over a canvas of `canvas` CSS pixels at `map_scale` device pixels each, then each label's fade
-/// (0 to 1; under [`DRAWN_MIN_FADE`] it is not drawn).
-pub fn collision_fades(map: &mut CollisionMap, canvas: [f64; 2], map_scale: f64, labels: &[Placing<'_>]) -> Vec<f64> {
-    let device = [(canvas[0] * map_scale).round(), (canvas[1] * map_scale).round()];
-    map.begin(device);
-    // the canvas's device pixels per CSS pixel, along each axis
-    let (kx, ky) = (device[0] / canvas[0], device[1] / canvas[1]);
-    let to_device = move |[x0, y0, x1, y1]: [f64; 4]| [x0 * kx, y0 * ky, x1 * kx, y1 * ky];
-    for (row, label) in labels.iter().enumerate() {
-        let Some(anchor) = label.anchor else { continue };
-        map.draw(row, label.priority, glyph_quads(label.text, anchor, label.size * COLLISION_SIZE_SCALE, label.perspective).map(to_device));
-    }
-    labels.iter().enumerate().map(|(row, label)| label.anchor.map_or(0.0, |[x, y]| map.fade(row, [x * kx, y * ky]))).collect()
+/// Which labels are shown this frame (1) and which are hidden (0): see the module's docs.
+pub fn collision_fades(group: &mut Group<u64>, canvas: [f64; 2], labels: &[Placing<'_>]) -> Vec<f64> {
+    let inside = |r: &Rect| r.x0 >= 0.0 && r.y0 >= 0.0 && r.x1 <= canvas[0] && r.y1 <= canvas[1];
+    let offered: Vec<Label<u64>> = labels
+        .iter()
+        .map(|l| {
+            let claim = l
+                .anchor
+                .and_then(|a| bounds(glyph_quads(l.text, a, l.size, l.perspective)))
+                .filter(inside)
+                .map_or(Rect::new(f64::NAN, f64::NAN, f64::NAN, f64::NAN), |r| Rect::new(r.x0 - LABEL_MARGIN, r.y0 - LABEL_MARGIN, r.x1 + LABEL_MARGIN, r.y1 + LABEL_MARGIN));
+            Label { id: l.key, priority: l.priority, claim }
+        })
+        .collect();
+    let placed = group.place(&offered, 0.0);
+    (0..labels.len()).map(|i| if placed.kept(i) { 1.0 } else { 0.0 }).collect()
 }
 
 /// Whether a label of `fade` is drawn (and pickable): deck throws a vertex under a fade of 0.0001
@@ -637,111 +490,6 @@ mod tests {
     /// The collision pass's loops (P1: each row's span as slices, the patch's columns once, the
     /// texel bounds' `ceil`) make the very map and fades of the plain per-texel loops they
     /// replaced, here kept as written for B4.
-    #[test]
-    fn the_collision_loops_match_the_plain_ones() {
-        fn draw_plain(map: &mut CollisionMap, row: usize, priority: f64, quads: &[[f64; 4]]) {
-            let Some(depth) = CollisionMap::depth_of(priority) else { return };
-            let [w, h] = map.size;
-            if w < 3 || h < 3 {
-                return;
-            }
-            let id = row as u32 + 1;
-            let (sx, sy) = (w as f64 / map.canvas[0], h as f64 / map.canvas[1]);
-            for &[x0, y0, x1, y1] in quads {
-                if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) {
-                    continue;
-                }
-                let (tx0, tx1) = (x0.min(x1) * sx, x0.max(x1) * sx);
-                let (ty0, ty1) = ((map.canvas[1] - y0.max(y1)) * sy, (map.canvas[1] - y0.min(y1)) * sy);
-                let first = |t: f64, lo: usize| ((t - 0.5).ceil().max(lo as f64)) as usize;
-                let end = |t: f64, hi: usize| ((t - 0.5).ceil().clamp(0.0, hi as f64)) as usize;
-                let (i0, i1) = (first(tx0, 1), end(tx1, w - 1));
-                let (r0, r1) = (first(ty0, 1), end(ty1, h - 1));
-                for r in r0..r1 {
-                    let base = r * w;
-                    for k in base + i0..base + i1.max(i0) {
-                        if depth <= map.depth[k] {
-                            map.depth[k] = depth;
-                            map.label[k] = id;
-                        }
-                    }
-                }
-            }
-        }
-        fn fade_plain(map: &CollisionMap, row: usize, anchor: [f64; 2]) -> f64 {
-            let [w, h] = map.size;
-            if w == 0 || h == 0 || ![anchor[0], anchor[1]].iter().all(|v| v.is_finite()) {
-                return 0.0;
-            }
-            let id = row as u32 + 1;
-            let u = anchor[0] / map.canvas[0];
-            let v = 1.0 - anchor[1] / map.canvas[1];
-            let (step_u, step_v) = (1.0 / map.canvas[0], 1.0 / map.canvas[1]);
-            let texel = |t: f64, n: usize| ((t * n as f64).floor().max(0.0) as usize).min(n - 1);
-            let mut matches = 0u32;
-            for j in -COLLISION_PATCH_N..=COLLISION_PATCH_N {
-                let r = texel(v + f64::from(j) * step_v, h);
-                for i in -COLLISION_PATCH_N..=COLLISION_PATCH_N {
-                    let c = texel(u + f64::from(i) * step_u, w);
-                    matches += u32::from(map.label[r * w + c] == id);
-                }
-            }
-            let side = f64::from(2 * COLLISION_PATCH_N + 1);
-            (f64::from(matches) / (side * side)).powf(COLLISION_FADE_POWER)
-        }
-        // xorshift: the same quads every run
-        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
-        let mut next = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            (seed >> 11) as f64 / (1u64 << 53) as f64
-        };
-        for canvas in [[300.0, 200.0], [301.0, 199.0], [1440.0, 900.0], [7.0, 5.0]] {
-            let (mut ours, mut plain) = (CollisionMap::new(), CollisionMap::new());
-            ours.begin(canvas);
-            plain.begin(canvas);
-            // the whole canvas and beyond, a NaN, and a quad turned inside out
-            let odd = [[-1e300, -1e300, 1e300, 1e300], [f64::NAN, 0.0, 10.0, 10.0], [40.0, 30.0, 10.0, 5.0]];
-            ours.draw(0, 0.0, odd);
-            draw_plain(&mut plain, 0, 0.0, &odd);
-            let mut anchors = vec![[canvas[0] / 2.0, canvas[1] / 2.0]];
-            for row in 1..600 {
-                // some priorities fall outside clip space
-                let priority = (next() - 0.5) * 2400.0;
-                let n = 1 + (next() * 8.0) as usize;
-                let quads: Vec<[f64; 4]> = (0..n)
-                    .map(|_| {
-                        let (x, y) = (next() * canvas[0] * 1.4 - canvas[0] * 0.2, next() * canvas[1] * 1.4 - canvas[1] * 0.2);
-                        let (w, h) = ((next() - 0.3) * 80.0, (next() - 0.3) * 30.0);
-                        [x, y, x + w, y + h]
-                    })
-                    .collect();
-                ours.draw(row, priority, quads.iter().copied());
-                draw_plain(&mut plain, row, priority, &quads);
-                anchors.push([next() * canvas[0] * 1.2 - canvas[0] * 0.1, next() * canvas[1] * 1.2 - canvas[1] * 0.1]);
-            }
-            assert!(ours.depth == plain.depth && ours.label == plain.label, "the maps differ on {canvas:?}");
-            for (row, &anchor) in anchors.iter().enumerate() {
-                assert_eq!(ours.fade(row, anchor).to_bits(), fade_plain(&plain, row, anchor).to_bits(), "row {row} on {canvas:?}");
-            }
-            assert!(ours.label.iter().any(|&l| l != 0) || ours.size[1] < 3, "something was drawn on {canvas:?}");
-        }
-    }
-
-    /// The texel bounds' `ceil` (P1) is `f64::ceil` but for the sign of a zero.
-    #[test]
-    fn the_texel_ceil_is_f64_s() {
-        let mut values = vec![0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0 - f64::EPSILON, 4_503_599_627_370_495.5, -4_503_599_627_370_495.5, 1e300, -1e300, f64::MAX, f64::MIN_POSITIVE];
-        values.extend((0..20_000).map(|i| f64::from(i) * 0.37 - 3700.3));
-        for x in values {
-            assert_eq!(ceil(x), x.ceil(), "{x}");
-        }
-        assert!(ceil(f64::NAN).is_nan());
-        assert_eq!(ceil(f64::INFINITY), f64::INFINITY);
-    }
-
-    /// Plan B4: the priority formula of doc 01 §5.9 (G:653-658).
     #[test]
     fn the_priority_formula() {
         assert_eq!(label_priority(&airport(s("ARN"))), 600.0);
@@ -1047,19 +795,17 @@ mod tests {
     }
 
     fn placing(anchor: [f64; 2], priority: f64, text: &LaidText) -> Placing<'_> {
-        Placing { anchor: Some(anchor), perspective: 1.0, priority, size: 1.0, text }
+        Placing { key: (anchor[0] * 1000.0 + anchor[1]) as u64, anchor: Some(anchor), perspective: 1.0, priority, size: 1.0, text }
     }
 
-    /// The fades of `labels` on a 400 × 300 canvas at scale 1.
     fn fades(labels: &[Placing<'_>]) -> Vec<f64> {
-        collision_fades(&mut CollisionMap::new(), [400.0, 300.0], 1.0, labels)
+        collision_fades(&mut Group::labels(), [400.0, 300.0], labels)
     }
 
     #[test]
-    fn a_label_whose_anchor_a_more_important_one_covers_is_hidden() {
-        let wide = boxed(80.0, 14.0 / COLLISION_SIZE_SCALE);
-        // the city's box at 1.3 reaches 52 px either side of 100: the village's anchor at 140 is
-        // under it, and hidden; the city is shown whichever comes first
+    fn shown_labels_never_overlap_and_the_more_important_wins() {
+        let wide = boxed(80.0, 14.0);
+        // 40 px apart their boxes overlap: the city stays, whichever comes first
         for flip in [false, true] {
             let mut labels = vec![placing([100.0, 100.0], 790.0, &wide), placing([140.0, 100.0], 0.0, &wide)];
             if flip {
@@ -1070,90 +816,35 @@ mod tests {
             assert_eq!((city, village), (1.0, 0.0), "flip {flip}");
             assert!(drawn(city) && !drawn(village));
         }
-        // the anchor clear of the other's quads at 1.3: both shown, though their boxes overlap
-        // (today's "DENMARK" over "Copenhagen")
-        let f = fades(&[placing([100.0, 100.0], 790.0, &wide), placing([160.0, 100.0], 0.0, &wide)]);
+        // apart by their width and the margins: both shown
+        let f = fades(&[placing([100.0, 100.0], 790.0, &wide), placing([100.0 + 80.0 + 2.0 * LABEL_MARGIN + 0.5, 100.0], 0.0, &wide)]);
         assert_eq!(f, [1.0, 1.0]);
-        // a less important label never hides a more important one's anchor
-        let f = fades(&[placing([100.0, 100.0], 0.0, &wide), placing([110.0, 100.0], 600.0, &wide)]);
-        assert_eq!(f, [0.0, 1.0]);
+        // a hidden label hides nothing: 300 is clear of 890, though 600 (hidden) covered it
+        let f = fades(&[placing([100.0, 100.0], 890.0, &wide), placing([160.0, 100.0], 600.0, &wide), placing([200.0, 100.0], 300.0, &wide)]);
+        assert_eq!(f, [1.0, 0.0, 1.0]);
     }
 
     #[test]
-    fn a_hidden_label_still_hides_those_under_it_and_equals_go_to_the_later() {
-        let wide = boxed(60.0 / COLLISION_SIZE_SCALE, 10.0);
-        // 890 hides 600 (anchor 25 px off, inside its 30 px); 600's quads still cover 300's anchor
-        // (50 px from 890's, 25 from 600's): 300 is hidden too, where the greedy pass would show it
-        let f = fades(&[placing([100.0, 100.0], 890.0, &wide), placing([125.0, 100.0], 600.0, &wide), placing([150.0, 100.0], 300.0, &wide)]);
-        assert_eq!(f, [1.0, 0.0, 0.0]);
-        // equal priorities: the later drawn wins the texels it shares
-        let f = fades(&[placing([100.0, 100.0], 500.0, &wide), placing([110.0, 100.0], 500.0, &wide)]);
-        assert_eq!(f, [0.0, 1.0]);
+    fn copies_of_one_place_show_once_and_a_label_shown_keeps_its_place() {
+        let wide = boxed(60.0, 10.0);
+        let f = fades(&[placing([100.0, 100.0], 500.0, &wide), placing([100.0, 100.0], 500.0, &wide)]);
+        assert_eq!(f, [1.0, 0.0]);
+        // between equals, the one already shown stays when the other comes first
+        let mut group = Group::labels();
+        let b = placing([130.0, 100.0], 500.0, &wide);
+        assert_eq!(collision_fades(&mut group, [400.0, 300.0], &[b]), [1.0]);
+        let a = placing([100.0, 100.0], 500.0, &wide);
+        assert_eq!(collision_fades(&mut group, [400.0, 300.0], &[a, b]), [0.0, 1.0]);
     }
 
     #[test]
-    fn a_label_half_covered_fades_by_the_share_of_its_patch_it_holds() {
-        // the cover's edge runs through the anchor's patch: some of its 5 columns are still the
-        // label's
-        let small = boxed(2.0, 2.0);
-        let cover = LaidText { glyphs: vec![LaidGlyph { ch: 'x', frame: [0.0, 0.0, 40.0 * 64.0, 40.0 * 64.0], offset: [0.0, 0.0] }], ..small.clone() };
-        // the cover at 1.3 is 52 px wide, centred on 100: x 74..126, texels (2 px each) 37 to 63,
-        // so it holds texels 37..=62 (those whose centre it covers); the label, 26 px wide round
-        // its anchor, holds the texels from 63 on that the cover leaves it
-        let label = LaidText { glyphs: vec![LaidGlyph { ch: 'x', frame: [0.0, 0.0, 20.0 * 64.0, 20.0 * 64.0], offset: [0.0, 0.0] }], ..small };
-        for (anchor, columns) in [
-            // x samples 123..=127 → texels 61, 62, 62, 63, 63: two of five columns
-            (125.0, 2.0),
-            // 124..=128 → 62, 62, 63, 63, 64: three
-            (126.0, 3.0),
-            // 125..=129 → 62, 63, 63, 64, 64: four
-            (127.0, 4.0),
-        ] {
-            let f = fades(&[placing([100.0, 100.0], 800.0, &cover), placing([anchor, 100.0], 100.0, &label)]);
-            let want = (columns * 5.0 / 25.0_f64).powf(2.2);
-            assert_eq!(f[0], 1.0);
-            assert!((f[1] - want).abs() < 1e-12, "anchor {anchor}: {} != {want}", f[1]);
-            assert!(drawn(f[1]));
-        }
-    }
-
-    #[test]
-    fn labels_at_the_edge_out_of_clip_space_or_behind_the_camera_are_not_drawn() {
+    fn labels_behind_the_camera_cut_by_the_edge_or_with_a_nan_box_are_not_drawn() {
         let small = boxed(6.0, 6.0);
-        // within 2 px of the canvas's edge the patch reaches the scissored border
-        let f = fades(&[placing([1.0, 150.0], 100.0, &small), placing([200.0, 299.5], 100.0, &small), placing([6.0, 150.0], 100.0, &small)]);
-        assert!(f[0] < 1.0 && f[1] < 1.0, "{f:?}");
-        assert_eq!(f[2], 1.0);
-        // a priority beyond ±1000 is outside clip space: it draws nothing, so it is not even
-        // shown itself, and hides nothing
-        let f = fades(&[placing([100.0, 100.0], 1200.0, &small), placing([101.0, 100.0], 0.0, &small), placing([300.0, 100.0], f64::NAN, &small)]);
-        assert_eq!(f, [0.0, 1.0, 0.0]);
-        assert_eq!(CollisionMap::depth_of(1000.0), Some(0));
-        assert_eq!(CollisionMap::depth_of(-1000.0), Some(u16::MAX));
-        assert_eq!(CollisionMap::depth_of(0.0), Some(32768));
-        // not in front of the camera
-        let f = collision_fades(&mut CollisionMap::new(), [400.0, 300.0], 1.0, &[Placing { anchor: None, ..placing([0.0; 2], 900.0, &small) }]);
-        assert_eq!(f, [0.0]);
-    }
-
-    #[test]
-    fn the_map_is_half_the_canvas_and_rows_count_from_the_bottom() {
-        let mut map = CollisionMap::new();
-        let square = boxed(20.0 / COLLISION_SIZE_SCALE, 20.0 / COLLISION_SIZE_SCALE);
-        // at scale 2 the canvas is 800 × 600 device pixels and the map 400 × 300 texels
-        let f = collision_fades(&mut map, [400.0, 300.0], 2.0, &[placing([100.0, 50.0], 100.0, &square)]);
-        assert_eq!(map.size(), [400, 300]);
-        assert_eq!(f, [1.0]);
-        // the label spans CSS 90..110 across and 40..60 down: device 180..220 and 80..120, texels
-        // 90..110 across and, from the bottom, 300 − 60 = 240 to 260
-        assert_eq!(map.at([90, 240]), Some(0));
-        assert_eq!(map.at([109, 259]), Some(0));
-        assert_eq!(map.at([89, 250]), None);
-        assert_eq!(map.at([100, 260]), None);
-        assert_eq!(map.at([100, 239]), None);
-        // an odd canvas rounds the map down
-        map.begin([1441.0, 901.0]);
-        assert_eq!(map.size(), [720, 450]);
+        let f = fades(&[Placing { anchor: None, ..placing([0.0; 2], 900.0, &small) }, placing([f64::NAN, 1.0], 1.0, &small), placing([100.0, 100.0], 0.0, &small)]);
+        assert_eq!(f, [0.0, 0.0, 1.0]);
+        // cut by the canvas's edge: not drawn
+        let f = fades(&[placing([2.0, 100.0], 0.0, &small), placing([100.0, 298.0], 0.0, &small), placing([396.0, 100.0], 0.0, &small)]);
+        assert_eq!(f, [0.0, 0.0, 1.0]);
     }
 
     #[test]

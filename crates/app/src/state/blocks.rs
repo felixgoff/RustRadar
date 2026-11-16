@@ -275,8 +275,10 @@ impl Blocks {
     /// them (the trains' scene builder runs first, as `trainLayers` is computed before
     /// `blockLayers`, G:2733).
     pub fn build(&mut self, settings: &Settings, list: &[&Train], drawn: &Drawn, scene: &mut SceneInput) {
+        // up on the bridges only where the map draws their decks, as the trains are
+        let decks = crate::scene_builder::trains::draws_decks(scene);
         let set = if blocks_on(settings) {
-            self.set.as_ref().map(|s| SetRef { generation: self.generation, list: &s.list, structures: &s.structures })
+            self.set.as_ref().map(|s| SetRef { generation: self.generation, list: &s.list, structures: &s.structures, decks })
         } else {
             None
         };

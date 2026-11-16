@@ -4,7 +4,8 @@
 //!
 //! - **Geometry** ([`BlockRuns`], `blockRuns`), once per block set: every line of every block cut
 //!   into its stretches on the ground and up on bridges ([`BlockRuns::above`], `[lon, lat,
-//!   metres]`) and in tunnels ([`BlockRuns::below`]) by [`on_structures`]; and each block's signal
+//!   metres]`; on the ground where the map draws no bridges' decks, [`SetRef::decks`], as the
+//!   trains are) and in tunnels ([`BlockRuns::below`]) by [`on_structures`]; and each block's signal
 //!   where its first line starts, with the blocks a train passing it goes on into ([`signals_of`]:
 //!   those starting within [`BLOCK_JOIN_M`] of an end of one of its lines, found through a hash of
 //!   the starts in cells of 0.001°, the 3 × 3 cells round each end).
@@ -215,6 +216,16 @@ pub fn runs_of(list: &[TrainBlock], structures: &[Structure]) -> BlockRuns {
     runs
 }
 
+impl BlockRuns {
+    /// Every run on the ground (a map that draws no bridges' decks): no line floats over a flat
+    /// bridge.
+    pub fn on_the_ground(&mut self) {
+        for p in self.above.iter_mut().flat_map(|r| &mut r.path) {
+            p[2] = 0.0;
+        }
+    }
+}
+
 /// The view's bounds close in (the flat projection), `[west, south, east, north]` (`viewBounds`);
 /// none on the globe.
 pub fn view_bounds(view: &ViewState, size: [f64; 2]) -> Option<[f64; 4]> {
@@ -393,6 +404,10 @@ pub struct SetRef<'a> {
     pub generation: u64,
     pub list: &'a [TrainBlock],
     pub structures: &'a [Structure],
+    /// The map draws the bridges' decks (the realistic ground without the 3D terrain): the track
+    /// goes up on them. Else it lies on the ground over a bridge, as the trains do; tunnels stay
+    /// tunnels.
+    pub decks: bool,
 }
 
 /// The block layers' part of the scene refresh (`blockLayers` less its fetching): the set's
@@ -400,8 +415,8 @@ pub struct SetRef<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct BlockBuilder {
     runs: Arc<BlockRuns>,
-    /// The set `runs` was made for.
-    runs_for: Option<u64>,
+    /// The set `runs` was made for, and whether up on the decks.
+    runs_for: Option<(u64, bool)>,
     /// `blocksTaken.at`: when the taken blocks were last worked out (local ms); 0 forces it.
     taken_at: f64,
     taken: Taken,
@@ -423,11 +438,18 @@ impl BlockBuilder {
         if view.zoom < BLOCKS_MIN_ZOOM {
             return BlocksScene::default();
         }
-        if self.runs_for != Some(set.generation) {
-            // a new set: its geometry, and the taken blocks at once (`blocksTaken.at = 0`)
-            self.runs = Arc::new(runs_of(set.list, set.structures));
-            self.runs_for = Some(set.generation);
+        if self.runs_for.map(|(generation, _)| generation) != Some(set.generation) {
+            // a new set: the taken blocks at once (`blocksTaken.at = 0`)
             self.taken_at = 0.0;
+        }
+        if self.runs_for != Some((set.generation, set.decks)) {
+            // its geometry, up on the decks or flat on the ground
+            let mut runs = runs_of(set.list, set.structures);
+            if !set.decks {
+                runs.on_the_ground();
+            }
+            self.runs = Arc::new(runs);
+            self.runs_for = Some((set.generation, set.decks));
         }
         if now_ms - self.taken_at > TAKEN_EVERY_MS {
             let taken = taken_blocks(trains, set.list, &self.taken.of, view_bounds(view, size));
@@ -573,6 +595,18 @@ mod tests {
         let top = runs.above.iter().flat_map(|r| r.path.iter()).map(|p| p[2]).fold(0.0, f64::max);
         assert!(top > 1.0, "up on the bridge: {top}");
         assert_eq!(runs.signals, signals_of(&long));
+        // on a map that draws no decks the builder lays it on the ground, tunnels kept; the same
+        // set seen again with the decks on is up on the bridge again
+        let both = [bridge_at(1300.0, 1500.0), Structure { tunnel: true, ..bridge_at(1600.0, 1800.0) }];
+        let mut builder = BlockBuilder::new();
+        let mut at = |decks: bool| builder.build(Some(SetRef { generation: 1, list: &long, structures: &both, decks }), &[], &view(16.0), [800.0, 600.0], 0.0).runs;
+        let flat = at(false);
+        assert!(flat.above.iter().flat_map(|r| &r.path).all(|p| p[2] == 0.0) && flat.below.len() == 1, "{flat:?}");
+        assert!(at(true).above.iter().flat_map(|r| &r.path).any(|p| p[2] > 1.0));
+    }
+
+    fn bridge_at(from: f64, to: f64) -> Structure {
+        Structure { tunnel: false, line: vec![spot(from, 0.0), spot(to, 0.0)], joined: [false, false] }
     }
 
     #[test]
@@ -659,7 +693,7 @@ mod tests {
     #[test]
     fn the_builder_draws_nothing_off_without_a_set_or_further_out_than_zoom_13() {
         let list = line_of_blocks();
-        let set = SetRef { generation: 1, list: &list, structures: &[] };
+        let set = SetRef { generation: 1, list: &list, structures: &[], decks: true };
         let mut b = BlockBuilder::new();
         assert!(b.build(None, &[], &view(15.0), SIZE, 1000.0).is_empty());
         assert_eq!(b.build(Some(set), &[], &view(12.99), SIZE, 1000.0), BlocksScene::default());
@@ -673,7 +707,7 @@ mod tests {
     #[test]
     fn taken_blocks_are_worked_out_every_half_second_and_at_once_for_a_new_set() {
         let list = line_of_blocks();
-        let set = SetRef { generation: 1, list: &list, structures: &[] };
+        let set = SetRef { generation: 1, list: &list, structures: &[], decks: true };
         let mut b = BlockBuilder::new();
         let v = view(15.5);
         let at_a = [train("t1", "SJ 523", spot(250.0, 0.5))];
@@ -695,7 +729,7 @@ mod tests {
         assert_eq!(same.taken_version, later.taken_version);
         // a new set is worked out at once
         let fewer = list[..1].to_vec();
-        let new = SetRef { generation: 2, list: &fewer, structures: &[] };
+        let new = SetRef { generation: 2, list: &fewer, structures: &[], decks: true };
         let scene = b.build(Some(new), &at_b, &v, SIZE, t0 + 1200.0);
         assert!(!scene.is_taken("b"));
         assert_eq!(scene.runs_generation, 2);
@@ -705,7 +739,7 @@ mod tests {
     #[test]
     fn colours_widths_aspects_and_labels_follow_the_taken_blocks() {
         let list = line_of_blocks();
-        let set = SetRef { generation: 7, list: &list, structures: &[] };
+        let set = SetRef { generation: 7, list: &list, structures: &[], decks: true };
         let mut b = BlockBuilder::new();
         let trains = [train("t2", "Pendeltåg 2245", spot(1500.0, 0.3)), train("t5", "Snälltåget 74", spot(1800.0, 0.2))];
         let scene = b.build(Some(set), &trains, &view(16.0), SIZE, 5000.0);
@@ -730,7 +764,7 @@ mod tests {
     #[test]
     fn the_signal_tooltip_says_what_the_blocks_say() {
         let list = line_of_blocks();
-        let set = SetRef { generation: 1, list: &list, structures: &[] };
+        let set = SetRef { generation: 1, list: &list, structures: &[], decks: true };
         let mut b = BlockBuilder::new();
         let scene = b.build(Some(set), &[train("t2", "Pendeltåg 2245", spot(1500.0, 0.3)), train("t6", "SJ 10", spot(1500.0, 8.0))], &view(16.0), SIZE, 1.782e12);
         assert_eq!(
@@ -746,7 +780,7 @@ mod tests {
     #[test]
     fn the_signals_are_picked_as_discs_of_their_outer_radius_drawn_over_everything() {
         let list = line_of_blocks();
-        let set = SetRef { generation: 1, list: &list, structures: &[] };
+        let set = SetRef { generation: 1, list: &list, structures: &[], decks: true };
         let v = view(16.0);
         let scene = BlockBuilder::new().build(Some(set), &[], &v, SIZE, 1.0);
         let viewport = crate::camera::viewport_for(&v, SIZE);
@@ -766,7 +800,7 @@ mod tests {
     #[test]
     fn on_the_terrain_a_signal_is_picked_where_it_stands() {
         let list = line_of_blocks();
-        let set = SetRef { generation: 1, list: &list, structures: &[] };
+        let set = SetRef { generation: 1, list: &list, structures: &[], decks: true };
         let v = ViewState { pitch: 50.0, ..view(16.0) };
         let scene = BlockBuilder::new().build(Some(set), &[], &v, SIZE, 1.0);
         let viewport = crate::camera::viewport_for(&v, SIZE);

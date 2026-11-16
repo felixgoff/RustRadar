@@ -334,7 +334,7 @@ fn a_signal_says_its_aspect_and_who_is_ahead_and_a_click_does_nothing() {
     ];
     let trains = [DrawnTrain { id: "t", name: "Pendeltåg 2245", at: [lon - step / 2.0, lat] }];
     let mut scene = SceneInput::new(view, size, 1.0, Basemap::Dark);
-    scene.blocks.scene = BlockBuilder::new().build(Some(SetRef { generation: 1, list: &blocks, structures: &[] }), &trains, &view, size, NOW_MS);
+    scene.blocks.scene = BlockBuilder::new().build(Some(SetRef { generation: 1, list: &blocks, structures: &[], decks: true }), &trains, &view, size, NOW_MS);
     let startup = Startup { basemap: Some(Basemap::Dark), fixture: None, demo: false };
     let mut state = AppState::new(startup, None, None, None, view, size);
     state.poll(NOW_MS);

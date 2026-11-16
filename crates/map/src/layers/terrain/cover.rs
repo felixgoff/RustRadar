@@ -1481,7 +1481,7 @@ mod tests {
         fn blocks_scene(view: &ViewState, taken: bool) -> blocks::Input {
             let list = [TrainBlock { id: "b".into(), signal: Some("121".into()), lines: vec![line(BLOCK_N, 300.0)] }];
             let trains = if taken { vec![DrawnTrain { id: "t", name: "SJ 523", at: spot(0.0, BLOCK_N) }] } else { Vec::new() };
-            let scene = BlockBuilder::new().build(Some(SetRef { generation: 1, list: &list, structures: &[] }), &trains, view, SIZE, MIDSUMMER);
+            let scene = BlockBuilder::new().build(Some(SetRef { generation: 1, list: &list, structures: &[], decks: true }), &trains, view, SIZE, MIDSUMMER);
             blocks::Input { scene }
         }
 

@@ -974,7 +974,7 @@ mod tests {
         let size = [800.0, 500.0];
         let view = ViewState { longitude: start[0], latitude: start[1], zoom: 16.0, pitch: 50.0, bearing: 0.0, position: Some([0.0, 0.0, 150.0]) };
         let mut scene = SceneInput::new(view, size, 1.0, Basemap::Dark);
-        scene.blocks.scene = BlockBuilder::new().build(Some(SetRef { generation: 1, list: &list, structures: &[] }), &[], &view, size, NOW);
+        scene.blocks.scene = BlockBuilder::new().build(Some(SetRef { generation: 1, list: &list, structures: &[], decks: true }), &[], &view, size, NOW);
         let viewport = viewport_for(&view, size);
         let [rx, ry, _] = viewport.project([start[0], start[1], 150.0]);
         let [sx, sy, _] = viewport.project([start[0], start[1], 0.0]);

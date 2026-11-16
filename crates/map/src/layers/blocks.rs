@@ -452,7 +452,7 @@ mod tests {
         let (list, structures) = blocks();
         let v = view(zoom);
         let trains = [DrawnTrain { id: "t", name: "SJ 523", at: spot(-25.0, 60.5) }];
-        let built = BlockBuilder::new().build(Some(SetRef { generation: 1, list: &list, structures: &structures }), &trains, &v, SIZE, 1.782e12);
+        let built = BlockBuilder::new().build(Some(SetRef { generation: 1, list: &list, structures: &structures, decks: true }), &trains, &v, SIZE, 1.782e12);
         let mut scene = SceneInput::new(v, SIZE, 1.0, Basemap::Dark);
         scene.earth = crate::layers::earth::Input::SHOWN;
         scene.blocks.scene = built;
@@ -467,7 +467,7 @@ mod tests {
         let (list, structures) = blocks();
         let v = view(16.0);
         let build = |trains: &[DrawnTrain<'_>], generation: u64, list: &[TrainBlock]| {
-            BlockBuilder::new().build(Some(SetRef { generation, list, structures: &structures }), trains, &v, SIZE, 1.782e12)
+            BlockBuilder::new().build(Some(SetRef { generation, list, structures: &structures, decks: true }), trains, &v, SIZE, 1.782e12)
         };
         let in_m = [DrawnTrain { id: "t", name: "SJ 523", at: spot(-25.0, 60.5) }];
         let taken = build(&in_m, 1, &list);

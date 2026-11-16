@@ -13,7 +13,7 @@
 //! | Draw | Cars | State | Colour |
 //! |---|---|---|---|
 //! | `train-car-meshes-<key>` | the mesh's cars not in a tunnel | [`STATE`] (`NO_CULL`: depth tested and written) | the train's at 240, or white for a model's car |
-//! | `train-car-meshes-<key>-tunnel` | its cars in tunnels | [`TUNNEL_STATE`] (`THROUGH_GROUND`: depth always, not written) | the same at alpha 90 |
+//! | `train-car-meshes-<key>-tunnel` | its cars in tunnels, as their [`footprint`]s | [`TUNNEL_STATE`] (`THROUGH_GROUND`: depth always, not written), unlit | the train's at alpha 90 |
 //!
 //! - **Meshes**: a plain car is [`rustradar_scene::train_models::car_mesh`] by its key
 //!   (`<shape>-cab`, `<coach shape>-coach`), grey shades in its vertex colours multiplied by the
@@ -35,8 +35,9 @@
 //!
 //! As in deck, a car at alpha 240 is drawn face by face in its mesh's order, each face blending
 //! over the faces drawn before it that it passes the depth test against (less-equal): straight
-//! down, a plain car's roof shows a little of the body's top under it; in a tunnel
-//! (`THROUGH_GROUND`, nothing written to depth) every face of the car shows through the next.
+//! down, a plain car's roof shows a little of the body's top under it. A car in a tunnel is not its
+//! mesh, whose stacked faces would add up to a solid car standing on the street or the water, but
+//! one flat, faint, unlit rectangle seen through whatever stands over it.
 //!
 //! Deviations: none intended. The meshes are on the GPU from the first car that takes them (today
 //! the models arrive by `fetch` after start-up and plain cars stand in meanwhile; here they are
@@ -49,7 +50,7 @@ use std::sync::OnceLock;
 use glam::DVec3;
 use rustradar_core::assets::File;
 use rustradar_scene::train_models::{CarMesh, TrainModels, car_mesh};
-use rustradar_scene::trains::{CAR_HIGHLIGHT, CarLayers, CarShape, DrawnCar};
+use rustradar_scene::trains::{CAR_HIGHLIGHT, CarLayers, CarShape, DrawnCar, drawn_height};
 
 use super::{DrawCx, Init, Pass, PrepareCx};
 use crate::frame::ViewFrame;
@@ -102,9 +103,19 @@ pub fn mesh_of(shape: &CarShape) -> Option<&'static CarMesh> {
 /// 0]`) and stretched to `[width, length, height]` (`getScale`), in its colour, highlighted
 /// [`CAR_HIGHLIGHT`] when it is under the pointer.
 pub fn instance(view: &ViewFrame, car: &DrawnCar, width: f64, height: f64) -> Instance {
-    let model = orientation_matrix([0.0, -car.heading, car.pitch], [width, car.length, height]);
+    let model = orientation_matrix([0.0, -car.heading, car.pitch], [width, car.length, drawn_height(car, height)]);
     let highlight = if car.highlighted { CAR_HIGHLIGHT } else { Instance::NO_HIGHLIGHT };
     Instance::at(view, [car.at[0], car.at[1], car.level.height], model, DVec3::ZERO, car.color, highlight)
+}
+
+/// A car in a tunnel, unit sized as the meshes are: one flat rectangle on the ground under the
+/// car's box, facing up, white (the car's colour tints it). Drawn once over each pixel it covers,
+/// so it is an even, faint mark over where the train runs underground, not a solid car.
+pub fn footprint() -> Vec<Vertex> {
+    let corners = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]];
+    let positions: Vec<f32> = corners.iter().flat_map(|&[x, y]| [x, y, 0.0]).collect();
+    let normals: Vec<f32> = corners.iter().flat_map(|_| [0.0, 0.0, 1.0]).collect();
+    Vertex::from_arrays(&positions, &normals, None)
 }
 
 /// One draw: a layer's mesh and its instances on the GPU, kept between frames.
@@ -122,6 +133,8 @@ pub struct TrainCars {
     tunnel: MeshPipeline,
     ground_style: Style,
     tunnel_style: Style,
+    /// What a car in a tunnel is drawn as, whatever its mesh: [`footprint`].
+    footprint: Shape,
     /// Each mesh taken so far, by key.
     shapes: HashMap<String, Shape>,
     /// This frame's draws (the first [`Self::active`]), reused across frames.
@@ -132,11 +145,12 @@ pub struct TrainCars {
 impl TrainCars {
     pub fn new(init: &Init<'_>) -> Self {
         let device = &init.gpu.device;
-        let style = StyleUniform::new(&MATERIAL, 1.0, [255; 4]);
         let ground = MeshPipeline::instanced(init, "train cars", STATE);
         let tunnel = MeshPipeline::instanced(init, "train cars in tunnels", TUNNEL_STATE);
-        let (ground_style, tunnel_style) = (ground.style(device, &style), tunnel.style(device, &style));
-        TrainCars { ground, tunnel, ground_style, tunnel_style, shapes: HashMap::new(), draws: Vec::new(), active: 0 }
+        let ground_style = ground.style(device, &StyleUniform::new(&MATERIAL, 1.0, [255; 4]));
+        let tunnel_style = tunnel.style(device, &StyleUniform::new(&Material::UNLIT, 1.0, [255; 4]));
+        let footprint = Shape::new(device, "train car footprint", &footprint(), None);
+        TrainCars { ground, tunnel, ground_style, tunnel_style, footprint, shapes: HashMap::new(), draws: Vec::new(), active: 0 }
     }
 
     /// Once a frame: the draws of `cars` ([`CarLayers::layers`]) in this frame's view, each mesh
@@ -184,9 +198,11 @@ impl TrainCars {
             return;
         }
         for draw in &self.draws[..self.active] {
-            let Some(shape) = self.shapes.get(&draw.key) else { continue };
-            let (pipeline, style) = if draw.tunnel { (&self.tunnel, &self.tunnel_style) } else { (&self.ground, &self.ground_style) };
-            pipeline.draw(pass, style, shape, &draw.instances);
+            if draw.tunnel {
+                self.tunnel.draw(pass, &self.tunnel_style, &self.footprint, &draw.instances);
+            } else if let Some(shape) = self.shapes.get(&draw.key) {
+                self.ground.draw(pass, &self.ground_style, shape, &draw.instances);
+            }
         }
     }
 
@@ -548,12 +564,12 @@ mod tests {
     }
 
     /// A car up on a bridge (6 m) and, below it, one in a tunnel. The tunnel's layer comes after
-    /// and tests no depth, so its car is drawn over the bridge's: straight down through its middle
-    /// its ten flat faces (the five boxes' tops and bottoms), each at alpha 90 over what was drawn
-    /// before, over the bridge's car as over the bare ground. As an ordinary car it would be hidden
+    /// and tests no depth, so its car is drawn over the bridge's: not its mesh but its flat
+    /// footprint, once, at alpha 90 and unlit, over the bridge's car as over the bare ground (where
+    /// the mesh's ten stacked faces made a near solid car). As an ordinary car it would be hidden
     /// under the bridge's car.
     #[test]
-    fn a_car_in_a_tunnel_is_seen_faintly_through_what_stands_over_it() {
+    fn a_car_in_a_tunnel_is_a_faint_footprint_seen_through_what_stands_over_it() {
         let Some(gpu) = gpu() else { return };
         let centre = [SIZE[0] / 2.0, SIZE[1] / 2.0];
         let [lon, lat] = viewport_for(&VIEW, SIZE).unproject(centre, 0.0);
@@ -581,8 +597,8 @@ mod tests {
         let hidden = shoot(&gpu, VIEW, 1.0, CarLayers::new(vec![bridge, DrawnCar { level: GROUND, ..tunnel }], mpp));
         let p = |image: &Image| image.pixel(centre[0] as u32, centre[1] as u32 + 4);
         let ground = over.pixel(2, 2);
-        // what shows of the background through ten faces at 90
-        let behind = (1.0 - 90.0 / 255.0_f64).powi(10);
+        // what shows of the background through the one footprint at 90
+        let behind = 1.0 - 90.0 / 255.0_f64;
         for (c, &g) in ground.iter().enumerate().take(3) {
             let want = f64::from(p(&faint)[c]) + behind * (f64::from(p(&alone)[c]) - f64::from(g));
             assert!((f64::from(p(&over)[c]) - want).abs() <= 3.0, "{:?} against {want} over {:?}", p(&over), p(&alone));

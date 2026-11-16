@@ -36,7 +36,10 @@
 //! other plain cars ([`car_mesh`] by its shape) of 25.4 m with 0.6 m between, and a train whose way
 //! is not known has them in a row back along its heading. Each car gets its level on the track
 //! (a tunnel or a bridge's height) and its colour: the train's, or white for a model's car (its
-//! livery is in its vertex colours), alpha [`TUNNEL_TRAIN_ALPHA`] in a tunnel. [`CarLayers`] holds
+//! livery is in its vertex colours). In a tunnel a car is only its footprint: a plain car's shape
+//! in the train's colour at alpha [`TUNNEL_TRAIN_ALPHA`], drawn flat ([`drawn_height`]) and seen
+//! through what stands over it, so it never reads as a solid train on the street or the water;
+//! it stays picked as a car. [`CarLayers`] holds
 //! them with the width and height every car is drawn at (never thinner than 3 px), and
 //! [`CarLayers::layers`] splits them into deck's layers: per mesh, in the order of its first car,
 //! the cars on the ground and on bridges, then those in tunnels. The map draws them
@@ -79,6 +82,16 @@ use crate::camera::{FLAT_ABOVE_ZOOM, ViewState, Viewport};
 use crate::geom::js_max;
 use crate::pick::{DepthTest, OrientedBox, PickList};
 use crate::train_models::{CAR_HEIGHT_M, CAR_WIDTH_M, CarMesh, TrainModels, car_mesh, car_places};
+
+/// How tall a car in a tunnel is drawn, metres: flat, a footprint on the ground over where it
+/// runs, not a solid car standing on the street or the water.
+pub const TUNNEL_CAR_HEIGHT_M: f64 = 0.05;
+
+/// How tall `car` is drawn when every car is `height` metres: flat ([`TUNNEL_CAR_HEIGHT_M`]) in a
+/// tunnel.
+pub fn drawn_height(car: &DrawnCar, height: f64) -> f64 {
+    if car.level.tunnel { TUNNEL_CAR_HEIGHT_M } else { height }
+}
 
 /// A train's alpha as drawn (G:1881).
 pub const TRAIN_ALPHA: u8 = 240;
@@ -433,7 +446,7 @@ pub struct DrawnCar {
     /// ramp, 0 on the level.
     pub pitch: f64,
     /// `getColor`: the train's colour at [`TRAIN_ALPHA`], or [`MODEL_WHITE`] for a model's car;
-    /// alpha [`TUNNEL_TRAIN_ALPHA`] in a tunnel.
+    /// in a tunnel the train's colour at [`TUNNEL_TRAIN_ALPHA`] (and a plain car's mesh).
     pub color: [u8; 4],
     /// Under the pointer: drawn with [`CAR_HIGHLIGHT`] (deck's `autoHighlight`). Laid out unset;
     /// [`CarLayers::highlight`] sets it for the car the pointer's pick landed on (item T8).
@@ -473,15 +486,18 @@ pub fn drawn_cars(list: &[&Train], drawn: &Drawn, bounds: Option<[f64; 4]>, mode
             places = car_places(&car_lines_with(&[(lat, lon, now_ms)], &[(lat, lon), behind], count, now_ms, length_of, gap));
         }
         for (k, place) in places.iter().enumerate() {
+            let (level, pitch) = car_level(train, place.at, place.heading, place.length);
+            let plain = CarShape::Plain { lead: k == 0, shape: train.shape.unwrap_or(TrainShape::Regional) };
             let mesh = match (model(k), models, &train.model) {
+                // in a tunnel only its footprint is drawn (a plain car's, in the train's colour)
+                _ if level.tunnel => plain,
                 (Some(car), Some(models), Some(name)) => {
                     let index = models.cars(name).and_then(|cars| cars.iter().position(|c| std::ptr::eq(c, car))).unwrap_or(0);
                     CarShape::Model { model: name.clone(), index }
                 }
-                _ => CarShape::Plain { lead: k == 0, shape: train.shape.unwrap_or(TrainShape::Regional) },
+                _ => plain,
             };
-            let (level, pitch) = car_level(train, place.at, place.heading, place.length);
-            let [r, g, b, a] = if modelled { MODEL_WHITE } else { drawn.colors[i] };
+            let [r, g, b, a] = if modelled && !level.tunnel { MODEL_WHITE } else { drawn.colors[i] };
             let color = [r, g, b, if level.tunnel { TUNNEL_TRAIN_ALPHA } else { a }];
             cars.push(DrawnCar { at: place.at, heading: place.heading, length: place.length, train: i, mesh, modelled, level, pitch, color, highlighted: false });
         }
@@ -515,8 +531,8 @@ pub struct CarLayer {
     pub key: String,
     /// The mesh the layer draws (its first car's).
     pub mesh: CarShape,
-    /// In tunnels: seen faintly through the ground (`THROUGH_GROUND`); else depth tested and
-    /// written (`NO_CULL`).
+    /// In tunnels: flat footprints seen faintly through the ground (`THROUGH_GROUND`); else depth
+    /// tested and written (`NO_CULL`).
     pub tunnel: bool,
     /// Its cars, as indices into [`CarLayers::cars`], in their order.
     pub cars: Vec<usize>,
@@ -731,6 +747,7 @@ impl CarLayers {
 /// turned to its heading (`getOrientation: [0, −heading, 0]`) and stretched to
 /// `[width, length, height]` metres (`getScale`).
 pub fn car_matrix(viewport: &Viewport, car: &DrawnCar, width: f64, height: f64) -> DMat4 {
+    let height = drawn_height(car, height);
     instance_matrix(viewport, [car.at[0], car.at[1], car.level.height], [0.0, -car.heading, car.pitch], [width, car.length, height])
 }
 
@@ -1324,11 +1341,16 @@ mod tests {
         let mut layers = CarLayers::new(cars, 1.0);
         layers.on_the_ground();
         assert!(layers.cars.iter().all(|c| c.level == GROUND && c.pitch == 0.0));
-        // a model's car in a tunnel: white, faint
+        // a model's car in a tunnel: only its footprint, a plain car's in the train's colour,
+        // faint, and drawn flat (at its own length)
         let mut m = eastward();
         m.model = Some("x40".into());
         m.structures = vec![Structure { tunnel: true, line: line(0.0, 200.0), joined: [false, false] }];
-        assert!(cars_of(&[&m], Some(&models()), NOW).iter().all(|c| c.color == [255, 255, 255, 90]));
+        let cars = cars_of(&[&m], Some(&models()), NOW);
+        let [r, g, b] = train_color_of(&m);
+        assert!(cars.iter().all(|c| c.color == [r, g, b, 90] && matches!(c.mesh, CarShape::Plain { .. }) && c.modelled), "{cars:?}");
+        assert!(cars.iter().all(|c| drawn_height(c, 4.1) == TUNNEL_CAR_HEIGHT_M));
+        assert_eq!(drawn_height(&cars_of(&[&eastward()], None, NOW)[0], 4.1), 4.1);
     }
 
     #[test]

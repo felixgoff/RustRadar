@@ -54,6 +54,8 @@ fn layout() -> (Vec<Train>, Vec<DrawnCar>) {
 fn shot(gpu: &Gpu, view: ViewState, size: [u32; 2], scale: f64, demo: bool) -> Image {
     let options = Options { demo, ..options(AT, Basemap::Dark, size, scale) };
     app_shot_with(gpu, &options, |state| {
+        // buildings off: since I2 the dark map stands them close in, over the station's tracks
+        state.persisted.settings.buildings = false;
         state.poll(NOW_MS);
         state.controller.set_view(view);
     })
@@ -195,8 +197,15 @@ fn zoom_16_demo_car_roof_and_side_are_lit_as_deck_lights_them() {
     let (_, cars) = layout();
     let middle = &cars[1];
     let view = along(middle.at, 60.0);
-    let with = shot(&gpu, view, SIZE, 1.0, true);
-    let without = shot(&gpu, view, SIZE, 1.0, false);
+    // buildings on (the key light is aimed only over them); none stands over this car
+    let lit_shot = |demo| {
+        let options = Options { demo, ..options(AT, Basemap::Dark, SIZE, 1.0) };
+        app_shot_with(&gpu, &options, |state| {
+            state.poll(NOW_MS);
+            state.controller.set_view(view);
+        })
+    };
+    let (with, without) = (lit_shot(true), lit_shot(false));
     save(&with, "t3-z16-tilted-demo.png");
     let canvas = SIZE.map(f64::from);
     let viewport = viewport_for(&view, canvas);
@@ -251,8 +260,9 @@ fn every_demo_train_is_drawn_as_its_cars_close_in() {
     for zoom in [13.0, 16.0] {
         let view = ViewState { zoom, ..V3.view() };
         let options = Options { demo: true, ..options(view, Basemap::Dark, size, 1.0) };
-        let with = app_shot_with(&gpu, &options, |_| {});
-        let without = app_shot_with(&gpu, &Options { demo: false, ..options.clone() }, |_| {});
+        // buildings off: since I2 the dark map stands them close in, over the station's tracks
+        let with = app_shot_with(&gpu, &options, |state| state.persisted.settings.buildings = false);
+        let without = app_shot_with(&gpu, &Options { demo: false, ..options.clone() }, |state| state.persisted.settings.buildings = false);
         save(&with, &format!("t3-z{zoom}-demo-1440x900.png"));
         let viewport = viewport_for(&view, size.map(f64::from));
         let trains = demo_trains(view.latitude, view.longitude, NOW_MS as i64);

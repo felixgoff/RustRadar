@@ -28,8 +28,8 @@ Placeholders used below (replace them everywhere):
 Every release from v0.2.0 to v0.3.16 carries `tauri-plugin-updater` 2.13.2, `tauri` 2.12.1 and `reqwest` 0.13.5
 (each tag's `Cargo.lock`), so one description covers all installed desktop copies:
 
-- **Launch check** (`src-tauri/src/updater.rs`): in release builds, unless started with `--updated`, GET the
-  endpoint compiled in from `src-tauri/tauri.conf.json`,
+- **Launch check** (`src-tauri/src/updater.rs` at tag `v0.3.16`; the Tauri app is gone from this branch): in release builds, unless started with `--updated`, GET the
+  endpoint compiled in from that tag's `src-tauri/tauri.conf.json`,
   `https://github.com/felixgoff/RustRadar/releases/latest/download/latest.json`, with an 8 s timeout. Any
   failure (no answer, 404, a manifest it cannot read, no entry for this install) opens the installed version.
 - **The request**: a fresh reqwest client (`ClientBuilder::new()`): system proxy settings, **the environment's
@@ -55,7 +55,7 @@ Every release from v0.2.0 to v0.3.16 carries `tauri-plugin-updater` 2.13.2, `tau
 | `.rpm` (`rust-radar`) | `RustRadar-V-1.x86_64.rpm` | `pkexec rpm -U <file>`, same fallbacks | `/usr/bin/rustradar --updated` |
 
 Phones: Android checks `https://api.github.com/repos/felixgoff/RustRadar/releases/latest` hourly and opens the
-release's `.apk` in the browser (`src-tauri/src/mobile_update.rs`); Android installs it over the old one only if
+release's `.apk` in the browser (`src-tauri/src/mobile_update.rs` at `v0.3.16`); Android installs it over the old one only if
 it is signed with the same key and its `versionCode` is not lower (`V` 0.3.17 is 3017, `O` 0.3.16 is 3016).
 iOS updates through TestFlight only.
 
@@ -131,7 +131,7 @@ repository with workflows and secrets is the iOS row (7.10).
    Android keystore stays where it is. Record hashes of `keys.json`, never its contents.
 4. **The proxy's CA is trusted only for the rehearsal** and removed afterwards (section 11). On Linux it is not
    installed at all (`SSL_CERT_FILE` for the one process).
-5. **Never push a `v*` tag to felixgoff/RustRadar**, and never merge stage 12's D2 into `main`, until section 10
+5. **Never push a `v*` tag to felixgoff/RustRadar**, and never merge `rust-port` (the native tree) into `main`, until section 10
    allows it. The iOS row pushes a tag only to its private copy, from a clone that has no remote for
    felixgoff/RustRadar.
 
@@ -436,15 +436,15 @@ On Fedora: `sudo dnf install ./RustRadar-P-1.x86_64.rpm`, control, prepare, rehe
 
 ### 7.10 I1: iOS, TestFlight on a tag
 
-The native App Store build and its TestFlight upload run only on a `v*` tag of a tree without
-`src-tauri/tauri.conf.json` (`rust.yml`, `tree.publish`): this row needs stage 12's D2 on a branch (not merged).
+The native App Store build and its TestFlight upload run only on a push to `main` or a `v*` tag (`rust.yml`,
+`tree.publish`): this row needs a tag of the native tree (`rust-port`, where D2 removed the Tauri app).
 
 1. Make a **private** copy for it, e.g. `OWNER/RustRadar-ios-rehearsal`, and in its Settings → Actions disable the
    "Refresh TestFlight" and "Bump version" workflows before adding any secret. Add only the four App Store Connect
    secrets by today's names (`APPLE_API_ISSUER`, `APPLE_API_KEY_ID`, `APPLE_API_KEY`, `APPLE_DEVELOPMENT_TEAM`):
    without `TAURI_SIGNING_PRIVATE_KEY` the copy's `updater` job stops at "Check signing key" and it publishes no
    desktop release; without the `ANDROID_*` secrets its APK is unsigned.
-2. In a clone of the D2 branch whose only remote is the copy (`git remote set-url origin
+2. In a clone of `rust-port` whose only remote is the copy (`git remote set-url origin
    https://github.com/OWNER/RustRadar-ios-rehearsal`; no remote for felixgoff/RustRadar): `cargo xtask bump V`,
    commit, `git tag vV`, push the branch and the tag to the copy.
 3. The copy's run builds the App Store IPA (`ios-release`) and uploads it (`testflight`) once the native tests
@@ -466,8 +466,8 @@ Use this only if section 4.3's key file is gone. It changes the old app instead 
 
 1. Make a rehearsal key: `bash scripts/ci/throwaway-updater-key.sh ~/rehearsal-key` (needs `minisign`; keep the
    folder until the rehearsal ends, then delete it).
-2. In a private copy of this repository with no other secrets, on a branch from tag `vO`, change two values in
-   `src-tauri/tauri.conf.json`: `plugins.updater.endpoints` to
+2. In a private copy of this repository with no other secrets, on a branch from tag `vO` (which still has the Tauri app), change two values in
+   that tag's `src-tauri/tauri.conf.json`: `plugins.updater.endpoints` to
    `["https://github.com/REPO/releases/latest/download/latest.json"]` and `plugins.updater.pubkey` to the content
    of `~/rehearsal-key/updater.key.pub`. Set the copy's `TAURI_SIGNING_PRIVATE_KEY` (the content of
    `updater.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, push a `v*` tag of that commit to the copy: the tag's
@@ -503,7 +503,7 @@ Rehearsed commit: `________`  Build run: `RUN = ________`  `V = ______`  `O = __
 | L2 | Linux, .deb (pkexec) | | | | | | | | | | | |
 | L3 | Linux, .rpm (optional) | | | | | | | | | | | |
 | A1 | Android, APK over APK | | | | | | | | | | | |
-| I1 | iOS, TestFlight on a tag (needs D2's branch) | | | | | | | | | | | |
+| I1 | iOS, TestFlight on a tag (of `rust-port`) | | | | | | | | | | | |
 
 Result is **pass**, **fail** (with what failed), or for W2 only **as control** (fails exactly as today's MSI
 update does, with the owner's decision in the notes).
@@ -515,7 +515,7 @@ update does, with the owner's decision in the notes).
 Only when every required row of section 9 is **pass** (W2: pass, or as control with a written decision) may a
 native build reach `releases/latest`. Until then:
 
-- stage 12's D2 (the tree without `src-tauri/tauri.conf.json`, which makes a push to `main` publish the native
+- `rust-port` (the native tree, where D2 removed the Tauri app, so a push to `main` publishes the native
   release) is not merged into `main`;
 - no `v*` tag is pushed to felixgoff/RustRadar for a native tree;
 - no native release in felixgoff/RustRadar is created, or edited into a full or latest release, by hand.
@@ -564,7 +564,7 @@ The plan's stage 12 entry condition ("P11 has passed") refers to this section.
 - Open points the rows will settle: whether MSI copies can update at all in quiet mode (W2's control); whether
   the native `.deb`'s new dependencies are present on users' machines (L2); the Windows relaunch carries no
   `--updated` (today's behaviour, so the native app checks once more at its first start: harmless while `V` is the
-  newest release); the iOS row needs D2's branch and moves felixgoff/RustRadar's next version above `V`.
+  newest release); the iOS row needs a tag of `rust-port` and moves felixgoff/RustRadar's next version above `V`.
 
 Tools: `crates/xtask/src/rehearsal.rs` (module docs; tests against a local server cover every check above) and
 `latest-json --rehearsal` (`crates/xtask/src/manifest.rs`).

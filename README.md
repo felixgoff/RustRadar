@@ -1,242 +1,197 @@
 # RustRadar
 
-A live flight radar on a 3D globe: Tauri 2 + SvelteKit (Svelte 5) + deck.gl 9,
-backed by a native Rust port of the [fr24](https://github.com/abc8747/fr24)
-Python library.
+A live flight radar on a 3D globe, also showing trains and ships, written in Rust and drawn
+with wgpu (Vulkan, Metal, DX12). One code base runs on Linux, Windows, macOS, Android and iOS.
 
-- Every live aircraft (~20k worldwide), drawn from the real shape of its type.
-  Around 99.7% of live traffic resolves to one of 40 aircraft models; the rest
-  (fighters, drones, balloons, ground vehicles) keep the built-in low-poly
-  shapes. What you see depends on the camera:
-  - **Flat and wide** — a top-down silhouette of the actual type, which is how
-    a map read from straight above wants to look.
-  - **Tilted** — the real mesh, about 220 triangles, enough for the planform,
-    engines and fin.
-  - **Zoom 11 and closer** — the same mesh at about 2,600 triangles,
-    tilted or not.
-- On screen aircraft are true to scale but clamped between 8 px (whole globe,
-  rising to 24 px at city level) and 72 px. They are dead-reckoned between feed
-  refreshes so they move smoothly, and altitude is exaggerated when zoomed out
-  and true to scale up close.
-- Airline liveries: zoomed in, aircraft take their airline's colours on the
-  fuselage, belly, tail and engines. About 60 high-traffic airlines have a
-  hand-made scheme; every other airline gets colours derived from its logo
-  (cached on disk). Military aircraft are grey.
-- Click an aircraft (or pick one from search, "Most tracked" or an airport
-  board) and the camera centres on it and tracks it, aimed at the aircraft's
-  altitude rather than the ground beneath it, so zooming closes on the aircraft
-  itself even when the view is tilted. Drag the map, or press `C`, to let go.
-  The panel and the 3D trail (coloured by altitude) update live from FR24's
-  streaming `FollowFlight` RPC. The panel shows the airline, origin and
-  destination with local times and delays, an altitude profile chart, the
-  route, aircraft details (serial number, age, photos) and the aircraft's
-  recent flights. `C` makes the camera follow it.
-- Routes: with a Flightradar24 subscription that includes flight plans, the
-  filed route (airways and waypoints of the current AIRAC cycle) is drawn and
-  its ICAO route string shown. Without one, the map shows the track flown so
-  far and the great circle to the destination, labelled as an estimate. The
-  flown track is Flightradar24's, with the earlier part filled in from the
-  OpenSky Network's tracks API when it saw more of the flight (anonymous
-  access allows about 400 calls a day, so tracks are cached and fetched only
-  for the open flight, at most every five minutes).
-  Flightradar24 only sends flight plans to signed-in subscribers, and there is
-  no free worldwide source of filed routes.
-- Filters: aircraft categories (filtered by the server, so hidden categories
-  cost nothing), altitude range, airborne or on ground, airlines, aircraft
-  types, airports and callsign/flight/registration text. They persist between
-  sessions, as do the map settings.
-- Airport boards: click an airport's code on the map (or in the flight panel,
-  or search for it) for live departures and arrivals in local time, with
-  status, gate and aircraft. Airborne flights open on the map.
-- Day and night shading with civil, nautical and astronomical twilight, and an
-  optional 3D weather radar (`W`). Heights are measured where a weather service
-  publishes 3D reflectivity, and estimated from intensity elsewhere.
-  - **The contiguous US and southern Canada** — NOAA MRMS: reflectivity
-    actually measured, about 1 km resolution, quality-controlled (no bird or
-    insect clutter), new every two minutes, drawn at 18 heights: 1, 1.5, 2,
-    2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8, 9, 10, 11, 12 and 14 km.
-  - **Central Europe** — the DWD WN composite (roughly 1.4-18.8°E,
-    45.7-56.2°N: Germany plus neighbouring countries): reflectivity on a 1 km
-    grid, refreshed every five minutes, lifted to heights estimated from
-    intensity (WN is a nowcast; only its analysis frame is drawn). Free open
-    data from Deutscher Wetterdienst, no key needed.
-  - **Elsewhere** — RainViewer, lifted to heights estimated from the tile
-    colour.
+History: RustRadar began as a Tauri + SvelteKit + deck.gl app and was ported to a native
+winit + wgpu + egui app in 2026 (the plan and notes are in `docs/port/`).
 
-  Tilt the camera to see storm cores rise as columns; looking straight down
-  shows the flat composite.
-- A dark vector map drawn from OpenFreeMap tiles (water, borders, roads,
-  runways and taxiways), or satellite imagery. Place and airport names are a
-  separate text layer, never baked into the map. 3D buildings from zoom 13.
-- A realistic map, after Streets GL: the ground drawn from the map's own data
-  in textures (zoomed out, the land in its own colours from NASA's Blue
-  Marble: deserts sandy, forests green; grass, woods, fields, paving, roads with their markings,
-  railways on ballast, rippling water), buildings with façades of windows and
-  roofs, trees, and the sky over them, all in physically based light. The sun
-  casts shadows, the distance fades into the air, and windows light up at
-  night. The weather sets the look: live where the map is looking (MET
-  Norway's forecast for the hour), or chosen (sun, clouds, rain, fog, snow).
-- Tilt and rotate (right-drag, or the map controls) down to street level.
+## What it does
+
+- **Every live aircraft** (~20k worldwide), drawn from the real shape of its type: about 99.7% of
+  traffic resolves to one of 40 aircraft models, the rest keep built-in low-poly shapes. Flat and
+  wide you see top-down silhouettes; tilted, the real mesh; from zoom 11, a finer one. Aircraft are
+  true to scale within sensible on-screen limits and dead-reckoned between feed refreshes.
+- **Airline liveries** up close: about 60 hand-made schemes, every other airline coloured from its
+  logo (cached on disk). Military aircraft are grey.
+- **Follow a flight**: click an aircraft (or pick one from search, "Most tracked" or an airport
+  board). The panel shows airline, origin and destination with local times and delays, an
+  altitude chart, the route, aircraft details and photos, and recent flights; the 3D trail is
+  coloured by altitude. `C` makes the camera follow it.
+- **Routes**: with a Flightradar24 subscription that includes flight plans, the filed route of the
+  current AIRAC cycle is drawn. Without one, the track flown so far (filled in from the OpenSky
+  Network where it saw more) and the great circle to the destination, labelled as an estimate.
+- **Filters**: categories (filtered by the server), altitude, airborne or on ground, airlines,
+  types, airports and free text. Filters and map settings persist.
+- **Airport boards**: live departures and arrivals in local time.
+- **Trains** (Sweden, Trafikverket) with 3D cars, routes and the rail map, and **ships**
+  (VesselFinder) with hull models.
+- **Weather radar** in 3D (`W`): measured volumes over the US and southern Canada (NOAA MRMS) and
+  central Europe (DWD), heights estimated from intensity elsewhere (RainViewer).
+- **Three basemaps**: a dark vector map (OpenFreeMap), satellite imagery (Esri), and a realistic
+  3D map after Streets GL with textured ground, buildings with façades and roofs, trees, terrain,
+  sky, sun shadows, clouds and live or chosen weather.
+- **Day and night** shading with the three twilights, and 3D buildings from zoom 13.
+
+Keyboard (`?` lists them): `P` / `I` / `S` aircraft, trains or ships (with `Shift`, also show
+them), `/` search, `F` filters, `C` follow, `Esc` close, `+` / `-` zoom, `T` tilt, `N` north up,
+`1` / `2` / `3` dark, satellite or realistic, `E` terrain, `B` buildings, `L` place names, `R`
+rail map, `K` aircraft labels, `W` weather radar, `D` day and night.
+
+Optional: a Flightradar24 account raises the flight limit and, depending on the plan, unlocks
+filed flight plans, squawk, vertical speed and airspace. Enter it on the API keys page (the key
+button in the map controls); the same page holds the Trafiklab and Trafikverket keys and exports
+or imports them as a file. Or set `fr24_username` / `fr24_password` (or `fr24_subscription_key` /
+`fr24_token`) in the environment (see `crates/fr24/README.md`).
 
 ## Layout
 
 ```
-crates/fr24/     Rust port of fr24: gRPC-web + protobuf, JSON API, auth (see its README)
-src-tauri/       Tauri backend: commands wrapping the fr24 client, airport
-                 boards, reference data (airlines, airports; cached weekly),
-                 logo-derived livery colours, sign-in
-src/app.css      Design tokens and global styles
-scripts/aircraft/ Offline pipeline: reads the Flightradar24 3D models and
-                 writes assets/aircraft/ (meshes + silhouettes)
-assets/aircraft/ Generated aircraft meshes, silhouette atlas and type index
-src/lib/         Svelte UI: Globe (deck.gl), aircraft models and liveries,
-                 panels, filters, routes and AIRAC cycles, day/night, API bindings
+crates/fr24/     Rust port of the fr24 Python library: gRPC-web + protobuf, JSON API, auth
+crates/core/     pure logic: geometry, settings, filters, formats, trains, labels, assets
+crates/backend/  network and disk: feeds, tiles, radar, weather, images, keys, caches
+crates/scene/    what to draw: per-frame lists for every layer, tessellation, picking
+crates/map/      wgpu renderer: pipelines, shaders, tile runtime, textures, headless render
+crates/app/      the app (package rustradar): window, input, state, egui UI, updater, platforms
+crates/xtask/    developer and release tooling (`cargo xtask`)
+assets/          fonts, icons, textures, aircraft/train meshes, rail and tree data
+platform/        Android (Gradle), iOS (xcodegen), Linux/macOS/Windows packaging, app icons
+scripts/         asset pipelines, release version, CI helpers
+docs/port/       architecture and port notes
 ```
 
-The root `Cargo.toml` is a workspace for both crates. Build output goes to
-`./target`.
+Build output goes to `./target`. fr24 is ported rather than wrapped with PyO3 so that the app
+stays a single native binary; its `.proto` files are compiled with `protox` (no `protoc` needed).
 
-### Why a Rust port instead of PyO3
+## Build and run
 
-fr24 is a thin layer over HTTP: protobuf messages in length-prefixed gRPC-web
-frames, plus a few JSON endpoints. That ports cleanly to `reqwest` + `prost`.
-PyO3 would mean shipping a Python interpreter, httpx/curl-cffi, protobuf and
-polars inside the app bundle. The port keeps the app a single native binary and
-uses fr24's `.proto` files verbatim. It compiles them with `protox`, so no
-`protoc` install is needed.
+### Desktop (Linux, Windows, macOS)
 
-## Develop
+Install Rust with [rustup](https://rustup.rs) (CI uses 1.97.0). The build compiles C and C++
+(Basis Universal, aws-lc) and runs bindgen, so it needs a C/C++ toolchain, CMake and libclang.
 
-Prerequisites: Rust (stable), [Bun](https://bun.sh), and the
-[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+- **Linux** (Ubuntu/Debian):
+  `sudo apt install build-essential clang libclang-dev cmake pkg-config libxkbcommon-x11-0 libvulkan1 mesa-vulkan-drivers`
+  (the last three are needed at run time: winit loads xkbcommon-x11, wgpu needs a Vulkan driver).
+- **macOS**: the Xcode command line tools and `brew install cmake`.
+- **Windows**: Visual Studio Build Tools (C++), CMake and LLVM (for libclang). Without NASM, set
+  `AWS_LC_SYS_PREBUILT_NASM=1`.
 
 ```sh
-bun install
-bun tauri dev        # run the app
-bun tauri build      # release bundle
-cargo test -p fr24   # unit tests
-cargo run -p fr24 --example smoke   # exercise every endpoint against the live API
+cargo run -p rustradar                      # debug build, opens the window
+cargo run -p rustradar --release            # much faster rendering
+cargo run -p rustradar -- --help            # every option
 ```
 
-Keyboard (`?` lists them in the app): `/` search, `F` filters, `C` follow
-the selected aircraft, `Esc` close the open panel, `+` / `-` zoom, `T` tilt,
-`N` north up, `1` / `2` dark map or satellite, `L` place names, `B` buildings,
-`P` liveries, `D` day and night, `W` weather radar.
+Options worth knowing: `--view LAT,LON,ZOOM[,PITCH[,BEARING]]`, `--basemap dark|satellite|realistic`,
+`--demo` (demo trains), `--set KEY=VALUE` (any setting for this run only, not saved).
 
-Optional: a Flightradar24 account raises the per-request flight limit and,
-depending on the plan, unlocks filed flight plans, squawk, vertical speed and
-airspace. Enter the login on the API keys page (the key button in the map
-controls); it is kept in the app's config folder and signs in at launch. The
-same page holds the Trafiklab and Trafikverket keys, and exports or imports
-them as a file. Alternatively set
-`fr24_username` / `fr24_password` (or `fr24_subscription_key` / `fr24_token`)
-in the environment, or use fr24's config file (see `crates/fr24/README.md`).
+### Android
 
-### Phones
-
-The same app builds for Android and iOS. Below 900px wide the layout switches
-to a full-screen map with a bottom sheet (`src/lib/phone.svelte.ts`,
-`src/lib/BottomSheet.svelte`).
+Needs JDK 17, the Android SDK (`ANDROID_HOME`), **NDK r28c** (`28.2.13676358`; r27's clang
+crashes on the Basis transcoder) as `ANDROID_NDK_HOME`, and cargo-ndk 4:
 
 ```sh
-bun tauri android dev          # needs the Android SDK and NDK (ANDROID_HOME, NDK_HOME)
-bun tauri android build --apk
-bun tauri ios dev              # on a Mac with Xcode
+rustup target add aarch64-linux-android
+cargo install cargo-ndk --version 4.1.2 --locked
+platform/android/build-rust.sh              # debug, arm64-v8a: the .so and the APK's assets
+cd platform/android && ./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb logcat -s rustradar
 ```
 
-The Android project is checked in at `src-tauri/gen/android`. The iOS one is
-generated in CI by `tauri ios init`.
+`platform/android/build-rust.sh --release armeabi-v7a x86_64` builds other ABIs. The release APK
+(four ABIs, checked and named, signed when the keystore secrets are set) is
+`cargo xtask android-release --out dist`.
 
-CI (`.github/workflows/rust.yml`) builds an APK and an IPA on every run, and
-a release attaches them to the release page. These repository secrets make
-the APK a signed release build and send the iOS build to TestFlight. Without
-the Android secrets, a release has no APK and shows a warning. Without the
-Apple secrets, the IPA is unsigned, which works only with sideloading tools
-such as AltStore or Sideloadly; those sign it with your own Apple ID, and with
-a free one the install expires after 7 days.
+### iOS
 
-| Secret | What it is |
-| --- | --- |
-| `ANDROID_KEYSTORE` | The release keystore, base64: `keytool -genkeypair -v -keystore release.jks -keyalg RSA -keysize 4096 -validity 10000 -alias rustradar`, then `base64 -w0 release.jks`. Keep the file: every update must be signed with the same key. |
-| `ANDROID_KEYSTORE_PASSWORD` | Its password (used for the key too). |
-| `ANDROID_KEY_ALIAS` | The alias, e.g. `rustradar`. |
-| `APPLE_DEVELOPMENT_TEAM` | The 10-character Team ID (developer.apple.com, Membership). |
-| `APPLE_API_ISSUER` | App Store Connect, Users and Access, Integrations: the Issuer ID. |
-| `APPLE_API_KEY_ID` | The Key ID of an App Store Connect API key with the Admin role. |
-| `APPLE_API_KEY` | That key's `.p8` file contents. |
+On a Mac with Xcode and [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`):
 
-On iOS, also create the app once in App Store Connect with the bundle ID
-`com.felix.rustradar`, so TestFlight has somewhere to put the builds.
+```sh
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+cd platform/ios && xcodegen generate && open RustRadar.xcodeproj
+```
 
-Android installs update through the app. When a newer release has an APK, the
-app shows the update toast, and its button downloads the APK
-(`src-tauri/src/mobile_update.rs`). iOS installs update through TestFlight.
+Set your team under Signing & Capabilities and Run. A build phase runs
+`platform/ios/build-rust.sh`, which builds the Rust library for the selected device or simulator.
+The release IPA is `cargo xtask ios-release --unsigned --out dist`. More device notes:
+`docs/port/device-notes.md`.
 
-To have Android update in the background instead, install
-[Obtainium](https://github.com/ImranR98/Obtainium) and add RustRadar to it:
+## Test
 
-[<img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="54">](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/felixgoff/RustRadar)
+```sh
+cargo test --workspace                      # everything (the map's GPU tests are slow on a CPU driver)
+cargo test -p rustradar-core                # one crate
+cargo clippy --all-targets --workspace -- -D warnings
+cargo run -p fr24 --example smoke           # every fr24 endpoint against the live API
+```
 
-(or in Obtainium: Add App, `https://github.com/felixgoff/RustRadar`). It
-checks the releases here and installs each new APK. Updating over an install
-from elsewhere works as long as both are signed with the release key; a debug
-build has to be uninstalled first.
+GPU tests need a Vulkan adapter; without one they print `skipped:` and pass. CI runs them on
+SwiftShader (`VK_ICD_FILENAMES` pointing at Chrome's `vk_swiftshader_icd.json`); lavapipe
+(`mesa-vulkan-drivers`) works too. Shots the tests draw land in `target/shots/`.
 
-## Design
+### Headless screenshots
 
-The UI follows the [impeccable](https://github.com/pbakaus/impeccable)
-guidelines for an app-style ("Operate") surface: solid surfaces rather than
-glass, one icon set ([Lucide](https://lucide.dev)), and an OKLCH palette whose
-text pairs all pass WCAG AA (navy ink shell; white aircraft; sodium amber for
-selection and actions; green only for "live"; red only for failures). Type is
-Overpass, with Overpass Mono for measured values. The signature detail is the
-flight panel's header, set in the column rhythm of an ATC flight-progress
-strip, with altitudes given as flight levels (FL380). Tokens live in
-`src/app.css`.
+The app binary renders one frame without a window and exits:
+
+```sh
+cargo run -p rustradar -- --screenshot out.png --size 1440x900 \
+  --view 59.6519,17.9186,13.5,45,30 --basemap dark --now 1760000000000 \
+  --fixture crates/map/tests/data --demo --ui
+```
+
+`--fixture DIR` reads tiles and feeds from a folder instead of the network (the committed
+fixtures in `crates/map/tests/data`, refreshed by `cargo xtask fixtures`, hold tiles, radar,
+clouds and weather but no live flights, so the example shows the demo trains); `--ui` draws the
+interface over the map; `--mode`, `--select ID`, `--scale`, `--wait SECONDS` and `--set KEY=VALUE`
+set up the rest. Named views V1 to V8 and the reference pictures are in `docs/port/reference/`.
+
+## Releases and versions
+
+Everything is in `.github/workflows/`:
+
+- `rust.yml` ("Build") runs on every push and pull request: tests and clippy, cross checks for
+  Windows, macOS, iOS and Android, and every release package (deb, rpm, AppImage, NSIS, MSI, `.app`,
+  dmg, APK, IPA). On `rust-port`, pull requests and manual runs it is a dry run: packages are
+  workflow artifacts, signed with a throwaway key. **A push to `main` or a `v*` tag publishes**: a
+  GitHub release with the packages, signed updater files and `latest.json`, the APK, and the iOS
+  build to TestFlight.
+- The version lives in `crates/app/Cargo.toml` and `crates/backend/Cargo.toml` (and their lock
+  entries). `cargo xtask version` prints it, `cargo xtask bump patch|minor|major|x.y.z` changes it;
+  `bump.yml` ("Bump version", run by hand) does the same and commits it. If `main` is pushed
+  without a bump, `scripts/release-version.sh` publishes the next patch after the latest release,
+  since installed apps only update to a newer version.
+- `testflight-refresh.yml` rebuilds the latest release for TestFlight before its build expires.
+
+Desktop installs update themselves from `latest.json` (minisign-signed). Android shows an update
+toast that downloads the new APK; or use
+[Obtainium](https://github.com/ImranR98/Obtainium) with `https://github.com/felixgoff/RustRadar`.
+iOS updates through TestFlight.
+
+Repository secrets (only the publishing runs see them): `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the updater key; the name is kept so installed copies keep
+updating), `ANDROID_KEYSTORE` (base64 release keystore; keep the file, every update must use the
+same key), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `APPLE_DEVELOPMENT_TEAM`,
+`APPLE_API_ISSUER`, `APPLE_API_KEY_ID`, `APPLE_API_KEY` (an App Store Connect API key). Without the
+Android ones a release has no signed APK; without the Apple ones the IPA is unsigned (sideload
+only). The app's identity (bundle id `com.felix.rustradar`, folders, update channel) must not
+change: see `docs/port/07-backend-decoupling-and-packaging.md`.
 
 ## Being a polite client
 
-Flightradar24's API is unofficial and undocumented, and it rate-limits
-(gRPC status 8, "too many requests"). RustRadar fetches only the slices
-covering the visible area when zoomed in. It refreshes the whole world every
-15 s, a region every 8 s, and backs off up to 6× when told to slow down.
+Flightradar24's API is unofficial and rate-limited. RustRadar fetches only the slices covering the
+visible area when zoomed in, refreshes the world every 15 s and a region every 8 s, and backs off
+up to 6× when told to slow down.
 
-## Notes
+## Licences and credits
 
-- deck.gl 9.4 workarounds in `src/lib/Globe.svelte`:
-  - GlobeView's default back-face culling hides camera-facing quads (text,
-    rings, paths), so those layers disable it.
-  - Wheel-zooming past zoom 12 calls a GlobeViewport-only method on the Web
-    Mercator viewport GlobeView switches to there. A one-line shim fixes it.
-  - GlobeView's local frame for mesh offsets is rotated half a turn relative
-    to the flat projection, so model yaw is offset by 180° on the globe.
-  - MVTLayer decodes tiles differently per projection, so the vector map has
-    one layer instance per projection. Labels are decoded to lon/lat and
-    drawn by a single TextLayer.
-- Map data: OpenFreeMap (© OpenMapTiles, © OpenStreetMap contributors).
-  Imagery: Esri World Imagery. Weather radar: NOAA MRMS (contiguous US and southern Canada, public
-  `noaa-mrms-pds` bucket, decoded from GRIB2 in `src-tauri/src/mrms.rs`), the
-  WN composite of Deutscher Wetterdienst (central Europe, open data from
-  opendata.dwd.de, in `src-tauri/src/dwd.rs`) and RainViewer elsewhere
-  (available up to zoom 7); the plumbing shared by all three is
-  `src-tauri/src/radar.rs`. Airline logos for automatic liveries: pics.avs.io.
-- The realistic map's textures are [Streets GL](https://github.com/StrandedKitty/streets-gl)'s
-  (MIT, © StrandedKitty): `scripts/realistic-textures.py` turns them into the
-  texture arrays in `assets/realistic/`, with Streets GL's licence beside
-  them. The land's colours zoomed out are NASA's Blue Marble: Next Generation
-  (public domain; NASA Earth Observatory, Reto Stöckli), which
-  `scripts/earth-texture.py` turns into `textures/realistic/earth.color.webp`.
-  Its weather is MET Norway's Locationforecast (CC BY 4.0), fetched by
-  `src-tauri/src/weather.rs`, which identifies the app as MET asks.
-- Aircraft shapes come from [Flightradar24's 3D models](https://github.com/Flightradar24/fr24-3d-models)
-  (glTF 1.0, in turn from the FlightGear project). `bun run build:aircraft`
-  downloads them, reduces each by vertex clustering to two levels of detail,
-  splits the triangles into livery parts, renders a top-down silhouette, and
-  writes the result to `assets/aircraft/`. Rerun it to pick up new models or
-  change the triangle budgets; the downloads are cached in `.cache/`.
-  **Those models are GPL-2.0**, so the generated files in `assets/aircraft/`
-  are a derivative work and carry that licence, while the rest of this project
-  is MIT. Delete that directory (the built-in shapes take over) or replace it
-  with your own models if that mix does not suit you.
-- AIRAC cycles are computed, not fetched: they change every 28 days, and
-  cycle 2401 took effect on 2024-01-25.
+The project's code is MIT. `assets/aircraft/` is derived from Flightradar24's GPL-2.0 aircraft
+models and carries that licence. Fonts (Overpass, OFL), icons (Lucide, ISC), Streets GL textures
+(MIT), Basis Universal (Apache-2.0), the data sources the app credits, and every Rust crate it
+links are listed in `THIRD-PARTY-NOTICES.md`; regenerate the crate list with
+`python3 scripts/rust-licenses.py`.
+
+Asset pipelines (rerun only to change the assets): `node scripts/aircraft/build.mjs` (aircraft
+meshes), `node scripts/trains/build.mjs` (train cars), `scripts/realistic-textures.py`,
+`scripts/earth-texture.py`, `scripts/night-texture.py`, `scripts/build-rail-overview.py`.

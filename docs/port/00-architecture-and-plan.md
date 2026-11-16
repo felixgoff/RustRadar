@@ -991,7 +991,7 @@ are.
 | K11 | **Motion model fidelity** (3 400 lines of numerics with sentinels and shared scratch) | medium / high | Transliteration, 46 tests, golden poses from the TypeScript (S1.17) | – |
 | K12 | **Third-party endpoints**: `tiles.streets.gl` (one person's server, z16 only), keyless Esri imagery, RainViewer's palette and API, Mapterhorn, EUMETView, Planetary Computer, source.coop, OpenFreeMap | medium / medium (already true today) | All through `backend` with disk caches, a polite User-Agent, per-host limits and back-off; every layer degrades to "not drawn"; attribution strings carried over | – |
 | K13 | **egui text and layout fidelity** against Chromium | certain / low | Judge on layout, sizes and colours; exact weights through the variable axis; reference pictures for side-by-side review | – |
-| K14 | **Binary size and build time**: 27 MB of assets per binary and per Android ABI; wgpu and naga add about 70 s to a cold build; LTO | certain / low | Accept for the first release; measure APK size in P8 | If the APK exceeds 150 MB, move assets to the APK's `assets/` folder (read through `AAssetManager`). Triggered (P8: 220 MB) and done (A1, section 1.6): 129.3 MB |
+| K14 | **Binary size and build time**: 27 MB of assets per binary and per Android ABI; wgpu and naga add about 70 s to a cold build; LTO | certain / low | Accept for the first release; measure APK size in P8 | If the APK exceeds 150 MB, move assets to the APK's `assets/` folder (read through `AAssetManager`). Triggered (P8: 220.1 MB, runs 325–327) and done (A1, section 1.6): the release APK is 129.3 MB (runs 330 and 331, under today's Tauri APK's 151 MB): each ABI's library 30.1 MB smaller, the 35 files (29.6 MB) once in `assets/`, stored; checked in "Pre-release fixes (A1, A2)" |
 | K15 | **`tokio::spawn` outside the runtime** aborts the process | medium / high | `backend::rt()`; the grep check in S1.3; a debug assertion in `rt()` | – |
 | K16 | **Remote image hosts** may want a Referer or a browser-like User-Agent | medium / low | U18 tries each host (JetPhotos, FR24 logos, VesselFinder, Wikimedia) and records the headers needed in `backend::images` | A host that refuses shows the placeholder |
 | K17 | **Zone names and locale**: abbreviations differ from the tz database's | low / low | Generated table from today's code (S1.11); English formatting everywhere | – |
@@ -1153,7 +1153,7 @@ non-Latin labels.
 | Signing and notarisation | Unsigned, as today |
 | Minimum OS versions | macOS 11, iOS 15, Android `minSdk 24` |
 | Exports on phones | Desktop only in the first native release |
-| Assets | All embedded with `include_bytes!`; revisit for Android only if K14 triggers. K14 triggered: on Android they are in the APK's `assets/` once (A1, section 1.6) |
+| Assets | Embedded with `include_bytes!` on desktop and iOS. On Android, where K14 triggered (220 MB), read at start from the APK's `assets/` (each file once, stored) through `AAssetManager`; one list for both, `core::assets` (A1, section 1.6). The WGSL shaders, the Lucide icons and the two licences stay embedded everywhere |
 | First native release installable by the old updater | P11 rehearsal is a release gate |
 | Android `versionCode` | `major·1 000 000 + minor·1000 + patch`, checked against a released APK in P8 |
 | `tokio::spawn` off the runtime | `backend::rt()` everywhere (K15) |
@@ -2527,17 +2527,23 @@ Run 326 (`5b05690`) is green the same way (every job, 3055 passed); its artifact
   key material grepped in the diff: none); only public keys (the updater's, and test keys) are in the tree.
 
 **Gaps** (by item)
-1. **Closed by A1**: CI run 330's release APK is 129.3 MB (libraries arm64-v8a 23.7, armeabi-v7a 17.7, x86 28.3, x86_64 28.5 MB, each 30.1 MB smaller; `assets/` once, stored; section 1.6).
+1. **Closed by A1** (`c23d0d0`, `ac54194`; checked by V11b, "Pre-release fixes"): the release APK of CI runs 330 and 331 is 129.3 MB (129 344 432 bytes; run 327's 220 066 590; libraries arm64-v8a 23.7, armeabi-v7a 17.7, x86 28.3, x86_64 28.5 MB, each 30.1 MB smaller; `assets/` once, stored; section 1.6).
    Was: **P8, K14: the release APK is 220 MB** (today's 151 MB; the x86 and x86_64 libraries alone are 58 MB each), over K14's 150 MB trigger: move
    the assets to the APK's `assets/` folder (read through `AAssetManager`) before the first native release, or
    accept it (owner). The arm64 library has 4 KB page alignment, as today's (only Play or 16 KB-page devices care).
 2. **P8, P9: the signed APK and the App Store build have never run** (only on a release): their first run is the
    first native release (or P11's I1 on a D2 branch); both are tested through stand-ins only.
-3. **F5: the backend crate's user agents say 0.1.0** (`RustRadar/0.1.0` from `rustradar-backend`'s own version in
+3. **Closed by A2** (`60e0995`; checked by V11b): `rustradar-backend` is 0.3.0 and `cargo xtask bump` (and
+   `scripts/version.mjs` while `crates/backend` exists) keep it at the app's version, so a release build sends
+   `RustRadar/<release version>` as today's app did: run 331's release APK's four libraries hold all five user agents
+   at `RustRadar/0.3.17` and none at another version.
+   Was: **F5: the backend crate's user agents say 0.1.0** (`RustRadar/0.1.0` from `rustradar-backend`'s own version in
    geocode, trains, adsb.lol, taxiways, tiles, rail, canopy, clouds, Overture, land cover, RainViewer,
    Trafikverket, train media), where today's app sent its release version: `cargo xtask bump` does not know the
    backend crate. Stage 12 (D2) or a small follow-up: bump it with the app, or pass the app's version in.
-4. **P9: `docs/port/device-notes.md` is stale for iOS**: its iOS project row and checklist row 1 expect "the map's
+4. **Closed by A2** (`c61477c`; checked by V11b): the device notes' iOS project row and K3 row 1 expect today's launch
+   storyboard on iOS and the map's ink on Android; their other stale stage 11 lines (CI, versions, NDK) are current.
+   Was: **P9: `docs/port/device-notes.md` is stale for iOS**: its iOS project row and checklist row 1 expect "the map's
    ink" before the first frame; the IPA now carries today's launch storyboard (the system background, white or
    black), as the Tauri app did.
 5. **P6: deviations to confirm** (recorded in `platform/macos/Info.plist` and `Packager.toml`):
@@ -2612,7 +2618,8 @@ Run 326 (`5b05690`) is green the same way (every job, 3055 passed); its artifact
   read `src-tauri/tauri.conf.json`, `src-tauri/icons` or `src-tauri/gen/android` (Pk5–Pk8 name them); after it,
   `cargo xtask bump` counts four places (the app's two and the backend's, A2), and `testflight-refresh.yml` builds the native tree once the newest tag is
   native.
-- **Before the first native release**: K14 is done (gap 1, A1); decide the backend's user agent (gap 3); after the first
+- **Before the first native release**: K14 is done (gap 1, A1) and the backend's user agents carry the release version
+  (gap 3, A2); after the first
   main push of the native tree, read its run: `release` created once, `latest.json` signed with the real key (the
   job checks it against `update::PUBKEY` first), the signed APK attached (`*_unsigned.apk` never is), the IPA
   uploaded; Pk11 suggests `cargo xtask rehearsal-check https://github.com/felixgoff/RustRadar/releases/download/<tag>/latest.json`
@@ -2622,3 +2629,100 @@ Run 326 (`5b05690`) is green the same way (every job, 3055 passed); its artifact
 
 **Disk.** The review's test build used the CI's `line-tables-only` debug info; the app's integration test binaries
 were deleted after each batch. The CI artifacts it read were downloaded into the scratchpad and deleted after.
+
+## Pre-release fixes (A1, A2)
+
+Checked on 2026-11-16 on `rust-port` at `2ece21f` by V11b (the review of this run, which owns no files but this
+document), after A1 (risk K14, stage 11 gap 1) and A2 (gaps 3 and 4) had reported. The commits since the stage 11
+status (`45909e4`): A2's `60e0995` and `c61477c`, A1's `c23d0d0`, `ac54194` and `2ece21f`. This section is in the
+commit after `2ece21f`.
+
+**In short.**
+- Both items are done. The Android release APK is 129.3 MB (220.1 MB before): the app's 35 files (29.6 MB) are in its
+  `assets/` once, stored, instead of compiled into each of the four libraries; desktop and iOS embed them as before.
+  A release build's requests say `RustRadar/<release version>` again, as today's app's do.
+- No fixes were needed: the workspace compiles, every test run here passes, Clippy is clean (also for Android), CI
+  is green on `2ece21f`, and nothing in the diff can publish from `rust-port` or carries a secret. This review
+  changed only this document (K14's row, section 7's Assets line, the stage 11 gaps 1, 3 and 4, this section).
+
+**Checks**
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets`, `cargo check -p rustradar` (shim) | clean, no warnings; the shim passes |
+| `cargo clippy --target aarch64-linux-android -p rustradar-app -p rustradar-core -p rustradar-map -p rustradar-scene -p rustradar-backend --lib -- -D warnings`, and `-p rustradar-core --features apk-assets --all-targets` | clean (host clang 18 and the NDK r28c sysroot's headers, fetched for this and deleted); `install_assets` is linted here, CI only checks it |
+| `cargo clippy --target aarch64-apple-ios -p rustradar-core -p rustradar-scene --lib -- -D warnings` | clean (pure Rust; the app's iOS build needs the iOS SDK: CI's iOS check and IPA jobs, green) |
+| `cargo clippy -p rustradar-core --features apk-assets --all-targets -- -D warnings` (host) | clean |
+| `cargo test`: core, core `--features apk-assets --lib assets`, scene, backend, xtask, fr24 | 606 + 2; 4; 647 + 3; 272 (22 ignored); 165 (3 ignored); 17 + 1: all pass |
+| map's tests of the files' readers (`layers::ground`, `layers::aircraft::assets`, `layers::train_cars`, `layers::rail`, `layers::trees`, `textures`, `pipelines::text`; SwiftShader) | 101 passed (14 min); the rest of the map's tests left to CI |
+| app: lib, and the 47 integration files in four batches (binaries deleted between them; SwiftShader) | 690 (2 ignored, as before) + 175: all pass |
+| `git diff 45909e4..HEAD`, the forbidden strings and key material | 0 |
+
+**Read adversarially**
+- *Can a file the Android app reads be missing from the APK?* Every reader goes through `core::assets`: the map's
+  `ground::texture_bytes` (the 13 realistic textures, through `RealisticTextures::start`), `aircraft::assets`
+  (`embedded` for the two atlases, `published` for the index and meshes), `train_cars::models`, `rail::RAILROADS`,
+  `trees`' two towns, scene's `OVERPASS` and `OVERPASS_MONO` (the map's labels), the app's `FONTS` (egui) and the
+  backend's `sth` and `flow`. Each is a static of the one `files!` list, and `FILES` is the same list, so the copy
+  (`cargo xtask android-assets`, in `build-rust.sh` for debug and release) and the check (in `android-release` and
+  the phone-shell job) cover every one: an APK without one fails CI. `install_assets` is the first statement of
+  `android_main`, before the event loop, the backend and any thread of the app's; every reader is lazy.
+- *Does the list test cover every embed?* `no_library_embeds_a_file_but_through_the_list_or_the_few_kept` scans every
+  `crates/*/src` but the xtask's, so core and scene too. What is left (grepped here as well): the list's own
+  `include_bytes!`, the 22 WGSL shaders (0.16 MB), the Lucide icons and the two licences, and unit-test fixtures under
+  `tests/data`, each of which this review found inside a `#[cfg(test)]` module. Its one blind spot: an include whose
+  argument holds no string literal (a macro's `$path`) is skipped, not failed; there is none.
+- *Desktop and iOS unchanged?* Without `apk-assets` a `File` is the `include_bytes!` of the same path and reads the
+  same bytes (core's test compares all 35 with the repository's files; the map's and the app's compare theirs). Run
+  331's IPA binary still holds the KTX2 textures; the desktop and iOS artifacts are within 0.3 MB (zipped) of run
+  327's, the font copy scene and app embedded twice being gone. The feature is turned on only by `rustradar-app`'s
+  Android target dependency (resolver 3), so the Tauri shim built for Android keeps the files embedded.
+- *The shim's user agent.* The six constants in `crates/backend` are byte for byte today's `src-tauri/src` strings
+  (`main`) with the crate's `CARGO_PKG_VERSION`; GitHub's update check keeps the bare `RustRadar`, as today. The shim
+  sends them through the backend, whose version is the app's (0.3.0 on `rust-port`, both in step).
+- *The release version, CI to binary.* The `version` job's `package` (0.3.17 here) → each native job's
+  `xtask bump "$VERSION"` (eight places, `crates/backend/Cargo.toml` and its lock entry among them) → the `--locked`
+  build → run 331's release APK: all five distinct user agents in each of its four libraries say `RustRadar/0.3.17`,
+  and no other `RustRadar/<version>` is in them; its IPA's binary likewise (six, all 0.3.17). `bump.yml` commits
+  with `git commit -am`, so the backend's file goes with the others.
+- *Publishing and secrets.* The workflow diff adds one test step to the test job and one `--check` line to the
+  phone-shell job, and changes a comment in `bump.yml`: no condition, secret reference or publishing step changed.
+
+**Per item**
+
+| Item | Verdict | Evidence, and what differs from the brief |
+|---|---|---|
+| A1 | done | as above; 10 new tests. Run 331's release APK: 129 344 432 bytes (run 327's 220 066 590, −41 %), `assets/` 35 files, 29 641 026 bytes, all stored, each byte for byte the repository's file, plus Gradle's own `dexopt/baseline.prof(m)`; libraries arm64-v8a 23.74, armeabi-v7a 17.73, x86 28.30, x86_64 28.55 MB; badging `com.felix.rustradar`, versionCode 3017, versionName 0.3.17, minSdk 24, INTERNET, MainActivity, four ABIs. Deviations (recorded by A1): the list is `core::assets` (the plan said `map::assets` and `app::assets`); the APK's keys are the paths under `static/`, `assets/` and `crates/backend/`; Android-only behaviour is a feature, not `target_os`. |
+| A2 | done | as above; 3 new tests and the bump tests updated. Deviation (doc 07 §15.1, "two places" after stage 12): four (the app's and the backend's, toml and lock). `scripts/version.mjs` still leaves `crates/app` behind (F5's deviation). The device notes match P9's IPA (gap 4). |
+
+**CI.** Run 331 (`2ece21f`), every job that ran green: Tauri or native tree, Release version (0.3.17), Native port
+(test & clippy) (SwiftShader: 3071 passed, 0 failed, 28 ignored, the new `apk-assets` step's 4 among them; Clippy
+clean), the four target checks, both phone shells (the debug APK's `assets/` check in its job), the four Package
+legs, Updater signatures and latest.json, Linux packages installed and started, Android release APK, APK badging
+(read: `com.felix.rustradar`, versionCode 3017, versionName 0.3.17, minSdk 24, targetSdk 37, INTERNET, MainActivity,
+four ABIs, 129 344 432 bytes) and iOS release IPA. Skipped, as they must be on `rust-port`: Publish the release,
+Upload to TestFlight, Attach phone builds (native), today's Tauri jobs (Check & test, Bundle, Android APK, iOS,
+Attach phone builds) and the lavapipe run. This review downloaded `native-android-apk` (the digest the badging job
+checked) and `native-ios-ipa`, read them (above) and deleted them. Run 330 (`ac54194`, the same code) was green the
+same way. The commit of this section, which changes only this document, starts a run of its own.
+
+**APK sizes** (release, four ABIs, unsigned dry run at 0.3.17)
+
+| | Run 327 (`45909e4`, before) | Run 331 (`2ece21f`, after) |
+|---|---|---|
+| APK | 220.07 MB | 129.34 MB |
+| each library | arm64-v8a 53.84, armeabi-v7a 47.84, x86 58.39, x86_64 58.64 MB (A1's reading of run 326, the same code) | 23.74, 17.73, 28.30, 28.55 MB |
+| `assets/` | Gradle's two profiles only | the 35 files, 29.64 MB, stored, and the two profiles |
+
+**Person checks added** (in `docs/port/device-notes.md`, K3 row 1): on Android, the log line `assets: 35 files, 29.6 MB,
+from the APK in N ms (35 read now, 35 of them mapped)` before the first frame, N and the time to the first frame
+against the previous APK's, and the first frames drawing the labels' fonts, the UI's text, the realistic textures and
+the aircraft icons; on iOS, today's launch storyboard before the first frame. None ticked here (both need a phone).
+
+**For the next engineers**
+- A file the app reads at run time goes into `core::assets`' list: the scan test fails otherwise, and the APK gets
+  it from the same list. `cargo test --all-features` turns `apk-assets` on everywhere and fails (nothing installs
+  the files); CI tests the feature with `-p rustradar-core --features apk-assets`.
+- egui's own fonts (`default_fonts`, kept on deliberately as the last fallback, `ui/fonts.rs`) are about 1.1 MB in
+  each library; with the pack-relative relocations A1 measured, the only size levers left, both behaviour questions.
+- Stage 12's D1 changes only the `static` root in the `files!` list; D2 leaves four version places.

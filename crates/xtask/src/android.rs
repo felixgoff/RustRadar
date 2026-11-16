@@ -259,12 +259,19 @@ pub fn check_badging(b: &Badging, version: &str, code: u32, abis: &[&str]) -> Re
 }
 
 /// The signer's certificate digest from `apksigner verify --print-certs` (exactly one signer).
+///
+/// apksigner names a signer `Signer #1`, or, when the APK's v3 signature covers SDK ranges,
+/// `Signer (minSdkVersion=24, maxSdkVersion=…)` once per range; the same certificate in several
+/// ranges is still one signer.
 pub fn signer_digest(text: &str) -> Result<String, String> {
-    let line = Regex::new(r"(?m)^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]+)\s*$").expect("a valid pattern");
-    let digests: Vec<String> = line.captures_iter(text).map(|c| c[1].to_ascii_lowercase()).collect();
+    let line = Regex::new(r"(?m)^Signer (?:#\d+|\([^)]*\)) certificate SHA-256 digest: ([0-9a-fA-F]+)\s*$")
+        .expect("a valid pattern");
+    let mut digests: Vec<String> = line.captures_iter(text).map(|c| c[1].to_ascii_lowercase()).collect();
+    digests.sort_unstable();
+    digests.dedup();
     match &digests[..] {
         [one] => Ok(one.clone()),
-        [] => Err("apksigner printed no signer certificate".to_owned()),
+        [] => Err(format!("apksigner printed no signer certificate:\n{}", text.trim())),
         _ => Err(format!("the APK has {} signers, today's one", digests.len())),
     }
 }
@@ -723,6 +730,13 @@ Signer #1 certificate SHA-1 digest: 0000000000000000000000000000000000000000
         assert!(signer_digest("Verifies\n").is_err());
         let two = format!("{text}Signer #2 certificate SHA-256 digest: {}\n", "ab".repeat(32));
         assert!(signer_digest(&two).is_err());
+        // a v3 signature over SDK ranges names each range; one certificate is still one signer
+        let ranges = format!(
+            "Verifies\nSigner (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: {d}\n\
+             Signer (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: {d}\n",
+            d = RELEASE_CERT_SHA256.to_ascii_uppercase()
+        );
+        assert_eq!(signer_digest(&ranges).unwrap(), RELEASE_CERT_SHA256);
     }
 
     #[test]

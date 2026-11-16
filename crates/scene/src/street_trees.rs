@@ -1,6 +1,6 @@
 //! Port of `street-trees.ts` (doc 04 §8.7): the trees towns keep registers of, in their streets
 //! and parks: Malmö's and Umeå's (both CC0), each where it stands, of its kind, Malmö's with their
-//! crowns' widths. `static/street-trees/*.bin`; see `scripts/street-trees.py` for the format:
+//! crowns' widths. `assets/street-trees/*.bin`; see `scripts/street-trees.py` for the format:
 //!
 //! ```text
 //! "RST1"            4 bytes magic
@@ -35,7 +35,7 @@ pub mod register_kinds {
 
 pub const STREET_TREES_ATTRIBUTION: &str = "Street trees: Malmö stad, Umeå kommun (CC0)";
 
-/// A town with a register: its file (`static/street-trees/{file}.bin`) and round where its trees
+/// A town with a register: its file (`assets/street-trees/{file}.bin`) and round where its trees
 /// are (west, south, east, north).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TownFile {
@@ -144,7 +144,7 @@ mod tests {
     use rustradar_core::assert_close;
 
     fn town(file: &str) -> Town {
-        let path = format!("{}/../../static/street-trees/{file}.bin", env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{}/../../assets/street-trees/{file}.bin", env!("CARGO_MANIFEST_DIR"));
         parse_town(&std::fs::read(&path).expect("a street-trees file")).expect("a town")
     }
 

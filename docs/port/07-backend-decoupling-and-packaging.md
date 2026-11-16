@@ -859,7 +859,7 @@ Tauri embeds `static/` in the binary. Options natively:
    bundle). Smaller RAM footprint on phones, but five lookup paths and installer changes.
 
 Either way move the files to a neutral folder (for example `assets/`) since `static/` is a SvelteKit
-convention. The KTX2 files are Basis Universal (UASTC and ETC1S) and need a native transcoder; that is doc 04's
+convention (done in stage 12, plan D1: the files are in `assets/`). The KTX2 files are Basis Universal (UASTC and ETC1S) and need a native transcoder; that is doc 04's
 subject, noted here because it adds a C++ dependency (`basis-universal` crate) to every cross-compile
 (Android NDK, iOS) **(verify it builds for all targets early)**.
 
@@ -1144,13 +1144,13 @@ owner decision (section 17). Facts:
 
 | Script | Input | Output | Depends on |
 |---|---|---|---|
-| `scripts/aircraft/build.mjs` (+ `gltf1.mjs`) | Flightradar24's glTF 1.0 models, downloaded to `.cache/fr24-models/` | `static/aircraft/meshes.bin`, `index.json` (two LODs: 220 and 2600 triangles, vertex clustering), silhouette atlases into `textures/aircraft/` (128 px cells; outline radius 9, pad 12) | Node (zlib) |
-| `scripts/trains/build.mjs` (+ `collada.mjs`) | SketchUp Collada exports in a folder given as an argument (8 models, cut positions in the script) | `static/trains/meshes.bin`, `index.json` (3 cars per model, 1500 triangles each, unit box 3.1 m wide × 4.1 m high) | Node, an external image tool for textures' average colour |
-| `scripts/compress-textures.mjs` | `textures/realistic/*.webp`, `textures/aircraft/*` | `static/realistic/*.ktx2`, `static/aircraft/*.ktx2` (Basis Universal: UASTC for colour/normal/mask/icons, ETC1S for the two Earth pictures, with mip levels) | Node, **`node_modules/@loaders.gl/textures`'s Basis encoder**, Python + Pillow; reads layer order from `src/lib/realistic-textures.ts` |
+| `scripts/aircraft/build.mjs` (+ `gltf1.mjs`) | Flightradar24's glTF 1.0 models, downloaded to `.cache/fr24-models/` | `assets/aircraft/meshes.bin`, `index.json` (two LODs: 220 and 2600 triangles, vertex clustering), silhouette atlases into `textures/aircraft/` (128 px cells; outline radius 9, pad 12) | Node (zlib) |
+| `scripts/trains/build.mjs` (+ `collada.mjs`) | SketchUp Collada exports in a folder given as an argument (8 models, cut positions in the script) | `assets/trains/meshes.bin`, `index.json` (3 cars per model, 1500 triangles each, unit box 3.1 m wide × 4.1 m high) | Node, an external image tool for textures' average colour |
+| `scripts/compress-textures.mjs` | `textures/realistic/*.webp`, `textures/aircraft/*` | `assets/realistic/*.ktx2`, `assets/aircraft/*.ktx2` (Basis Universal: UASTC for colour/normal/mask/icons, ETC1S for the two Earth pictures, with mip levels) | Node, **`node_modules/@loaders.gl/textures`'s Basis encoder**, Python + Pillow; reads layer order from `src/lib/realistic-textures.ts` |
 | `scripts/realistic-textures.py` | a Streets GL checkout | `textures/realistic/*.webp` (512 px; glow 128 px) | Python, Pillow, NumPy |
 | `scripts/earth-texture.py`, `night-texture.py` | NASA Blue Marble / Black Marble JPEGs | `textures/realistic/earth.color.webp`, `earth.night.webp` (4096 × 2048) | Python, Pillow, NumPy |
-| `scripts/build-rail-overview.py` | Natural Earth railroads GeoJSON | `static/rail/railroads.bin` (`RRO1` format) | Python stdlib |
-| `scripts/street-trees.py` | Malmö and Umeå open data | `static/street-trees/{malmo,umea}.bin` (`RST1` format) | Python stdlib |
+| `scripts/build-rail-overview.py` | Natural Earth railroads GeoJSON | `assets/rail/railroads.bin` (`RRO1` format) | Python stdlib |
+| `scripts/street-trees.py` | Malmö and Umeå open data | `assets/street-trees/{malmo,umea}.bin` (`RST1` format) | Python stdlib |
 | `scripts/flow.py`, `scripts/sth.py` | Trafikverket GeoPackages | `crates/backend/data/flow.json`, `crates/backend/data/sth.json` (moved from `src-tauri/data/` in stage 1) | Python stdlib |
 
 All outputs are checked in, so none of these block the port. Two break when the frontend is deleted:
@@ -1158,7 +1158,7 @@ All outputs are checked in, so none of these block the port. Two break when the 
 (`src/lib/realistic-textures.ts`). If the textures will ever be regenerated, either keep a minimal
 `package.json` under `scripts/` for tooling, switch to the `basisu` command-line encoder, or port to Rust with
 the `basis-universal` crate's encoder; and move the layer lists to a data file both the tool and the renderer
-read. Output paths (`static/…`) change if assets move (section 11.8).
+read. The output paths are `assets/…` since stage 12 moved `static/` there (plan D1).
 
 ---
 

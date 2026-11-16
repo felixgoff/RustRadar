@@ -1,5 +1,5 @@
 //! The launch's update with its progress window (item P3; doc 07 §5.2, §7.1; `RS:updater.rs`'s
-//! `run`, `update`, `open_splash` and `show`, and `static/updater.html`).
+//! `run`, `update`, `open_splash` and `show`, and the Tauri app's `updater.html`, gone since D1).
 //!
 //! **The launch** ([`Launch`]): the main window is made hidden (`visible: false`, as today) and
 //! stays hidden while a release build without `--updated` asks the endpoint, at most

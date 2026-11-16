@@ -1559,7 +1559,7 @@ mod tests {
 
     #[test]
     fn the_overview_is_open_paths_in_its_two_colours_in_the_world_frame() {
-        let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../static/rail/railroads.bin")).unwrap();
+        let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/rail/railroads.bin")).unwrap();
         let overview = crate::rail_overview::parse_rail_overview(&file).unwrap();
         let segments = overview_segments(&overview, &OVERVIEW_COLORS);
         let expected: usize = (0..overview.length).map(|i| (overview.path(i).len() / 2).saturating_sub(1)).sum();

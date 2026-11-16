@@ -116,7 +116,7 @@ pub fn class_of(code: Option<&str>, name: Option<&str>) -> TrainClass {
     BY_NAME.iter().find(|(k, _)| name.contains(k)).map_or(DEFAULT, |(_, c)| *c)
 }
 
-/// The 3D model a train is drawn with (static/trains, built by
+/// The 3D model a train is drawn with (assets/trains, built by
 /// scripts/trains/build.mjs), by its product, operator and the stations it
 /// calls at; `None` draws the plain cars of its `Shape`. Liveries are the
 /// operators', so a model is only taken where the operator matches.

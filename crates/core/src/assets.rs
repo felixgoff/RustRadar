@@ -3,8 +3,8 @@
 //! overview, the fonts and the backend's rail data, 29.6 MB in all.
 //!
 //! Every crate reads them through the [`File`]s here, each known by its `key`: its path under
-//! its folder of the repository (`root`: `static`, `assets` or `crates/backend`), which is also
-//! its path in the Android APK's `assets/` folder.
+//! its folder of the repository (`root`: `assets` or `crates/backend`), which is also its path in
+//! the Android APK's `assets/` folder.
 //!
 //! - **Desktop and iOS**: each [`File`] is the file's bytes, embedded with `include_bytes!` (plan
 //!   1.6, section 7's "Assets" line), as before.
@@ -31,7 +31,7 @@ use std::sync::OnceLock;
 
 /// One file the app reads: its key, its folder in the repository and its bytes.
 pub struct File {
-    /// Its folder in the repository: `static`, `assets` or `crates/backend`.
+    /// Its folder in the repository: `assets` or `crates/backend`.
     pub root: &'static str,
     /// Its path under [`Self::root`], and in the APK's `assets/`.
     pub key: &'static str,
@@ -71,7 +71,7 @@ impl File {
         }
     }
 
-    /// Its path in the repository, from the root (`static/realistic/ground.color.ktx2`).
+    /// Its path in the repository, from the root (`assets/realistic/ground.color.ktx2`).
     pub fn path(&self) -> String {
         format!("{}/{}", self.root, self.key)
     }
@@ -139,7 +139,7 @@ macro_rules! files {
 }
 
 files! {
-    "static" {
+    "assets" {
         /// The realistic map's textures (doc 04 §3; Basis UASTC KTX2, the textures' own
         /// supercompression, so deflate gains nothing on them).
         BUILDING_COLOR = "realistic/building.color.ktx2";
@@ -169,8 +169,6 @@ files! {
         STREET_TREES_UMEA = "street-trees/umea.bin";
         /// The rail overview at low zoom (doc 02 §8).
         RAILROADS = "rail/railroads.bin";
-    }
-    "assets" {
         /// Overpass, the variable `wght` font, by subset (plan 1.5; `cargo xtask vendor-fonts`).
         OVERPASS_LATIN = "fonts/overpass-latin.ttf";
         OVERPASS_LATIN_EXT = "fonts/overpass-latin-ext.ttf";
@@ -278,7 +276,7 @@ mod tests {
         for (entry, file) in FILES.iter().zip(ALL) {
             assert_eq!((entry.root, entry.key), (file.root, file.key));
             assert!(keys.insert(entry.key), "{} is listed twice", entry.key);
-            assert!(["static", "assets", "crates/backend"].contains(&entry.root), "{}", entry.root);
+            assert!(["assets", "crates/backend"].contains(&entry.root), "{}", entry.root);
             let parts: Vec<&str> = entry.key.split('/').collect();
             assert!(parts.len() >= 2 && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != ".."), "{}", entry.key);
             assert!(entry.key.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b)), "{}", entry.key);
@@ -296,7 +294,7 @@ mod tests {
             assert_eq!(&**file, file.bytes());
             total += on_disk.len();
         }
-        // plan 1.6's 27 MB of static/, the fonts and the backend's data
+        // plan 1.6's 27 MB of what was static/, the fonts and the backend's data
         assert!((29_000_000..31_000_000).contains(&total), "{total}");
         assert!(STH.text().starts_with('{') && FLOW.text().starts_with('{'));
         assert_eq!(&GROUND_COLOR[..4], &[0xab, 0x4b, 0x54, 0x58]);

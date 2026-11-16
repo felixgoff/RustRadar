@@ -14,7 +14,7 @@
 // same way (the same integer hash; degrees to 4 decimals, so the f32 the wire carries reads back
 // as that decimal). The loop is G:2520-2636 (and the CPU parts of G:2870-3025) copied as written,
 // with today's modules: geo.ts, models.ts, motion.ts, screen.ts, deck's GlobeViewport, and the
-// published models' lookup and sizes from static/aircraft/index.json and meshes.bin (what
+// published models' lookup and sizes from assets/aircraft/index.json and meshes.bin (what
 // aircraft.ts reads; its `forFlight` is copied). Liveries do not change counts and are left out;
 // no flight is selected or hovered, and nothing is followed; aircraft labels are on and the
 // altitude exaggeration is the default 10. `yawOffset` is left out: it changes no count and no
@@ -96,11 +96,11 @@ function snapshot(): LiveFlight[] {
 
 type PackedMesh = { positions: number; vertices: number };
 type Packed = { size: number; lods: PackedMesh[]; gear?: PackedMesh & { attachZ: number } };
-const index = JSON.parse(readFileSync(join(ROOT, "static/aircraft/index.json"), "utf8")) as {
+const index = JSON.parse(readFileSync(join(ROOT, "assets/aircraft/index.json"), "utf8")) as {
   models: Record<string, Packed>; types: Record<string, string>; icons: Record<string, string>;
   icon: { cell: number; outline?: { cell: number } };
 };
-const bin = readFileSync(join(ROOT, "static/aircraft/meshes.bin"));
+const bin = readFileSync(join(ROOT, "assets/aircraft/meshes.bin"));
 const buffer = bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength);
 const positionsOf = (m: PackedMesh) => new Float32Array(buffer, m.positions, m.vertices * 3);
 

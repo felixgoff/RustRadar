@@ -804,7 +804,7 @@ fi
         );
         write("sdk/build-tools/36.0.0/badging.txt", badging);
         // the app's files, which the APK's assets/ is checked against, and the APK Gradle makes
-        for folder in ["static", "assets", "crates/backend"] {
+        for folder in ["assets", "crates/backend"] {
             std::os::unix::fs::symlink(bump::repo_root().join(folder), dir.join(folder)).unwrap();
         }
         let assets = crate::android_assets::apk_assets();

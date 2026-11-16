@@ -58,7 +58,7 @@ crates/
                                           updater. Renamed to `rustradar` in stage 12
   xtask/       package xtask              developer and release tooling (never shipped, never cross-compiled)
 src-tauri/     package rustradar          until stage 12: a thin Tauri shim over rustradar-backend
-assets/        fonts/, icons/lucide/      new vendored assets (stage 1). `static/` moves here in stage 12
+assets/        fonts/, icons/lucide/      new vendored assets (stage 1); `static/`'s files since stage 12 (D1)
 platform/      android/, ios/             Gradle project and xcodegen spec (stage 2 prototype, stage 11 final)
 ```
 
@@ -427,14 +427,14 @@ devices in scope.
 
 ### 1.6 Assets
 
-The files the app reads (all of `static/`, 27 MB, the fonts and the backend's rail data: 35 files, 29.6 MB) are
+The files the app reads (what was `static/`, 27 MB, the fonts and the backend's rail data: 35 files, 29.6 MB) are
 listed once, in `core::assets`, and every crate reads them through it, so that paths appear in one place. On
 desktop and iOS they are embedded with `include_bytes!`. On Android they are not (K14 triggered: the release APK
 was 220 MB with them compiled into each of its four libraries): the APK carries them once, stored, in `assets/`,
 and `android_main` hands them to `core::assets` through `AAssetManager` before anything reads them (core's
 feature `apk-assets`, on for the Android app only; `cargo xtask android-assets` copies and checks them; item A1,
 CI run 330: 129.3 MB). The WGSL shaders, the Lucide icons and the two licence texts stay embedded everywhere
-(0.2 MB). The files stay in `static/` while the Tauri build exists and move to `assets/` in stage 12.
+(0.2 MB). `static/`'s files moved to `assets/` in stage 12 (D1; `updater.html`, the Tauri updater's page, went).
 
 ---
 

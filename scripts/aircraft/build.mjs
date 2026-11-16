@@ -1,7 +1,7 @@
 // Turns the Flightradar24 3D models into the two things RustRadar draws:
 // low-poly meshes at two levels of detail, and top-down silhouettes for the
 // flat map view. Run with `bun run build:aircraft`; the generated files go to
-// `static/aircraft/`.
+// `assets/aircraft/`.
 //
 // The published models are far too detailed to instance thousands of times
 // (a 737 is 25k triangles), so each is reduced by vertex clustering: vertices
@@ -14,8 +14,8 @@ import { readTriangles } from "./gltf1.mjs";
 
 const SOURCE = "https://raw.githubusercontent.com/Flightradar24/fr24-3d-models/master/models";
 const CACHE = new URL("../../.cache/fr24-models/", import.meta.url);
-const OUT = new URL("../../static/aircraft/", import.meta.url);
-// the icon atlases, which scripts/compress-textures.mjs makes static/aircraft/*.ktx2
+const OUT = new URL("../../assets/aircraft/", import.meta.url);
+// the icon atlases, which scripts/compress-textures.mjs makes assets/aircraft/*.ktx2
 const ATLASES = new URL("../../textures/aircraft/", import.meta.url);
 
 /** Triangle budget per level of detail. */

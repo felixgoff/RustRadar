@@ -2,7 +2,7 @@
 // app credits him) into the cars RustRadar draws close in. Run with
 // `bun run build:trains <folder>`, the folder holding each model's SketchUp
 // Collada export as `<name>/model.dae`; the generated files go to
-// `static/trains/`.
+// `assets/trains/`.
 //
 // Each model is a whole trainset lying along +y. It is cut into cars at
 // `cuts`, and three are kept: the leading car, one from the middle and the
@@ -15,7 +15,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readCollada } from "./collada.mjs";
 
-const OUT = new URL("../../static/trains/", import.meta.url);
+const OUT = new URL("../../assets/trains/", import.meta.url);
 /** As in src/lib/train-models.ts. */
 const CAR_WIDTH_M = 3.1;
 const CAR_HEIGHT_M = 4.1;
@@ -186,4 +186,4 @@ for (const [name, { dir, cuts }] of Object.entries(MODELS)) {
 mkdirSync(OUT, { recursive: true });
 writeFileSync(new URL("meshes.bin", OUT), Buffer.concat(sections));
 writeFileSync(new URL("index.json", OUT), JSON.stringify(index));
-console.log(`static/trains: ${(at / 1e6).toFixed(2)} MB`);
+console.log(`assets/trains: ${(at / 1e6).toFixed(2)} MB`);

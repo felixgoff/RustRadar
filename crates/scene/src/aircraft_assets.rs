@@ -1,5 +1,5 @@
 //! Port of `aircraft.ts` (doc 03 §4.1–4.4): real aircraft shapes, built from the Flightradar24
-//! 3D models by `scripts/aircraft/build.mjs` and shipped in `static/aircraft/`.
+//! 3D models by `scripts/aircraft/build.mjs` and shipped in `assets/aircraft/`.
 //!
 //! Each type comes at two levels of detail (a couple of hundred triangles for the wide view, a
 //! couple of thousand up close) plus a top-down silhouette used when the map is flat, and most
@@ -200,7 +200,7 @@ pub struct IconCells {
     pub outline: Option<OutlineCells>,
 }
 
-/// `static/aircraft/index.json` as written (`Index`).
+/// `assets/aircraft/index.json` as written (`Index`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AircraftIndex {
     #[serde(deserialize_with = "ordered")]
@@ -428,7 +428,7 @@ mod tests {
     use rustradar_core::assert_close;
 
     fn read(name: &str) -> Vec<u8> {
-        let path = format!("{}/../../static/aircraft/{name}", env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{}/../../assets/aircraft/{name}", env!("CARGO_MANIFEST_DIR"));
         std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
     }
 

@@ -6,7 +6,7 @@
 //! colours are grey shades multiplied by the train's colour, so the body (1) takes it and the
 //! windows and underframe stay dark.
 //!
-//! Operator models (`static/trains`, built by `scripts/trains/build.mjs`) replace the plain cars
+//! Operator models (`assets/trains`, built by `scripts/trains/build.mjs`) replace the plain cars
 //! once loaded: the app reads [`INDEX_FILE`] and [`MESHES_FILE`] and hands both to
 //! [`TrainModels::parse`]; until then, or on an `Err`, the plain cars are drawn. Each model
 //! car is unindexed and flat shaded, in the plain cars' unit box, its normals already divided by
@@ -436,7 +436,7 @@ mod tests {
     }
 
     fn read(name: &str) -> Vec<u8> {
-        let path = format!("{}/../../static/trains/{name}", env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{}/../../assets/trains/{name}", env!("CARGO_MANIFEST_DIR"));
         std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
     }
 

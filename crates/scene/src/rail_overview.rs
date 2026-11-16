@@ -3,7 +3,7 @@
 //! The map's vector tiles carry railways only from zoom 8, so a whole country (Sweden, say) showed
 //! no rail at all. Below that the network comes from Natural Earth's 1:10m railroads (public
 //! domain), simplified to about a kilometre and shipped with the app as
-//! `static/rail/railroads.bin`; see `scripts/build-rail-overview.py` for the format:
+//! `assets/rail/railroads.bin`; see `scripts/build-rail-overview.py` for the format:
 //!
 //! ```text
 //! "RRO1"                                  4 bytes magic
@@ -136,7 +136,7 @@ mod tests {
     use super::*;
 
     fn file() -> Vec<u8> {
-        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../static/rail/railroads.bin")).expect("static/rail/railroads.bin")
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/rail/railroads.bin")).expect("assets/rail/railroads.bin")
     }
 
     #[test]

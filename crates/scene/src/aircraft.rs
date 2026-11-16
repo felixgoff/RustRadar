@@ -833,7 +833,7 @@ mod tests {
 
     fn shipped() -> AircraftModels {
         let read = |name: &str| {
-            let path = format!("{}/../../static/aircraft/{name}", env!("CARGO_MANIFEST_DIR"));
+            let path = format!("{}/../../assets/aircraft/{name}", env!("CARGO_MANIFEST_DIR"));
             std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
         };
         AircraftModels::parse(&read("index.json"), &read("meshes.bin")).unwrap()

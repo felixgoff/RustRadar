@@ -6,7 +6,7 @@
 //! What today's app does, and so this layer, in drawing order ([`rustradar_scene::rail::rail_layers`]
 //! decides which, from the frame's zoom and projection):
 //! - **Overview below zoom 8** (`rail-overview-*`, doc 02 §8.3): Natural Earth's railroads shipped
-//!   with the app (`static/rail/railroads.bin`, embedded), parsed and made into path segments on the
+//!   with the app (`assets/rail/railroads.bin`, embedded), parsed and made into path segments on the
 //!   worker pool the first time a view below zoom 8 asks for them (`railOverview()` loads lazily),
 //!   drawn once they are in, never if the file cannot be read. Open paths, main lines `RAIL_MAIN`
 //!   1.5 px, the rest `RAIL_MINOR` 1 px, `SURFACE_NO_CULL`, one mesh in the world's frame.
@@ -97,7 +97,7 @@ use crate::state::DrawState;
 /// source name the app's fetcher maps to `backend::rail::tile`, and a fixture folder's name.
 pub const RAIL_TILES: &str = "openrailwaymap";
 
-/// `static/rail/railroads.bin`, the overview (doc 02 §8.3; [`rustradar_core::assets`]).
+/// `assets/rail/railroads.bin`, the overview (doc 02 §8.3; [`rustradar_core::assets`]).
 pub static RAILROADS: &rustradar_core::assets::File = &rustradar_core::assets::RAILROADS;
 
 /// The speed labels' face: Overpass at 650 for today's Inter (plan section 6, item 5).

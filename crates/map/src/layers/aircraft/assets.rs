@@ -2,7 +2,7 @@
 //! the published models' meshes at both levels of detail with their landing gear, the built-in
 //! procedural models, and the two silhouette atlases.
 //!
-//! - [`published`]: `static/aircraft/index.json` and `meshes.bin` ([`INDEX_JSON`], [`MESHES_BIN`]:
+//! - [`published`]: `assets/aircraft/index.json` and `meshes.bin` ([`INDEX_JSON`], [`MESHES_BIN`]:
 //!   [`rustradar_core::assets`], embedded or, on Android, from the APK), read once per process
 //!   into `scene`'s [`AircraftModels`] (`aircraftModels.load()`). The scene builder looks flights up in it (`forFlight`, a model's
 //!   size, its gear's `attachZ`, a mesh's lowest point), and its `is_some()` is today's
@@ -62,17 +62,17 @@ use crate::pipelines::icon::IconDef;
 use crate::pipelines::mesh::{Shape, Vertex};
 use crate::textures::{AIRCRAFT_ICONS, AIRCRAFT_ICONS_OUTLINE, Ktx2Texture, LoadOptions, Texture, TextureFile};
 
-/// `static/aircraft/index.json`: the models, the lookups by type and icon class, the atlases'
+/// `assets/aircraft/index.json`: the models, the lookups by type and icon class, the atlases'
 /// layout ([`rustradar_scene::aircraft_assets::INDEX_FILE`]).
 pub static INDEX_JSON: &File = &assets::AIRCRAFT_INDEX;
-/// `static/aircraft/meshes.bin`: every mesh the index points into.
+/// `assets/aircraft/meshes.bin`: every mesh the index points into.
 pub static MESHES_BIN: &File = &assets::AIRCRAFT_MESHES;
-/// `static/aircraft/icons.ktx2`: the silhouettes, 7 × 6 cells of 128 px.
+/// `assets/aircraft/icons.ktx2`: the silhouettes, 7 × 6 cells of 128 px.
 pub static ICONS_KTX2: &File = &assets::AIRCRAFT_ICONS;
-/// `static/aircraft/icons-outline.ktx2`: their borders, 7 × 6 cells of 152 px.
+/// `assets/aircraft/icons-outline.ktx2`: their borders, 7 × 6 cells of 152 px.
 pub static OUTLINE_KTX2: &File = &assets::AIRCRAFT_OUTLINE;
 
-/// The embedded bytes of an aircraft file by its path under `static/` (the paths of
+/// The embedded bytes of an aircraft file by its path under `assets/` (the paths of
 /// [`rustradar_scene::aircraft_assets`] and of the [`TextureFile`]s).
 pub fn embedded(path: &str) -> Option<&'static [u8]> {
     Some(match path {
@@ -367,7 +367,7 @@ mod tests {
 
     /// A static file as it is on disk.
     fn static_file(path: &str) -> Vec<u8> {
-        let full = format!("{}/../../static/{path}", env!("CARGO_MANIFEST_DIR"));
+        let full = format!("{}/../../assets/{path}", env!("CARGO_MANIFEST_DIR"));
         std::fs::read(&full).unwrap_or_else(|e| panic!("{full}: {e}"))
     }
 

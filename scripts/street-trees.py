@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds static/street-trees/*.bin, the trees towns keep registers of.
+"""Builds assets/street-trees/*.bin, the trees towns keep registers of.
 
 Malmö's and Umeå's registers of the trees in their streets and parks (both
 CC0): where each stands, what kind it is, and in Malmö how wide its crown is.
@@ -22,7 +22,7 @@ import os
 import struct
 import urllib.request
 
-OUT = os.path.join(os.path.dirname(__file__), "..", "static", "street-trees")
+OUT = os.path.join(os.path.dirname(__file__), "..", "assets", "street-trees")
 TOWNS = {
     "malmo": "https://opendata-api.malmo.se/dataset/0d9523fd-40da-4e6f-8a90-981f61034ff3/resource/1fc8d406-9bd2-481d-9b80-885cd5e3655c/download/trad.geojson",
     "umea": "https://opendata.umea.se/api/explore/v2.1/catalog/datasets/trad-som-forvaltas-av-gator-och-parker/exports/geojson",

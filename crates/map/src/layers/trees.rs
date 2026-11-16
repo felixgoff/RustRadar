@@ -20,7 +20,7 @@
 //!   land cover ([`LAND_COVER`]: `landCover`, NMD's classes in Sweden, WorldCover's where NMD is
 //!   clear or not to be had, `backend::landcover`'s tiles, which the land cover ground asks for
 //!   too) and its canopy heights ([`CANOPY`], `backend::canopy`); and the towns' registered trees
-//!   in it (`static/street-trees`, embedded). Each of those may be missing (an answer of nothing or
+//!   in it (`assets/street-trees`, embedded). Each of those may be missing (an answer of nothing or
 //!   a failure), and the tile is planted without it; a tile whose own bytes can't be had (a
 //!   failure, or nothing there) is failed and asked again only once it is forgotten. At
 //!   most [`MAX_LOADING`] tiles load at once (a tile left out waits for a later frame); past

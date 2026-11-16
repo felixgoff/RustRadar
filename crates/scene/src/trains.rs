@@ -32,7 +32,7 @@
 //! bounds out as its cars ([`drawn_cars`]): as many as its operator says (else four), back from
 //! where it is drawn along its frames and then the track behind it (`core::train_cars`), each car
 //! the chord between its ends ([`car_places`]); a train with one of the operator models
-//! ([`TrainModels`], `static/trains`) has that model's cars at their own lengths, end to end, any
+//! ([`TrainModels`], `assets/trains`) has that model's cars at their own lengths, end to end, any
 //! other plain cars ([`car_mesh`] by its shape) of 25.4 m with 0.6 m between, and a train whose way
 //! is not known has them in a row back along its heading. Each car gets its level on the track
 //! (a tunnel or a bridge's height) and its colour: the train's, or white for a model's car (its
@@ -1103,10 +1103,10 @@ mod tests {
         drawn_cars(list, motion.drawn(), AROUND, models, now)
     }
 
-    /// The operator models of `static/trains`.
+    /// The operator models of `assets/trains`.
     fn models() -> TrainModels {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../static/trains");
-        let read = |name: &str| std::fs::read(dir.join(name)).expect("static/trains");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/trains");
+        let read = |name: &str| std::fs::read(dir.join(name)).expect("assets/trains");
         TrainModels::parse(&read("index.json"), &read("meshes.bin")).expect("the models")
     }
 

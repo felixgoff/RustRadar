@@ -524,7 +524,7 @@ impl Sampling {
     }
 }
 
-/// A KTX2 file the map uses: its path under `static/` and how it is uploaded and sampled.
+/// A KTX2 file the map uses: its path under `assets/` and how it is uploaded and sampled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureFile {
     pub path: &'static str,
@@ -812,7 +812,7 @@ mod tests {
     use crate::gpu::testing::gpu;
 
     fn static_file(path: &str) -> Vec<u8> {
-        let full = format!("{}/../../static/{path}", env!("CARGO_MANIFEST_DIR"));
+        let full = format!("{}/../../assets/{path}", env!("CARGO_MANIFEST_DIR"));
         std::fs::read(&full).unwrap_or_else(|e| panic!("{full}: {e}"))
     }
 

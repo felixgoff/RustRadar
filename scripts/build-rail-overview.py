@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds static/rail/railroads.bin, the railway network drawn zoomed out.
+"""Builds assets/rail/railroads.bin, the railway network drawn zoomed out.
 
 The map's vector tiles carry railways only from zoom 8, so a whole country
 showed no rail at all. This takes Natural Earth's 1:10m railroads (public
@@ -24,7 +24,7 @@ import sys
 import urllib.request
 
 URL = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_railroads.geojson"
-OUT = os.path.join(os.path.dirname(__file__), "..", "static", "rail", "railroads.bin")
+OUT = os.path.join(os.path.dirname(__file__), "..", "assets", "rail", "railroads.bin")
 # degrees; about 1 km, below what shows at the zooms this is drawn at
 TOLERANCE = 0.01
 SCALE = 100

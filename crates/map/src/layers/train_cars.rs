@@ -17,7 +17,7 @@
 //!
 //! - **Meshes**: a plain car is [`rustradar_scene::train_models::car_mesh`] by its key
 //!   (`<shape>-cab`, `<coach shape>-coach`), grey shades in its vertex colours multiplied by the
-//!   train's colour; a model's car is one of the operator models of `static/trains`, embedded
+//!   train's colour; a model's car is one of the operator models of `assets/trains`, embedded
 //!   ([`INDEX_JSON`], [`MESHES_BIN`]) and read once per process ([`models`]; the scene builder hands
 //!   the same models to the layout, for the cars' lengths), its livery in its vertex colours. Each
 //!   mesh is unindexed (three vertices a triangle) and uploaded the first time a car takes it.
@@ -56,10 +56,10 @@ use crate::frame::ViewFrame;
 use crate::pipelines::mesh::{Instance, Instances, Material, MeshPipeline, Shape, Style, StyleUniform, Vertex, orientation_matrix};
 use crate::state::DrawState;
 
-/// `static/trains/index.json`: each model's three cars, their lengths and their sections of
+/// `assets/trains/index.json`: each model's three cars, their lengths and their sections of
 /// [`MESHES_BIN`] ([`rustradar_scene::train_models::INDEX_FILE`]).
 pub static INDEX_JSON: &File = &rustradar_core::assets::TRAIN_INDEX;
-/// `static/trains/meshes.bin`: every model car's triangles.
+/// `assets/trains/meshes.bin`: every model car's triangles.
 pub static MESHES_BIN: &File = &rustradar_core::assets::TRAIN_MESHES;
 
 /// The operator models, read from the embedded files once per process (`loadTrainModels()`);
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn the_operator_models_are_embedded_with_their_cars_lengths() {
-        let models = models().expect("static/trains reads");
+        let models = models().expect("assets/trains reads");
         let mut names: Vec<&str> = models.names().collect();
         names.sort_unstable();
         assert_eq!(names, ["contessa", "sj-intercity", "x2000", "x40", "x55", "x60", "x61-skane", "x61-vasttrafik"]);

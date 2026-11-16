@@ -200,7 +200,7 @@ impl LineMesh {
 // ------------------------------------------------------------------ textures
 
 /// The realistic map's files (plan 1.6; [`rustradar_core::assets`], embedded or, on Android, from
-/// the APK): the bytes of `path` (a `textures::TextureFile` path under `static/`), `None` for any
+/// the APK): the bytes of `path` (a `textures::TextureFile` path under `assets/`), `None` for any
 /// other.
 pub fn texture_bytes(path: &str) -> Option<Bytes> {
     use rustradar_core::assets as a;

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The map's images as GPU textures ready to use: Basis Universal in KTX2
-// files (static/realistic/*.ktx2, static/aircraft/*.ktx2), each with its mip
+// files (assets/realistic/*.ktx2, assets/aircraft/*.ktx2), each with its mip
 // levels made, which the app turns into whatever compressed format the GPU
 // takes (BC7 on desktops, ASTC on phones and Apple's) in a worker:
 // src/lib/ktx2.ts. A quarter of the memory of the images' own pixels, and no
@@ -103,7 +103,7 @@ function listIn(source, name) {
 function jobs() {
   const ts = readFileSync(`${ROOT}src/lib/realistic-textures.ts`, "utf8");
   const src = (name) => `${ROOT}textures/realistic/${name}`;
-  const out = (name) => `${ROOT}static/realistic/${name}.ktx2`;
+  const out = (name) => `${ROOT}assets/realistic/${name}.ktx2`;
   const set = (list, kind, as) => ({ out: out(`${list.toLowerCase().replace("_textures", "")}.${kind}`), images: listIn(ts, list).map((n) => src(`${n}.${kind}.webp`)), kind: as });
   return [
     set("BUILDING_TEXTURES", "color", "color"),
@@ -119,8 +119,8 @@ function jobs() {
     { out: out("tree-volume.normal"), images: [src("tree-volume.normal.webp")], kind: "normal" },
     { out: out("earth.color"), images: [src("earth.color.webp")], kind: "earth" },
     { out: out("earth.night"), images: [src("earth.night.webp")], kind: "earth" },
-    { out: `${ROOT}static/aircraft/icons.ktx2`, images: [`${ROOT}textures/aircraft/icons.png`], kind: "data" },
-    { out: `${ROOT}static/aircraft/icons-outline.ktx2`, images: [`${ROOT}textures/aircraft/icons-outline.png`], kind: "data" },
+    { out: `${ROOT}assets/aircraft/icons.ktx2`, images: [`${ROOT}textures/aircraft/icons.png`], kind: "data" },
+    { out: `${ROOT}assets/aircraft/icons-outline.ktx2`, images: [`${ROOT}textures/aircraft/icons-outline.png`], kind: "data" },
   ];
 }
 

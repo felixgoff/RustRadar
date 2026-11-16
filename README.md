@@ -87,8 +87,8 @@ src-tauri/       Tauri backend: commands wrapping the fr24 client, airport
                  logo-derived livery colours, sign-in
 src/app.css      Design tokens and global styles
 scripts/aircraft/ Offline pipeline: reads the Flightradar24 3D models and
-                 writes static/aircraft/ (meshes + silhouettes)
-static/aircraft/ Generated aircraft meshes, silhouette atlas and type index
+                 writes assets/aircraft/ (meshes + silhouettes)
+assets/aircraft/ Generated aircraft meshes, silhouette atlas and type index
 src/lib/         Svelte UI: Globe (deck.gl), aircraft models and liveries,
                  panels, filters, routes and AIRAC cycles, day/night, API bindings
 ```
@@ -222,19 +222,19 @@ covering the visible area when zoomed in. It refreshes the whole world every
   `src-tauri/src/radar.rs`. Airline logos for automatic liveries: pics.avs.io.
 - The realistic map's textures are [Streets GL](https://github.com/StrandedKitty/streets-gl)'s
   (MIT, © StrandedKitty): `scripts/realistic-textures.py` turns them into the
-  texture arrays in `static/realistic/`, with Streets GL's licence beside
+  texture arrays in `assets/realistic/`, with Streets GL's licence beside
   them. The land's colours zoomed out are NASA's Blue Marble: Next Generation
   (public domain; NASA Earth Observatory, Reto Stöckli), which
-  `scripts/earth-texture.py` turns into `static/realistic/earth.color.webp`.
+  `scripts/earth-texture.py` turns into `textures/realistic/earth.color.webp`.
   Its weather is MET Norway's Locationforecast (CC BY 4.0), fetched by
   `src-tauri/src/weather.rs`, which identifies the app as MET asks.
 - Aircraft shapes come from [Flightradar24's 3D models](https://github.com/Flightradar24/fr24-3d-models)
   (glTF 1.0, in turn from the FlightGear project). `bun run build:aircraft`
   downloads them, reduces each by vertex clustering to two levels of detail,
   splits the triangles into livery parts, renders a top-down silhouette, and
-  writes the result to `static/aircraft/`. Rerun it to pick up new models or
+  writes the result to `assets/aircraft/`. Rerun it to pick up new models or
   change the triangle budgets; the downloads are cached in `.cache/`.
-  **Those models are GPL-2.0**, so the generated files in `static/aircraft/`
+  **Those models are GPL-2.0**, so the generated files in `assets/aircraft/`
   are a derivative work and carry that licence, while the rest of this project
   is MIT. Delete that directory (the built-in shapes take over) or replace it
   with your own models if that mix does not suit you.

@@ -65,15 +65,21 @@ fn limb(globe: &GlobeViewport, angle: f64) -> f64 {
 fn edge(image: &Image, angle: f64) -> f64 {
     let centre = [f64::from(image.width) / 2.0, f64::from(image.height) / 2.0];
     let half = f64::from(LAND[0] + INK[0]) / 2.0;
-    let mut r = 0.0;
-    loop {
+    let on = |r: f64| {
         let (x, y) = (centre[0] + r * angle.cos(), centre[1] + r * angle.sin());
-        assert!(x >= 0.0 && y >= 0.0 && x < f64::from(image.width) && y < f64::from(image.height), "no edge at {angle}");
-        if f64::from(image.pixel(x as u32, y as u32)[0]) < half {
-            return r;
-        }
+        (x >= 0.0 && y >= 0.0 && x < f64::from(image.width) && y < f64::from(image.height)).then(|| image.pixel(x as u32, y as u32))
+    };
+    // from the picture's edge inwards: the polar cap past ±85.06° reads as sea (I3), a dark spot
+    // inside the disc that an outward scan would take for the limb
+    let mut r = 0.0;
+    while on(r + 0.25).is_some() {
         r += 0.25;
     }
+    while on(r).is_some_and(|p| f64::from(p[0]) < half) {
+        r -= 0.25;
+    }
+    assert!(r > 0.0, "no edge at {angle}");
+    r + 0.25
 }
 
 /// The acceptance of E17: `--screenshot` renders the globe of E5 through `map::headless`, with the

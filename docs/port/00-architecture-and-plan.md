@@ -838,10 +838,13 @@ Entry condition: the parity checklist of section 4 is complete and P11 has passe
 
 | Id | Item | Files | Acceptance |
 |---|---|---|---|
-| D1 | Move `static/**` to `assets/**` (drop `updater.html`), update `core::assets` (its `static` root), update the offline scripts' output paths | `assets/**`, `crates/core/src/assets.rs`, `scripts/*` | workspace builds; all shots unchanged |
-| D2 | Delete `src/`, `src-tauri/`, `package.json`, `bun.lock`, `patches/`, `svelte.config.js`, `vite.config.js`, `tsconfig.json`, `scripts/version.mjs`, `scripts/testflight-age.mjs`, `scripts/port/`; rename package `rustradar-app` to `rustradar` (binary `rustradar`), carrying the version on from the last Tauri release | repository root, `crates/app/Cargo.toml`, `Cargo.lock` | `git ls-files '*.ts' '*.svelte' '*.js' '*.mjs'` lists only the offline asset generators kept under `scripts/` (section 9, question 7); `cargo tree` has no `tauri`, `wry` or `webkit` |
-| D3 | `README.md`, `PRODUCT.md`, `.gitignore`, third-party notices (Overpass OFL, Lucide ISC, Streets GL MIT, Basis Universal Apache-2.0, tile fixtures) | documents | build instructions work from a clean clone |
-| D4 | Final parity audit: walk section 4 against the reference pictures and the last Tauri build; record every remaining difference in section 6 | this document | signed off by the owner |
+| D1 ✅ | Move `static/**` to `assets/**` (drop `updater.html`), update `core::assets` (its `static` root), update the offline scripts' output paths | `assets/**`, `crates/core/src/assets.rs`, `scripts/*` | workspace builds; all shots unchanged |
+| D2 ✅ | Delete `src/`, `src-tauri/`, `package.json`, `bun.lock`, `patches/`, `svelte.config.js`, `vite.config.js`, `tsconfig.json`, `scripts/version.mjs`, `scripts/testflight-age.mjs`, `scripts/port/`; rename package `rustradar-app` to `rustradar` (binary `rustradar`), carrying the version on from the last Tauri release | repository root, `crates/app/Cargo.toml`, `Cargo.lock` | `git ls-files '*.ts' '*.svelte' '*.js' '*.mjs'` lists only the offline asset generators kept under `scripts/` (section 9, question 7); `cargo tree` has no `tauri`, `wry` or `webkit` |
+| D3 ✅ | `README.md`, `PRODUCT.md`, `.gitignore`, third-party notices (Overpass OFL, Lucide ISC, Streets GL MIT, Basis Universal Apache-2.0, tile fixtures) | documents | build instructions work from a clean clone |
+| D4 | Replaced by I1-I3 (section 7, "better, not a copy"): no parity audit against the Tauri build | — | — |
+| I1 ✅ | Real 3D bridges (lit decks, parapets, piers, shadows, graded ramps); trains and cars ride and tilt on them | `scene::bridges`, `map::layers::ground` | Stage 12 status |
+| I2 ✅ | Seamless building LODs: every tile lit with shadows, 300 ms crossfade, dark/satellite use z13-14 | `tess::buildings`, `layers::buildings*` | Stage 12 status |
+| I3 ✅ | Labels never overlap (greedy whole-box), smooth-lit terrain, no grey polar cap | `scene::declutter`, `layers::labels`, `layers::terrain`, `layers::earth` | Stage 12 status |
 
 ---
 
@@ -1042,6 +1045,11 @@ non-Latin labels.
 
 ## 7. Decisions on the mappers' open questions
 
+**Stage 12 (owner): better, not a copy.** After parity the app keeps every feature but no longer reproduces the
+TypeScript/deck.gl look or quirks. Code that only mimics deck.gl, TypeScript or Chromium may be simplified or removed,
+broken-looking features are removed outright, and tests that only pin the old look get new goldens or go. Where this
+conflicts with a parity row below, this wins.
+
 **Doc 01 (camera, basemap)**
 
 | Question | Decision |
@@ -1159,7 +1167,7 @@ non-Latin labels.
 | `tokio::spawn` off the runtime | `backend::rt()` everywhere (K15) |
 | Soft keyboard, insets, surface loss | Prototyped in stage 2 (E19) |
 | Basis as a C++ dependency | Accepted, with fallback K7 |
-| TestFlight refresh during the transition | The workflow detects a Tauri tree (`src-tauri/tauri.conf.json`) and uses the old steps for it (P10) |
+| TestFlight refresh during the transition | The workflow skips a tag that still holds `src-tauri/` with a warning; it rebuilds only native tags (D2) |
 | Unverified tool claims | Each is checked inside the item that depends on it (P5–P9, U20) |
 
 ---
@@ -2726,3 +2734,27 @@ the aircraft icons; on iOS, today's launch storyboard before the first frame. No
 - egui's own fonts (`default_fonts`, kept on deliberately as the last fallback, `ui/fonts.rs`) are about 1.1 MB in
   each library; with the pack-relative relocations A1 measured, the only size levers left, both behaviour questions.
 - Stage 12's D1 changes only the `static` root in the `files!` list; D2 leaves four version places.
+
+---
+
+## Stage 12 status
+
+**What changed** (commits `45aad09`..HEAD on `rust-port`): `static/` is `assets/` (D1); the TypeScript/Tauri app,
+bun and its scripts are gone, the app package is `rustradar` (lib still `rustradar_app`), icons live in
+`platform/icons`, and `rust.yml` builds only the native app (D2); README, PRODUCT.md and THIRD-PARTY-NOTICES.md
+describe the native app (D3). D4 is replaced by the owner's "better, not a copy" (section 7): real 3D bridges with
+trains on their decks (I1), lit and shadowed building tiles at every zoom with a 300 ms crossfade between LODs
+(I2), labels that never overlap and keep their size, smooth-lit terrain and a sea-coloured polar cap (I3). Tests
+that only pinned the old look were given new goldens or removed, as each commit says.
+
+**Checks (V12):** workspace check and clippy `-D warnings` clean; tests of every crate pass except the full map GPU
+suite (CI runs it); `git ls-files '*.ts' '*.svelte' '*.js' '*.mjs'` lists only the five offline generators under
+`scripts/` (plus agent tooling under `.claude/`); `cargo tree --target all` has no tauri, wry or webkit;
+`cargo xtask bump --check` passes at 0.3.0. The workflows publish only on a push to `main` or a `v*` tag: one native
+release (version from `scripts/release-version.sh`, signed `latest.json` by the `TAURI_SIGNING_PRIVATE_KEY` secret,
+signed APK, IPA to TestFlight); `rust-port` publishes nothing (the `tree` gate and the `release` job's ref guard).
+Identity (`com.felix.rustradar`, updater key and endpoint, versionCode scheme) is unchanged, so installed Tauri
+apps update; `docs/port/upgrade-rehearsal.md` still matches.
+
+**Before the merge to main:** the P11 upgrade rehearsal (`docs/port/upgrade-rehearsal.md`) on real installs, and the
+owner's approval.

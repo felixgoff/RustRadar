@@ -7,11 +7,9 @@
 // - Vertex: the tile's RTIN mesh in its local Mercator frame (`(u, v)` in tile units, the height in
 //   metres), the height first raised to the sea's (`SeaLevelExtension`: `size.z = max(size.z, 0.0)`,
 //   on the skirt's vertices as well).
-// - Fragment: SimpleMeshLayer's flat shading for a mesh without normals,
-//   `normalize(cross(dFdx(position), dFdy(position)))`, here in the render frame (deck's common space
-//   on the flat map, turned on the globe as the key light's direction is); wgpu's framebuffer y runs
-//   down where GL's runs up, so `dFdy` is `-dpdy`. Then `mesh.wgsl`'s lighting (ambient, the camera
-//   light, the key light) per fragment, as SimpleMeshLayer's fragment shader does it.
+// - Normal: smooth, from each vertex's slope (`mesh::slopes`) turned into the render frame
+//   ([`surface_normal`]). Then `mesh.wgsl`'s lighting (ambient, the camera light, the key light)
+//   per fragment.
 //
 // What is draped over the surface (the cover textures) and the realistic map's air over it
 // (`TERRAIN_AIR`) are the terrain items Z2 and on.
@@ -47,6 +45,8 @@ struct Varyings {
     @builtin(position) clip: vec4<f32>,
     // the fragment in the render frame, relative to the view centre (common units)
     @location(0) rel: vec3<f32>,
+    // its smooth normal in the render frame
+    @location(1) normal: vec3<f32>,
 }
 
 // `v` scaled to unit length; the zero vector stays zero.
@@ -85,20 +85,34 @@ fn shade(surface: vec3<f32>, camera: vec3<f32>, position: vec3<f32>, normal: vec
     return color;
 }
 
+
+// The surface's normal in the render frame from its slope (metres of height per tile unit east and
+// south, averaged on the CPU over the triangles round the vertex), so the relief is lit smooth
+// rather than facet by facet.
+fn surface_normal(local: vec3<f32>, slope: vec2<f32>) -> vec3<f32> {
+    let step = 1.0 / 256.0;
+    let p0 = project_local(local).rel;
+    let tu = project_local(local + vec3<f32>(step, 0.0, step * slope.x)).rel - p0;
+    let tv = project_local(local + vec3<f32>(0.0, step, step * slope.y)).rel - p0;
+    let up = project_local(local + vec3<f32>(0.0, 0.0, 1.0)).rel - p0;
+    let n = cross(tu, tv);
+    return unit(select(n, -n, dot(n, up) < 0.0));
+}
+
 @vertex
-fn vs(@location(0) position: vec3<f32>) -> Varyings {
-    // no lower than the sea
-    let p = project_local(vec3<f32>(position.xy, max(position.z, 0.0)));
+fn vs(@location(0) position: vec3<f32>, @location(1) slope: vec2<f32>) -> Varyings {
+    // no lower than the sea, where the surface is flat
+    let local = vec3<f32>(position.xy, max(position.z, 0.0));
+    let p = project_local(local);
     var out: Varyings;
     out.clip = p.clip;
     out.rel = p.rel;
+    out.normal = surface_normal(local, select(slope, vec2<f32>(0.0), position.z <= 0.0));
     return out;
 }
 
 @fragment
 fn fs(in: Varyings) -> @location(0) vec4<f32> {
-    // the face's normal, from the screen derivatives (uniform control flow: before any branch)
-    let normal = unit(cross(dpdx(in.rel), -dpdy(in.rel)));
-    let rgb = shade(style.color.rgb, globals.camera_render, in.rel, normal, lights.key_render);
+    let rgb = shade(style.color.rgb, globals.camera_render, in.rel, unit(in.normal), lights.key_render);
     return vec4<f32>(rgb, style.color.a * style.opacity);
 }

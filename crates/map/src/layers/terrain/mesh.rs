@@ -75,6 +75,10 @@ pub struct SurfaceMesh {
     /// `u` east and `v` south in tile units (a pixel of overlap past 0 and 1), the height in metres
     /// (the sea floor's below 0: the shader raises it).
     pub vertices: Vec<[f32; 3]>,
+    /// Each vertex's slope, metres of height per tile unit east and south, averaged over the
+    /// triangles round it (a skirt's vertex takes its top's): the shaders light the surface smooth
+    /// from it.
+    pub slopes: Vec<[f32; 2]>,
     /// Three a triangle: the surface's, then the skirt's.
     pub indices: Vec<u32>,
     /// The ground's lowest and highest heights in the tile, metres: the mesh's bounding box before
@@ -90,7 +94,7 @@ pub struct SurfaceMesh {
 
 impl ByteSize for SurfaceMesh {
     fn byte_size(&self) -> usize {
-        self.vertices.len() * size_of::<[f32; 3]>() + self.indices.len() * size_of::<u32>() + self.heights.byte_size()
+        self.vertices.len() * size_of::<[f32; 5]>() + self.indices.len() * size_of::<u32>() + self.heights.byte_size()
     }
 }
 
@@ -101,8 +105,50 @@ impl SurfaceMesh {
         let [low, high] = mesh.bounding_box;
         // (Z3: the drawn surface, raised to the sea as its shader raises it, on a grid)
         let heights = Arc::new(HeightGrid::from_mesh(&vertices, &mesh.indices, mesh.surface_triangles, GRID_SIDE));
-        SurfaceMesh { vertices, indices: mesh.indices.clone(), z_range: [low[2], high[2]], size, surface_triangles: mesh.surface_triangles, heights }
+        let slopes = slopes(&vertices, &mesh.indices, mesh.surface_triangles);
+        SurfaceMesh { vertices, slopes, indices: mesh.indices.clone(), z_range: [low[2], high[2]], size, surface_triangles: mesh.surface_triangles, heights }
     }
+}
+
+/// Each vertex's slope ([`SurfaceMesh::slopes`]): every surface triangle's plane, weighted by its
+/// area, with the heights raised to the sea as the shaders raise them; a vertex no surface triangle
+/// holds (the skirt's) takes the slope of the surface vertex at its place.
+pub fn slopes(vertices: &[[f32; 3]], indices: &[u32], surface_triangles: usize) -> Vec<[f32; 2]> {
+    let mut sums = vec![[0.0f64; 3]; vertices.len()];
+    let at = |i: u32| {
+        let [u, v, h] = vertices[i as usize];
+        [f64::from(u), f64::from(v), f64::from(h.max(0.0))]
+    };
+    for t in indices.chunks_exact(3).take(surface_triangles) {
+        let [a, b, c] = [at(t[0]), at(t[1]), at(t[2])];
+        let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+        let det = e1[0] * e2[1] - e2[0] * e1[1];
+        if det.abs() < 1e-12 {
+            continue;
+        }
+        let gu = (e1[2] * e2[1] - e2[2] * e1[1]) / det;
+        let gv = (e1[0] * e2[2] - e2[0] * e1[2]) / det;
+        let w = det.abs();
+        for &i in t {
+            let s = &mut sums[i as usize];
+            s[0] += gu * w;
+            s[1] += gv * w;
+            s[2] += w;
+        }
+    }
+    let key = |p: &[f32; 3]| (p[0].to_bits(), p[1].to_bits());
+    let mut on_surface = std::collections::HashMap::new();
+    for (i, s) in sums.iter().enumerate() {
+        if s[2] > 0.0 {
+            on_surface.insert(key(&vertices[i]), i);
+        }
+    }
+    (0..vertices.len())
+        .map(|i| {
+            let s = if sums[i][2] > 0.0 { sums[i] } else { on_surface.get(&key(&vertices[i])).map_or([0.0; 3], |&j| sums[j]) };
+            if s[2] > 0.0 { [(s[0] / s[2]) as f32, (s[1] / s[2]) as f32] } else { [0.0; 2] }
+        })
+        .collect()
 }
 
 /// The decode step, on the worker pool: a height tile's bytes to its mesh. `None` for no bytes; an
@@ -123,6 +169,11 @@ pub fn decode(_tile: TileIndex, bytes: &[u8], cancel: &Cancel, options: &Terrain
     Ok(Some(SurfaceMesh::from_loader(&mesh, width)))
 }
 
+/// The vertex buffer's contents: each vertex's place and slope.
+fn interleaved(mesh: &SurfaceMesh) -> Vec<[f32; 5]> {
+    mesh.vertices.iter().zip(&mesh.slopes).map(|(&[u, v, h], &[su, sv])| [u, v, h, su, sv]).collect()
+}
+
 /// A tile's mesh on the GPU.
 pub struct SurfaceGpu {
     vertices: wgpu::Buffer,
@@ -139,7 +190,7 @@ impl SurfaceGpu {
             wgpu::util::DeviceExt::create_buffer_init(&gpu.device, &wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage })
         };
         SurfaceGpu {
-            vertices: buffer("terrain vertices", bytemuck::cast_slice(&mesh.vertices), wgpu::BufferUsages::VERTEX),
+            vertices: buffer("terrain vertices", bytemuck::cast_slice(&interleaved(mesh)), wgpu::BufferUsages::VERTEX),
             indices: buffer("terrain indices", bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX),
             elements: mesh.indices.len() as u32,
             z_range: mesh.z_range,
@@ -152,7 +203,8 @@ impl SurfaceGpu {
         &self.heights
     }
 
-    /// The vertex buffer: `[f32; 3]` a vertex (`u`, `v`, metres) at location 0.
+    /// The vertex buffer: `[f32; 5]` a vertex, (`u`, `v`, metres) at location 0 and its slope at
+    /// location 1.
     pub fn vertices(&self) -> &wgpu::Buffer {
         &self.vertices
     }
@@ -180,11 +232,11 @@ impl SurfaceGpu {
     }
 }
 
-/// The surface's vertex layout: `[f32; 3]` at location 0.
+/// The surface's vertex layout: the place at location 0, the slope at location 1.
 pub const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-    array_stride: size_of::<[f32; 3]>() as u64,
+    array_stride: size_of::<[f32; 5]>() as u64,
     step_mode: wgpu::VertexStepMode::Vertex,
-    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2],
 };
 
 /// The surface's colour and material: `MESH_COLOR`, opaque, luma's default Phong material (deck's
@@ -285,13 +337,28 @@ mod tests {
         png
     }
 
+    /// A plane's slope everywhere on it, its skirt's vertices taking their tops'; the sea flat.
+    #[test]
+    fn slopes_are_the_planes_and_the_skirt_takes_its_tops() {
+        let h = |u: f32, v: f32| 100.0 * u + 50.0 * v + 10.0;
+        let mut vertices: Vec<[f32; 3]> = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]].iter().map(|&[u, v]| [u, v, h(u, v)]).collect();
+        // a skirt vertex under the first corner
+        vertices.push([0.0, 0.0, h(0.0, 0.0) - 4.0]);
+        let indices = vec![0, 1, 2, 1, 3, 2, 0, 4, 1];
+        for s in slopes(&vertices, &indices, 2) {
+            assert!((s[0] - 100.0).abs() < 1e-3 && (s[1] - 50.0).abs() < 1e-3, "{s:?}");
+        }
+        let sea: Vec<[f32; 3]> = vertices.iter().map(|&[u, v, _]| [u, v, -5.0]).collect();
+        assert!(slopes(&sea, &indices, 2).iter().all(|s| *s == [0.0, 0.0]));
+    }
+
     /// The shader's uniforms are `mesh.rs`'s, member for member.
     #[test]
     fn the_shader_takes_the_mesh_pipelines_uniforms() {
         for name in ["Lights", "Style"] {
             assert_eq!(wgsl_members(SHADER, name), wgsl_members(mesh::SHADER, name), "{name}");
         }
-        assert_eq!(VERTEX_LAYOUT.array_stride, 12);
+        assert_eq!(VERTEX_LAYOUT.array_stride, 20);
         let style = style_uniform();
         assert_eq!(style.color, [34.0 / 255.0, 39.0 / 255.0, 48.0 / 255.0, 1.0]);
         assert_eq!((style.ambient, style.diffuse, style.shininess, style.unlit), (0.35, 0.6, 32.0, 0));

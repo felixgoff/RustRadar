@@ -11,7 +11,7 @@
 //   being the tile's square); the light's terms (`rl_vertex`) for the air.
 // - Fragment: `TERRAIN_MODE_USE_COVER`'s `color = pixel + color · (1 − pixel.a)` (the cover holds
 //   colours premultiplied by their coverage, drawn over a clear transparent texture), then
-//   SimpleMeshLayer's flat-shaded normal and luma's Phong lighting on that colour, as
+//   the smooth normal (from each vertex's slope) and Phong lighting on that colour, as
 //   `terrain_surface.wgsl` lights the bare mesh (deck's `material: false` is the default Phong
 //   material, which lights the draped colour too). `fs_air` adds `TERRAIN_AIR` at the end
 //   (`realistic.ts:979-983`): `rgb = rgb · t + display(air) · (1 − t) · a`, with `t = rl_clear()`
@@ -59,6 +59,8 @@ struct Varyings {
     // `rl_vertex`'s `eye` and `sun` (what the air needs)
     @location(2) eye: vec3<f32>,
     @location(3) sun: vec3<f32>,
+    // its smooth normal in the render frame
+    @location(4) normal: vec3<f32>,
 }
 
 // `v` scaled to unit length; the zero vector stays zero.
@@ -97,9 +99,23 @@ fn shade(surface: vec3<f32>, camera: vec3<f32>, position: vec3<f32>, normal: vec
     return color;
 }
 
+
+// The surface's normal in the render frame from its slope (metres of height per tile unit east and
+// south, averaged on the CPU over the triangles round the vertex), so the relief is lit smooth
+// rather than facet by facet.
+fn surface_normal(local: vec3<f32>, slope: vec2<f32>) -> vec3<f32> {
+    let step = 1.0 / 256.0;
+    let p0 = project_local(local).rel;
+    let tu = project_local(local + vec3<f32>(step, 0.0, step * slope.x)).rel - p0;
+    let tv = project_local(local + vec3<f32>(0.0, step, step * slope.y)).rel - p0;
+    let up = project_local(local + vec3<f32>(0.0, 0.0, 1.0)).rel - p0;
+    let n = cross(tu, tv);
+    return unit(select(n, -n, dot(n, up) < 0.0));
+}
+
 @vertex
-fn vs(@location(0) position: vec3<f32>) -> Varyings {
-    // no lower than the sea
+fn vs(@location(0) position: vec3<f32>, @location(1) slope: vec2<f32>) -> Varyings {
+    // no lower than the sea, where the surface is flat
     let local = vec3<f32>(position.xy, max(position.z, 0.0));
     let p = project_local(local);
     let rl = rl_vertex(p.rel, rl_mercator(local_offset(local.xy)));
@@ -109,13 +125,14 @@ fn vs(@location(0) position: vec3<f32>) -> Varyings {
     out.uv = position.xy;
     out.eye = rl.eye;
     out.sun = rl.sun;
+    out.normal = surface_normal(local, select(slope, vec2<f32>(0.0), position.z <= 0.0));
     return out;
 }
 
 // The draped colour over the mesh colour, lit (uniform control flow: the derivatives and the
 // cover's sample come before any branch).
 fn surface(in: Varyings) -> vec4<f32> {
-    let normal = unit(cross(dpdx(in.rel), -dpdy(in.rel)));
+    let normal = unit(in.normal);
     let pixel = textureSample(cover, cover_sampler, in.uv);
     let color = pixel + style.color * (1.0 - pixel.a);
     let rgb = shade(color.rgb, globals.camera_render, in.rel, normal, lights.key_render);

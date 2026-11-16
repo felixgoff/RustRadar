@@ -771,6 +771,18 @@ fn course_of(a: LonLat, b: LonLat) -> f64 {
     ((b[0] - a[0]) * ((a[1] * PI) / 180.0).cos()).atan2(b[1] - a[1]) * 180.0 / PI
 }
 
+/// How high vertex `i` of `line` stands on the track, metres, exactly as [`on_structures`] lays it:
+/// up on a bridge's deck, else (on the ground or in a tunnel) 0.
+pub fn height_on(line: &[LonLat], i: usize, structures: &[Structure]) -> f64 {
+    if structures.is_empty() || line.len() < 2 || i >= line.len() {
+        return 0.0;
+    }
+    // on_structures reaches a vertex along the segment before it (the first along its own)
+    let course = if i == 0 { course_of(line[0], line[1]) } else { course_of(line[i - 1], line[i]) };
+    let level = level_among(line[i], Some(course), &measure_all(structures), LEVEL_WITHIN_M);
+    if level.tunnel { 0.0 } else { level.height }
+}
+
 /// A stretch of a line on the track, in a tunnel or not ([`on_structures`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Run {

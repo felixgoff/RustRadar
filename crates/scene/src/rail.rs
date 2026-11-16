@@ -57,8 +57,11 @@
 //! fragment (the layer's business), the stations and the speed labels by their anchors
 //! ([`Station::drawn`], [`SpeedLabel::inside`]).
 //!
-//! Bridges raised to their decks on the flat map are item T7's (`crate::bridges`); here every line
-//! lies on the ground.
+//! A tile's bridges ([`crate::bridges::bridge_parts`], the realistic ground's own
+//! rise: `orm_deck` for the speed map, `omt_deck` for the network) are kept apart from its other
+//! lines, once up on their decks and once on the ground ([`RailTile::bridges`],
+//! [`RailTile::bridges_flat`]): the flat map draws the first where it draws the decks, so the rail
+//! map rides on them rather than showing through under them, else (and on the globe) the second.
 
 use std::borrow::Cow;
 use std::f64::consts::PI;
@@ -699,6 +702,12 @@ pub struct RailTile {
     /// The lines in tile units (`LocalMercator::tile`), widths in pixels before the layer's
     /// [`rail_width_scale`], in feature order.
     pub lines: Vec<PathSegment>,
+    /// The tile's bridges up on their decks (`[u, v, metres]`, raised along
+    /// [`crate::bridges::bridge_parts`] as the realistic ground raises its decks), drawn after
+    /// [`Self::lines`] where the map draws the decks; else [`Self::bridges_flat`].
+    pub bridges: Vec<PathSegment>,
+    /// The same bridges lying on the ground, for a map that draws no decks.
+    pub bridges_flat: Vec<PathSegment>,
     /// The speed labels ([`speed_labels`] over the tile's features in tile units, `size` 1: the
     /// flat map's, the only one they are drawn on, from zoom [`SPEED_LABEL_MIN_ZOOM`]); none for
     /// the network.
@@ -708,12 +717,15 @@ pub struct RailTile {
 impl RailTile {
     /// Whether it draws nothing.
     pub fn is_empty(&self) -> bool {
-        self.lines.is_empty() && self.labels.is_empty()
+        self.lines.is_empty() && self.bridges.is_empty() && self.labels.is_empty()
     }
 
     /// The bytes it holds (for the tile cache's budget).
     pub fn byte_size(&self) -> usize {
-        size_of_val(self.lines.as_slice()) + self.labels.iter().map(|l| size_of::<SpeedLabel>() + l.text.len()).sum::<usize>()
+        size_of_val(self.lines.as_slice())
+            + size_of_val(self.bridges.as_slice())
+            + size_of_val(self.bridges_flat.as_slice())
+            + self.labels.iter().map(|l| size_of::<SpeedLabel>() + l.text.len()).sum::<usize>()
     }
 }
 
@@ -840,6 +852,63 @@ fn properties_of(feature: &mvt::Feature<'_>, layer: &str) -> Properties {
     p
 }
 
+/// A tile's lines as they are pushed, feature by feature, gathered as loaders.gl's binary lines
+/// and then split by their decks ([`crate::bridges::bridge_parts`], the realistic ground's own
+/// rise) into the lines on the ground (in their order) and the bridges, raised and flat
+/// ([`RailTile::bridges`]).
+struct Split<'a> {
+    lines: crate::bridges::Lines,
+    paints: Vec<Paint<'a>>,
+}
+
+impl<'a> Split<'a> {
+    fn new() -> Self {
+        let lines = crate::bridges::Lines { kind: "LineString".into(), size: 2, path_indices: vec![0], ..Default::default() };
+        Split { lines, paints: Vec::new() }
+    }
+
+    /// One feature's lines (`[u, v, 0]`), drawn in `paint`.
+    fn push(&mut self, p: Properties, lines: &[Vec<[f64; 3]>], paint: Paint<'a>) {
+        let id = self.lines.properties.len() as u32;
+        self.lines.properties.push(p);
+        self.paints.push(paint);
+        for line in lines {
+            for q in line {
+                self.lines.positions.extend([q[0], q[1]]);
+                self.lines.feature_ids.push(id);
+                self.lines.global_feature_ids.push(id);
+            }
+            self.lines.path_indices.push((self.lines.positions.len() / 2) as u32);
+        }
+    }
+
+    fn finish(self, tile: TileIndex, deck: &crate::bridges::DeckHeight, labels: Vec<SpeedLabel>) -> RailTile {
+        let local = LocalMercator::tile(tile);
+        let index = crate::bridges::TileIndex { x: tile.x, y: tile.y, z: tile.z };
+        // each path of `lines` in its feature's paint, `[u, v, metres]` (or on the ground)
+        let paths = |lines: &crate::bridges::Lines, flatten: bool, out: &mut PathBuilder| {
+            let size = lines.size;
+            for w in lines.path_indices.windows(2) {
+                let (start, end) = (w[0] as usize, w[1] as usize);
+                let Some(paint) = lines.feature_ids.get(start).and_then(|&f| self.paints.get(f as usize)) else { continue };
+                let at = |i: usize, k: usize| lines.positions.get(i * size + k).copied().unwrap_or(f64::NAN);
+                let path: Vec<[f64; 3]> = (start..end).map(|i| [at(i, 0), at(i, 1), if size == 3 && !flatten { at(i, 2) } else { 0.0 }]).collect();
+                out.push(&path, paint);
+            }
+        };
+        let (mut ground, mut raised, mut flat) = (PathBuilder::new(local), PathBuilder::new(local), PathBuilder::new(local));
+        match crate::bridges::bridge_parts(&self.lines, index, deck) {
+            None => paths(&self.lines, false, &mut ground),
+            Some(parts) => {
+                paths(&parts.ground, false, &mut ground);
+                paths(&parts.raised, false, &mut raised);
+                paths(&parts.raised, true, &mut flat);
+            }
+        }
+        RailTile { lines: ground.finish(), bridges: raised.finish(), bridges_flat: flat.finish(), labels }
+    }
+}
+
 /// The rail network of one OpenFreeMap tile (`bytes`, as served) at `tile` (`railNetworkLayer`):
 /// the `transportation` layer's rail and transit lines as path segments in tile units, each in
 /// its kind's colour and width, tunnels faint and dashed; every other feature draws nothing
@@ -848,7 +917,7 @@ pub fn network_tile(tile: TileIndex, bytes: &[u8], cancelled: &dyn Fn() -> bool)
     let globe = tile.z <= GLOBE_MAX_Z;
     // the globe's GeoJSON paths close a loop; the flat map's binary paths are open
     let path_type = if globe { PathType::Auto } else { PathType::Open };
-    let mut paths = PathBuilder::new(LocalMercator::tile(tile));
+    let mut paths = Split::new();
     for layer in mvt::layers_named(bytes, &[NETWORK_TILE_LAYER]) {
         let geo = TileGeo::new(tile, layer.extent);
         for feature in layer.features() {
@@ -866,12 +935,11 @@ pub fn network_tile(tile: TileIndex, bytes: &[u8], cancelled: &dyn Fn() -> bool)
                 continue;
             }
             let paint = Paint { color: Colors::Same(color), width: rail_width(&p), dash_array: rail_dash(&p), path_type };
-            for line in feature.lines() {
-                paths.push(&geo.path(&line, globe), &paint);
-            }
+            let lines: Vec<Vec<[f64; 3]>> = feature.lines().iter().map(|line| geo.path(line, globe)).collect();
+            paths.push(p, &lines, paint);
         }
     }
-    Ok(RailTile { lines: paths.finish(), labels: Vec::new() })
+    Ok(paths.finish(tile, &crate::bridges::omt_deck, Vec::new()))
 }
 
 /// The speed map of one backend rail tile (OpenRailwayMap's `railway_line_high`) at `tile`
@@ -880,7 +948,7 @@ pub fn network_tile(tile: TileIndex, bytes: &[u8], cancelled: &dyn Fn() -> bool)
 /// other railways) are left out. `cancelled` is asked between features.
 pub fn speed_tile(tile: TileIndex, bytes: &[u8], cancelled: &dyn Fn() -> bool) -> Result<RailTile, Cancelled> {
     let globe = tile.z <= GLOBE_MAX_Z;
-    let mut paths = PathBuilder::new(LocalMercator::tile(tile));
+    let mut paths = Split::new();
     // the features as the labels read them: the flat map's, in tile units
     let mut features: Vec<LineFeature> = Vec::new();
     for layer in mvt::layers_named(bytes, &[SPEED_TILE_LAYER]) {
@@ -898,9 +966,8 @@ pub fn speed_tile(tile: TileIndex, bytes: &[u8], cancelled: &dyn Fn() -> bool) -
             if color[3] > 0 {
                 // GeoJSON features (`binary: false`): a line whose last point is its first is a loop
                 let paint = Paint { color: Colors::Same(color), width: rail_speed_width(&p), dash_array: rail_speed_dash(&p), path_type: PathType::Auto };
-                for line in &lines {
-                    paths.push(&geo.path(line, globe), &paint);
-                }
+                let drawn: Vec<Vec<[f64; 3]>> = lines.iter().map(|line| geo.path(line, globe)).collect();
+                paths.push(p.clone(), &drawn, paint);
             }
             if speed_kind(&p) == Some(SpeedKind::Line) {
                 let mut parts: Vec<Vec<Vec<f64>>> = lines.iter().map(|l| l.iter().map(|&q| geo.unit(q).to_vec()).collect()).collect();
@@ -914,7 +981,7 @@ pub fn speed_tile(tile: TileIndex, bytes: &[u8], cancelled: &dyn Fn() -> bool) -
         }
     }
     let labels = speed_labels(&features, 1.0, SPEED_LABEL_MIN_LENGTH, SPEED_LABEL_SPACING);
-    Ok(RailTile { lines: paths.finish(), labels })
+    Ok(paths.finish(tile, &crate::bridges::orm_deck, labels))
 }
 
 /// The stations and halts of one OpenFreeMap tile at `tile` (`railStationLayer`), in feature
@@ -1449,12 +1516,18 @@ mod tests {
                 (RAIL_MINOR, 1.3, [0.0, 0.0]),
                 (RAIL_SERVICE, 0.8, [0.0, 0.0]),
                 (tunnel_of(RAIL_TRANSIT), 1.2, [3.0, 2.5]),
-                // a bridge on the ground (T7 raises it on the flat map)
-                (RAIL_MAIN, 1.9, [0.0, 0.0]),
             ]
         );
+        // the bridge apart: up on its deck (its ends meet the lines on the ground there, so it
+        // ramps up from them), and the same lying on the ground for a map without decks
+        assert_eq!(paints(&t.bridges), [(RAIL_MAIN, 1.9, [0.0, 0.0])]);
+        assert_eq!(paints(&t.bridges_flat), paints(&t.bridges));
+        let top = t.bridges.iter().map(|s| f64::from(s.end[2])).fold(0.0, f64::max);
+        assert!((top - crate::bridges::RAIL_DECK_M).abs() < 1e-4, "{top}");
+        assert!(t.bridges_flat.iter().all(|s| s.start[2] == 0.0 && s.end[2] == 0.0));
+        assert_eq!(t.bridges.len(), t.bridges_flat.len());
         // one open segment a line, across the tile in tile units, capped at both ends
-        assert_eq!(t.lines.len(), 5);
+        assert_eq!(t.lines.len(), 4);
         assert_eq!((t.lines[0].start, t.lines[0].end), ([0.0, 0.5, 0.0], [1.0, 0.5, 0.0]));
         assert_eq!(t.lines[0].types, crate::geom::path::START_CAP | crate::geom::path::END_CAP);
         let cancelled = network_tile(FLAT_TILE, &bytes, &|| true);

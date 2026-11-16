@@ -342,7 +342,7 @@ impl Layer for Blocks {
             .runs
             .signals
             .iter()
-            .map(|s| circle::Instance::at(cx.view, s.at, cx.scene.stands_on.at(s.at)).radius(SIGNAL_RADIUS_PX).fill(scene.aspect(s).color()).line(BLOCK_CASING, SIGNAL_LINE_PX))
+            .map(|s| circle::Instance::at(cx.view, s.at, cx.scene.stands_on.at(s.at) + s.height).radius(SIGNAL_RADIUS_PX).fill(scene.aspect(s).color()).line(BLOCK_CASING, SIGNAL_LINE_PX))
             .collect();
         self.signal_instances.write(device, queue, &discs);
 
@@ -352,8 +352,9 @@ impl Layer for Blocks {
         let (mut glyphs, mut boxes): (Vec<Glyph>, Vec<Background>) = (Vec::new(), Vec::new());
         if scene.names {
             for (i, laid) in &self.laid.names {
-                let [lon, lat] = scene.runs.signals[*i].at;
-                let label = Label::at(cx.view, [lon, lat, cx.scene.stands_on.at([lon, lat])], SIGNAL_NAME_SIZE, SIGNAL_NAME_COLOR).with_pixel_offset(SIGNAL_NAME_OFFSET);
+                let signal = &scene.runs.signals[*i];
+                let [lon, lat] = signal.at;
+                let label = Label::at(cx.view, [lon, lat, cx.scene.stands_on.at([lon, lat]) + signal.height], SIGNAL_NAME_SIZE, SIGNAL_NAME_COLOR).with_pixel_offset(SIGNAL_NAME_OFFSET);
                 boxes.push(label.background(laid, SIGNAL_NAME_BACKGROUND));
                 glyphs.extend(label.glyphs(laid));
             }
@@ -366,7 +367,7 @@ impl Layer for Blocks {
         let (mut glyphs, mut boxes): (Vec<Glyph>, Vec<Background>) = (Vec::new(), Vec::new());
         for (block, laid) in scene.labels.iter().zip(&self.laid.label_texts) {
             let [lon, lat] = block.at;
-            let label = Label::at(cx.view, [lon, lat, cx.scene.stands_on.at([lon, lat])], BLOCK_LABEL_SIZE, BLOCK_LABEL_COLOR);
+            let label = Label::at(cx.view, [lon, lat, cx.scene.stands_on.at([lon, lat]) + block.height], BLOCK_LABEL_SIZE, BLOCK_LABEL_COLOR);
             boxes.push(label.background(laid, BLOCK_LABEL_BACKGROUND));
             glyphs.extend(label.glyphs(laid));
         }

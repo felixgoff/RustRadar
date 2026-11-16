@@ -62,12 +62,6 @@ pub struct Trains {
     route_cursor: Option<RouteCursor>,
 }
 
-/// Whether the map draws the bridges' decks (the realistic ground without the 3D terrain): only
-/// then do the trains and the signal blocks go up on them; elsewhere they lie on the ground.
-pub fn draws_decks(scene: &SceneInput) -> bool {
-    scene.ground.shown && scene.basemap == rustradar_core::geo::Basemap::Realistic && !scene.terrain.shown
-}
-
 impl Trains {
     /// Fills its layers' inputs in `scene` from `state` (see [`super::SceneBuilder::build`]); tells
     /// the train state when the selected train is off its route.
@@ -87,7 +81,7 @@ impl Trains {
             self.latest.car_layers = self.builder.car_layers(&list, &scene.view, scene.size, models, now_ms);
             // up on a bridge only where the map draws its deck; elsewhere the bridges lie flat
             // and so do the trains
-            if !draws_decks(scene) {
+            if !scene.draws_decks() {
                 self.latest.car_layers.on_the_ground();
             }
             // the car under the pointer (T8: deck's `autoHighlight`)

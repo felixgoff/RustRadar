@@ -110,6 +110,13 @@ pub struct SceneInput {
 }
 
 impl SceneInput {
+    /// Whether the map draws the bridges' decks (the realistic ground without the 3D terrain):
+    /// only then do the trains, the signal blocks and the rail map go up on them; elsewhere they
+    /// lie on the ground with the bridges.
+    pub fn draws_decks(&self) -> bool {
+        self.ground.shown && self.basemap == Basemap::Realistic && !self.terrain.shown
+    }
+
     /// A scene of `view` on a `size` CSS-pixel canvas at `map_scale`, with nothing on it.
     pub fn new(view: ViewState, size: [f64; 2], map_scale: f64, basemap: Basemap) -> Self {
         SceneInput {

@@ -44,9 +44,11 @@
 //! The speed legend and the credit are the UI's (stage 7): `rustradar_scene::rail::speed_legend`,
 //! `speed_legend_shown`, `next_shown_zoom`, `rail_attribution`.
 //!
-//! **Bridges**: the rail map is a flat overlay, so a bridge's line lies on the ground with the
-//! rest of its tile, in the tile's order; tunnels are faint and dashed. The bridges as 3D
-//! structures, and the trains riding on them, are the realistic ground's
+//! **Bridges**: on the flat map each tile's bridges are drawn after its other lines: up on their
+//! decks where the map draws the decks ([`crate::renderer::SceneInput::draws_decks`]: the realistic ground without
+//! the 3D terrain), at the realistic ground's own deck heights, so the rail map rides on the bridge
+//! with the trains rather than showing through under it; elsewhere on the ground. Tunnels are
+//! faint and dashed. The bridges as 3D structures are the realistic ground's
 //! (`rustradar_scene::bridges`, `layers::ground`).
 
 use rustradar_scene::geom::path::PathSegment;
@@ -111,6 +113,9 @@ impl ByteSize for Decoded {
 /// A tile of lines on the GPU, and its speed labels (tile units).
 pub struct TileLines {
     pub lines: path::Mesh,
+    /// Its bridges up on their decks, and the same on the ground ([`RailTile::bridges`]).
+    pub bridges: path::Mesh,
+    pub bridges_flat: path::Mesh,
     pub labels: Vec<SpeedLabel>,
 }
 
@@ -144,7 +149,12 @@ pub fn decode_stations(tile: TileIndex, bytes: &[u8], cancel: &crate::jobs::Canc
 /// The upload step of a tile of lines, on the main thread.
 fn upload(device: &wgpu::Device, decoded: Decoded) -> TileLines {
     let Decoded { tile } = decoded;
-    TileLines { lines: path::Mesh::new(device, "rail lines", &tile.lines), labels: tile.labels }
+    TileLines {
+        lines: path::Mesh::new(device, "rail lines", &tile.lines),
+        bridges: path::Mesh::new(device, "rail bridges", &tile.bridges),
+        bridges_flat: path::Mesh::new(device, "rail bridges on the ground", &tile.bridges_flat),
+        labels: tile.labels,
+    }
 }
 
 /// The overview, loaded on first need.
@@ -459,17 +469,27 @@ impl Layer for Rail {
             self.globe.draw(pass, cx, slot, &self.overview_style, mesh);
         }
         let set = if self.speeds_drawn { &self.speed } else { &self.network };
+        // a tile's bridges up on the decks where the map draws them, else on the ground
+        let decks = cx.scene.draws_decks();
         for (k, &(slot, tile)) in self.drawn.iter().enumerate() {
             let Some(t) = set.get(tile) else { continue };
             if draped && self.flat {
-                if !t.lines.is_empty() {
+                let bridges = if decks { &t.bridges } else { &t.bridges_flat };
+                if !t.lines.is_empty() || !bridges.is_empty() {
                     let c = &self.clip;
                     c.mark.draw(pass, cx, slot, &c.mark_style, &c.square);
                     self.clipped.draw(pass, cx, slot, &self.clipped_lines, &t.lines);
+                    self.clipped.draw(pass, cx, slot, &self.clipped_lines, bridges);
                     c.reset.draw(pass, cx, slot, &c.reset_style, &c.square);
                 }
-            } else if draped && !t.lines.is_empty() {
-                self.globe.draw(pass, cx, slot, &self.globe_lines, &t.lines);
+            } else if draped {
+                // on the globe no deck is drawn: the bridges lie with the rest
+                if !t.lines.is_empty() {
+                    self.globe.draw(pass, cx, slot, &self.globe_lines, &t.lines);
+                }
+                if !t.bridges_flat.is_empty() {
+                    self.globe.draw(pass, cx, slot, &self.globe_lines, &t.bridges_flat);
+                }
             }
             // the tile's speed labels, after its lines and before the next tile's
             if standing

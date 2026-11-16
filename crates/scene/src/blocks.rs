@@ -45,7 +45,7 @@ use rustradar_core::model::{Structure, TrainBlock};
 use rustradar_core::num::{js_round, js_string};
 use rustradar_core::trains::block_at;
 
-use crate::bridges::on_structures;
+use crate::bridges::{height_on, on_structures};
 use crate::camera::{FLAT_ABOVE_ZOOM, MercatorViewport, Viewport, ViewState};
 use crate::geom::js_hypot2;
 use crate::pick::{DepthTest, PickList};
@@ -130,6 +130,9 @@ pub struct BlockSignal {
     pub name: Option<String>,
     /// `[lon, lat]`: the start of its block's first line.
     pub at: [f64; 2],
+    /// How high it stands there, metres: up on a bridge's deck as its track is
+    /// ([`crate::bridges::height_on`]; 0 from [`signals_of`], set by [`runs_of`]).
+    pub height: f64,
     /// The ids of the blocks whose start one of its block's lines ends at, in the order found.
     pub next: Vec<String>,
 }
@@ -196,7 +199,7 @@ pub fn signals_of(list: &[TrainBlock]) -> Vec<BlockSignal> {
                     }
                 }
             }
-            Some(BlockSignal { block: b.id.clone(), name: b.signal.clone(), at, next })
+            Some(BlockSignal { block: b.id.clone(), name: b.signal.clone(), at, height: 0.0, next })
         })
         .collect()
 }
@@ -205,6 +208,10 @@ pub fn signals_of(list: &[TrainBlock]) -> Vec<BlockSignal> {
 /// of `structures` ([`on_structures`]).
 pub fn runs_of(list: &[TrainBlock], structures: &[Structure]) -> BlockRuns {
     let mut runs = BlockRuns { signals: signals_of(list), ..Default::default() };
+    // each signal on its track's deck, as the track is drawn there
+    for (signal, b) in runs.signals.iter_mut().zip(list.iter().filter(|b| start_of(b).is_some())) {
+        signal.height = b.lines.first().map_or(0.0, |line| height_on(line, 0, structures));
+    }
     for b in list {
         for line in &b.lines {
             for run in on_structures(line, structures) {
@@ -222,6 +229,9 @@ impl BlockRuns {
     pub fn on_the_ground(&mut self) {
         for p in self.above.iter_mut().flat_map(|r| &mut r.path) {
             p[2] = 0.0;
+        }
+        for s in &mut self.signals {
+            s.height = 0.0;
         }
     }
 }
@@ -282,6 +292,8 @@ pub struct BlockLabel {
     pub text: String,
     /// `[lon, lat]`.
     pub at: [f64; 2],
+    /// How high it stands there, metres: on the deck where its track is up on one.
+    pub height: f64,
 }
 
 /// The signal tooltip's text (`tooltip` for `train-signals`, G:3400-3411): the head line, and the
@@ -371,7 +383,7 @@ impl BlocksScene {
     pub fn picks_on(&self, viewport: &Viewport, ground: impl Fn([f64; 2]) -> f64) -> PickList<usize> {
         let mut list = PickList::new();
         for (i, s) in self.runs.signals.iter().enumerate() {
-            let at = viewport.project([s.at[0], s.at[1], ground(s.at)]);
+            let at = viewport.project([s.at[0], s.at[1], ground(s.at) + s.height]);
             list.point(i, at, SIGNAL_RADIUS_PX + SIGNAL_LINE_PX / 2.0, DepthTest::Always);
         }
         list
@@ -467,8 +479,11 @@ impl BlockBuilder {
             .filter_map(|b| {
                 let text = self.by.get(&b.id)?;
                 let first = b.lines.first()?;
-                let at = *first.get(first.len() / 2)?;
-                Some(BlockLabel { text: text.clone(), at })
+                let i = first.len() / 2;
+                let at = *first.get(i)?;
+                // on the deck where its track is drawn up on one
+                let height = if set.decks { height_on(first, i, set.structures) } else { 0.0 };
+                Some(BlockLabel { text: text.clone(), at, height })
             })
             .collect();
         BlocksScene {
@@ -753,7 +768,7 @@ mod tests {
         assert_eq!(aspects, [Aspect::Caution, Aspect::Stop, Aspect::Clear, Aspect::Clear]);
         assert_eq!(Aspect::Caution.color(), [250, 196, 40, 255]);
         // the label halfway along `b`'s first line (its second point of two: index 1)
-        assert_eq!(scene.labels, [BlockLabel { text: "Pendeltåg 2245, Snälltåget 74".into(), at: spot(2000.0, 0.0) }]);
+        assert_eq!(scene.labels, [BlockLabel { text: "Pendeltåg 2245, Snälltåget 74".into(), at: spot(2000.0, 0.0), height: 0.0 }]);
         // the names of the signals that have one
         let names: Vec<&str> = scene.named_signals().map(|(_, n)| n).collect();
         assert_eq!(names, ["101", "103"]);

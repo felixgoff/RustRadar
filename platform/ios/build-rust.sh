@@ -30,7 +30,7 @@ cd "$here/../.."
 # Xcode's SDKROOT names the iOS SDK; cargo's build scripts run on the Mac and must not link
 # against it (cc-rs finds the iOS SDK itself through xcrun).
 env -u SDKROOT IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-15.0}" \
-  cargo build -p rustradar-app --lib --target "$target" ${flags[@]+"${flags[@]}"}
+  cargo build -p rustradar --lib --target "$target" ${flags[@]+"${flags[@]}"}
 mkdir -p "$out"
 # where cargo put it: CARGO_TARGET_DIR (xcodebuild hands its caller's environment to this phase,
 # as cargo xtask ios-release reads it too), else the workspace's target/

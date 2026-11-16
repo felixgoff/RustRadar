@@ -26,7 +26,7 @@ for abi in "${abis[@]}"; do targets+=(-t "$abi"); done
 cd "$here/../.."
 # -P: the API level of minSdk (app/build.gradle.kts). The C++ of GameActivity and of the Basis
 # transcoder links libc++ statically, so no libc++_shared.so is packaged.
-cargo ndk "${targets[@]}" -P 24 -o "$here/app/src/main/jniLibs" build ${flags[@]+"${flags[@]}"} -p rustradar-app --lib
+cargo ndk "${targets[@]}" -P 24 -o "$here/app/src/main/jniLibs" build ${flags[@]+"${flags[@]}"} -p rustradar --lib
 # the host's xtask (built already by `cargo xtask android-release`), with the same lock rule
 locked=()
 for flag in ${flags[@]+"${flags[@]}"}; do [ "$flag" = "--locked" ] && locked=(--locked); done

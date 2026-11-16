@@ -722,13 +722,6 @@ mod tests {
     fn the_compiled_in_key_signed_the_published_release() {
         let text = base64_to_string(PUBKEY).unwrap();
         assert_eq!(text, "untrusted comment: minisign public key: 28F06F796981B11D\nRWQdsYFpeW/wKNqSpTck13EuTwGChxjiqTMSMzY7iy32FKRAh35w+cur\n");
-        // tauri.conf.json's key, while src-tauri is in the tree (D2 removes it)
-        let conf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/tauri.conf.json");
-        if let Ok(conf) = std::fs::read_to_string(conf) {
-            let conf: serde_json::Value = serde_json::from_str(&conf).unwrap();
-            assert_eq!(conf["plugins"]["updater"]["pubkey"], PUBKEY);
-            assert_eq!(conf["plugins"]["updater"]["endpoints"][0], ENDPOINT);
-        }
         // every signature of v0.3.15 has the key's id (other bytes fail the signature, not the id)
         // and the version the manifest announces
         let published = Manifest::from_slice(manifest::tests::PUBLISHED.as_bytes()).unwrap();
@@ -767,20 +760,11 @@ mod tests {
     }
 
     #[test]
-    fn the_version_compared_is_the_tauri_apps() {
-        // today's app compares tauri.conf.json's version (`app.package_info().version`); this crate
-        // carries the same (F5), so the desktop check, the Android check and the user agent read the
-        // release version as today. While src-tauri is in the tree: D2 removes it, and with it this
-        // comparison (`cargo xtask bump --check` keeps the crate and Cargo.lock together after it).
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        if root.join("src-tauri").is_dir() {
-            let conf = std::fs::read_to_string(root.join("src-tauri/tauri.conf.json")).unwrap();
-            let conf: serde_json::Value = serde_json::from_str(&conf).unwrap();
-            let version = conf["version"].as_str().unwrap();
-            assert_eq!(env!("CARGO_PKG_VERSION"), version);
-            assert_eq!(current_version(), Version::parse(version).unwrap());
-            assert_eq!(Updater::new().unwrap().current_version, Version::parse(version).unwrap(), "the desktop check");
-        }
+    fn the_version_compared_is_the_crates() {
+        // the desktop check, the Android check and the user agent all read this crate's version, the
+        // one `cargo xtask bump` writes before a release build
+        assert_eq!(current_version(), Version::parse(env!("CARGO_PKG_VERSION")).unwrap());
+        assert_eq!(Updater::new().unwrap().current_version, current_version(), "the desktop check");
         // the strings compared are today's: the Android check passes `package_info().version` as text
         assert_eq!(android::VERSION, current_version().to_string());
         assert_eq!(USER_AGENT, format!("RustRadar/{} (+https://github.com/felixgoff/RustRadar)", current_version()));

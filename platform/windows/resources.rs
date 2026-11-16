@@ -7,7 +7,7 @@
 //!
 //! Today's `rustradar.exe` (v0.3.16's, out of its NSIS installer) holds, all in language 1033:
 //! - the icon group 32512 (`tauri_utils::platform::WINDOWS_APP_ICON_RESOURCE_ID`, the one Tauri's window
-//!   loads) with the six images of `src-tauri/icons/icon.ico` (`bundle.icon`'s `.ico`);
+//!   loads) with the six images of `platform/icons/icon.ico` (`bundle.icon`'s `.ico`);
 //! - version information 1: FILEVERSION and PRODUCTVERSION `major, minor, patch, build`
 //!   (`to_winres_version`: the build metadata if it is a number that fits 16 bits, else 0), and in the
 //!   block `000004b0` (neutral language, Unicode) CompanyName `felix` (the identifier's second part, as
@@ -22,7 +22,7 @@
 //! as the invoker (no installer detection or virtualisation for 64-bit programs); `asInvoker` written
 //! out is that same level, with no elevation prompt.
 
-/// `productName` of `src-tauri/tauri.conf.json`: FileDescription and ProductName.
+/// The product name: FileDescription and ProductName.
 pub const PRODUCT_NAME: &str = "RustRadar";
 
 /// The second part of the identifier `com.felix.rustradar` (no `bundle.publisher` is set): CompanyName.

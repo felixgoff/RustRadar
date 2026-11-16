@@ -55,7 +55,7 @@
 //! `armv7-linux-androideabi`, `i686-linux-android`, `x86_64-linux-android`).
 //!
 //! What else keeps the native APK installable over today's and the user's data in place (doc 07
-//! §13.6, plan risk K10), checked against `src-tauri/gen/android` by the tests while it exists: the
+//! §13.6, plan risk K10), carried over from the Tauri project and kept by the tests: the
 //! applicationId and namespace, minSdk 24, targetSdk and compileSdk 37, the INTERNET permission only,
 //! the launcher activity `.MainActivity` with today's launch mode and config changes (home-screen
 //! shortcuts name it), the launcher icons byte for byte, the app's name. The app's files stay in
@@ -772,9 +772,10 @@ Signer #1 certificate SHA-1 digest: 0000000000000000000000000000000000000000
             fs::write(&path, text).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         };
-        write("Cargo.toml", "[workspace]\nmembers = [\"crates/app\"]\n");
+        write("Cargo.toml", "[workspace]\nmembers = [\"crates/app\", \"crates/backend\"]\n");
         write("crates/app/Cargo.toml", "[package]\nname = \"rustradar\"\nversion = \"0.3.17\"\n");
-        write("Cargo.lock", "[[package]]\nname = \"rustradar\"\nversion = \"0.3.17\"\n");
+        write("crates/backend/Cargo.toml", "[package]\nname = \"rustradar-backend\"\nversion = \"0.3.17\"\n");
+        write("Cargo.lock", "[[package]]\nname = \"rustradar\"\nversion = \"0.3.17\"\n\n[[package]]\nname = \"rustradar-backend\"\nversion = \"0.3.17\"\n");
         write("runner/.keep", "");
         write("platform/android/app/src/main/jniLibs/arm64-v8a/libold.so", "old");
         write(
@@ -804,7 +805,7 @@ fi
         );
         write("sdk/build-tools/36.0.0/badging.txt", badging);
         // the app's files, which the APK's assets/ is checked against, and the APK Gradle makes
-        for folder in ["assets", "crates/backend"] {
+        for folder in ["assets", "crates/backend/data"] {
             std::os::unix::fs::symlink(bump::repo_root().join(folder), dir.join(folder)).unwrap();
         }
         let assets = crate::android_assets::apk_assets();
@@ -926,18 +927,11 @@ fi
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    // The project against today's Tauri project (src-tauri/gen/android) while it exists: what must
-    // not change for the native APK to install over today's and keep the user's data (doc 07 §13.6).
+    // The project's identity: what must not change for the APK to install over the Tauri releases'
+    // and keep the user's data (doc 07 §13.6).
 
     fn read(path: &str) -> String {
         fs::read_to_string(bump::repo_root().join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
-    }
-
-    const TODAY: &str = "src-tauri/gen/android";
-
-    fn today() -> Option<PathBuf> {
-        let dir = bump::repo_root().join(TODAY);
-        dir.is_dir().then_some(dir)
     }
 
     /// The value of `name = <value>` in a Gradle Kotlin file (quotes removed).
@@ -952,11 +946,6 @@ fi
         assert_eq!(gradle_value(&ours, "applicationId"), APPLICATION_ID);
         assert_eq!(gradle_value(&ours, "namespace"), APPLICATION_ID);
         assert_eq!(gradle_value(&ours, "minSdk"), MIN_SDK.to_string());
-        let Some(_) = today() else { return };
-        let theirs = read(&format!("{TODAY}/app/build.gradle.kts"));
-        for name in ["applicationId", "namespace", "minSdk", "targetSdk", "compileSdk"] {
-            assert_eq!(gradle_value(&ours, name), gradle_value(&theirs, name), "{name}");
-        }
         // signed the same way, from the same keystore.properties keys this writes
         for line in [
             r#"val keystoreFile = rootProject.file("keystore.properties")"#,
@@ -966,7 +955,7 @@ fi
             r#"keyPassword = keystore["password"] as String"#,
             r#"if (keystoreFile.exists()) signingConfig = signingConfigs.getByName("release")"#,
         ] {
-            assert!(ours.contains(line) && theirs.contains(line), "{line}");
+            assert!(ours.contains(line), "{line}");
         }
         let keys: BTreeSet<String> =
             Regex::new(r#"keystore\["(\w+)"\]"#).unwrap().captures_iter(&ours).map(|c| c[1].to_owned()).collect();
@@ -1008,50 +997,10 @@ fi
         let ours = read(&format!("{PROJECT}/app/src/main/AndroidManifest.xml"));
         assert_eq!(names(&ours, "uses-permission"), PERMISSIONS.iter().map(|p| p.to_string()).collect());
         assert_eq!(attribute(&ours, "meta-data", "value"), LIBRARY.trim_start_matches("lib").trim_end_matches(".so"));
-        let Some(_) = today() else { return };
-        let theirs = read(&format!("{TODAY}/app/src/main/AndroidManifest.xml"));
-        for element in ["uses-permission", "uses-feature", "activity", "action", "category"] {
-            assert_eq!(names(&ours, element), names(&theirs, element), "{element}");
-        }
-        for name in ["launchMode", "configChanges", "exported", "label"] {
-            assert_eq!(attribute(&ours, "activity", name), attribute(&theirs, "activity", name), "activity {name}");
-        }
-        for name in ["icon", "label", "theme", "usesCleartextTraffic"] {
-            assert_eq!(attribute(&ours, "application", name), attribute(&theirs, "application", name), "application {name}");
-        }
-        assert_eq!(read(&format!("{PROJECT}/app/src/main/res/values/strings.xml")), read(&format!("{TODAY}/app/src/main/res/values/strings.xml")));
     }
 
     #[test]
-    fn the_launcher_icons_are_todays() {
-        let Some(today) = today() else { return };
-        let res = today.join("app/src/main/res");
-        let ours = bump::repo_root().join(PROJECT).join("app/src/main/res");
-        let mut compared = 0;
-        for dir in fs::read_dir(&res).unwrap().flatten() {
-            for file in fs::read_dir(dir.path()).unwrap().flatten() {
-                let name = file.file_name().to_string_lossy().into_owned();
-                if !name.starts_with("ic_launcher") {
-                    continue;
-                }
-                let mine = ours.join(dir.file_name()).join(&name);
-                let same = fs::read(&mine).ok() == Some(fs::read(file.path()).unwrap());
-                assert!(same, "{} differs from today's", mine.display());
-                compared += 1;
-            }
-        }
-        // five densities × three PNGs, the adaptive icon, its two drawables and its colour
-        assert_eq!(compared, 19);
-    }
-
-    #[test]
-    fn the_abis_are_todays() {
-        let Some(today) = today() else { return };
-        let plugin = fs::read_to_string(today.join("buildSrc/src/main/java/com/felix/rustradar/kotlin/RustPlugin.kt")).unwrap();
-        let list = Regex::new(r#"defaultAbiList = listOf\(([^)]*)\)"#).unwrap().captures(&plugin).unwrap()[1].to_owned();
-        let theirs: Vec<String> = Regex::new(r#""([^"]+)""#).unwrap().captures_iter(&list).map(|c| c[1].to_owned()).collect();
-        assert_eq!(theirs, strings(&ABIS));
-        // build-rust.sh takes each of them
+    fn build_rust_takes_every_abi() {
         let script = read(&format!("{PROJECT}/build-rust.sh"));
         for abi in ABIS {
             assert!(script.contains(abi), "{abi}");

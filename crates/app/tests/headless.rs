@@ -139,7 +139,7 @@ fn the_binary_writes_a_shot_without_the_network() {
     let out = shots_dir().join("e17-binary-v1.png");
     let _ = std::fs::remove_file(&out);
     let dead = "http://127.0.0.1:9";
-    let run = Command::new(env!("CARGO_BIN_EXE_rustradar-app"))
+    let run = Command::new(env!("CARGO_BIN_EXE_rustradar"))
         .args(["--screenshot", out.to_str().expect("utf-8 path"), "--size", "800x500", "--view", "35,10,1.9", "--now", "1782036000000"])
         .env("HTTPS_PROXY", dead)
         .env("HTTP_PROXY", dead)

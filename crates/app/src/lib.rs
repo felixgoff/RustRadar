@@ -39,7 +39,7 @@ use rustradar_scene::camera::ViewState;
 use crate::state::Startup;
 
 /// The command line (plan section 8).
-pub const USAGE: &str = "usage: rustradar-app [--view LAT,LON,ZOOM[,PITCH[,BEARING]]] [--basemap dark|satellite|realistic]
+pub const USAGE: &str = "usage: rustradar [--view LAT,LON,ZOOM[,PITCH[,BEARING]]] [--basemap dark|satellite|realistic]
                      [--size WIDTHxHEIGHT] [--now UNIX_MS] [--fixture DIR] [--demo] [--set KEY=VALUE]...
                      [--screenshot FILE.png [--scale FACTOR] [--wait SECONDS] [--ui] [--select ID]
                      [--mode aircraft|trains|ships]] [--updated]

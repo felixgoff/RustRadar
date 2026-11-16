@@ -1,5 +1,5 @@
 //! The app's build script. On Windows targets it embeds what tauri-build embedded in today's
-//! `rustradar.exe` (plan stage 11, row P5; doc 07 §11.7, §13.1): the icon (`src-tauri/icons/icon.ico`
+//! `rustradar.exe` (plan stage 11, row P5; doc 07 §11.7, §13.1): the icon (`platform/icons/icon.ico`
 //! as icon group 32512), the version information (from this crate's version, which `cargo xtask bump`
 //! writes: item F5) and the application manifest (Common Controls 6, per-monitor-v2 DPI awareness, the
 //! invoker's execution level), linked into the binaries only. The resources themselves are
@@ -67,8 +67,8 @@ fn static_vc_runtime() {
 fn windows_resources() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
     let crate_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
-    // tauri.conf.json's bundle.icon `.ico` (item D2 moves the icons: this path moves with them)
-    let icon = crate_dir.join("../../src-tauri/icons/icon.ico");
+    // the app icon (platform/icons)
+    let icon = crate_dir.join("../../platform/icons/icon.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
     let icon = icon.canonicalize().unwrap_or_else(|e| panic!("{}: {e}", icon.display()));
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");

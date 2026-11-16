@@ -230,7 +230,7 @@ fn radar_changes(base: &Image, image: &Image, opacity: f64) -> (usize, usize, us
 /// its standard output and error.
 fn run_binary(args: &[&str]) -> (bool, String, String) {
     let dead = "http://127.0.0.1:9";
-    let run = Command::new(env!("CARGO_BIN_EXE_rustradar-app"))
+    let run = Command::new(env!("CARGO_BIN_EXE_rustradar"))
         .args(args)
         .env("HTTPS_PROXY", dead)
         .env("HTTP_PROXY", dead)
@@ -286,7 +286,7 @@ fn the_binary_refuses_a_wrong_set() {
     let (ok, _, stderr) = run_binary(&["--set", "tilt=true"]);
     assert!(!ok);
     assert!(stderr.contains("--set: there is no setting \"tilt\"; the settings: mode, alsoShow, basemap, labels, labelSize"), "{stderr}");
-    assert!(stderr.contains("usage: rustradar-app"), "{stderr}");
+    assert!(stderr.contains("usage: rustradar"), "{stderr}");
     let (ok, _, stderr) = run_binary(&["--set", "sky=storm"]);
     assert!(!ok);
     assert!(stderr.contains("--set sky wants live, sunny, cloudy, rain, fog or snow, not \"storm\""), "{stderr}");

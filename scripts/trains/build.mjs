@@ -1,6 +1,6 @@
 // Turns Lardman's train models (3D Warehouse, used with his permission; the
 // app credits him) into the cars RustRadar draws close in. Run with
-// `bun run build:trains <folder>`, the folder holding each model's SketchUp
+// `node scripts/trains/build.mjs <folder>`, the folder holding each model's SketchUp
 // Collada export as `<name>/model.dae`; the generated files go to
 // `assets/trains/`.
 //
@@ -26,7 +26,7 @@ const TRIANGLES = 1500;
 
 /**
  * The models RustRadar draws (which train takes which is in
- * src-tauri/src/train_class.rs): the export's folder, and where its cars
+ * crates/backend/src/trafikverket.rs): the export's folder, and where its cars
  * meet along y, metres, read off the bogies and the gaps between bodies.
  * Models of two units keep only the first.
  */
@@ -43,7 +43,7 @@ const MODELS = {
 
 const source = process.argv[2];
 if (!source) {
-  console.error("usage: bun run build:trains <folder with the models' Collada exports>");
+  console.error("usage: node scripts/trains/build.mjs <folder with the models' Collada exports>");
   process.exit(1);
 }
 

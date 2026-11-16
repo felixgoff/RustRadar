@@ -1,11 +1,11 @@
 //! Performance measurements of item P1 (plan, "Performance (P1)"). Meant for release builds:
 //!
 //! ```text
-//! cargo run -p rustradar-app --release --example perf -- decode [--repeat N] [--top N] [--step NAME] [--only Z/X/Y]
-//! cargo run -p rustradar-app --release --example perf -- frame [--aircraft N] [--view LAT,LON,ZOOM[,PITCH[,BEARING]]]
+//! cargo run -p rustradar --release --example perf -- decode [--repeat N] [--top N] [--step NAME] [--only Z/X/Y]
+//! cargo run -p rustradar --release --example perf -- frame [--aircraft N] [--view LAT,LON,ZOOM[,PITCH[,BEARING]]]
 //!                                                            [--size WxH] [--frames N] [--drawn N] [--warmup N] [--labels] [--pan] [--trace]
 //!                                                            [--basemap B] [--no-map-labels] [--no-night] [--draw-settle]
-//! cargo run -p rustradar-app --release --example perf -- fixture DIR [--aircraft N] [--view …] [--size WxH]
+//! cargo run -p rustradar --release --example perf -- fixture DIR [--aircraft N] [--view …] [--size WxH]
 //! ```
 //!
 //! - `decode`: every committed fixture tile (`crates/map/tests/data/tiles`) through the decode step

@@ -9,7 +9,7 @@
 //! Until this, every file of `rustradar_core::assets` was compiled into each of the APK's four
 //! libraries: 29.6 MB four times, and the release APK came to 220 MB (CI run 326), over K14's
 //! 150 MB trigger. Now the Android build (`rustradar-core`'s feature `apk-assets`, on for
-//! `rustradar-app` on Android) embeds none of them, and the APK carries each once, in `assets/`:
+//! `rustradar` on Android) embeds none of them, and the APK carries each once, in `assets/`:
 //!
 //! - **Copy** ([`copy`]): exactly [`FILES`], each from `<root>/<key>` in the repository to
 //!   `DIR/<key>`, and nothing else (a file in DIR the list lacks is removed, so a file taken off

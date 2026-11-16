@@ -105,7 +105,7 @@ const SCRUBBED: [&str; 10] = [
 ];
 
 /// Today's app icons: the Tauri CLI 2.12.1 template's `AppIcon.appiconset/Contents.json`, in its order
-/// (size in points, idiom, file, scale), filled with `src-tauri/icons/ios`.
+/// (size in points, idiom, file, scale).
 #[cfg(test)]
 pub const ICONS: [(&str, &str, &str, &str); 18] = [
     ("20x20", "iphone", "AppIcon-20x20@2x.png", "2x"),
@@ -1477,17 +1477,6 @@ mod tests {
             assert!(line(l), "project.yml has no `{l}`");
         }
         assert!(spec.contains(&format!("iOS: \"{MINIMUM_IOS}\"")));
-        // today's, read from the Tauri config while it exists (stage 12 deletes it)
-        let conf = repo("src-tauri/tauri.conf.json");
-        if conf.exists() {
-            let conf: serde_json::Value = serde_json::from_str(&fs::read_to_string(conf).unwrap()).unwrap();
-            assert_eq!(conf["identifier"], BUNDLE_ID);
-            assert_eq!(conf["productName"], PRODUCT);
-            // no bundle.iOS.minimumSystemVersion: the Tauri CLI's default, 15.0 (tauri-utils)
-            assert!(conf["bundle"]["iOS"]["minimumSystemVersion"].is_null());
-            // no bundle.iOS.bundleVersion: the build number is the version
-            assert!(conf["bundle"]["iOS"]["bundleVersion"].is_null());
-        }
         let ignore = fs::read_to_string(repo("platform/ios/.gitignore")).unwrap();
         // the build folder holds the archive, the export and, for a moment, the export options with the team
         assert!(ignore.lines().any(|l| l == "/build") && ignore.lines().any(|l| l == "/RustRadar.xcodeproj"));
@@ -1551,14 +1540,8 @@ mod tests {
         );
         assert_eq!(get("CFBundleDevelopmentRegion"), "en");
         assert_eq!(get("CFBundleInfoDictionaryVersion"), "6.0");
-        // src-tauri/Info.ios.plist, merged in today
+        // the Tauri project's Info.ios.plist, merged in
         assert_eq!(get("ITSAppUsesNonExemptEncryption"), "false");
-        let merged = repo("src-tauri/Info.ios.plist");
-        if merged.exists() {
-            for (key, value) in plist(&merged) {
-                assert_eq!(info.get(&key), Some(&value), "{key} differs from src-tauri/Info.ios.plist");
-            }
-        }
     }
 
     /// A PNG's width, height, bit depth and colour type, from its IHDR.
@@ -1596,7 +1579,6 @@ mod tests {
         wanted.sort();
         wanted.dedup();
         assert_eq!(pngs, wanted, "the icon set's files");
-        let tauri = repo("src-tauri/icons/ios");
         for (size, idiom, file, scale) in ICONS {
             let bytes = fs::read(dir.join(file)).unwrap();
             let points: f64 = size.split('x').next().unwrap().parse().unwrap();
@@ -1604,9 +1586,6 @@ mod tests {
             let pixels = (points * factor) as u32;
             // RGB, 8 bits: App Store Connect refuses an icon with an alpha channel
             assert_eq!(png_header(&bytes), (pixels, pixels, 8, 2), "{file} ({idiom} {size} @{scale})");
-            if tauri.exists() {
-                assert_eq!(bytes, fs::read(tauri.join(file)).unwrap(), "{file} is not today's");
-            }
         }
     }
 
@@ -1632,7 +1611,7 @@ mod tests {
         assert!(script.contains(&format!("iphoneos) target={RUST_TARGET} ;;")));
         assert!(script.contains("flags=(--release --locked)"));
         assert!(script.contains("IPHONEOS_DEPLOYMENT_TARGET=\"${IPHONEOS_DEPLOYMENT_TARGET:-15.0}\""));
-        assert!(script.contains("cargo build -p rustradar-app --lib"));
+        assert!(script.contains("cargo build -p rustradar --lib"));
     }
 
     /// Writes `text` to `path` under `dir`, executable.
@@ -1693,13 +1672,13 @@ mod tests {
         assert!(ok);
         assert_eq!(
             said,
-            "cargo build -p rustradar-app --lib --target aarch64-apple-ios --release --locked in ROOT\n\
+            "cargo build -p rustradar --lib --target aarch64-apple-ios --release --locked in ROOT\n\
              SDKROOT=unset IPHONEOS_DEPLOYMENT_TARGET=15.0\n"
         );
         assert_eq!(lib.as_deref(), Some("aarch64-apple-ios release\n"));
         // the phone shells' simulator build
         let (ok, said, lib) = phase("iphonesimulator", "Debug");
-        assert!(ok && said.starts_with("cargo build -p rustradar-app --lib --target aarch64-apple-ios-sim in ROOT\n"), "{said}");
+        assert!(ok && said.starts_with("cargo build -p rustradar --lib --target aarch64-apple-ios-sim in ROOT\n"), "{said}");
         assert_eq!(lib.as_deref(), Some("aarch64-apple-ios-sim debug\n"));
         let (ok, said, _) = phase("macosx", "Release");
         assert!(!ok && said.is_empty());
@@ -1719,9 +1698,10 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         };
-        write("Cargo.toml", "[workspace]\nmembers = [\"crates/app\"]\n");
+        write("Cargo.toml", "[workspace]\nmembers = [\"crates/app\", \"crates/backend\"]\n");
         write("crates/app/Cargo.toml", "[package]\nname = \"rustradar\"\nversion = \"0.3.17\"\n");
-        write("Cargo.lock", "[[package]]\nname = \"rustradar\"\nversion = \"0.3.17\"\n");
+        write("crates/backend/Cargo.toml", "[package]\nname = \"rustradar-backend\"\nversion = \"0.3.17\"\n");
+        write("Cargo.lock", "[[package]]\nname = \"rustradar\"\nversion = \"0.3.17\"\n\n[[package]]\nname = \"rustradar-backend\"\nversion = \"0.3.17\"\n");
         write("platform/ios/project.yml", "name: RustRadar\n");
         write("platform/ios/RustRadar.entitlements", "<plist version=\"1.0\"><dict/></plist>\n");
         write("home/.keep", "");

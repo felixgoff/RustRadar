@@ -1017,7 +1017,7 @@ mod tests {
 
     /// The splash in a real window (X11): opened on the main window's device once the update is
     /// found, centred, moving at most 60 frames a second while the download comes, then the app
-    /// closes after the relaunch. Run with `xvfb-run -a cargo test -p rustradar-app --lib
+    /// closes after the relaunch. Run with `xvfb-run -a cargo test -p rustradar --lib
     /// update::splash -- --ignored` (winit needs `libxkbcommon-x11`).
     #[cfg(target_os = "linux")]
     #[test]

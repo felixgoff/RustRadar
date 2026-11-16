@@ -8,7 +8,7 @@
 //!
 //! - **Desktop and iOS**: each [`File`] is the file's bytes, embedded with `include_bytes!` (plan
 //!   1.6, section 7's "Assets" line), as before.
-//! - **Android** (this crate's feature `apk-assets`, which `rustradar-app` turns on for its Android
+//! - **Android** (this crate's feature `apk-assets`, which the app (`rustradar`) turns on for its Android
 //!   build only): nothing is embedded. The bytes were compiled into each of the APK's four
 //!   libraries (the release APK was 220 MB, over K14's 150 MB trigger), so the APK now carries the
 //!   files once, in `assets/`, stored uncompressed (`cargo xtask android-assets` copies exactly
@@ -19,7 +19,7 @@
 //!   in the log). After that a [`File`] reads as on the other platforms.
 //!
 //! A feature, not `target_os = "android"`: the Tauri shim (`src-tauri`) links this crate through
-//! the backend and builds for Android too; without `rustradar-app` it keeps the files embedded.
+//! the backend and builds for Android too; without the app it keeps the files embedded.
 //!
 //! What stays embedded everywhere, being code or a few kilobytes the UI draws at once: the WGSL
 //! shaders (`crates/map/src/shaders`, 0.16 MB), the Lucide icons and the two licence texts

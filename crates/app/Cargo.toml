@@ -1,17 +1,18 @@
 [package]
-name = "rustradar-app"
+name = "rustradar"
 version = "0.3.0"
 edition = "2024"
-description = "Native RustRadar client: winit window, wgpu rendering, egui UI (no webview)"
+description = "Live flight radar on a 3D globe"
 
 [lib]
+# Not `rustradar`: a cdylib and a binary of one name write the same .pdb on Windows (cargo#8519).
 name = "rustradar_app"
 # rlib for the desktop binary and tests; cdylib/staticlib are what the Android
 # (NativeActivity loads a .so) and iOS (Xcode links a .a) shells need.
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [[bin]]
-name = "rustradar-app"
+name = "rustradar"
 path = "src/main.rs"
 
 [dependencies]
@@ -37,8 +38,8 @@ egui-wgpu = { version = "0.37", default-features = false }
 egui-winit = { version = "0.37", default-features = false }
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
-# The updater (update/): latest.json and its versions, minisign signatures in Tauri's encoding
-# (base64 of the files), and the HTTP client built through fr24::client_builder() (doc 07 §2.3).
+# The updater (update/): latest.json and its versions, minisign signatures (as the Tauri updater encoded them:
+# base64 of the files), and the HTTP client built through fr24::client_builder() (doc 07 §2.3).
 semver = { workspace = true }
 minisign-verify = { workspace = true }
 base64 = "0.23"
@@ -50,7 +51,7 @@ fr24 = { workspace = true }
 png = "0.18"
 
 # build.rs's Windows resources (icon, version information, manifest; item P5), compiled with the crate
-# tauri-winres compiles with. A cfg on build dependencies is the host's, so only a Windows host builds
+# tauri-winres used. A cfg on build dependencies is the host's, so only a Windows host builds
 # it: Linux, Android and iOS builds never do.
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3.0.12"

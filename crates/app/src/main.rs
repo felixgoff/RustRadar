@@ -1,4 +1,4 @@
-//! `rustradar-app`: opens the window, or with `--screenshot FILE.png` draws one shot without a
+//! `rustradar`: opens the window, or with `--screenshot FILE.png` draws one shot without a
 //! window and writes it (see `--help`).
 
 // release builds on Windows open no console window (doc 07 §11.7)

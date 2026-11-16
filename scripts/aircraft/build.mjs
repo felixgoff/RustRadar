@@ -1,6 +1,6 @@
 // Turns the Flightradar24 3D models into the two things RustRadar draws:
 // low-poly meshes at two levels of detail, and top-down silhouettes for the
-// flat map view. Run with `bun run build:aircraft`; the generated files go to
+// flat map view. Run with `node scripts/aircraft/build.mjs`; the generated files go to
 // `assets/aircraft/`.
 //
 // The published models are far too detailed to instance thousands of times

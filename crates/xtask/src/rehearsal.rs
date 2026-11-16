@@ -882,13 +882,6 @@ mod tests {
         let key = installed_key(&crate::bump::repo_root()).unwrap();
         let text = String::from_utf8(STANDARD.decode(&key).unwrap()).unwrap();
         assert!(text.starts_with("untrusted comment: minisign public key: 28F06F796981B11D\n"), "{text}");
-        // while tauri.conf.json exists it holds the same key
-        let conf = crate::bump::repo_root().join("src-tauri/tauri.conf.json");
-        if let Ok(conf) = fs::read_to_string(conf) {
-            let conf: serde_json::Value = serde_json::from_str(&conf).unwrap();
-            assert_eq!(conf["plugins"]["updater"]["pubkey"], key.as_str());
-            assert_eq!(conf["plugins"]["updater"]["endpoints"][0], ENDPOINT);
-        }
     }
 
     #[test]

@@ -22,9 +22,9 @@ require-sh = false
 # (and cargo-packager, for the deb) put them: by pixel size, the @2x one as 256x256@2.
 assets = [
     { source = "platform/linux/RustRadar.desktop", dest = "/usr/share/applications/RustRadar.desktop", mode = "644" },
-    { source = "src-tauri/icons/32x32.png", dest = "/usr/share/icons/hicolor/32x32/apps/rustradar.png", mode = "644" },
-    { source = "src-tauri/icons/128x128.png", dest = "/usr/share/icons/hicolor/128x128/apps/rustradar.png", mode = "644" },
-    { source = "src-tauri/icons/128x128@2x.png", dest = "/usr/share/icons/hicolor/256x256@2/apps/rustradar.png", mode = "644" },
+    { source = "platform/icons/32x32.png", dest = "/usr/share/icons/hicolor/32x32/apps/rustradar.png", mode = "644" },
+    { source = "platform/icons/128x128.png", dest = "/usr/share/icons/hicolor/128x128/apps/rustradar.png", mode = "644" },
+    { source = "platform/icons/128x128@2x.png", dest = "/usr/share/icons/hicolor/256x256@2/apps/rustradar.png", mode = "644" },
 ]
 
 # What the binary links (libc, libm, libgcc_s, libstdc++) cargo-generate-rpm finds itself (`--auto-req

@@ -4,9 +4,8 @@
 //! cargo xtask package <deb|rpm|appimage|nsis|msi|app|dmg>... [--target TRIPLE] [--binary FILE] [--out DIR] [--sign]
 //! ```
 //!
-//! Builds the app's release binary (`cargo build --release --locked` of the package `crates/app` is,
-//! `rustradar-app` until item D2 names it `rustradar`; `--binary` packs one built before instead), then
-//! for each format: copies it as `rustradar` (today's binary name), writes the format's installer kind
+//! Builds the app's release binary (`cargo build --release --locked -p rustradar`; `--binary` packs one
+//! built before instead), then for each format: copies it as `rustradar`, writes the format's installer kind
 //! into the copy (below), packs the copy with the format's tool, and moves the package to `--out`
 //! (default `<target dir>/package`) under the name today's release gives it. `--sign` then signs each
 //! package as `cargo xtask sign` does, with `TAURI_SIGNING_PRIVATE_KEY` and its password: today's
@@ -43,7 +42,7 @@
 //! **Identity** (doc 07 §13.3, §13.6), as v0.3.16's packages have it: package `rust-radar` (the product
 //! name in kebab case) at the release version, release 1 for the rpm, Maintainer `you`, the Cargo
 //! description, `/usr/bin/rustradar`, `/usr/share/applications/RustRadar.desktop` (today's file, kept in
-//! `platform/linux`), the icons of `src-tauri/icons` at `hicolor/32x32`, `128x128` and `256x256@2`.
+//! `platform/linux`), the icons of `platform/icons` at `hicolor/32x32`, `128x128` and `256x256@2`.
 //! What changes: the dependencies (WebKitGTK and GTK give way to what winit and wgpu open at run time,
 //! listed in `Packager.toml` and `rpm.toml`, and the deb's `libc6` at the newest glibc symbol version
 //! the binary asks for, [`glibc_needed`]; the rpm finds what the binary links itself), the AppImage
@@ -82,7 +81,7 @@
 //!
 //! The bundle is today's: `RustRadar.app/Contents/{Info.plist, MacOS/rustradar, Resources/icon.icns}`,
 //! its `Info.plist` `platform/macos/Info.plist` at the release version ([`info_plist`]; the file's head
-//! says which keys are today's and which are new), its icon `src-tauri/icons/icon.icns`; the binary
+//! says which keys are today's and which are new), its icon `platform/icons/icon.icns`; the binary
 //! must be a Mach-O for the architecture named ([`check_macos_binary`]). The installer kind is left as
 //! it is: tauri-bundler's `patch_binary` skips the `.app` and the dmg, and an unknown kind is the `.app`
 //! on macOS (tauri-utils' `bundle_type`, the app's `Installer::from_marker`), where `_APP` would say
@@ -851,13 +850,6 @@ fn check_tool(subcommand: &str, (name, version): (&str, &str)) -> Result<(), Str
     }
 }
 
-/// The package of `crates/app` (also its binary's name).
-fn app_package(root: &Path) -> Result<String, String> {
-    let manifest = fs::read_to_string(root.join("crates/app/Cargo.toml")).map_err(|e| format!("crates/app/Cargo.toml: {e}"))?;
-    let name = Regex::new(r#"(?m)^name\s*=\s*"([^"]+)""#).expect("a valid pattern");
-    name.captures(&manifest).map(|c| c[1].to_owned()).ok_or_else(|| "crates/app/Cargo.toml names no package".to_owned())
-}
-
 /// The workspace's target folder, as cargo has it (`CARGO_TARGET_DIR` and all).
 fn target_dir(root: &Path) -> Result<PathBuf, String> {
     let output = cargo().current_dir(root).args(["metadata", "--format-version", "1", "--no-deps"]).output().map_err(|e| format!("cargo metadata: {e}"))?;
@@ -875,9 +867,8 @@ fn arch(target: Option<&str>) -> String {
 
 /// Builds the release binary and says where it is.
 fn build(root: &Path, target_dir: &Path, target: Option<&str>) -> Result<PathBuf, String> {
-    let package = app_package(root)?;
     let mut command = cargo();
-    command.current_dir(root).args(["build", "--release", "--locked", "-p", &package, "--bin", &package]);
+    command.current_dir(root).args(["build", "--release", "--locked", "-p", BINARY, "--bin", BINARY]);
     if let Some(target) = target {
         command.args(["--target", target]);
     }
@@ -895,7 +886,7 @@ fn build(root: &Path, target_dir: &Path, target: Option<&str>) -> Result<PathBuf
     }
     // a Windows target's binary (the target named, or this machine's) ends in .exe
     let windows = target.map_or(cfg!(windows), |t| t.contains("windows"));
-    Ok(dir.join("release").join(if windows { format!("{package}.exe") } else { package }))
+    Ok(dir.join("release").join(if windows { format!("{BINARY}.exe") } else { BINARY.to_owned() }))
 }
 
 /// The one file in `dir` ending in `extension`.
@@ -1194,7 +1185,7 @@ mod tests {
         assert_eq!(parsed.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
         assert_eq!(parsed.out, Some(PathBuf::from("dist")));
         assert!(parsed.sign && parsed.binary.is_none());
-        assert_eq!(args(&["rpm", "--binary", "target/release/rustradar-app"]).unwrap().binary, Some(PathBuf::from("target/release/rustradar-app")));
+        assert_eq!(args(&["rpm", "--binary", "target/release/rustradar"]).unwrap().binary, Some(PathBuf::from("target/release/rustradar")));
         assert!(args(&[]).unwrap_err().starts_with("usage"));
         assert!(args(&["--sign"]).unwrap_err().starts_with("usage"));
         assert!(args(&["snap"]).unwrap_err().contains("no package format `snap`"));
@@ -1216,15 +1207,13 @@ mod tests {
     #[test]
     fn the_packager_configuration_is_todays_identity() {
         let config = packager_toml();
-        let conf: Value = serde_json::from_str(&fs::read_to_string(root().join("src-tauri/tauri.conf.json")).unwrap()).unwrap();
-        assert_eq!(config["product-name"], conf["productName"]);
-        assert_eq!(config["identifier"], conf["identifier"]);
+        assert_eq!(config["product-name"], "RustRadar");
         assert_eq!(config["identifier"], "com.felix.rustradar");
         assert_eq!(config["description"], "Live flight radar on a 3D globe, powered by a Rust port of fr24");
         assert_eq!(config["authors"], json!(["you"]));
-        let icons: Vec<String> = config["icons"].as_array().unwrap().iter().map(|i| format!("src-tauri/{}", i.as_str().unwrap().trim_start_matches("src-tauri/"))).collect();
-        let today: Vec<String> = conf["bundle"]["icon"].as_array().unwrap().iter().map(|i| format!("src-tauri/{}", i.as_str().unwrap())).collect();
-        assert_eq!(icons, today, "tauri.conf.json's bundle.icon");
+        let icons: Vec<String> = config["icons"].as_array().unwrap().iter().map(|i| i.as_str().unwrap().to_owned()).collect();
+        let names = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.icns", "icon.ico"];
+        assert_eq!(icons, names.map(|n| format!("platform/icons/{n}")), "the Tauri releases' bundle.icon");
         for icon in &icons {
             assert!(root().join(icon).is_file(), "{icon}");
         }
@@ -1520,9 +1509,7 @@ mod tests {
         for file in [NSIS_TEMPLATE, NSIS_UTILS, WIX_TEMPLATE, "platform/windows/English.nsh"] {
             assert!(root().join(file).is_file(), "{file}");
         }
-        let conf: Value = serde_json::from_str(&fs::read_to_string(root().join("src-tauri/tauri.conf.json")).unwrap()).unwrap();
-        assert!(conf["bundle"].get("windows").is_none(), "today's NSIS and WiX settings are tauri-bundler's defaults");
-        assert!(config["icons"].as_array().unwrap().contains(&json!("src-tauri/icons/icon.ico")), "the MSI's ProductIcon");
+        assert!(config["icons"].as_array().unwrap().contains(&json!("platform/icons/icon.ico")), "the MSI's ProductIcon");
         let text = fs::read_to_string(root().join(PACKAGER_TOML)).unwrap();
         let (bin, out) = (Path::new("/w/bin"), Path::new("/w/out"));
         assert_eq!(packager_config(&text, Format::Nsis, "0.3.16", bin, out, &[]).unwrap()["formats"], json!(["nsis"]));
@@ -1660,7 +1647,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout).into_owned()
         };
         let version = bump::current().unwrap();
-        let icon = root().join("src-tauri/icons/icon.ico");
+        let icon = root().join("platform/icons/icon.ico");
         fs::write(dir.join("rustradar.manifest"), windows_resources::MANIFEST).unwrap();
         let script = windows_resources::resource_script(&version, icon.to_str().unwrap(), dir.join("rustradar.manifest").to_str().unwrap()).unwrap();
         fs::write(dir.join("rustradar.rc"), script).unwrap();
@@ -1798,10 +1785,9 @@ mod tests {
         assert_eq!(added, [("NSPrincipalClass", "NSApplication"), ("LSApplicationCategoryType", "public.app-category.travel")]);
 
         let value = |key: &str| ours.iter().find(|(k, _)| k == key).unwrap().1.clone();
-        let conf: Value = serde_json::from_str(&fs::read_to_string(root().join("src-tauri/tauri.conf.json")).unwrap()).unwrap();
-        assert_eq!(value("CFBundleIdentifier"), conf["identifier"].as_str().unwrap());
-        assert_eq!(value("CFBundleName"), conf["productName"].as_str().unwrap());
-        assert_eq!(value("CFBundleDisplayName"), conf["productName"].as_str().unwrap());
+        assert_eq!(value("CFBundleIdentifier"), "com.felix.rustradar");
+        assert_eq!(value("CFBundleName"), "RustRadar");
+        assert_eq!(value("CFBundleDisplayName"), "RustRadar");
         assert_eq!(value("CFBundleExecutable"), Format::App.binary_name());
         let config = packager_toml();
         let icns = config["icons"].as_array().unwrap().iter().filter_map(Value::as_str).find(|i| i.ends_with(".icns")).unwrap();
@@ -1839,11 +1825,11 @@ mod tests {
             assert_eq!(made["formats"], json!(["app"]));
             assert_eq!(made["binaries"], json!([{ "path": BINARY, "main": true }]));
         }
-        let icns = Path::new("/repo/src-tauri/icons/icon.icns");
+        let icns = Path::new("/repo/platform/icons/icon.icns");
         let args = dmg_args(&config, icns, "RustRadar_0.3.16_aarch64.dmg").unwrap();
         let today = [
             "--volname", "RustRadar", "--icon", "RustRadar.app", "180", "170", "--app-drop-link", "480", "170", "--window-size", "660", "400",
-            "--hide-extension", "RustRadar.app", "--volicon", "/repo/src-tauri/icons/icon.icns", "RustRadar_0.3.16_aarch64.dmg", "RustRadar.app",
+            "--hide-extension", "RustRadar.app", "--volicon", "/repo/platform/icons/icon.icns", "RustRadar_0.3.16_aarch64.dmg", "RustRadar.app",
         ];
         assert_eq!(args, today);
         // tauri-bundler's defaults without a [dmg] table; a window position as cargo-packager names it
@@ -1861,7 +1847,7 @@ mod tests {
         broken["dmg"]["app-position"] = json!({ "x": 1 });
         assert!(dmg_args(&broken, icns, "x.dmg").unwrap_err().contains("needs x and y"));
         // the volume's icon is the bundle's (v0.3.16's .VolumeIcon.icns is icon.icns)
-        assert!(config["icons"].as_array().unwrap().contains(&json!("src-tauri/icons/icon.icns")));
+        assert!(config["icons"].as_array().unwrap().contains(&json!("platform/icons/icon.icns")));
         assert!(minimum_system_version("[macos]\n").is_err());
     }
 
@@ -1903,7 +1889,7 @@ mod tests {
         let plist = info_plist(&fs::read_to_string(root().join(INFO_PLIST)).unwrap(), "0.3.16").unwrap();
         let app = a_bundle(&dir, &plist);
         let script = dmg_tools(&root(), &dir.join("dmg-tools")).unwrap();
-        let args = dmg_args(&packager_toml(), &root().join("src-tauri/icons/icon.icns"), "RustRadar_0.3.16_aarch64.dmg").unwrap();
+        let args = dmg_args(&packager_toml(), &root().join("platform/icons/icon.icns"), "RustRadar_0.3.16_aarch64.dmg").unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
         let output = Command::new(&script).current_dir(&dir).args(&args).env("PATH", path).output().unwrap();
         let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
@@ -1927,7 +1913,7 @@ mod tests {
         fs::write(app.join("Contents/Info.plist"), plist).unwrap();
         fs::write(app.join("Contents/MacOS/rustradar"), mach_o("aarch64")).unwrap();
         set_executable(&app.join("Contents/MacOS/rustradar")).unwrap();
-        fs::copy(root().join("src-tauri/icons/icon.icns"), app.join("Contents/Resources/icon.icns")).unwrap();
+        fs::copy(root().join("platform/icons/icon.icns"), app.join("Contents/Resources/icon.icns")).unwrap();
         app
     }
 
@@ -2008,7 +1994,7 @@ mod tests {
         assert_eq!(binary.2, Path::new("Contents/MacOS/rustradar"));
         assert_eq!(binary.3, mach_o("aarch64"));
         assert_eq!(file("RustRadar.app/Contents/Info.plist").3, plist.as_bytes());
-        assert_eq!(file("RustRadar.app/Contents/Resources/icon.icns").3, fs::read(root().join("src-tauri/icons/icon.icns")).unwrap());
+        assert_eq!(file("RustRadar.app/Contents/Resources/icon.icns").3, fs::read(root().join("platform/icons/icon.icns")).unwrap());
         fs::remove_dir_all(&dir).unwrap();
     }
 

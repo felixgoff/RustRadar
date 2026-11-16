@@ -11,25 +11,24 @@
 # rpm: that one is cargo-generate-rpm 0.21.1's, configured in platform/linux/rpm.toml.
 #
 # Each platform's part has its own tables below: Linux (P7) here; Windows (P5: [windows], [nsis],
-# [wix]) and macOS (P6: [macos], [dmg]) add theirs at the end. The identity is today's Tauri app's
-# (src-tauri/tauri.conf.json, src-tauri/Cargo.toml, doc 07 §13.6), so that each package upgrades
-# the one installed today in place.
+# [wix]) and macOS (P6: [macos], [dmg]) add theirs at the end. The identity is the Tauri releases'
+# (doc 07 §13.6), so that each package upgrades the one installed in place.
 
 product-name = "RustRadar"
 identifier = "com.felix.rustradar"
-# src-tauri/Cargo.toml's description and authors, which Tauri's bundler wrote into the packages
-# (the deb's Description and Maintainer, the rpm's Summary, the .desktop file's Comment).
+# The description and authors the Tauri packages carried (the deb's Description and Maintainer, the
+# rpm's Summary, the .desktop file's Comment).
 description = "Live flight radar on a 3D globe, powered by a Rust port of fr24"
 authors = ["you"]
-# tauri.conf.json's bundle.icon. The Linux packages take the PNGs, installed by their pixel size as
+# The app icons (platform/icons). The Linux packages take the PNGs, installed by their pixel size as
 # Tauri's bundler installs them: 32x32, 128x128 and 256x256@2 (the @2x one) under
 # /usr/share/icons/hicolor/<size>/apps/rustradar.png.
 icons = [
-    "src-tauri/icons/32x32.png",
-    "src-tauri/icons/128x128.png",
-    "src-tauri/icons/128x128@2x.png",
-    "src-tauri/icons/icon.icns",
-    "src-tauri/icons/icon.ico",
+    "platform/icons/32x32.png",
+    "platform/icons/128x128.png",
+    "platform/icons/128x128@2x.png",
+    "platform/icons/icon.icns",
+    "platform/icons/icon.ico",
 ]
 # Today's binary name: /usr/bin/rustradar, the .desktop file's Exec and Icon, the window's app id.
 binaries = [{ path = "rustradar", main = true }]

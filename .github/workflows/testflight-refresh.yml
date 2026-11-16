@@ -5,9 +5,9 @@ name: TestFlight refresh
 # latest release again (a new build number: the day's date) and uploads it,
 # so testers always have one that works. Run it by hand to upload one now.
 #
-# The latest release is built with the tooling its own tree has (doc 07 §9.4,
-# §14.2): a tag that still holds the Tauri app (src-tauri/tauri.conf.json) with
-# today's Tauri steps, a native one with `cargo xtask ios-release`.
+# The latest release is built with `cargo xtask ios-release` (doc 07 §9.4,
+# §14.2). A tag of the Tauri app (src-tauri/tauri.conf.json) is skipped: its
+# tooling is gone, and the next release replaces it.
 
 on:
   schedule:
@@ -97,14 +97,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      # TREE: tauri while the tag holds the Tauri app, else native
+      # TREE: native, or tauri for a tag of the Tauri app (skipped)
       - name: The latest release
         run: |
           tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
           [ -n "$tag" ] || { echo "::error::no release tag to build"; exit 1; }
           git checkout --quiet "$tag"
           tree=native
-          if [ -f src-tauri/tauri.conf.json ]; then tree=tauri; fi
+          if [ -f src-tauri/tauri.conf.json ]; then
+            tree=tauri
+            echo "::warning::$tag is a Tauri release; nothing to rebuild until the next release"
+          fi
           {
             echo "TAG=$tag"
             echo "TREE=$tree"
@@ -112,73 +115,7 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "Building $tag ($tree app)" >> "$GITHUB_STEP_SUMMARY"
 
-      # ---- a tag of the Tauri app: today's steps
-
-      - uses: oven-sh/setup-bun@v2
-        if: env.TREE == 'tauri'
-
-      - uses: dtolnay/rust-toolchain@stable
-        if: env.TREE == 'tauri'
-        with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim
-
-      - uses: swatinem/rust-cache@v2
-        if: env.TREE == 'tauri'
-        with:
-          workspaces: ". -> target"
-          key: ios
-
-      - name: Install frontend dependencies
-        if: env.TREE == 'tauri'
-        run: bun install --frozen-lockfile
-
-      - name: App Store Connect key
-        if: env.TREE == 'tauri'
-        env:
-          ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          KEY: ${{ secrets.APPLE_API_KEY }}
-          TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
-        run: |
-          mkdir -p ~/.appstoreconnect/private_keys
-          key="$HOME/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8"
-          printf '%s\n' "$KEY" > "$key"
-          {
-            echo "APPLE_API_ISSUER=$ISSUER"
-            echo "APPLE_API_KEY=$KEY_ID"
-            echo "APPLE_API_KEY_ID=$KEY_ID"
-            echo "APPLE_API_KEY_PATH=$key"
-            echo "APPLE_DEVELOPMENT_TEAM=$TEAM"
-          } >> "$GITHUB_ENV"
-
-      # the release's version (as rust.yml sets it), and a build number of its own: App Store
-      # Connect takes a build only once, and a date sorts after the release's own (its version)
-      - name: Version
-        if: env.TREE == 'tauri'
-        run: node scripts/version.mjs "${TAG#v}"
-
-      - name: Xcode project
-        if: env.TREE == 'tauri'
-        run: |
-          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
-          brew list cocoapods >/dev/null 2>&1 || brew install cocoapods
-          bun tauri ios init --ci
-          bun tauri icon src-tauri/icons/icon.png
-          # (App Store Connect refuses icons with an alpha channel: see rust.yml)
-          cp src-tauri/icons/ios/*.png src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/
-
-      - name: Build for the App Store
-        if: env.TREE == 'tauri'
-        run: bun tauri ios build --export-method app-store-connect --config "{\"bundle\":{\"iOS\":{\"bundleVersion\":\"$BUILD_NUMBER\"}}}"
-
-      - name: Upload to TestFlight
-        if: env.TREE == 'tauri'
-        run: |
-          ipa="$(find src-tauri/gen/apple/build -name '*.ipa' | head -n 1)"
-          xcrun altool --upload-app --type ios --file "$ipa" --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER"
-          echo "Uploaded $TAG as build $BUILD_NUMBER" >> "$GITHUB_STEP_SUMMARY"
-
-      # ---- a tag of the native app: rust.yml's ios-release job, with the build number
+      # rust.yml's ios-release job, with the build number
 
       - uses: dtolnay/rust-toolchain@master
         if: env.TREE == 'native'

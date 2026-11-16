@@ -220,14 +220,6 @@ mod tests {
     }
 
     #[test]
-    fn the_bundle_id_is_tauri_confs_identifier() {
-        let conf = crate::bump::repo_root().join("src-tauri/tauri.conf.json");
-        let Ok(text) = fs::read_to_string(conf) else { return }; // gone after stage 12
-        let conf: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(conf["identifier"], APP_ID);
-    }
-
-    #[test]
     fn ages_read_as_the_script_printed_them() {
         let now = 1_794_400_000_000; // 2026-11-11T12:26:40Z
         let builds = json!({ "data": [{ "type": "builds", "id": "b", "attributes": { "uploadedDate": "2026-09-01T05:00:00.000-07:00", "version": "202609011" } }] });

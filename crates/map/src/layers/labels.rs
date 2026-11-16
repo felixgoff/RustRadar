@@ -367,7 +367,7 @@ impl Layer for Labels {
                     key: f.key(),
                     anchor: at.map(|(anchor, _, _)| anchor),
                     perspective: at.map_or(1.0, |(_, k, _)| k),
-                    priority: f.priority,
+                    priority: f.priority_at(cx.view.view.zoom),
                     size: f.size * label_scale,
                     text: self.laid[i].as_ref().unwrap_or(&empty),
                 }

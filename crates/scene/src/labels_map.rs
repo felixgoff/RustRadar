@@ -23,7 +23,9 @@
 //!   box, grown by [`LABEL_MARGIN`], meets no box shown before it (`crate::declutter::Group`, which
 //!   also keeps a label already shown ahead of an equal one, so labels hold still as the camera
 //!   moves). Shown labels never overlap, none is cut by the canvas's edge, and a copy of a place
-//!   from a neighbouring tile is hidden by the first.
+//!   from a neighbouring tile is hidden by the first. From zoom [`COUNTRIES_YIELD_ZOOM`] in, a
+//!   country's name ranks below the cities' ([`MapLabel::priority_at`]): there the cities are what
+//!   is looked for, where on the globe the countries are.
 
 use rustradar_core::geo::cos_angle;
 use rustradar_core::mvt::{self, GeomType, Value};
@@ -257,6 +259,11 @@ pub fn label_color(p: &LabelProps) -> [u8; 4] {
     }
 }
 
+/// From this zoom in, a country's name gives way to the cities' ([`MapLabel::priority_at`]).
+pub const COUNTRIES_YIELD_ZOOM: f64 = 4.0;
+/// How far a country's priority drops there: from `900 − 10 · rank` to `450 − 10 · rank`.
+pub const COUNTRY_YIELD: f64 = 450.0;
+
 /// `labelPriority` (G:653-658): higher wins. Airports 600; places `base − 10 · rank` with base 900
 /// for a country, 800 for a city, 400 for a town, 100 for anything else.
 pub fn label_priority(p: &LabelProps) -> f64 {
@@ -296,6 +303,8 @@ pub struct MapLabel {
     pub color: [u8; 4],
     /// [`label_priority`].
     pub priority: f64,
+    /// A country's name: it yields to the cities closer in ([`Self::priority_at`]).
+    pub country: bool,
 }
 
 impl MapLabel {
@@ -310,7 +319,16 @@ impl MapLabel {
             size: label_size(p),
             color: label_color(p),
             priority: label_priority(p),
+            country: p.class_is("country") && !p.is_airport(),
         }
+    }
+
+    /// Its priority in the collision pass at `zoom`: [`Self::priority`], but from
+    /// [`COUNTRIES_YIELD_ZOOM`] in a country's name drops [`COUNTRY_YIELD`] below every city's (yet
+    /// above the towns'), so where the two meet the city is named and the country only where
+    /// there is room. On the globe further out the countries still lead.
+    pub fn priority_at(&self, zoom: f64) -> f64 {
+        if self.country && zoom >= COUNTRIES_YIELD_ZOOM { self.priority - COUNTRY_YIELD } else { self.priority }
     }
 }
 
@@ -490,6 +508,21 @@ mod tests {
     /// The collision pass's loops (P1: each row's span as slices, the patch's columns once, the
     /// texel bounds' `ceil`) make the very map and fades of the plain per-texel loops they
     /// replaced, here kept as written for B4.
+    #[test]
+    fn close_in_a_country_gives_way_to_its_cities_but_not_on_the_globe() {
+        let denmark = MapLabel::new([10.0, 56.0], &place("country", "Denmark", n(4.0)));
+        let copenhagen = MapLabel::new([12.6, 55.7], &place("city", "Copenhagen", n(6.0)));
+        let town = MapLabel::new([12.0, 55.6], &place("town", "Roskilde", n(1.0)));
+        let airport = MapLabel::new([12.6, 55.6], &airport(s("CPH")));
+        assert!(denmark.country && !copenhagen.country && !airport.country);
+        assert!(denmark.priority_at(1.9) > copenhagen.priority_at(1.9), "the globe: countries lead");
+        assert!(denmark.priority_at(3.99) > copenhagen.priority_at(3.99));
+        assert!(denmark.priority_at(4.5) < copenhagen.priority_at(4.5), "Europe: the city is named");
+        assert!(denmark.priority_at(4.5) > town.priority_at(4.5), "and still before a town");
+        assert_eq!(copenhagen.priority_at(9.0), copenhagen.priority);
+        assert_eq!(denmark.priority_at(4.0), 860.0 - COUNTRY_YIELD);
+    }
+
     #[test]
     fn the_priority_formula() {
         assert_eq!(label_priority(&airport(s("ARN"))), 600.0);
@@ -746,7 +779,7 @@ mod tests {
     }
 
     fn at(lon: f64, lat: f64, iata: Option<&str>) -> MapLabel {
-        MapLabel { lon, lat, iata: iata.map(str::to_owned), text: "x".into(), name: String::new(), size: 12.0, color: PLACE_COLOR, priority: 100.0 }
+        MapLabel { lon, lat, iata: iata.map(str::to_owned), text: "x".into(), name: String::new(), size: 12.0, color: PLACE_COLOR, priority: 100.0, country: false }
     }
 
     #[test]

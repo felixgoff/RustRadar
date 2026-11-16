@@ -15,10 +15,12 @@
 //!   a tile of 16 comes back empty (`LodMVTLayer.getTileData` resolves `null`) and its coarser
 //!   ancestor, if one is cached, stands in (`keepCoarserUntilIn`). Requests: 8 at once
 //!   ([`MAX_REQUESTS`]).
-//! - **Far tiles flat, near tiles standing.** A tile under [`CITY_CLOSE_ZOOM`] (14), the far
-//!   zoom-13 ones, is drawn flat (`extruded: false`): each footprint on the ground in the
-//!   building colour, unlit, no shadows. A tile of 14 is extruded: walls and a flat roof at the
-//!   building's height, lit, and its shadows cast on the ground ([`tile_shadows`]).
+//! - **Every tile stands.** Every level of [`city_lod`] is extruded ([`CITY_CLOSE_ZOOM`] is its
+//!   coarsest): walls and a flat roof at the building's height, lit, with shadows
+//!   ([`tile_shadows`]), so a tile's buildings look the same at every level of detail and only
+//!   their footprints' detail changes as tiles refine (the old app drew its far zoom-13 tiles flat
+//!   on the ground, a jump at every switch). A zoom-13 tile's shadows cost about as much as a
+//!   zoom-14 one's: OpenFreeMap keeps only its larger buildings there.
 //! - **Heights** ([`building_height`], `buildingHeight`, `BL:36-43`): `hide_3d ? 0 :
 //!   Number(render_height ?? 6)` metres, read as deck reads loaders.gl's binary tiles (the flat
 //!   map's): a numeric property a feature lacks reads 0 when the tile's other features have it as
@@ -75,9 +77,9 @@ pub const SOURCE_LAYER: &str = "building";
 /// source on the dark and satellite maps.
 pub const SOURCE_ZOOMS: [u32; 2] = [13, 14];
 
-/// From this tile zoom on the buildings stand up and cast shadows; the coarser (far) tiles are
-/// drawn flat (`CITY_CLOSE_ZOOM`, G:1042).
-pub const CITY_CLOSE_ZOOM: u32 = 14;
+/// From this tile zoom on the buildings stand up and cast shadows: [`city_lod`]'s coarsest level,
+/// so every tile does (a coarser one, only ever asked for by tests, is drawn flat).
+pub const CITY_CLOSE_ZOOM: u32 = 13;
 
 /// Requests at once (`maxRequests: 8`, G:1066).
 pub const MAX_REQUESTS: usize = 8;
@@ -112,6 +114,13 @@ const EARTH_CIRCUMFERENCE: f64 = 2.0 * PI * 6_378_137.0;
 /// `CITY_LOD` (G:1039): the buildings' tiles by their distance from the camera.
 pub fn city_lod() -> Lod {
     Lod { levels: vec![13, 14, 16], bias: 0.5, max_distance: 25_000.0 }
+}
+
+/// The dark and satellite maps' buildings by distance: [`city_lod`] without its zoom 16, which
+/// they have no source for, so the nearest tiles are OpenFreeMap's zoom 14 (the old app asked for
+/// zoom 16 there and drew nothing close in unless a coarser tile happened to be cached).
+pub fn plain_lod() -> Lod {
+    Lod { levels: SOURCE_ZOOMS.to_vec(), ..city_lod() }
 }
 
 /// `SHADOW_SUN_STEP` (G:985): the cosine of a quarter of a degree; the shadows are recast once the
@@ -311,6 +320,19 @@ pub fn building_height(feature: &Feature<'_>, heights: Heights) -> f64 {
     }
 }
 
+/// The height a building of OpenFreeMap's zoom-13 tiles stands at, metres: those tiles merge the
+/// buildings into blocks and give no heights at all, and the area-weighted median of the zoom-14
+/// tiles' heights in the fixtures' cities is about 15 m; 12 m keeps the far blocks close to what
+/// the near tiles show instead of the 6 m sheds [`DEFAULT_HEIGHT_M`] would make of a city.
+pub const MERGED_HEIGHT_M: f64 = 12.0;
+
+/// A building's height on `tile`: [`building_height`], except that a zoom-13 tile's merged blocks
+/// without a height stand at [`MERGED_HEIGHT_M`].
+pub fn tile_building_height(tile: TileIndex, feature: &Feature<'_>, heights: Heights) -> f64 {
+    let height = building_height(feature, heights);
+    if tile.z < 14 && !heights.numeric_height && feature.get("render_height").is_none() && height == DEFAULT_HEIGHT_M { MERGED_HEIGHT_M } else { height }
+}
+
 /// math.gl's `getPolygonSignedArea` of a closed ring of `x, y` pairs (its sign is a turn; only its
 /// sign and whether it is 0 matter here).
 fn ring_area(ring: &[[f64; 2]]) -> f64 {
@@ -445,7 +467,7 @@ pub fn tessellate(tile: TileIndex, bytes: &[u8], close_from_zoom: u32, cancelled
                 continue;
             }
             // deck's `elevations` attribute: f32
-            let height = building_height(&feature, heights) as f32;
+            let height = tile_building_height(tile, &feature, heights) as f32;
             for polygon in binary_polygons(&feature, layer.extent) {
                 b.building(&polygon, height);
             }
@@ -573,9 +595,9 @@ impl ShadowSun {
 //   side of a counter-clockwise ring runs (so the façade reads left to right from outside, and
 //   the same windows are lit at night). Roofs flat at the height, earcut's triangles as the plain
 //   buildings'; their texture lies fixed to the world (the shader's `rl_t`).
-// - **Far tiles** (zoom 13, under [`CITY_CLOSE_ZOOM`]): the footprints flat on the ground in the
-//   building's colour, alpha `255 − code` as deck's `fillColors` has it, no walls, unlit (the
-//   building shader needs `extruded`): what the plan's section 7 decided ("as today").
+// - **Far tiles** stand as the near ones (every level is at least [`CITY_CLOSE_ZOOM`]), in the
+//   same look: the seed is the building's place in the world, so its colour, façade and roof stay
+//   as the tiles refine.
 //
 // Not here: Overture's heights for Streets GL's buildings that have none (`sglBuildingFetch`,
 // item R6: it writes `height` or `levels` into a building's properties before this reads them),
@@ -1024,7 +1046,7 @@ pub fn tessellate_realistic_with(
                     });
                 }
             } else {
-                let height = building_height(&feature, heights);
+                let height = tile_building_height(tile, &feature, heights);
                 let colour = match feature.get("colour") {
                     Some(Value::Str(s)) => Some(*s),
                     _ => None,
@@ -1221,17 +1243,20 @@ mod tests {
     }
 
     #[test]
-    fn a_far_tile_is_flat_and_casts_nothing() {
+    fn a_far_tile_stands_and_casts_shadows_as_a_near_one() {
         let square: &[&[(i64, i64)]] = &[&SQUARE];
         let tile = mvt_tile("building", &[(&[("render_height", Value::Num(20.0))], square)]);
         let far = TileIndex { x: 4507, y: 2409, z: 13 };
         let out = tessellate(far, &tile, CITY_CLOSE_ZOOM, &|| false).expect("not cancelled");
-        assert!(!out.extruded);
-        assert_eq!(out.vertices.len(), 5);
-        assert_eq!(out.indices.len(), 6);
-        assert!(out.vertices.iter().all(|v| v.position[2] == 0.0));
-        assert!(out.footprints.is_empty() && out.footprints.polygon_starts.is_empty());
-        assert_eq!(tile_shadows(far, &out.footprints, [1.0, 0.0, 0.0]), None);
+        assert!(out.extruded);
+        // four walls of four vertices, and the roof's five at the height
+        assert_eq!(out.vertices.len(), 4 * 4 + 5);
+        assert!(out.vertices.iter().filter(|v| v.normal == [0.0, 0.0, 1.0]).all(|v| v.position[2] == 20.0));
+        assert_eq!(out.footprints.len(), 1);
+        assert!(tile_shadows(far, &out.footprints, [0.5, 0.0, 0.5]).is_some());
+        // a coarser tile than any level (tests only) still lies flat
+        let flat = tessellate(far, &tile, 14, &|| false).expect("not cancelled");
+        assert!(!flat.extruded && flat.vertices.iter().all(|v| v.position[2] == 0.0));
     }
 
     #[test]
@@ -1326,8 +1351,8 @@ mod tests {
         assert_eq!(sun.held(), Some(moved));
     }
 
-    /// The fixtures' tiles of V5 (Stockholm city) and V4 (Arlanda): extruded z14 tiles have walls,
-    /// roofs and footprints; z13 tiles are flat; a tile with no buildings gives nothing; a
+    /// The fixtures' tiles of V5 (Stockholm city) and V4 (Arlanda): z14 and z13 tiles have walls,
+    /// roofs and footprints; a tile with no buildings gives nothing; a
     /// cancelled job stops.
     #[test]
     fn fixture_tiles_tessellate() {
@@ -1343,10 +1368,9 @@ mod tests {
         // every roof vertex is at its building's height, every wall vertex on the ground or there
         assert!(out.vertices.iter().all(|v| v.position[2] >= 0.0 && v.position[2] <= tallest));
         let far = TileIndex { x: 4507, y: 2409, z: 13 };
-        let flat = tessellate(far, &fixture(13, 4507, 2409), CITY_CLOSE_ZOOM, &|| false).expect("not cancelled");
-        assert!(!flat.extruded && !flat.is_empty());
-        assert!(flat.vertices.iter().all(|v| v.position[2] == 0.0));
-        assert!(flat.footprints.is_empty());
+        let far = tessellate(far, &fixture(13, 4507, 2409), CITY_CLOSE_ZOOM, &|| false).expect("not cancelled");
+        assert!(far.extruded && !far.footprints.is_empty());
+        assert!(far.vertices.iter().any(|v| f64::from(v.position[2]) == MERGED_HEIGHT_M));
         assert!(tessellate(close, &[], CITY_CLOSE_ZOOM, &|| false).expect("not cancelled").is_empty());
         assert_eq!(tessellate(close, &fixture(14, 9014, 4818), CITY_CLOSE_ZOOM, &|| true), Err(Cancelled));
     }
@@ -1421,7 +1445,7 @@ mod tests {
                             Some(Value::Str(s)) => Some((*s).to_owned()),
                             _ => None,
                         };
-                        (building_height(&feature, heights), colour, BuildingLook::default())
+                        (tile_building_height(tile, &feature, heights), colour, BuildingLook::default())
                     };
                     for rings in binary_polygons(&feature, layer.extent) {
                         let seed = style_seed(tile, &rings);
@@ -1466,8 +1490,8 @@ mod tests {
             (
                 TileIndex { x: 4507, y: 2409, z: 13 },
                 489,
-                0xe6c8_72c0,
-                [[6, -418_412_049, 6000, 192, 132, 98, 239], [6, 1_371_270_478, 6000, 238, 234, 222, 240], [10, -1_885_692_243, 6000, 209, 207, 201, 233]],
+                0x3701_a02d,
+                [[6, -418_412_049, 12000, 228, 210, 174, 255], [6, 1_371_270_478, 12000, 238, 234, 222, 250], [10, -1_885_692_243, 12000, 173, 89, 67, 224]],
             ),
         ];
         for (tile, count, digest, first) in today {
@@ -1476,7 +1500,7 @@ mod tests {
             assert_eq!(got.len(), count, "{tile:?}");
             assert_eq!(got[..3], first, "{tile:?}");
             assert_eq!(fnv(&got), digest, "{tile:?}: {got:?}");
-            // the tile's vertices carry those colours (the far tile's as deck's flat polygons)
+            // the tile's vertices carry those colours
             let out = tessellate_realistic(tile, &bytes, CITY_CLOSE_ZOOM, &|| false).expect("not cancelled");
             assert_eq!(out.sgl, tile.z == 16);
             assert_eq!(out.extruded, tile.z >= CITY_CLOSE_ZOOM);
@@ -1568,16 +1592,16 @@ mod tests {
         assert_eq!(red[..3], [182, 106, 94]);
     }
 
-    /// A far tile (zoom 13) of the realistic map: the footprints flat on the ground in each
-    /// building's colour with deck's alpha, no walls, no footprints for shadows; a cancelled job
-    /// stops; a tile without buildings gives nothing.
+    /// A far tile (zoom 13) of the realistic map stands as a near one: walls with their façades,
+    /// roofs, footprints for the shadows, each building in its own colour; a cancelled job stops; a
+    /// tile without buildings gives nothing.
     #[test]
-    fn a_far_realistic_tile_lies_flat_in_each_building_s_colour() {
+    fn a_far_realistic_tile_stands_in_each_building_s_colour() {
         let far = TileIndex { x: 4507, y: 2409, z: 13 };
         let out = tessellate_realistic(far, &fixture(13, 4507, 2409), CITY_CLOSE_ZOOM, &|| false).expect("not cancelled");
-        assert!(!out.extruded && !out.is_empty());
-        assert!(out.vertices.iter().all(|v| v.position[2] == 0.0 && v.style[3] == 0));
-        assert!(out.footprints.is_empty());
+        assert!(out.extruded && !out.is_empty());
+        assert!(out.vertices.iter().any(|v| v.style[3] & STYLE_WALL != 0 && f64::from(v.position[2]) == MERGED_HEIGHT_M));
+        assert!(!out.footprints.is_empty());
         let colours: std::collections::HashSet<[u8; 4]> = out.vertices.iter().map(|v| v.tint).collect();
         assert!(colours.len() > 50, "{}", colours.len());
         assert!(out.vertices.iter().all(|v| v.tint[3] >= 255 - (GLASS + FACADES * FLAT3)));

@@ -8,9 +8,6 @@
 // Entry points:
 // - `vs_building` + `fs_building`: an extruded tile's walls and flat roofs (deck's extruded
 //   SolidPolygonLayer with `BuildingExtension`);
-// - `vs_building` + `fs_flat`: a far tile's footprints flat on the ground in each building's colour
-//   and alpha, unlit (deck's `extruded: false`, where the extension is off and `UNLIT` leaves
-//   `fillColors` as it is);
 // - `vs_roof` + `fs_roof`: pitched roofs' meshes (item R6; `RoofExtension`'s `roofInject`): the
 //   same vertex, its tangent across the slope (`cross(up, n)`) and no foot shading (`rb_z` 10), the
 //   same fragment not clipped to the tile (the roofs' SimpleMeshLayer has no `ClipExtension`).
@@ -254,17 +251,16 @@ fn building_colour(b: BuildingOut, clipped: bool) -> vec4<f32> {
         let evened = textureSampleLevel(building_glow, building_sampler, vec2<f32>(0.5, 0.5), index, 16.0).r * vec3<f32>(0.52, 0.355, 0.204);
         lit += mix(evened, each, near) * rlight.night * 0.28;
     }
-    if (clipped && outside_tile(b.tile)) {
+    if ((clipped && outside_tile(b.tile)) || lod_dissolved(b.clip.xy)) {
         discard;
     }
     return vec4<f32>(rl_display(rl_aerial(rl, lit)), 1.0);
 }
 
-// A far tile's footprint: the building's colour and alpha as they are (unlit).
-@fragment
-fn fs_flat(b: BuildingOut) -> @location(0) vec4<f32> {
-    if (outside_tile(b.tile)) {
-        discard;
-    }
-    return b.tint;
+// The level-of-detail dissolve (`layers::buildings::LodFade`): a tile draws only the pixels whose
+// screen-door threshold lies in its frame's band `[pad.x, pad.y)`; a tile coming in and the one it
+// replaces hold complementary bands, so each pixel shows one of them while they cross over.
+fn lod_dissolved(pixel: vec2<f32>) -> bool {
+    let d = fract(52.9829189 * fract(dot(floor(pixel), vec2<f32>(0.06711056, 0.00583715))));
+    return d < frame.pad.x || d >= frame.pad.y;
 }

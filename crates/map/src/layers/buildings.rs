@@ -1,7 +1,7 @@
 //! Plain buildings on the dark and satellite maps (item B7; doc 01 §9.3; doc 04 §7.1, §7.6, §13;
 //! row 7 of doc 03 §3): OpenFreeMap's buildings as today's app draws them through `BuildingLayer`
-//! (`building-layer.ts`, `cityBuildingLayer`, G:1039-1092), extruded and lit close in, flat far off,
-//! with their shadows on the ground. The tessellation is `rustradar_scene::tess::buildings`; the
+//! (`building-layer.ts`, `cityBuildingLayer`, G:1039-1092), extruded and lit at every level of
+//! detail, with their shadows on the ground. The tessellation is `rustradar_scene::tess::buildings`; the
 //! realistic map's buildings (façades, roofs, foot shade) are items R4–R6.
 //!
 //! What today's app does, and so this layer:
@@ -11,18 +11,14 @@
 //!   layer works out the projection and the basemap. When it stops drawing it drops its tiles and
 //!   their shadows, as deck finalizes a layer that leaves the list.
 //! - **Tiles** by their distance from the camera (`LodMVTLayer`): [`LodSelect`] over
-//!   `tess::city_lod()` (levels 13, 14, 16, bias 0.5, 25 km) with the look-ahead while zooming,
-//!   OpenFreeMap at zooms 13 and 14 ([`tess::SOURCE_ZOOMS`]; a tile of 16 has no source on these
-//!   maps and settles empty at once), 8 requests at once, refined by `keepCoarserUntilIn`
+//!   `tess::plain_lod()` (levels 13 and 14, bias 0.5, 25 km: OpenFreeMap's zooms,
+//!   [`tess::SOURCE_ZOOMS`]; the old app also asked for a zoom 16 these maps have no source for,
+//!   and drew nothing close in) with the look-ahead while zooming, 8 requests at once, refined by `keepCoarserUntilIn`
 //!   ([`Refinement::KeepCoarserUntilIn`]: a coarser tile is drawn in place of finer ones until they
 //!   are all in, never with them, and stays for a finer one that came back empty). Tiles are
 //!   decoded on the worker pool and drawn in deck's order, coarse to fine ([`TileSet::visible`]).
-//!   So close in, where the selection wants zoom-16 tiles, buildings show only where a zoom-14 or
-//!   zoom-13 tile over them is cached: arriving there by zooming in (as one does), it is; in a view
-//!   opened straight at zoom 15.5 the near ground has none, as today.
-//! - **Each tile**, as `BuildingLayer.renderSubLayers` makes it: a far tile (zoom 13, under
-//!   `CITY_CLOSE_ZOOM`) is its footprints flat on the ground in `BUILDING_COLOR` `[58,68,84]`,
-//!   unlit (`extruded: false`); a near tile (zoom 14) first its shadows on the ground (`-shadow`, a
+//! - **Each tile**, far (zoom 13) or near (zoom 14) alike, so a switch of level changes only the
+//!   footprints' detail (the old app laid its far tiles flat and unlit): first its shadows on the ground (`-shadow`, a
 //!   SolidPolygonLayer in `SHADOW_COLOR` `[4,8,16]` at the sun's alpha, with the `SHADOW` draw state
 //!   of the stencil rule: a pixel is darkened once per frame, whichever shadow comes first), then
 //!   its buildings extruded and lit in `BUILDING_COLOR` with `BUILDING_MATERIAL` ([`MATERIAL`]:
@@ -45,12 +41,15 @@
 //!   the rest keeping their old shadows meanwhile (`renderLayers`' recasting budget). The layer is
 //!   [`Layer::pending`] while any is left to recast, so a shot waits for them.
 //!
+//! - **Crossfade** ([`LodFade`]): as tiles refine, a tile coming in dissolves in over
+//!   [`LOD_FADE`] while the one it replaces dissolves out through the complementary screen-door
+//!   band (each frame's `pad`, the shader's `lod_dissolved`), so no pixel shows both and nothing
+//!   pops; the layer is pending meanwhile.
 //! - **On the 3D terrain** (item Z3, `terrain::ground`; deck's `TerrainExtension`): a near tile's
 //!   buildings stand on the ground vertex by vertex (an extruded layer is *offset*: each vertex is
 //!   raised by the ground under it), through a vertex buffer of the ground's heights under them
 //!   ([`Standing`]) raised again where the terrain tiles under the tile change, within
-//!   `STAND_BUDGET_MS` a frame; a far tile's flat footprints (`extruded: false`, no anchors) and the
-//!   shadows are draped into the terrain's covers.
+//!   `STAND_BUDGET_MS` a frame; the shadows are draped into the terrain's covers.
 //!
 //! How it is checked: V4 against today's picture (97.7 % of today's building pixels are buildings
 //! here and 98.9 % the other way, 0.7 levels apart on average); V5 for the lit faces and the
@@ -142,11 +141,19 @@ fn vs_building(v: BuildingVertex) -> BuildingVaryings {
     return out;
 }
 
+// The level-of-detail dissolve (`LodFade`): a tile draws only the pixels whose screen-door
+// threshold lies in its frame's band `[pad.x, pad.y)`; a tile coming in and the one it replaces
+// hold complementary bands, so each pixel shows exactly one of them while they cross over.
+fn lod_dissolved(pixel: vec2<f32>) -> bool {
+    let d = fract(52.9829189 * fract(dot(floor(pixel), vec2<f32>(0.06711056, 0.00583715))));
+    return d < frame.pad.x || d >= frame.pad.y;
+}
+
 // deck's ClipExtension by fragment (`clip_isInBounds`, bounds [0, 0, 1, 1] in tile units): the
 // map's x within [west, east), y within [south, north), so u in [0, 1) and v (south) in (0, 1].
 @fragment
 fn fs_building(in: BuildingVaryings) -> @location(0) vec4<f32> {
-    if (in.tile.x < 0.0 || in.tile.x >= 1.0 || in.tile.y <= 0.0 || in.tile.y > 1.0) {
+    if (in.tile.x < 0.0 || in.tile.x >= 1.0 || in.tile.y <= 0.0 || in.tile.y > 1.0 || lod_dissolved(in.clip.xy)) {
         discard;
     }
     return in.color;
@@ -217,6 +224,84 @@ pub fn decode(tile: TileIndex, bytes: &[u8], cancel: &Cancel) -> Result<Option<B
 pub fn shadow_vertices(shadows: &TileShadows) -> Vec<fill::Vertex> {
     let color = tess::shadow_color(shadows.alpha, tess::SHADOW_STRENGTH);
     shadows.positions.chunks_exact(2).map(|p| fill::Vertex { position: [p[0], p[1], 0.0], color }).collect()
+}
+
+/// How long a tile takes to dissolve in, or out, when the level of detail changes.
+pub const LOD_FADE: Duration = Duration::from_millis(300);
+
+/// A tile's dissolve band for its frame (`Frame::pad`, read by the shaders' `lod_dissolved`): it
+/// draws the pixels whose screen-door threshold lies in `[lo, hi)`.
+pub type Band = [f32; 2];
+
+/// Fully drawn.
+pub const WHOLE: Band = [0.0, 2.0];
+
+/// The buildings' crossfade between levels of detail: a tile that starts to be drawn dissolves
+/// in over [`LOD_FADE`] and the one it replaces (a coarser parent, finer children, one that fell
+/// out of the selection) dissolves out over the same time while it is still cached, through
+/// complementary screen-door bands, so the switch shows no pop and no pixel is drawn by both.
+#[derive(Debug, Default)]
+pub struct LodFade {
+    /// Each tile drawn or dissolving out: since when, and whether it is leaving.
+    tiles: HashMap<TileIndex, (Instant, bool)>,
+    /// Whether any tile is mid-fade.
+    busy: bool,
+}
+
+impl LodFade {
+    /// This frame's draws: `visible` (in draw order) with their bands, after the tiles leaving
+    /// that `cached` still holds. `now` is the frame's clock.
+    pub fn update(&mut self, now: Instant, visible: &[TileIndex], cached: impl Fn(TileIndex) -> bool) -> Vec<(TileIndex, Band)> {
+        let progress = |since: Instant| (now.saturating_duration_since(since).as_secs_f32() / LOD_FADE.as_secs_f32()).min(1.0);
+        let back = |p: f32| now.checked_sub(LOD_FADE.mul_f32(p)).unwrap_or(now);
+        let mut out = Vec::with_capacity(visible.len());
+        // leaving: each continues from where it stood
+        self.tiles.retain(|tile, (since, leaving)| {
+            if visible.contains(tile) {
+                return true;
+            }
+            if !*leaving {
+                *since = back(1.0 - progress(*since));
+                *leaving = true;
+            }
+            let p = progress(*since);
+            if p >= 1.0 || !cached(*tile) {
+                return false;
+            }
+            out.push((*tile, [p, 2.0]));
+            true
+        });
+        self.busy = !out.is_empty();
+        for &tile in visible {
+            let (since, leaving) = self.tiles.entry(tile).or_insert((now, false));
+            if *leaving {
+                *since = back(1.0 - progress(*since));
+                *leaving = false;
+            }
+            let p = progress(*since);
+            self.busy |= p < 1.0;
+            out.push((tile, if p < 1.0 { [0.0, p] } else { WHOLE }));
+        }
+        out
+    }
+
+    /// Whether a tile is still dissolving in or out (the picture changes by itself).
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
+    /// Forgets every tile (the layer stopped drawing).
+    pub fn clear(&mut self) {
+        self.tiles.clear();
+        self.busy = false;
+    }
+}
+
+/// `tile`'s frame with its dissolve `band`.
+pub fn faded_frame(cx: &mut PrepareCx<'_>, tile: TileIndex, band: Band) -> FrameSlot {
+    let mut frame = cx.view.tile(tile, 0.0);
+    frame.pad = band;
+    cx.frames.push(&frame)
 }
 
 /// A tile's shadows under one sun.
@@ -327,10 +412,8 @@ impl BuildingPipeline {
 pub struct Buildings {
     tiles: TileSet<BuildingTile, TileMeshes>,
     pipeline: BuildingPipeline,
-    /// Near tiles: lit in `BUILDING_COLOR` with [`MATERIAL`].
+    /// Every tile: lit in `BUILDING_COLOR` with [`MATERIAL`].
     lit: Style,
-    /// Far tiles: `BUILDING_COLOR` unlit.
-    flat: Style,
     shadows: Fill,
     shadow_style: fill::Style,
     /// The sun the shadows are cast with.
@@ -347,6 +430,8 @@ pub struct Buildings {
     unstood: usize,
     /// This frame's tiles in draw order, each with its frame.
     drawn: Vec<(FrameSlot, TileIndex)>,
+    /// The crossfade as tiles refine.
+    fade: LodFade,
 }
 
 impl Buildings {
@@ -354,20 +439,18 @@ impl Buildings {
         let device = &init.gpu.device;
         let tiles = init.tile_set(
             vec![Source::at(io::OPENFREEMAP, tess::SOURCE_ZOOMS.to_vec())],
-            LodSelect::new(tess::city_lod(), TILE_SIZE),
+            LodSelect::new(tess::plain_lod(), TILE_SIZE),
             TileSetOptions { max_requests: tess::MAX_REQUESTS, refinement: Refinement::KeepCoarserUntilIn, ..Default::default() },
             |tile, bytes, cancel| decode(tile, &bytes, cancel),
         );
         let pipeline = BuildingPipeline::new(init, "buildings", DrawState::NO_CULL);
         let lit = pipeline.style(device, &MATERIAL, COLOR);
-        let flat = pipeline.style(device, &Material::UNLIT, COLOR);
         let shadows = shadow::fill(init, "building shadows");
         let shadow_style = shadows.style(device, fill::OPAQUE);
         Buildings {
             tiles,
             pipeline,
             lit,
-            flat,
             shadows,
             shadow_style,
             sun: ShadowSun::default(),
@@ -377,6 +460,7 @@ impl Buildings {
             stale: 0,
             unstood: 0,
             drawn: Vec::new(),
+            fade: LodFade::default(),
         }
     }
 
@@ -431,6 +515,7 @@ impl Layer for Buildings {
                 self.tiles.clear();
             }
             self.casts.clear();
+            self.fade.clear();
             self.stale = 0;
             return;
         }
@@ -444,7 +529,7 @@ impl Layer for Buildings {
         // standing on the 3D terrain where it is drawn (Z3)
         let mut budget = StandBudget::default();
         let visible: Vec<TileIndex> = self.tiles.visible().map(|(t, _)| t).collect();
-        for tile in visible {
+        for &tile in &visible {
             if let Some(m) = self.tiles.get_mut(tile)
                 && m.extruded
                 && m.standing.stale(tile, &cx.scene.stands_on)
@@ -455,8 +540,9 @@ impl Layer for Buildings {
         }
         self.unstood = budget.left;
         self.pipeline.set_lights(&cx.gpu.queue, cx.lights(), cx.view);
-        for (tile, _) in self.tiles.visible() {
-            self.drawn.push((cx.tile_frame(tile, 0.0), tile));
+        let tiles = &self.tiles;
+        for (tile, band) in self.fade.update(Instant::now(), &visible, |t| tiles.get(t).is_some()) {
+            self.drawn.push((faded_frame(cx, tile, band), tile));
         }
     }
 
@@ -468,15 +554,8 @@ impl Layer for Buildings {
         let (draped, standing) = (cx.draws_draped(), cx.pass == Pass::Map);
         for &(slot, tile) in &self.drawn {
             let Some(meshes) = self.tiles.get(tile) else { continue };
-            if !meshes.extruded {
-                // far off, flat: only the roofs show from there (draped over the 3D terrain, Z3:
-                // a SolidPolygonLayer that is not extruded has no anchors to stand on)
-                if draped {
-                    self.pipeline.draw(pass, cx, slot, &self.flat, &meshes.mesh, &meshes.standing);
-                }
-                continue;
-            }
-            // under the tile's buildings, on the ground; not clipped to the tile
+            // under the tile's buildings, on the ground; not clipped to the tile (a tile
+            // dissolving out keeps its shadows to the end: each pixel is darkened once anyway)
             if draped && let Some(shadows) = self.casts.get(&tile).filter(|c| c.serial == meshes.serial).and_then(|c| c.mesh.as_ref()) {
                 self.shadows.draw(pass, cx, slot, &self.shadow_style, shadows);
             }
@@ -491,7 +570,7 @@ impl Layer for Buildings {
     }
 
     fn pending(&self) -> bool {
-        self.shown && (self.tiles.loading() || self.stale > 0 || self.unstood > 0)
+        self.shown && (self.tiles.loading() || self.stale > 0 || self.unstood > 0 || self.fade.busy())
     }
 }
 
@@ -661,7 +740,7 @@ mod tests {
             scene
         };
         let viewport = viewport_for(&v4(), size);
-        let wanted: Vec<TileIndex> = distance_tile_indices(&viewport, &tess::city_lod(), None, 0.0);
+        let wanted: Vec<TileIndex> = distance_tile_indices(&viewport, &tess::plain_lod(), None, 0.0);
         assert!(wanted.iter().any(|t| t.z == 13) && wanted.iter().any(|t| t.z == 14) && wanted.iter().all(|t| t.z != 16), "{wanted:?}");
         let mut on_dark = Vec::new();
         for basemap in [Basemap::Dark, Basemap::Satellite] {
@@ -689,22 +768,20 @@ mod tests {
         assert_eq!(openfreemap(&only(ViewState { zoom: 12.0, ..v4() }, Basemap::Dark, true)), 0);
     }
 
-    /// Opened straight at V5 (zoom 15.5, pitched 60°), the selection wants zoom-16 tiles everywhere
-    /// in view: on the dark map they have no source, and no coarser tile over them is cached, so no
-    /// building shows; as today (`LodMVTLayer.getTileData` resolves `null` there and
-    /// `keepCoarserUntilIn` keeps only a cached tile over it). Arriving by zooming in, they show:
-    /// see `v5_shows_lit_buildings_and_their_shadows_darkening_once`.
+    /// Opened straight at V5 (zoom 15.5, pitched 60°), the selection wants OpenFreeMap's zoom-14
+    /// tiles close in (`plain_lod` has no zoom 16 to ask for on these maps), so the buildings stand
+    /// there at once (the old app asked for zoom 16, which has no source here, and showed none).
     #[test]
-    fn opened_straight_at_v5_the_dark_map_has_no_tile_for_the_buildings_close_in() {
+    fn opened_straight_at_v5_the_dark_map_stands_its_buildings_close_in() {
         let size = [1440.0, 900.0];
         let viewport = viewport_for(&v5(), size);
-        let wanted = distance_tile_indices(&viewport, &tess::city_lod(), None, 0.0);
-        assert!(!wanted.is_empty() && wanted.iter().all(|t| t.z == 16), "{wanted:?}");
+        let wanted = distance_tile_indices(&viewport, &tess::plain_lod(), None, 0.0);
+        assert!(!wanted.is_empty() && wanted.iter().all(|t| t.z == 14), "{wanted:?}");
         let Some(gpu) = gpu() else { return };
         let (image, fixtures) = shots(&gpu, &[dark(v5(), size)], "b7-dark-v5-straight-1440x900.png");
         assert!(fixtures.misses().is_empty(), "{:?}", fixtures.misses());
         let buildings = image.rgba.chunks_exact(4).filter(|p| is_building([p[0], p[1], p[2], p[3]])).count();
-        assert_eq!(buildings, 0);
+        assert!(buildings > 100_000, "{buildings}");
     }
 
     /// V4 (Arlanda, zoom 13.5 pitched 45° and turned 30°: zoom-14 tiles standing nearly
@@ -743,26 +820,26 @@ mod tests {
     }
 
     /// V4 at zoom 12.1, just onto the flat map: every tile the distance LOD takes is a far one of
-    /// zoom 13, so every building lies flat on the ground in `BUILDING_COLOR`, unlit; no wall, no
-    /// lit roof, no shadow.
+    /// zoom 13, and its buildings stand lit with their shadows as the near tiles' do (the old app
+    /// laid them flat and unlit, a jump at every switch).
     #[test]
-    fn far_tiles_lie_flat_in_the_building_colour() {
+    fn far_tiles_stand_lit_as_the_near_ones() {
         let Some(gpu) = gpu() else { return };
         let view = ViewState { zoom: 12.1, ..v4() };
         let size = [1440.0, 900.0];
-        let wanted = distance_tile_indices(&viewport_for(&view, size), &tess::city_lod(), None, 0.0);
+        let wanted = distance_tile_indices(&viewport_for(&view, size), &tess::plain_lod(), None, 0.0);
         assert!(!wanted.is_empty() && wanted.iter().all(|t| t.z == 13), "{wanted:?}");
         let (image, fixtures) = shots(&gpu, &[dark(view, size)], "b7-dark-v4-z12.1-1440x900.png");
         assert!(fixtures.misses().is_empty(), "the fixtures lack {:?}", fixtures.misses());
         let pixels: Vec<[u8; 4]> = image.rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect();
         let flat = pixels.iter().filter(|p| p[..3] == tess::BUILDING_COLOR).count();
         let buildings = pixels.iter().filter(|p| is_building(**p)).count();
-        // (the rest are their edges, blended with the ground)
         let lit = pixels.iter().filter(|p| is_building(**p) && p[2] > tess::BUILDING_COLOR[2]).count();
         let shadow = pixels.iter().filter(|p| p[..3] == shadowed([50, 50, 50], 1)).count();
-        eprintln!("V4 at 12.1: {flat} px in the building colour of {buildings} building px; {lit} brighter, {shadow} shadowed");
-        assert!(flat > 2_000 && flat * 2 > buildings, "{flat} of {buildings}");
-        assert_eq!((lit, shadow), (0, 0));
+        eprintln!("V4 at 12.1: {flat} px in the flat building colour of {buildings} building px; {lit} brighter, {shadow} shadowed");
+        assert!(buildings > 2_000 && lit * 2 > buildings, "{lit} of {buildings}");
+        assert!(flat * 10 < buildings, "{flat} of {buildings}");
+        assert!(shadow > 0, "{shadow}");
     }
 
     /// The ink of `ground` with the buildings' shadow blended over it `times` times at the full

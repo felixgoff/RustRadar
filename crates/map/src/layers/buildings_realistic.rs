@@ -19,13 +19,13 @@
 //!   ([`Refinement::KeepCoarserUntilIn`]: a coarser tile in place of finer ones until they are all
 //!   in, never with them). Decoded on the worker pool, uploaded within the frame's budget, drawn
 //!   coarse to fine. So at V5 (zoom 15.5, pitched 60°) every tile is Streets GL's.
-//! - **Each tile**: a near one (zoom ≥ 14, `CITY_CLOSE_ZOOM`) extruded, its walls and flat roofs in
-//!   the building shader ([`BuildingShader`]: Streets GL's texture arrays, `textures::
-//!   BuildingTextures`, through the realistic light, `look::LightUniform`); a far one (zoom 13)
-//!   flat on the ground in each building's colour and deck's alpha (`255 − code`), unlit: as
-//!   today's app draws it (plan section 7: "as today"; the building extension needs `extruded`).
-//!   Both with `NO_CULL` (depth tested and written), clipped to the tile's square by fragment
-//!   (MVTLayer's `ClipExtension` on the flat map; the shader's `discard`), as the plain buildings.
+//! - **Each tile**, far (zoom 13) or near, extruded: its walls and flat roofs in the building
+//!   shader ([`BuildingShader`]: Streets GL's texture arrays, `textures::BuildingTextures`, through
+//!   the realistic light, `look::LightUniform`), each building's look seeded by its place in the
+//!   world, so it keeps its colour, façade and roof as tiles refine (the old app laid its far tiles
+//!   flat and unlit). With `NO_CULL` (depth tested and written), clipped to the tile's square by
+//!   fragment (the shader's `discard`), as the plain buildings, and crossfaded between levels as
+//!   they are ([`super::buildings::LodFade`]: complementary screen-door bands, roofs included).
 //! - **Textures** (doc 04 §5.3): the realistic map's set, started by the first realistic layer that
 //!   draws ([`super::ground::load_textures`]); the stand-ins (white, flat, no glow) are bound until
 //!   every file is in, and the layer is pending meanwhile (the shots wait for them).
@@ -42,14 +42,13 @@
 //!   buildings and pitched roofs stand on the ground vertex by vertex (an extruded layer is *offset*: each vertex is
 //!   raised by the ground under it; the walls' foot shading keeps its own height), through a vertex buffer of the ground's heights under them
 //!   ([`Standing`]) raised again where the terrain tiles under the tile change, within
-//!   `STAND_BUDGET_MS` a frame; a far tile's flat footprints (`extruded: false`, no anchors) and the
-//!   foot shade and shadows are draped into the terrain's covers.
+//!   `STAND_BUDGET_MS` a frame; the foot shade and shadows are draped into the terrain's covers.
 //!
 //! How it is checked (the tests below): V5 from the fixtures at noon, each of the nearest walls
 //! facing the camera sampled along its top storey on the screen: its brightness repeats once a bay
 //! (a window to each bay, `textures::BUILDING_TEXTURES`' window layers); at midwinter night the
-//! windows' middles are brighter and warmer than the wall between them. Far tiles lie flat in each
-//! building's colour and alpha. The layer asks for Streets GL's tiles only on the realistic flat
+//! windows' middles are brighter and warmer than the wall between them. Far tiles stand as the near
+//! ones. The layer asks for Streets GL's tiles only on the realistic flat
 //! map with the setting on.
 //!
 //! Deviations, invisible: the walls are vertices of their own with their bays and storeys worked
@@ -61,7 +60,10 @@ use rustradar_scene::lod::TILE_SIZE;
 use rustradar_scene::streets_gl::SGL_ZOOM;
 use rustradar_scene::tess::buildings::{self as tess, Footprints, RealisticTile, RealisticVertex};
 
+use std::time::Instant;
+
 use super::building_shadows::BuildingShadows;
+use super::buildings::{LodFade, faded_frame};
 use super::roofs::{self, Overture, Roofs};
 use super::{ByteSize, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::FrameSlot;
@@ -200,7 +202,7 @@ impl BuildingShader {
     }
 
     /// A pipeline of `vertex_entry` (`vs_building`, `vs_roof`) and `fragment_entry`
-    /// (`fs_building`, `fs_flat`) with `state`, for [`RealisticVertex`]'s buffer.
+    /// (`fs_building`, `fs_roof`) with `state`, for [`RealisticVertex`]'s buffer.
     pub fn pipeline(&self, init: &Init<'_>, label: &str, vertex_entry: &str, fragment_entry: &str, state: DrawState) -> wgpu::RenderPipeline {
         build(
             init,
@@ -253,10 +255,8 @@ impl BuildingShader {
 pub struct BuildingsRealistic {
     tiles: TileSet<RealisticTile, TileMeshes>,
     shader: BuildingShader,
-    /// Near tiles: walls and roofs in the building shader.
+    /// Every tile: walls and roofs in the building shader.
     walls: wgpu::RenderPipeline,
-    /// Far tiles: footprints flat, unlit.
-    flat: wgpu::RenderPipeline,
     /// Whether this frame draws, and whether the textures were still loading.
     shown: bool,
     textures_loading: bool,
@@ -270,6 +270,8 @@ pub struct BuildingsRealistic {
     roofs: Roofs,
     /// Tiles on screen left standing on an older ground this frame (Z3).
     unstood: usize,
+    /// The crossfade as tiles refine.
+    fade: LodFade,
 }
 
 impl BuildingsRealistic {
@@ -284,10 +286,21 @@ impl BuildingsRealistic {
         );
         let shader = BuildingShader::new(init, "realistic buildings");
         let walls = shader.pipeline(init, "realistic buildings", "vs_building", "fs_building", DrawState::NO_CULL);
-        let flat = shader.pipeline(init, "realistic buildings, far", "vs_building", "fs_flat", DrawState::NO_CULL);
         let shadows = BuildingShadows::new(init);
         let roofs = Roofs::new(init, &shader);
-        BuildingsRealistic { tiles, shader, walls, flat, shown: false, textures_loading: false, look: None, drawn: Vec::new(), shadows, roofs, unstood: 0 }
+        BuildingsRealistic {
+            tiles,
+            shader,
+            walls,
+            shown: false,
+            textures_loading: false,
+            look: None,
+            drawn: Vec::new(),
+            shadows,
+            roofs,
+            unstood: 0,
+            fade: LodFade::default(),
+        }
     }
 
     /// The tile set (tests).
@@ -322,6 +335,7 @@ impl Layer for BuildingsRealistic {
             self.textures_loading = false;
             self.look = None;
             self.shadows.clear();
+            self.fade.clear();
             return;
         }
         cx.update_tiles(&mut self.tiles, |gpu, _tile, decoded| upload(&gpu.device, decoded));
@@ -333,7 +347,7 @@ impl Layer for BuildingsRealistic {
         let mut budget = StandBudget::default();
         let visible: Vec<TileIndex> = self.tiles.visible().map(|(t, _)| t).collect();
         let ground = &cx.scene.stands_on;
-        for tile in visible {
+        for &tile in &visible {
             if let Some(m) = self.tiles.get_mut(tile)
                 && m.extruded
                 && (m.standing.stale(tile, ground) || m.roofs_standing.stale(tile, ground))
@@ -344,8 +358,9 @@ impl Layer for BuildingsRealistic {
             }
         }
         self.unstood = budget.left;
-        for (tile, _) in self.tiles.visible() {
-            self.drawn.push((cx.tile_frame(tile, 0.0), tile));
+        let tiles = &self.tiles;
+        for (tile, band) in self.fade.update(Instant::now(), &visible, |t| tiles.get(t).is_some()) {
+            self.drawn.push((faded_frame(cx, tile, band), tile));
         }
     }
 
@@ -360,16 +375,15 @@ impl Layer for BuildingsRealistic {
             if meshes.mesh.index_count() == 0 {
                 continue;
             }
-            // a near tile's foot shade, then its shadows, on the ground under its buildings
+            // the tile's foot shade, then its shadows, on the ground under its buildings (kept by a
+            // tile dissolving out to the end: each pixel is darkened once anyway)
             if draped {
                 self.shadows.draw_tile(pass, cx, slot, tile);
             }
-            // far off, flat: only the roofs show from there (draped over the 3D terrain, Z3: a
-            // SolidPolygonLayer that is not extruded has no anchors to stand on)
-            if if meshes.extruded { !standing } else { !draped } {
+            if !standing {
                 continue;
             }
-            self.shader.begin(pass, if meshes.extruded { &self.walls } else { &self.flat });
+            self.shader.begin(pass, &self.walls);
             cx.bind_frame(pass, slot);
             meshes.standing.bind(pass, 1);
             meshes.mesh.draw(pass);
@@ -387,7 +401,7 @@ impl Layer for BuildingsRealistic {
     }
 
     fn pending(&self) -> bool {
-        self.shown && (self.tiles.loading() || self.textures_loading || self.shadows.pending() || self.unstood > 0)
+        self.shown && (self.tiles.loading() || self.textures_loading || self.shadows.pending() || self.unstood > 0 || self.fade.busy())
     }
 }
 
@@ -763,11 +777,10 @@ mod tests {
     }
 
     /// V4's place just onto the flat map (zoom 12.1): every building tile is a far one of zoom 13,
-    /// so every building lies flat on the ground, unlit, in its own colour at deck's alpha
-    /// (`255 − code`): over the map's clear colour (nothing else drawn) a pixel inside a footprint
-    /// is that colour blended once.
+    /// and its buildings stand in their façades as the near tiles' do (the old app laid them flat
+    /// and unlit): over the map's clear colour the walls show, lit, in many shades.
     #[test]
-    fn far_tiles_lie_flat_in_each_building_s_colour() {
+    fn far_tiles_stand_as_the_near_ones() {
         let Some(gpu) = gpu() else { return };
         let view = ViewState { latitude: 59.6519, longitude: 17.9186, zoom: 12.1, pitch: 45.0, bearing: 30.0, position: None };
         let size = [1440.0, 900.0];
@@ -781,25 +794,17 @@ mod tests {
         scene.local_now_ms = MIDSUMMER;
         scene.buildings = buildings::Input::SHOWN;
         let image = render_with(&gpu, &mut renderer, &scene, 1.0).expect("rendered");
-        image.save_png(&shots_dir().join("r4-far-flat.png")).expect("png");
+        image.save_png(&shots_dir().join("r4-far-standing.png")).expect("png");
         assert!(fixtures.misses().is_empty(), "the fixtures lack {:?}", fixtures.misses());
-        let mut blended = std::collections::HashSet::new();
         for tile in &wanted {
             let bytes = fixtures.read(io::OPENFREEMAP, *tile).expect("read").expect("a fixture tile");
-            // (a tile of fields and woods has none)
-            let Some(decoded) = decode(*tile, &bytes, &Cancel::new()).expect("decoded") else { continue };
-            assert!(!decoded.extruded);
-            for v in &decoded.vertices {
-                let a = f64::from(v.tint[3]) / 255.0;
-                blended.insert(std::array::from_fn::<u8, 3, _>(|i| (f64::from(v.tint[i]) * a + f64::from(CLEAR_RGB[i]) * (1.0 - a)).round() as u8));
+            if let Some(decoded) = decode(*tile, &bytes, &Cancel::new()).expect("decoded") {
+                assert!(decoded.extruded && !decoded.footprints.is_empty());
             }
         }
-        let near = |p: [u8; 4]| blended.iter().any(|c| (0..3).all(|i| c[i].abs_diff(p[i]) <= 1));
         let drawn: Vec<[u8; 4]> = image.rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).filter(|p| p[..3] != CLEAR_RGB).collect();
-        let exact = drawn.iter().filter(|&&p| near(p)).count();
-        eprintln!("V4 at 12.1: {} px drawn, {exact} in a building's colour blended once ({} colours)", drawn.len(), blended.len());
-        // (the rest: the edges of small buildings, blended with the clear colour, and the parts of
-        // buildings mapped twice, blended twice)
-        assert!(exact > 2_000 && exact * 5 > drawn.len() * 2, "{exact} of {}", drawn.len());
+        let shades: std::collections::HashSet<[u8; 3]> = drawn.iter().map(|p| [p[0], p[1], p[2]]).collect();
+        eprintln!("V4 at 12.1: {} px drawn in {} shades", drawn.len(), shades.len());
+        assert!(drawn.len() > 2_000 && shades.len() > 500, "{} px, {} shades", drawn.len(), shades.len());
     }
 }

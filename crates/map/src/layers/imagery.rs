@@ -659,7 +659,8 @@ mod tests {
         let (inside, gap) = (at(280.0), at(292.0));
         assert_eq!((tile_of(inside), tile_of(gap)), ([2, 2], [1, 2]));
         eprintln!("V1: {:?} at {inside:?} (sphere {:?}); {:?} at {gap:?} (sphere {:?})", pixel(&image, inside), pixel(&sphere, inside), pixel(&image, gap), pixel(&sphere, gap));
-        assert!(diff(pixel(&image, inside), pixel(&sphere, inside)) > 20, "no picture in 3/2/2");
+        // the sphere lights to about the sea (I3), so the open sea in 3/2/2 differs by less than it did
+        assert!(diff(pixel(&image, inside), pixel(&sphere, inside)) > 10, "no picture in 3/2/2");
         assert_ne!(pixel(&sphere, gap), [30, 30, 30], "the sphere's limb is further in");
         assert!(diff(pixel(&image, gap), pixel(&sphere, gap)) <= 1, "3/1/2 drawn");
     }

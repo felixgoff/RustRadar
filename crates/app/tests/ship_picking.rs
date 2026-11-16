@@ -112,6 +112,9 @@ impl Window {
         let startup = Startup { basemap: Some(Basemap::Satellite), fixture: Some(folder()), demo: false };
         let mut state = AppState::new(startup, None, None, None, V6.view(), SIZE.map(f64::from));
         state.persisted.settings.mode = Mode::Ships;
+        // buildings off: since I2 the satellite map stands them at zoom 13, lit by the moving sun,
+        // so later frames differ from the first by a level here and there
+        state.persisted.settings.buildings = false;
         state.poll(NOW_MS);
         assert_eq!(state.ships.on_map().len(), SPOTS.len(), "the fixture's ships are on the map");
         let mut engine = Engine::new(gpu, FORMAT, state);

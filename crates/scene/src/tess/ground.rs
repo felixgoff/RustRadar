@@ -35,15 +35,12 @@
 //!   triangulated in tile units; lines as they are, open (`_pathType: 'open'`), each part its own
 //!   path; and the tile's bridges split off (`bridgeParts` with `deckOf`,
 //!   `crate::ground_rails::deck_of`: OpenMapTiles' `brunnel` decks, OpenRailwayMap's tracks at
-//!   their rail decks) into four more passes after the three: [`GroundTile::bridge_shade`]
-//!   (`-bridge-shade`: every bridge flat in [`BRIDGE_SHADE`], `max(width, edge width) + 2` m wide,
-//!   unlit, a plain RGBA colour, not a paint), [`GroundTile::bridge_edges`] and
-//!   [`GroundTile::bridge_lines`] (raised to their decks as today's app raises them: the deck's
-//!   metres times `crate::bridges::rail_map_lift`, a 6 m deck 0.15 mm at Stockholm, because
-//!   `bridgeParts` writes deck's common units into tiles deck reads in metres), and
-//!   [`GroundTile::bridge_decks`] (`-bridge-decks`: the raised bridges in [`NONE`] with depth
-//!   written, a railway's 0 m wide, else as wide as its edging; plain RGBA). On the globe nothing
-//!   is raised and these stay empty. MVTLayer's tile clip on the flat map is the layer's.
+//!   their rail decks) and raised to their decks in metres ([`crate::bridges::rise`]): their
+//!   painted surface in two more passes after the three, [`GroundTile::bridge_edges`] and
+//!   [`GroundTile::bridge_lines`], and what holds them up, [`GroundTile::structures`]
+//!   ([`crate::bridges::Structures`]: slab, parapets, piers; a tram's rails in the street ride on
+//!   their road's). On the globe nothing is raised. MVTLayer's tile clip on the flat map is the
+//!   layer's.
 //! - Lines are drawn with deck's PathLayer; its `geometry.uv` (across the line −1 to 1, along
 //!   each segment from its start in half widths), which the railway's and the pier's textures are
 //!   laid by, is worked out by the shader from the segment: nothing more is stored here.
@@ -69,14 +66,14 @@ use glam::DVec2;
 use rustradar_core::mvt::{self, GeomType, Line as Points};
 use serde_json::Value;
 
-use crate::bridges::{self, Lines, Properties, bridge_parts};
+use crate::bridges::{self, Lines, Properties, Structures, bridge_parts};
 use crate::camera::lng_lat_to_world;
 use crate::geom::densify::GLOBE_RESOLUTION_DEG;
 use crate::geom::earcut::earcut;
 use crate::geom::grid_cut::{GridOptions, PolylineGridOptions, cut_polygon_by_grid, cut_polyline_by_grid};
 use crate::geom::js_max;
 use crate::geom::path::{LocalMercator, Paint, PathBuilder, PathSegment, PathType};
-pub use crate::ground::{BRIDGE_SHADE, GROUND_LAYERS, NONE, Rgba, SGL_GROUND_LAYERS, SURFACE_COUNT};
+pub use crate::ground::{GROUND_LAYERS, NONE, Rgba, SGL_GROUND_LAYERS, SURFACE_COUNT};
 use crate::ground::{Line, area_paint, line_of, on_rails};
 use crate::ground_rails::deck_of;
 use crate::tess::buildings::binary_polygons;
@@ -105,8 +102,7 @@ pub const fn explicit(paint: Rgba) -> [u8; 4] {
 }
 
 /// One tile of ground, in its passes' order (see the module notes). The segments of `edges`,
-/// `lines`, `bridge_edges` and `bridge_lines` carry [`explicit`] paints; `bridge_shade` and
-/// `bridge_decks` plain RGBA colours.
+/// `lines`, `bridge_edges` and `bridge_lines` carry [`explicit`] paints.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GroundTile {
     /// `-areas`: the polygons' vertices, in tile units.
@@ -117,38 +113,30 @@ pub struct GroundTile {
     pub edges: Vec<PathSegment>,
     /// `-lines`: each line, widths in metres.
     pub lines: Vec<PathSegment>,
-    /// `-bridge-shade` (flat map): the bridges flat on the ground in [`BRIDGE_SHADE`], unlit.
-    pub bridge_shade: Vec<PathSegment>,
     /// `-bridge-edges` (flat map): the bridges' edging, raised.
     pub bridge_edges: Vec<PathSegment>,
     /// `-bridge-lines` (flat map): the bridges, raised.
     pub bridge_lines: Vec<PathSegment>,
-    /// `-bridge-decks` (flat map): the raised bridges in [`NONE`], for the depth buffer alone.
-    pub bridge_decks: Vec<PathSegment>,
+    /// The bridges' structures (flat map), lit, under their raised surfaces.
+    pub structures: Structures,
 }
 
 impl GroundTile {
     /// The line passes in draw order, with deck's sub-layer id suffixes.
-    pub fn line_passes(&self) -> [(&'static str, &[PathSegment]); 6] {
-        [
-            ("edges", &self.edges),
-            ("lines", &self.lines),
-            ("bridge-shade", &self.bridge_shade),
-            ("bridge-edges", &self.bridge_edges),
-            ("bridge-lines", &self.bridge_lines),
-            ("bridge-decks", &self.bridge_decks),
-        ]
+    pub fn line_passes(&self) -> [(&'static str, &[PathSegment]); 4] {
+        [("edges", &self.edges), ("lines", &self.lines), ("bridge-edges", &self.bridge_edges), ("bridge-lines", &self.bridge_lines)]
     }
 
     /// Whether it draws nothing.
     pub fn is_empty(&self) -> bool {
-        self.indices.is_empty() && self.line_passes().iter().all(|(_, s)| s.is_empty())
+        self.indices.is_empty() && self.structures.is_empty() && self.line_passes().iter().all(|(_, s)| s.is_empty())
     }
 
     /// The bytes it holds (for the tile cache's budget).
     pub fn byte_size(&self) -> usize {
         size_of_val(self.vertices.as_slice())
             + size_of_val(self.indices.as_slice())
+            + self.structures.byte_size()
             + self.line_passes().iter().map(|(_, s)| size_of_val(*s)).sum::<usize>()
     }
 }
@@ -376,10 +364,9 @@ struct Builder {
     tile: GroundTile,
     edges: PathBuilder,
     lines: PathBuilder,
-    shade: PathBuilder,
     bridge_edges: PathBuilder,
     bridge_lines: PathBuilder,
-    decks: PathBuilder,
+    structures: Structures,
     flat: bool,
 }
 
@@ -391,10 +378,9 @@ impl Builder {
             tile: GroundTile::default(),
             edges: b(),
             lines: b(),
-            shade: b(),
             bridge_edges: b(),
             bridge_lines: b(),
-            decks: b(),
+            structures: Structures::default(),
             flat,
         }
     }
@@ -403,10 +389,9 @@ impl Builder {
         GroundTile {
             edges: self.edges.finish(),
             lines: self.lines.finish(),
-            bridge_shade: self.shade.finish(),
             bridge_edges: self.bridge_edges.finish(),
             bridge_lines: self.bridge_lines.finish(),
-            bridge_decks: self.decks.finish(),
+            structures: self.structures,
             ..self.tile
         }
     }
@@ -466,33 +451,17 @@ impl Builder {
             return;
         };
         each_path(&parts.ground, |p, path| self.ground_line(p, &path, PathType::Open));
-        // (the shade plain: not one of the ground's surfaces)
-        each_path(&parts.under, |p, path| {
-            let line = line_of(p);
-            self.shade.push(&path, &open(BRIDGE_SHADE, js_max(line.width, line.edge_width()) + 2.0));
-        });
-        // at today's height: `bridgeParts` writes its decks in deck's common units, which deck's
-        // CARTESIAN tiles read as metres (`commonUnitsPerWorldUnit[2] = unitsPerMeter`), so a
-        // 6 m deck stands 0.15 mm up at Stockholm, as the rail map's (`bridges::rail_map_lift`)
-        let lift = bridges::rail_map_lift(index);
-        each_path(&parts.raised, |p, mut path| {
-            for v in &mut path {
-                v[2] *= lift;
-            }
+        let m = bridges::metres_per_unit(index);
+        each_path(&parts.raised, |p, path| {
             let line: Line = line_of(p);
             push_painted(&mut self.bridge_edges, &path, line.edge_paint, line.edge_width(), PathType::Open);
             push_painted(&mut self.bridge_lines, &path, line.paint, line.width, PathType::Open);
-            // the roads' bridges only: the railways' carry the rail map, signal blocks and trains,
-            // drawn after on the same deck
-            let deck = if on_rails(p) { 0.0 } else { js_max(line.width, line.edge_width()) };
-            self.decks.push(&path, &open(NONE, deck));
+            // a tram's rails in the street ride on their road's deck
+            if !on_rails(p) && (line.paint[3] != 0 || line.edge_paint[3] != 0) {
+                self.structures.push(&path, js_max(line.width, line.edge_width()), false, m);
+            }
         });
     }
-}
-
-/// An open path's plain paint (the flat map's binary lines).
-fn open(color: Rgba, width: f64) -> Paint<'static> {
-    Paint { path_type: PathType::Open, ..Paint::solid(color, width) }
 }
 
 /// `path` in the ground's `paint` ([`explicit`]) and `width` metres, unless the paint is
@@ -750,7 +719,7 @@ mod tests {
                 [([255, 255, 255, WATER_ID], 18.0), ([255, 255, 255, 32], 11.0), ([255, 255, 255, 36], 2.0), ([255, 255, 255, 39], 2.2)],
                 "flat {flat}"
             );
-            assert!(t.bridge_shade.is_empty() && t.bridge_lines.is_empty() && t.bridge_decks.is_empty());
+            assert!(t.bridge_lines.is_empty() && t.structures.is_empty());
         }
     }
 
@@ -813,10 +782,9 @@ mod tests {
         assert_eq!(globe.lines.len(), 3);
     }
 
-    /// The flat map's bridges stand on their decks over their shade (`bridgeParts`): a road's a
-    /// deck a `layer` (6 m each), a tram's a railway's (6 m, its deck 0 wide in the depth buffer,
-    /// as it carries the rail map), each at today's height, its metres times the tile's
-    /// `rail_map_lift`; on the globe they lie on the ground.
+    /// The flat map's bridges stand on their decks (`bridgeParts`): a road's a deck a `layer`
+    /// (6 m each), a tram's a railway's (6 m), in metres, on their structures (the roads': a
+    /// tram's rails ride on their road's); on the globe they lie on the ground.
     #[test]
     fn the_flat_maps_bridges_are_raised() {
         let bytes = encode(&[(
@@ -829,24 +797,22 @@ mod tests {
         )]);
         let flat = tessellate(Z14, &bytes, &GROUND_LAYERS, true, &never).expect("not cancelled");
         assert!(flat.edges.is_empty() && flat.lines.is_empty(), "every line is a bridge");
-        // `max(width, edge width) + 2`
-        assert_eq!(runs(&flat.bridge_shade), [(BRIDGE_SHADE, 15.0), (BRIDGE_SHADE, 14.0), (BRIDGE_SHADE, 4.2)]);
         assert_eq!(runs(&flat.bridge_edges), [([255, 255, 255, 36], 13.0), ([255, 255, 255, 36], 12.0)]);
         assert_eq!(runs(&flat.bridge_lines), [([255, 255, 255, 32], 9.0), ([255, 255, 255, 32], 8.0), ([255, 255, 255, 39], 2.2)]);
-        assert_eq!(runs(&flat.bridge_decks), [(NONE, 13.0), (NONE, 12.0), (NONE, 0.0)]);
-        // up to their decks in the middle
+        // up to their decks in the middle, on the ground at their ends
         let top = |segments: &[PathSegment], width: f32| segments.iter().filter(|s| s.width == width).map(|s| s.start[2]).fold(0.0, f32::max);
-        let lift = crate::bridges::rail_map_lift(crate::bridges::TileIndex { x: Z14.x, y: Z14.y, z: Z14.z });
-        assert!(lift > 1e-6 && lift < 1e-4, "{lift}");
-        assert_eq!(top(&flat.bridge_lines, 9.0), (6.0 * lift) as f32);
-        assert_eq!(top(&flat.bridge_lines, 8.0), (12.0 * lift) as f32);
-        assert_eq!(top(&flat.bridge_lines, 2.2), (6.0 * lift) as f32);
-        assert_eq!(top(&flat.bridge_decks, 13.0), (6.0 * lift) as f32);
-        assert!(flat.bridge_shade.iter().all(|s| s.start[2] == 0.0));
+        assert_eq!(top(&flat.bridge_lines, 9.0), 6.0);
+        assert_eq!(top(&flat.bridge_lines, 8.0), 12.0);
+        assert_eq!(top(&flat.bridge_lines, 2.2), 6.0);
+        assert!(flat.bridge_lines.iter().filter(|s| s.types & crate::geom::path::START_CAP != 0).all(|s| s.start[2] == 0.0));
+        // the two roads' structures, up to the parapets over the higher deck
+        assert!(!flat.structures.is_empty());
+        let highest = flat.structures.vertices.iter().map(|v| v.position[2]).fold(0.0, f32::max);
+        assert!(highest > 12.0 && highest < 13.5, "{highest}");
         // on the globe, on the ground
         let globe = tessellate(Z14, &bytes, &GROUND_LAYERS, false, &never).expect("not cancelled");
         assert_eq!(runs(&globe.lines), [([255, 255, 255, 32], 9.0), ([255, 255, 255, 32], 8.0), ([255, 255, 255, 39], 2.2)]);
-        assert!(globe.bridge_lines.is_empty() && globe.lines.iter().all(|s| s.start[2] == 0.0));
+        assert!(globe.bridge_lines.is_empty() && globe.structures.is_empty() && globe.lines.iter().all(|s| s.start[2] == 0.0));
     }
 
     /// Streets GL's layers: fields with their rows, crop and shade in their colour, gardens as

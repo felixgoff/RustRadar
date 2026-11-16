@@ -69,7 +69,37 @@ use rustradar_core::num::{js_round, js_string};
 use rustradar_core::settings::RailShows;
 use serde_json::Value;
 
-pub use crate::bridges::{Coordinates, Geometry, LineFeature, Properties};
+pub use crate::bridges::Properties;
+
+/// A point of a GeoJSON line: x, y and anything after.
+pub type Coord = Vec<f64>;
+
+/// GeoJSON coordinates, by how deeply they nest.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Coordinates {
+    /// `Point`.
+    Point(Coord),
+    /// `LineString`, `MultiPoint`.
+    Line(Vec<Coord>),
+    /// `MultiLineString`, `Polygon`.
+    Lines(Vec<Vec<Coord>>),
+    /// `MultiPolygon`.
+    Polygons(Vec<Vec<Vec<Coord>>>),
+}
+
+/// A feature's geometry: its GeoJSON type and coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Geometry {
+    pub kind: String,
+    pub coordinates: Coordinates,
+}
+
+/// A tile's GeoJSON feature, in the tile's own coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineFeature {
+    pub geometry: Geometry,
+    pub properties: Properties,
+}
 use crate::camera::{lng_lat_to_world, world_to_lng_lat};
 use crate::geom::densify::GLOBE_RESOLUTION_DEG;
 use crate::geom::grid_cut::{PolylineGridOptions, cut_polyline_by_grid};

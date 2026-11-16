@@ -552,9 +552,6 @@ pub const SGL_GROUND_LAYERS: [&str; 4] = ["common", "natural", "water", "highway
 /// Far out, the main roads and rivers stay a hairline this wide, pixels (but Streets GL's, close
 /// in, as wide as they are).
 pub const LINE_MIN_PIXELS: f64 = 0.6;
-/// The shade a bridge throws on what it crosses (not lit: a shadow), RGBA.
-pub const BRIDGE_SHADE: Rgba = [16, 20, 14, 70];
-
 /// In the app the ground's railways are OpenRailwayMap's, as current as the track the trains run
 /// on; the maps' own (out of date in places) are left out then, but for trams' rails in the street
 /// (`OWN_RAILS = isTauri()`, always so in the native app).

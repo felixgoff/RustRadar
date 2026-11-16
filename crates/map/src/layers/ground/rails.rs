@@ -17,14 +17,12 @@
 //!   `SPEED_TILE_ZOOMS`, over-zoomed past 12), one MVTLayer and cache per projection: the one the
 //!   view is not in leaves deck's list, its tiles with it. deck's TileLayer defaults: 6 requests at
 //!   a time, best-available refinement. Each tile's passes (`GroundTile.renderLayers`): the
-//!   tracks' ballast (`-edges`), the tracks (`-lines`), and on the flat map its bridges
-//!   (`-bridge-shade` in `BRIDGE_SHADE`, unlit; `-bridge-edges` and `-bridge-lines` raised to the
-//!   rail map's 6 m decks as today's app raises them, [`bridge_lift`]: `bridgeParts` writes the
-//!   heights in deck's common units and the `CARTESIAN` tiles read them as metres, so a deck
-//!   stands 0.15 mm up and no ramp shows, item T7's finding; `-bridge-decks`, none wide on a
-//!   railway, depth written). Widths in
+//!   tracks' ballast (`-edges`), the tracks (`-lines`), and on the flat map its bridges: their
+//!   structures (`layers::ground::bridges`: slab, edge beams and piers, lit), then
+//!   `-bridge-edges` and `-bridge-lines` on their decks in metres, the trains' height function
+//!   (`scene::bridges::rise`). Widths in
 //!   metres, at least 0.6 px ([`RAILS_MIN_PIXELS`]), round joints and caps; `SURFACE_NO_CULL` (no
-//!   depth written but by the decks); on the flat map clipped to the tile's square (MVTLayer's
+//!   depth written but by the structures); on the flat map clipped to the tile's square (MVTLayer's
 //!   `ClipExtension`), with the stencil as the city ground does.
 //! - **`ground-platforms`** (the flat map only): the same backend's `standard_railway_platforms`
 //!   at tile zoom 15 alone ([`PLATFORM_TILES`]), by distance (`LodMVTLayer` with `PLATFORM_LOD`:
@@ -38,8 +36,7 @@
 //!
 //! **Paints.** `scene::ground_rails` hands the ground's paints as deck carries them (RGB a tint,
 //! alpha 255 less the surface id); the decode step turns the ground's passes into the shader's
-//! explicit attributes (`tess::ground::explicit`, `[r, g, b, id]`) and leaves the shade and the
-//! decks plain RGBA, as the city ground has them.
+//! explicit attributes (`tess::ground::explicit`, `[r, g, b, id]`).
 //!
 //! How it is checked (the tests below): the tiles, zooms, widths and states are today's; a
 //! fixture tile's tracks lie on their ballast in the ground's paints; and at Stockholm C from the
@@ -67,7 +64,8 @@ use rustradar_scene::tess::ground::explicit;
 
 pub use rustradar_scene::ground_rails::{PLATFORM_TILES, PLATFORMS_MIN_PIXELS, RAIL_TILES as RAIL_TILESET, RAILS_MIN_PIXELS, platform_lod};
 
-use super::city::{DECKS, plain_style};
+use super::bridges::{self, BridgeStructures, TileBridges};
+use super::city::DECKS;
 use super::{GroundShader, LineMesh, LineWidth, load_textures};
 use crate::frame::FrameSlot;
 use crate::jobs::Cancel;
@@ -75,7 +73,7 @@ use crate::layers::vector_map::{CLIP_MARK, CLIP_RESET, CLIPPED, MAX_REQUESTS};
 use crate::layers::terrain::ground::{StandBudget, Standing};
 use crate::layers::{ByteSize, DeckSelect, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::pipelines::fill;
-use crate::pipelines::path::{self, Path, Segment as PathSegment};
+use crate::pipelines::path::Segment as PathSegment;
 use crate::state::DrawState;
 
 /// The tiles' source: the backend's rail tiles, the rail map's (`railTilesUrl()`).
@@ -139,8 +137,7 @@ impl ByteSize for Platforms {
     }
 }
 
-/// The ground's passes of `lines` in the shader's explicit paints; the shade and the decks stay
-/// plain colours.
+/// The ground's passes of `lines` in the shader's explicit paints.
 pub fn explicit_lines(lines: GroundLines) -> GroundLines {
     let paint = |segments: Vec<PathSegment>| segments.into_iter().map(|s| PathSegment { color: explicit(s.color), ..s }).collect();
     GroundLines {
@@ -158,35 +155,12 @@ pub fn explicit_platforms(tile: PlatformsTile) -> Platforms {
     Platforms { vertices, indices: tile.indices, lines: explicit_lines(tile.lines) }
 }
 
-/// How high today's app draws a tile's raised bridges for each metre of deck: `bridgeParts`
-/// writes the heights in deck's common units (`× 512 / (circumference · cos φ)` at the tile's
-/// middle) and the flat map's `CARTESIAN` tiles read `z` as metres, so a 6 m deck stands 0.15 mm
-/// up at Stockholm (`scene::bridges::rail_map_lift`, item T7's finding for the rail map, the same
-/// function here).
-pub fn bridge_lift(tile: TileIndex) -> f64 {
-    rustradar_scene::bridges::rail_map_lift(rustradar_scene::bridges::TileIndex { x: tile.x, y: tile.y, z: tile.z })
-}
-
-/// `lines`' raised passes at today's height ([`bridge_lift`] of their decks).
-pub fn lifted(lines: GroundLines, lift: f64) -> GroundLines {
-    let lift = |segments: Vec<PathSegment>| {
-        segments
-            .into_iter()
-            .map(|s| {
-                let up = |p: [f32; 3]| [p[0], p[1], (f64::from(p[2]) * lift) as f32];
-                PathSegment { left: up(s.left), start: up(s.start), end: up(s.end), right: up(s.right), ..s }
-            })
-            .collect()
-    };
-    GroundLines { bridge_edges: lift(lines.bridge_edges), bridge_lines: lift(lines.bridge_lines), bridge_decks: lift(lines.bridge_decks), ..lines }
-}
-
 /// The rails' decode step, on the worker pool: the tile the way of the flat map (`flat`, its
-/// bridges at today's height) or the globe (`None` for a tile with nothing to draw).
+/// bridges raised) or the globe (`None` for a tile with nothing to draw).
 pub fn decode_rails(tile: TileIndex, bytes: &[u8], flat: bool, cancel: &Cancel) -> Result<Option<Rails>, String> {
     match scene::rails_tile(tile, bytes, flat, &|| cancel.is_cancelled()) {
         Ok(lines) if lines.is_empty() => Ok(None),
-        Ok(lines) => Ok(Some(Rails(lifted(explicit_lines(lines), bridge_lift(tile))))),
+        Ok(lines) => Ok(Some(Rails(explicit_lines(lines)))),
         Err(scene::Cancelled) => Err("cancelled".into()),
     }
 }
@@ -195,11 +169,7 @@ pub fn decode_rails(tile: TileIndex, bytes: &[u8], flat: bool, cancel: &Cancel) 
 pub fn decode_platforms(tile: TileIndex, bytes: &[u8], cancel: &Cancel) -> Result<Option<Platforms>, String> {
     match scene::platforms_tile(tile, bytes, &|| cancel.is_cancelled()) {
         Ok(decoded) if decoded.is_empty() => Ok(None),
-        Ok(decoded) => {
-            let mut platforms = explicit_platforms(decoded);
-            platforms.lines = lifted(platforms.lines, bridge_lift(tile));
-            Ok(Some(platforms))
-        }
+        Ok(decoded) => Ok(Some(explicit_platforms(decoded))),
         Err(scene::Cancelled) => Err("cancelled".into()),
     }
 }
@@ -210,12 +180,9 @@ pub fn decode_platforms(tile: TileIndex, bytes: &[u8], cancel: &Cancel) -> Resul
 pub struct LineMeshes {
     pub edges: LineMesh,
     pub lines: LineMesh,
-    /// Plain RGBA segments (the plain path pipeline).
-    pub bridge_shade: path::Mesh,
     pub bridge_edges: LineMesh,
     pub bridge_lines: LineMesh,
-    /// Plain RGBA segments, alpha 0, for the depth buffer.
-    pub bridge_decks: path::Mesh,
+    pub structures: Option<TileBridges>,
 }
 
 impl LineMeshes {
@@ -223,10 +190,9 @@ impl LineMeshes {
         LineMeshes {
             edges: LineMesh::new(device, label, &l.edges),
             lines: LineMesh::new(device, label, &l.lines),
-            bridge_shade: path::Mesh::new(device, label, &l.bridge_shade),
             bridge_edges: LineMesh::new(device, label, &l.bridge_edges),
             bridge_lines: LineMesh::new(device, label, &l.bridge_lines),
-            bridge_decks: path::Mesh::new(device, label, &l.bridge_decks),
+            structures: bridges::upload(device, &l.structures),
         }
     }
 }
@@ -239,40 +205,26 @@ pub struct PlatformMeshes {
     pub standing: Standing,
 }
 
-/// What one set of line passes is drawn with: the ground shader's lines pipeline, the plain
-/// paths' for the shade and the decks with their styles, and the lines' minimum width.
+/// What one set of line passes is drawn with: the ground shader's lines pipeline, the bridges'
+/// structures, and the lines' minimum width.
 struct LinePipelines<'a> {
     lines: &'a wgpu::RenderPipeline,
-    shade: (&'a Path, &'a path::Style),
-    decks: (&'a Path, &'a path::Style),
+    structures: &'a BridgeStructures,
     width: LineWidth,
 }
 
-/// A tile's six line passes in its frame (`GroundTile.renderLayers`' order).
+/// A tile's line passes and bridges in its frame.
 fn draw_passes(pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>, shader: &GroundShader, slot: FrameSlot, m: &LineMeshes, p: &LinePipelines<'_>) {
     if !m.edges.is_empty() || !m.lines.is_empty() {
         shader.begin(pass, p.lines, p.width);
         shader.draw_lines(pass, cx, slot, &m.edges);
         shader.draw_lines(pass, cx, slot, &m.lines);
     }
-    if !m.bridge_shade.is_empty() {
-        p.shade.0.draw(pass, cx, slot, p.shade.1, &m.bridge_shade);
-    }
+    p.structures.draw(pass, cx, slot, m.structures.as_ref());
     if !m.bridge_edges.is_empty() || !m.bridge_lines.is_empty() {
         shader.begin(pass, p.lines, p.width);
         shader.draw_lines(pass, cx, slot, &m.bridge_edges);
         shader.draw_lines(pass, cx, slot, &m.bridge_lines);
-    }
-    if !m.bridge_decks.is_empty() {
-        p.decks.0.draw(pass, cx, slot, p.decks.1, &m.bridge_decks);
-    }
-}
-
-/// `[Hairline, Exact]`'s index.
-fn width_index(width: LineWidth) -> usize {
-    match width {
-        LineWidth::Hairline => 0,
-        LineWidth::Exact => 1,
     }
 }
 
@@ -325,13 +277,8 @@ pub struct GroundRails {
     /// The tracks on the flat map (clipped) and on the globe (not).
     flat_lines: wgpu::RenderPipeline,
     globe_lines: wgpu::RenderPipeline,
-    /// The plain path pipeline for the rails' bridges' shade (clipped) and for the decks and the
-    /// platforms' shade ([`DECKS`], [`SOLID`]: the same state), each with [`plain_style`] for
-    /// both [`LineWidth`]s.
-    shade: Path,
-    shade_styles: [path::Style; 2],
-    decks: Path,
-    deck_styles: [path::Style; 2],
+    /// The bridges' structures.
+    structures: BridgeStructures,
     /// The platforms standing and their lines, in [`SOLID`].
     platform_areas: wgpu::RenderPipeline,
     /// The platforms standing on the 3D terrain, unclipped (`NO_CULL`, item G3): the stencil's
@@ -352,7 +299,6 @@ pub struct GroundRails {
 
 impl GroundRails {
     pub fn new(init: &Init<'_>) -> Self {
-        let device = &init.gpu.device;
         let shader = GroundShader::new(init, "ground-rails");
         let rails = |flat: bool| -> TileSet<Rails, LineMeshes> {
             init.tile_set(
@@ -370,16 +316,10 @@ impl GroundRails {
             TileSetOptions { max_requests: MAX_REQUESTS, refinement: Refinement::KeepCoarserUntilIn, ..Default::default() },
             |tile, bytes, cancel| decode_platforms(tile, &bytes, cancel),
         );
-        let shade = Path::new(init, "ground rails bridge shade", CLIPPED);
-        let decks = Path::new(init, "ground rails bridge decks", DECKS);
-        let styles = |p: &Path| [LineWidth::Hairline, LineWidth::Exact].map(|w| p.style(device, &plain_style(w)));
         GroundRails {
             flat_lines: shader.lines(init, "ground-rails-flat", CLIPPED),
             globe_lines: shader.lines(init, "ground-rails-globe", DrawState::SURFACE_NO_CULL),
-            shade_styles: styles(&shade),
-            deck_styles: styles(&decks),
-            shade,
-            decks,
+            structures: BridgeStructures::new(init, "ground rails bridges"),
             platform_areas: shader.platforms(init, "ground-platforms", SOLID),
             platform_areas_on_terrain: shader.platforms(init, "ground-platforms on the terrain", DrawState::NO_CULL),
             platform_lines: shader.lines(init, "ground-platforms lines", SOLID),
@@ -449,11 +389,15 @@ impl Layer for GroundRails {
         }
         load_textures(cx);
         self.shader.prepare(cx);
+        self.structures.prepare(cx);
         let flat = self.shown == Some(Shown::Flat);
         let rails = if flat { &mut self.flat } else { &mut self.globe };
         cx.update_tiles(rails, |gpu, _tile, decoded| LineMeshes::new(&gpu.device, "ground rails", &decoded.0));
         for (tile, _) in rails.visible() {
             self.rails_drawn.push((cx.tile_frame(tile, 0.0), tile));
+        }
+        for &(_, tile) in &self.rails_drawn {
+            self.structures.shade(&cx.gpu.device, rails.get_mut(tile).and_then(|m| m.structures.as_mut()));
         }
         if flat {
             cx.update_tiles(&mut self.platforms, |gpu, _tile, decoded| PlatformMeshes {
@@ -490,17 +434,11 @@ impl Layer for GroundRails {
         // map pass (item G3)
         let (draped, standing) = (cx.draws_draped(), cx.pass == Pass::Map);
         let shader = &self.shader;
-        let rails_width = width_index(RAILS_WIDTH);
         match shown {
             Shown::Globe if !draped => {}
             Shown::Globe => {
                 // (GeoJSON on the globe: nothing raised, nothing clipped)
-                let p = LinePipelines {
-                    lines: &self.globe_lines,
-                    shade: (&self.shade, &self.shade_styles[rails_width]),
-                    decks: (&self.decks, &self.deck_styles[rails_width]),
-                    width: RAILS_WIDTH,
-                };
+                let p = LinePipelines { lines: &self.globe_lines, structures: &self.structures, width: RAILS_WIDTH };
                 for &(slot, tile) in &self.rails_drawn {
                     if let Some(m) = self.globe.get(tile) {
                         draw_passes(pass, cx, shader, slot, m, &p);
@@ -508,12 +446,7 @@ impl Layer for GroundRails {
                 }
             }
             Shown::Flat => {
-                let p = LinePipelines {
-                    lines: &self.flat_lines,
-                    shade: (&self.shade, &self.shade_styles[rails_width]),
-                    decks: (&self.decks, &self.deck_styles[rails_width]),
-                    width: RAILS_WIDTH,
-                };
+                let p = LinePipelines { lines: &self.flat_lines, structures: &self.structures, width: RAILS_WIDTH };
                 for &(slot, tile) in &self.rails_drawn {
                     let Some(m) = self.flat.get(tile).filter(|_| draped) else { continue };
                     self.clip.mark(pass, cx, slot);
@@ -521,13 +454,7 @@ impl Layer for GroundRails {
                     self.clip.reset(pass, cx, slot);
                 }
                 // `ground-platforms`: its areas standing, then its lines, all in `solid`'s parameters
-                let platforms_width = width_index(PLATFORMS_WIDTH);
-                let p = LinePipelines {
-                    lines: &self.platform_lines,
-                    shade: (&self.decks, &self.deck_styles[platforms_width]),
-                    decks: (&self.decks, &self.deck_styles[platforms_width]),
-                    width: PLATFORMS_WIDTH,
-                };
+                let p = LinePipelines { lines: &self.platform_lines, structures: &self.structures, width: PLATFORMS_WIDTH };
                 for &(slot, tile) in &self.platforms_drawn {
                     let Some(m) = self.platforms.get(tile) else { continue };
                     // (standing on the terrain they are not clipped: the stencil's square lies at
@@ -649,19 +576,15 @@ mod tests {
         }
         // every track's ballast (no railway here without an edge)
         assert_eq!(globe.lines.len(), globe.edges.len());
-        assert!(globe.bridge_lines.is_empty() && globe.bridge_shade.is_empty());
-        // Stockholm's bridges split off on the flat map: their ballast and tracks, shade and (none
-        // wide) decks, the shade a plain colour; raised as today's are, their 6 m decks a 6 m
-        // deck's common units up (0.15 mm)
+        assert!(globe.bridge_lines.is_empty() && globe.structures.is_empty());
+        // Stockholm's bridges split off on the flat map: their ballast and tracks up on their 6 m
+        // decks, on their structures
         assert!(!flat.bridge_lines.is_empty(), "the tile's bridges");
         assert!(flat.bridge_lines.iter().all(|s| id(s.color) == 35));
-        let lift = bridge_lift(RAILS_AT_C);
-        assert!((lift * 6.0 - 1.5e-4).abs() < 1e-5, "{lift}");
         let top = flat.bridge_lines.iter().map(|s| f64::from(s.start[2])).fold(0.0, f64::max);
-        assert!((top - 6.0 * lift).abs() < 1e-9, "{top}");
-        assert!(flat.bridge_lines.iter().filter(|s| f64::from(s.start[2]) > 5.0 * lift).count() * 2 > flat.bridge_lines.len(), "up on their decks");
-        assert!(flat.bridge_shade.iter().all(|s| s.color == scene::BRIDGE_SHADE));
-        assert!(flat.bridge_decks.iter().all(|s| s.color == scene::NONE && s.width == 0.0));
+        assert_eq!(top, 6.0);
+        assert!(flat.bridge_lines.iter().filter(|s| s.start[2] > 3.0).count() * 2 > flat.bridge_lines.len(), "up on their decks");
+        assert!(!flat.structures.is_empty());
         assert!(flat.lines.len() + flat.bridge_lines.len() >= globe.lines.len());
     }
 
@@ -834,7 +757,7 @@ mod tests {
         let rails = decode_rails(RAILS_AT_C, &fixture(RAIL_SOURCE, RAILS_AT_C), true, &never).unwrap().unwrap().0;
         let at = |s: &PathSegment| (DVec2::new(f64::from(s.start[0]), f64::from(s.start[1])), DVec2::new(f64::from(s.end[0]), f64::from(s.end[1])));
         let tracks = Near::new(rails.lines.iter().map(at));
-        let bridges = Near::new(rails.bridge_shade.iter().map(at));
+        let bridges = Near::new(rails.bridge_lines.iter().map(at));
         let platforms = decode_platforms(PLATFORMS_AT_C, &fixture(RAIL_SOURCE, PLATFORMS_AT_C), &never).unwrap().unwrap();
         let tops: Vec<[DVec2; 3]> = platforms
             .indices

@@ -27,12 +27,10 @@
 //!   and drawn in its tile frame, coarse tiles first.
 //! - **Each tile's passes** (`GroundTile.renderLayers`, doc 04 §6.9), in this order: its areas,
 //!   its lines' edging, its lines (so no road's pavement covers another's asphalt where they
-//!   meet), then its bridges: `-bridge-shade` (every bridge flat on the ground in
-//!   `BRIDGE_SHADE`, `max(width, edge width) + 2` m wide, unlit: the plain path pipeline, not the
-//!   ground shader), `-bridge-edges` and `-bridge-lines` raised to their decks (the ground
-//!   shader), and `-bridge-decks` (the raised roads' bridges in NONE, alpha 0, with the depth
-//!   written so what is drawn later passes under them; a railway's 0 m wide). `SURFACE_NO_CULL`
-//!   throughout (no depth written but by the decks, nothing culled); lines in metres with round
+//!   meet), then its bridges: their decks' shadows and their structures (`super::bridges`: slab,
+//!   parapets, piers, lit, depth written so what passes under a deck is hidden by it), then
+//!   `-bridge-edges` and `-bridge-lines` on their decks in metres (the ground shader). `SURFACE_NO_CULL`
+//!   throughout (no depth written but by the structures, nothing culled); lines in metres with round
 //!   joints and caps, at least 0.6 px wide on OpenMapTiles' tiles and as wide as they are on
 //!   Streets GL's (`renderCityGround`: `lineWidthMinPixels: z >= 16 ? 0 : 0.6`; [`line_width`]).
 //! - **Clipped to the tile's square** (MVTLayer's `ClipExtension` on the flat map, every pass):
@@ -81,6 +79,7 @@ use rustradar_scene::lod::{Lod, TILE_SIZE};
 use rustradar_scene::streets_gl::SGL_ZOOM;
 use rustradar_scene::tess::ground::{self as tess, GroundTile};
 
+use super::bridges::{self, BridgeStructures, TileBridges};
 use super::roads::{Roads, Survey};
 use super::vector::Decoded;
 use super::{GroundShader, GroundVertex, LineMesh, LineWidth};
@@ -90,7 +89,6 @@ use crate::jobs::Cancel;
 use crate::layers::vector_map::{CLIP_MARK, CLIP_RESET, CLIPPED, MAX_REQUESTS};
 use crate::layers::{DrawCx, Init, LodSelect, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::pipelines::fill::{self, Fill};
-use crate::pipelines::path::{self, Path, PathStyle, Units};
 use crate::state::DrawState;
 
 /// The zooms OpenMapTiles' tiles serve in the city ground (`cityGroundSources`).
@@ -133,17 +131,14 @@ pub fn decode_surveyed(tile: TileIndex, bytes: &[u8], survey: &Survey, cancel: &
     }
 }
 
-/// A tile on the GPU: its seven passes.
+/// A tile on the GPU: its passes and its bridges' structures.
 pub struct CityMeshes {
     pub areas: fill::Mesh<GroundVertex>,
     pub edges: LineMesh,
     pub lines: LineMesh,
-    /// Plain RGBA segments (the plain path pipeline).
-    pub bridge_shade: path::Mesh,
     pub bridge_edges: LineMesh,
     pub bridge_lines: LineMesh,
-    /// Plain RGBA segments, alpha 0, for the depth buffer.
-    pub bridge_decks: path::Mesh,
+    pub structures: Option<TileBridges>,
 }
 
 /// The upload step, on the main thread.
@@ -152,29 +147,14 @@ pub fn upload(device: &wgpu::Device, decoded: &GroundTile) -> CityMeshes {
         areas: fill::Mesh::new(device, "city ground areas", &decoded.vertices, &decoded.indices),
         edges: LineMesh::new(device, "city ground edges", &decoded.edges),
         lines: LineMesh::new(device, "city ground lines", &decoded.lines),
-        bridge_shade: path::Mesh::new(device, "city ground bridge shade", &decoded.bridge_shade),
         bridge_edges: LineMesh::new(device, "city ground bridge edges", &decoded.bridge_edges),
         bridge_lines: LineMesh::new(device, "city ground bridge lines", &decoded.bridge_lines),
-        bridge_decks: path::Mesh::new(device, "city ground bridge decks", &decoded.bridge_decks),
+        structures: bridges::upload(device, &decoded.structures),
     }
 }
 
-/// `-bridge-decks`: inside the tile's square, unculled, depth written.
+/// Depth written inside the tile's square (the platforms' state, `layers::ground::rails`).
 pub const DECKS: DrawState = DrawState { depth_write: true, ..CLIPPED };
-
-/// The plain passes' path props for a tile's [`LineWidth`]: the layer's (metres, round joints and
-/// caps, its minimum width).
-pub fn plain_style(width: LineWidth) -> PathStyle {
-    PathStyle { width_units: Units::Meters, width_min_pixels: width.min_pixels(), joint_rounded: true, cap_rounded: true, ..PathStyle::DEFAULT }
-}
-
-/// `[Hairline, Exact]`'s index.
-fn width_index(width: LineWidth) -> usize {
-    match width {
-        LineWidth::Hairline => 0,
-        LineWidth::Exact => 1,
-    }
-}
 
 /// The tile's square, `[0, 1]²` in tile units, and the stencil passes that clip a tile to it.
 struct Clip {
@@ -204,12 +184,8 @@ pub struct GroundCity {
     /// The ground shader's areas and lines inside the tile's square ([`CLIPPED`]).
     areas: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
-    /// The plain path pipeline: the bridges' shade ([`CLIPPED`]) and decks ([`DECKS`]), with
-    /// [`plain_style`] for each [`LineWidth`].
-    shade: Path,
-    shade_styles: [path::Style; 2],
-    decks: Path,
-    deck_styles: [path::Style; 2],
+    /// The bridges' structures.
+    structures: BridgeStructures,
     clip: Clip,
     /// The survey's road widths the tiles are decoded with (item R9).
     roads: Roads,
@@ -221,7 +197,6 @@ pub struct GroundCity {
 impl GroundCity {
     /// The layer, its ground pipelines made with `shader`.
     pub fn new(init: &Init<'_>, shader: &GroundShader) -> Self {
-        let device = &init.gpu.device;
         let roads = Roads::new();
         let survey = roads.survey();
         let tiles = init.tile_set(
@@ -230,17 +205,11 @@ impl GroundCity {
             TileSetOptions { max_requests: MAX_REQUESTS, refinement: Refinement::KeepCoarserUntilIn, ..Default::default() },
             move |tile, bytes, cancel| decode_surveyed(tile, &bytes, &survey, cancel),
         );
-        let shade = Path::new(init, "city ground bridge shade", CLIPPED);
-        let decks = Path::new(init, "city ground bridge decks", DECKS);
-        let styles = |p: &Path| [LineWidth::Hairline, LineWidth::Exact].map(|w| p.style(device, &plain_style(w)));
         GroundCity {
             tiles,
             areas: shader.areas(init, "city ground areas", CLIPPED),
             lines: shader.lines(init, "city ground lines", CLIPPED),
-            shade_styles: styles(&shade),
-            deck_styles: styles(&decks),
-            shade,
-            decks,
+            structures: BridgeStructures::new(init, "city ground bridges"),
             clip: Clip::new(init),
             roads,
             shown: false,
@@ -279,18 +248,21 @@ impl GroundCity {
             self.tiles.reload_all();
         }
         cx.update_tiles(&mut self.tiles, |gpu, _tile, decoded| upload(&gpu.device, &decoded.0));
+        self.structures.prepare(cx);
         for (tile, _) in self.tiles.visible() {
             self.drawn.push((cx.tile_frame(tile, 0.0), tile));
         }
+        for &(_, tile) in &self.drawn {
+            self.structures.shade(&cx.gpu.device, self.tiles.get_mut(tile).and_then(|m| m.structures.as_mut()));
+        }
     }
 
-    /// Each tile's seven passes inside its square, after `shader`'s `prepare` this frame.
+    /// Each tile's passes and bridges inside its square, after `shader`'s `prepare` this frame.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>, shader: &GroundShader) {
         let clip = &self.clip;
         for &(slot, tile) in &self.drawn {
             let Some(m) = self.tiles.get(tile) else { continue };
             let width = line_width(tile);
-            let w = width_index(width);
             clip.mark.draw(pass, cx, slot, &clip.mark_style, &clip.square);
             if m.areas.index_count() > 0 {
                 shader.begin(pass, &self.areas, width);
@@ -301,16 +273,11 @@ impl GroundCity {
                 shader.draw_lines(pass, cx, slot, &m.edges);
                 shader.draw_lines(pass, cx, slot, &m.lines);
             }
-            if !m.bridge_shade.is_empty() {
-                self.shade.draw(pass, cx, slot, &self.shade_styles[w], &m.bridge_shade);
-            }
+            self.structures.draw(pass, cx, slot, m.structures.as_ref());
             if !m.bridge_edges.is_empty() || !m.bridge_lines.is_empty() {
                 shader.begin(pass, &self.lines, width);
                 shader.draw_lines(pass, cx, slot, &m.bridge_edges);
                 shader.draw_lines(pass, cx, slot, &m.bridge_lines);
-            }
-            if !m.bridge_decks.is_empty() {
-                self.decks.draw(pass, cx, slot, &self.deck_styles[w], &m.bridge_decks);
             }
             clip.reset.draw(pass, cx, slot, &clip.reset_style, &clip.square);
         }
@@ -517,8 +484,6 @@ mod tests {
         assert!(serving(15).is_empty() && serving(8).is_empty());
         assert_eq!(line_width(TileIndex::new(36057, 19273, 16)), LineWidth::Exact);
         assert_eq!(line_width(TileIndex::new(9014, 4818, 14)), LineWidth::Hairline);
-        assert_eq!(plain_style(LineWidth::Hairline).width_min_pixels, 0.6);
-        assert_eq!(plain_style(LineWidth::Exact).width_min_pixels, 0.0);
         assert!(DECKS.depth_write && DECKS.cull.is_none() && DECKS.stencil == CLIPPED.stencil);
     }
 

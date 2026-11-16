@@ -79,6 +79,12 @@ impl Trains {
         if self.latest.cars {
             let models = rustradar_map::layers::train_cars::models();
             self.latest.car_layers = self.builder.car_layers(&list, &scene.view, scene.size, models, now_ms);
+            // up on a bridge only where the map draws its deck (the realistic ground without the
+            // 3D terrain); elsewhere the bridges lie flat and so do the trains
+            let decks = scene.ground.shown && scene.basemap == rustradar_core::geo::Basemap::Realistic && !scene.terrain.shown;
+            if !decks {
+                self.latest.car_layers.on_the_ground();
+            }
             // the car under the pointer (T8: deck's `autoHighlight`)
             if let Some(car) = state.pick.hovered_car() {
                 self.latest.car_layers.highlight(car);

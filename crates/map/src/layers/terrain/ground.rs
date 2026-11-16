@@ -387,6 +387,7 @@ mod tests {
             mesh: CarShape::Plain { lead: true, shape: TrainShape::Regional },
             modelled: false,
             level: Level { tunnel: false, height: 6.0 },
+            pitch: 0.0,
             color: [255; 4],
             highlighted: false,
         };

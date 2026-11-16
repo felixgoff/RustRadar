@@ -102,7 +102,7 @@ pub fn mesh_of(shape: &CarShape) -> Option<&'static CarMesh> {
 /// 0]`) and stretched to `[width, length, height]` (`getScale`), in its colour, highlighted
 /// [`CAR_HIGHLIGHT`] when it is under the pointer.
 pub fn instance(view: &ViewFrame, car: &DrawnCar, width: f64, height: f64) -> Instance {
-    let model = orientation_matrix([0.0, -car.heading, 0.0], [width, car.length, height]);
+    let model = orientation_matrix([0.0, -car.heading, car.pitch], [width, car.length, height]);
     let highlight = if car.highlighted { CAR_HIGHLIGHT } else { Instance::NO_HIGHLIGHT };
     Instance::at(view, [car.at[0], car.at[1], car.level.height], model, DVec3::ZERO, car.color, highlight)
 }
@@ -369,6 +369,7 @@ mod tests {
             mesh: CarShape::Plain { lead: false, shape: TrainShape::Regional },
             modelled: false,
             level: Level { tunnel: false, height: 4.5 },
+            pitch: 0.0,
             color: [96, 212, 160, 240],
             highlighted: false,
         };
@@ -498,6 +499,7 @@ mod tests {
                 mesh: CarShape::Plain { lead: false, shape: TrainShape::Regional },
                 modelled: false,
                 level: GROUND,
+                pitch: 0.0,
                 color: [96, 212, 160, alpha],
                 highlighted: false,
             };
@@ -563,6 +565,7 @@ mod tests {
             mesh: CarShape::Plain { lead: false, shape: TrainShape::Regional },
             modelled: false,
             level,
+            pitch: 0.0,
             color,
             highlighted: false,
         };

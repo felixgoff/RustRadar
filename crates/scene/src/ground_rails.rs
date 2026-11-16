@@ -30,20 +30,17 @@
 //! `-areas` (its polygons), `-edges` (each line's edging, [`crate::ground::Line::edge_width`]
 //! wide in its `edge_paint`) and `-lines` (each line in its paint): so no track's ballast covers
 //! another's track where they meet. On the flat map (loaders.gl's binary tiles) a tile's bridges
-//! are raised to their decks ([`crate::bridges::bridge_parts`]: OpenRailwayMap's tracks to
-//! [`crate::bridges::RAIL_DECK_M`] with `ormDeck`, anything else with `omtDeck`), left out of the
-//! ground's passes and drawn after them: `-bridge-shade` (the bridges flat, in
-//! [`BRIDGE_SHADE`], unlit, `max(width, edge width) + 2` m wide: every bridge of the tile, drawn
-//! or not), `-bridge-edges`, `-bridge-lines`, and `-bridge-decks` (in [`NONE`] with depth
-//! written, 0 m wide on a railway, else as wide as its edging: so what comes after passes under a
-//! road's bridge; a railway's carries what is drawn on it after). On the globe (GeoJSON) nothing
-//! is raised. [`GroundLines`] holds the line passes in that order; [`PlatformsTile`] adds the
-//! platforms' mesh for `-areas`.
+//! are raised to their decks in metres ([`crate::bridges::bridge_parts`]: OpenRailwayMap's tracks
+//! to [`crate::bridges::RAIL_DECK_M`] with `ormDeck`, anything else with `omtDeck`, along
+//! [`crate::bridges::rise`], the trains' height function), left out of the ground's passes and
+//! drawn after them: `-bridge-edges` and `-bridge-lines` (the deck's surface), on
+//! [`GroundLines::structures`] (the lit slab, edge beams and piers that hold it up,
+//! [`crate::bridges::Structures`]). On the globe (GeoJSON) nothing is raised. [`GroundLines`]
+//! holds the line passes in that order; [`PlatformsTile`] adds the platforms' mesh for `-areas`.
 //!
 //! **Paints**: a segment's colour ([`PathSegment::color`]) and a vertex's [`PlatformVertex::paint`]
 //! are the ground's paints as deck carries them (`crate::ground`): RGB a tint (sRGB), alpha 255
-//! less the surface's id; the ground shader reads the surface from the alpha. The shade is a
-//! plain colour (drawn without the ground's surfaces) and the decks are depth only.
+//! less the surface's id; the ground shader reads the surface from the alpha.
 //!
 //! **Geometry**, as `crate::rail` tessellates the speed map's tiles: in the tile's units
 //! ([`LocalMercator::tile`]: `u` east, `v` south, metres up). On the flat map a tile's lines as
@@ -56,7 +53,7 @@
 //!
 //! Deviations, none visible:
 //! - what deck draws transparent and without depth (a line or edging in [`NONE`], an area of no
-//!   paint) is left out; the decks are kept, though transparent;
+//!   paint) is left out;
 //! - the rail tiles' polygons are left out: deck would fill them in its default black (the
 //!   ground's terrain, tinted black), but OpenRailwayMap's `railway_line_high` holds lines alone;
 //! - the tags are read as GeoJSON features have them; loaders.gl's binary tiles read a numeric
@@ -71,14 +68,14 @@ use glam::DVec2;
 use rustradar_core::mvt::{self, GeomType};
 use serde_json::Value;
 
-use crate::bridges::{self, Lines, Properties, bridge_parts, omt_deck, orm_deck};
+use crate::bridges::{self, Lines, Properties, Structures, bridge_parts, omt_deck, orm_deck};
 use crate::camera::lng_lat_to_world;
 use crate::geom::densify::GLOBE_RESOLUTION_DEG;
 use crate::geom::earcut::earcut;
 use crate::geom::grid_cut::{PolylineGridOptions, cut_polyline_by_grid};
 use crate::geom::js_max;
 use crate::geom::path::{LocalMercator, Paint, PathBuilder, PathSegment, PathType};
-pub use crate::ground::{BRIDGE_SHADE, NONE, PLATFORM_M, PLATFORM_MAX_DISTANCE_M, PLATFORM_ZOOM, PLATFORMS, RAIL_LINES, Rgba};
+pub use crate::ground::{NONE, PLATFORM_M, PLATFORM_MAX_DISTANCE_M, PLATFORM_ZOOM, PLATFORMS, RAIL_LINES, Rgba};
 use crate::ground::{area_paint, line_of, on_rails};
 use crate::lod::Lod;
 use crate::tess::buildings::binary_polygons;
@@ -118,38 +115,28 @@ pub struct GroundLines {
     pub edges: Vec<PathSegment>,
     /// `-lines`: each line on the ground.
     pub lines: Vec<PathSegment>,
-    /// `-bridge-shade` (flat map): the bridges flat on the ground, in [`BRIDGE_SHADE`], unlit.
-    pub bridge_shade: Vec<PathSegment>,
     /// `-bridge-edges` (flat map): the bridges' edging, raised.
     pub bridge_edges: Vec<PathSegment>,
     /// `-bridge-lines` (flat map): the bridges, raised.
     pub bridge_lines: Vec<PathSegment>,
-    /// `-bridge-decks` (flat map): the bridges raised in [`NONE`], for the depth buffer alone
-    /// (depth written; a railway's 0 m wide, so at the layer's minimum width).
-    pub bridge_decks: Vec<PathSegment>,
+    /// The bridges' structures (flat map), lit, under their raised surfaces.
+    pub structures: Structures,
 }
 
 impl GroundLines {
     /// The passes in draw order, with deck's sub-layer id suffixes.
-    pub fn passes(&self) -> [(&'static str, &[PathSegment]); 6] {
-        [
-            ("edges", &self.edges),
-            ("lines", &self.lines),
-            ("bridge-shade", &self.bridge_shade),
-            ("bridge-edges", &self.bridge_edges),
-            ("bridge-lines", &self.bridge_lines),
-            ("bridge-decks", &self.bridge_decks),
-        ]
+    pub fn passes(&self) -> [(&'static str, &[PathSegment]); 4] {
+        [("edges", &self.edges), ("lines", &self.lines), ("bridge-edges", &self.bridge_edges), ("bridge-lines", &self.bridge_lines)]
     }
 
     /// Whether it draws nothing.
     pub fn is_empty(&self) -> bool {
-        self.passes().iter().all(|(_, s)| s.is_empty())
+        self.structures.is_empty() && self.passes().iter().all(|(_, s)| s.is_empty())
     }
 
     /// The bytes it holds (for the tile cache's budget).
     pub fn byte_size(&self) -> usize {
-        self.passes().iter().map(|(_, s)| size_of_val(*s)).sum()
+        self.structures.byte_size() + self.passes().iter().map(|(_, s)| size_of_val(*s)).sum::<usize>()
     }
 }
 
@@ -276,30 +263,28 @@ fn properties_of(feature: &mvt::Feature<'_>, layer: &str) -> Properties {
     p
 }
 
-/// The six line passes being made.
+/// The line passes and structures being made.
 struct Passes {
     edges: PathBuilder,
     lines: PathBuilder,
-    shade: PathBuilder,
     bridge_edges: PathBuilder,
     bridge_lines: PathBuilder,
-    decks: PathBuilder,
+    structures: Structures,
 }
 
 impl Passes {
     fn new(tile: TileIndex) -> Self {
         let b = || PathBuilder::new(LocalMercator::tile(tile));
-        Passes { edges: b(), lines: b(), shade: b(), bridge_edges: b(), bridge_lines: b(), decks: b() }
+        Passes { edges: b(), lines: b(), bridge_edges: b(), bridge_lines: b(), structures: Structures::default() }
     }
 
     fn finish(self) -> GroundLines {
         GroundLines {
             edges: self.edges.finish(),
             lines: self.lines.finish(),
-            bridge_shade: self.shade.finish(),
             bridge_edges: self.bridge_edges.finish(),
             bridge_lines: self.bridge_lines.finish(),
-            bridge_decks: self.decks.finish(),
+            structures: self.structures,
         }
     }
 
@@ -347,16 +332,14 @@ impl Passes {
             None => each_path(&lines, |p, path| self.ground(p, &path, PathType::Open)),
             Some(parts) => {
                 each_path(&parts.ground, |p, path| self.ground(p, &path, PathType::Open));
-                each_path(&parts.under, |p, path| {
-                    let line = line_of(p);
-                    self.shade.push(&path, &paint(BRIDGE_SHADE, js_max(line.width, line.edge_width()) + 2.0));
-                });
+                let m = bridges::metres_per_unit(index);
                 each_path(&parts.raised, |p, path| {
                     let line = line_of(p);
                     push_painted(&mut self.bridge_edges, &path, line.edge_paint, line.edge_width(), PathType::Open);
                     push_painted(&mut self.bridge_lines, &path, line.paint, line.width, PathType::Open);
-                    let deck = if on_rails(p) { 0.0 } else { js_max(line.width, line.edge_width()) };
-                    self.decks.push(&path, &paint(NONE, deck));
+                    if line.paint[3] != 0 || line.edge_paint[3] != 0 {
+                        self.structures.push(&path, js_max(line.width, line.edge_width()), on_rails(p), m);
+                    }
                 });
             }
         }
@@ -369,11 +352,6 @@ impl Passes {
         push_painted(&mut self.edges, path, line.edge_paint, line.edge_width(), path_type);
         push_painted(&mut self.lines, path, line.paint, line.width, path_type);
     }
-}
-
-/// An open path's paint (the flat map's binary lines).
-fn paint(color: Rgba, width: f64) -> Paint<'static> {
-    Paint { path_type: PathType::Open, ..Paint::solid(color, width) }
 }
 
 /// `path` in `color` and `width` unless the colour is transparent (drawn as nothing, no depth).
@@ -657,7 +635,7 @@ mod tests {
                 assert_eq!(s.types, START_CAP | END_CAP, "open, capped at both ends");
             }
             // no bridges in this tile
-            assert!(t.bridge_shade.is_empty() && t.bridge_edges.is_empty() && t.bridge_lines.is_empty() && t.bridge_decks.is_empty());
+            assert!(t.bridge_edges.is_empty() && t.bridge_lines.is_empty() && t.structures.is_empty());
             assert!(!t.is_empty() && t.byte_size() == 10 * size_of::<PathSegment>());
         }
         // the surfaces the ground's shader reads from the alpha: the railway's track and gravel
@@ -665,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn on_the_flat_map_a_bridge_rises_to_its_deck_over_its_shade_and_on_the_globe_lies_on_the_ground() {
+    fn on_the_flat_map_a_bridge_rises_to_its_deck_on_its_structure_and_on_the_globe_lies_on_the_ground() {
         let (s, b) = (V::S, V::B);
         let present = ("state", s("present"));
         let bridge: &[(i64, i64)] = &[(1200, 2048), (2800, 2048)];
@@ -678,7 +656,7 @@ mod tests {
                 line_f(&[("feature", s("rail")), present], &[ground]),
                 line_f(&[("feature", s("rail")), present, ("bridge", b(true))], &[bridge]),
                 line_f(&[("feature", s("light_rail")), present, ("bridge", b(true))], &[cut]),
-                // a tram's bridge: no track, but its shade and its deck
+                // a tram's bridge: no track, so no structure either
                 line_f(&[("feature", s("tram")), present, ("bridge", b(true))], &[&[(500, 3500), (900, 3500)]]),
             ],
         )]);
@@ -687,12 +665,8 @@ mod tests {
         assert_eq!(paints(&t.lines), [(TRACK, 2.6)]);
         assert_eq!(t.lines.len(), 1);
         assert_eq!(t.edges.len(), 1);
-        // the bridges' shade: flat, every bridge, as wide as its edging and 2 m more
-        assert_eq!(paints(&t.bridge_shade), [(BRIDGE_SHADE, 6.6), (BRIDGE_SHADE, 5.4), (BRIDGE_SHADE, 2.0)]);
-        assert_eq!(t.bridge_shade.len(), 3, "the shade keeps the bridges' own points");
-        assert!(t.bridge_shade.iter().all(|s| s.start[2] == 0.0 && s.end[2] == 0.0));
-        // raised: the main line's 6 m deck, ramped up over 40 m from each end, in pieces of at
-        // most 6 m; the light rail's ramp only at its east end
+        // raised: the main line's 6 m deck, ramped up from each end as the trains' level is, in
+        // pieces of at most 6 m; the light rail's ramp only at its east end
         let metres = tile_metres(STOCKHOLM);
         let long = 1600.0 / 4096.0 * metres;
         let pieces = (long / 6.0).ceil() as usize;
@@ -702,11 +676,9 @@ mod tests {
         assert_eq!(main[pieces - 1].end[2], 0.0);
         let top = main.iter().map(|s| s.end[2]).fold(0.0, f32::max);
         assert_eq!(top, 6.0);
-        assert!(main.iter().all(|s| (0.0..=6.0).contains(&s.start[2])));
-        // up the ramp as a smoothstep of the way along its 40 m
-        for s in main.iter().take_while(|s| (f64::from(s.start[0]) - 1200.0 / 4096.0) * metres < 40.0) {
-            let k = (f64::from(s.start[0]) - 1200.0 / 4096.0) * metres / 40.0;
-            assert!((f64::from(s.start[2]) - 6.0 * k * k * (3.0 - 2.0 * k)).abs() < 1e-3, "{k}: {}", s.start[2]);
+        for s in &main {
+            let d = (f64::from(s.start[0]) - 1200.0 / 4096.0) * metres;
+            assert!((f64::from(s.start[2]) - bridges::rise(d, long, 6.0, [false, false])).abs() < 1e-3, "{d}: {}", s.start[2]);
         }
         let light: Vec<&PathSegment> = t.bridge_lines.iter().filter(|s| s.width == 2.2).collect();
         assert_eq!(light[0].start[2], 6.0, "the tile's edge: up already");
@@ -714,18 +686,18 @@ mod tests {
         // the raised edging under the raised track, the same pieces
         assert_eq!(paints(&t.bridge_edges), [(BALLAST, 4.6), (BALLAST, 3.4)]);
         assert_eq!(t.bridge_edges.len(), t.bridge_lines.len());
-        // the decks: every bridge raised, transparent, and on a railway 0 m wide (the layer's
-        // minimum width)
-        assert_eq!(paints(&t.bridge_decks), [(NONE, 0.0)]);
-        assert_eq!(t.bridge_decks.len(), t.bridge_lines.len() + (400.0 / 4096.0 * metres / 6.0).ceil() as usize);
-        assert_eq!(t.passes().map(|(name, _)| name), ["edges", "lines", "bridge-shade", "bridge-edges", "bridge-lines", "bridge-decks"]);
+        // the two drawn bridges stand on structures: their edge beams just over the deck
+        assert!(!t.structures.is_empty());
+        let highest = t.structures.vertices.iter().map(|v| v.position[2]).fold(0.0, f32::max);
+        assert!(highest > 6.0 && highest < 6.5, "{highest}");
+        assert_eq!(t.passes().map(|(name, _)| name), ["edges", "lines", "bridge-edges", "bridge-lines"]);
 
         // the globe raises nothing: every line on the ground, a bridge as well
         let g = rails_tile(STOCKHOLM, &bytes, false, &never).unwrap();
         assert_eq!(paints(&g.lines), [(TRACK, 2.6), (TRACK, 2.2)]);
         assert_eq!(g.lines.len(), 3);
         assert!(g.lines.iter().all(|s| s.start[2] == 0.0));
-        assert!(g.bridge_shade.is_empty() && g.bridge_lines.is_empty() && g.bridge_decks.is_empty());
+        assert!(g.bridge_lines.is_empty() && g.structures.is_empty());
     }
 
     #[test]
@@ -850,7 +822,6 @@ mod tests {
         assert_eq!((PLATFORM_TILES.min_zoom, PLATFORM_TILES.max_zoom), (Some(15.0), Some(15.0)));
         assert_eq!(platform_lod(), Lod { levels: vec![15], bias: 0.0, max_distance: 4000.0 });
         assert_eq!((RAILS_MIN_PIXELS, PLATFORMS_MIN_PIXELS), (0.6, 0.0));
-        assert_eq!(BRIDGE_SHADE, [16, 20, 14, 70]);
         // OpenRailwayMap's bridges to the rail map's deck, the rest as OpenMapTiles has them
         let p = |v: Value| v.as_object().unwrap().clone();
         let none = |_: &str| None;

@@ -426,8 +426,12 @@ pub struct DrawnCar {
     pub mesh: CarShape,
     /// One of an operator model's cars (all of its train's are).
     pub modelled: bool,
-    /// Where it is: its height (metres up on a bridge) and whether it is in a tunnel.
+    /// Where it is: its height (metres up on a bridge, at its middle: halfway between its ends'
+    /// heights) and whether it is in a tunnel.
     pub level: Level,
+    /// How far its front is tilted up, degrees: the slope from its back to its front on a bridge's
+    /// ramp, 0 on the level.
+    pub pitch: f64,
     /// `getColor`: the train's colour at [`TRAIN_ALPHA`], or [`MODEL_WHITE`] for a model's car;
     /// alpha [`TUNNEL_TRAIN_ALPHA`] in a tunnel.
     pub color: [u8; 4],
@@ -476,13 +480,29 @@ pub fn drawn_cars(list: &[&Train], drawn: &Drawn, bounds: Option<[f64; 4]>, mode
                 }
                 _ => CarShape::Plain { lead: k == 0, shape: train.shape.unwrap_or(TrainShape::Regional) },
             };
-            let level = level_of(train, place.at, Some(place.heading));
+            let (level, pitch) = car_level(train, place.at, place.heading, place.length);
             let [r, g, b, a] = if modelled { MODEL_WHITE } else { drawn.colors[i] };
             let color = [r, g, b, if level.tunnel { TUNNEL_TRAIN_ALPHA } else { a }];
-            cars.push(DrawnCar { at: place.at, heading: place.heading, length: place.length, train: i, mesh, modelled, level, color, highlighted: false });
+            cars.push(DrawnCar { at: place.at, heading: place.heading, length: place.length, train: i, mesh, modelled, level, pitch, color, highlighted: false });
         }
     }
     cars
+}
+
+/// A car's level and pitch from the track's level under its two ends (`at` its middle, pointing
+/// `heading`, `length` metres): its wheels on the deck of a bridge's ramp, not floating over it.
+fn car_level(train: &Train, at: [f64; 2], heading: f64, length: f64) -> (Level, f64) {
+    let middle = level_of(train, at, Some(heading));
+    if train.structures.is_empty() || middle.tunnel {
+        return (middle, 0.0);
+    }
+    let h = heading.to_radians();
+    let k = at[1].to_radians().cos().max(1e-6);
+    let end = |m: f64| [at[0] + h.sin() * m / (M_PER_DEG * k), at[1] + h.cos() * m / M_PER_DEG];
+    let (front, back) = (level_of(train, end(length / 2.0), Some(heading)), level_of(train, end(-length / 2.0), Some(heading)));
+    let height = (front.height + back.height) / 2.0;
+    let pitch = if length > 0.0 { (front.height - back.height).atan2(length).to_degrees() } else { 0.0 };
+    (Level { tunnel: false, height }, pitch)
 }
 
 /// One of the cars' mesh layers (`train-car-meshes-<key>` and `train-car-meshes-<key>-tunnel`):
@@ -521,6 +541,15 @@ impl CarLayers {
         let width = js_max(CAR_WIDTH_M, MIN_CAR_WIDTH_PX * mpp);
         let height = js_max(CAR_HEIGHT_M, MIN_CAR_WIDTH_PX * 1.3 * mpp);
         CarLayers { cars, width, height }
+    }
+
+    /// Every car on the ground, level (a map that draws no bridges' decks: no car floats over a
+    /// flat bridge); tunnels stay tunnels.
+    pub fn on_the_ground(&mut self) {
+        for car in &mut self.cars {
+            car.level.height = 0.0;
+            car.pitch = 0.0;
+        }
     }
 
     /// The mesh layers in draw order: for each mesh the cars take, in the order of its first car
@@ -702,7 +731,7 @@ impl CarLayers {
 /// turned to its heading (`getOrientation: [0, −heading, 0]`) and stretched to
 /// `[width, length, height]` metres (`getScale`).
 pub fn car_matrix(viewport: &Viewport, car: &DrawnCar, width: f64, height: f64) -> DMat4 {
-    instance_matrix(viewport, [car.at[0], car.at[1], car.level.height], [0.0, -car.heading, 0.0], [width, car.length, height])
+    instance_matrix(viewport, [car.at[0], car.at[1], car.level.height], [0.0, -car.heading, car.pitch], [width, car.length, height])
 }
 
 /// The rectangle a train icon's glyph covers, lying on the ground in `viewport`'s common space as
@@ -1279,13 +1308,22 @@ mod tests {
         let cars = cars_of(&[&t], None, NOW);
         assert_eq!(cars.iter().map(|c| c.level.tunnel).collect::<Vec<_>>(), [false, true, false]);
         assert_eq!(cars.iter().map(|c| c.color[3]).collect::<Vec<_>>(), [240, 90, 240]);
-        // a bridge 30 to 130 m back: the second car on its ramp, the third on its deck
-        t.structures = vec![Structure { tunnel: false, line: line(30.0, 130.0), joined: [false, false] }];
+        // a bridge from 30 m back: the second and third cars up its ramp, tilted with it (their
+        // fronts, east, lower), the third higher
+        t.structures = vec![Structure { tunnel: false, line: line(30.0, 430.0), joined: [false, false] }];
         let cars = cars_of(&[&t], None, NOW);
-        assert_eq!(cars[0].level, GROUND);
-        assert!(cars[1].level.height > 0.0 && cars[1].level.height < 6.0, "{:?}", cars[1].level);
-        assert_eq!(cars[2].level, Level { tunnel: false, height: 6.0 });
+        assert_eq!((cars[0].level, cars[0].pitch), (GROUND, 0.0));
+        assert!(cars[1].level.height > 0.0 && cars[1].level.height < cars[2].level.height && cars[2].level.height < 6.0, "{:?}", cars[1].level);
+        assert!(cars[1].pitch < 0.0 && cars[2].pitch < 0.0 && cars[2].pitch > -10.0, "{} {}", cars[1].pitch, cars[2].pitch);
         assert!(cars.iter().all(|c| c.color[3] == 240));
+        // on a bridge's level deck: up on it, level
+        t.structures = vec![Structure { tunnel: false, line: line(-100.0, 300.0), joined: [false, false] }];
+        let cars = cars_of(&[&t], None, NOW);
+        assert!(cars.iter().all(|c| (c.level.height - 6.0).abs() < 1e-6 && c.pitch.abs() < 1e-6), "{cars:?}");
+        // on a map that draws no decks, every car on the ground
+        let mut layers = CarLayers::new(cars, 1.0);
+        layers.on_the_ground();
+        assert!(layers.cars.iter().all(|c| c.level == GROUND && c.pitch == 0.0));
         // a model's car in a tunnel: white, faint
         let mut m = eastward();
         m.model = Some("x40".into());

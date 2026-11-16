@@ -35,6 +35,7 @@
 //! the view is the globe (zoom ≤ 12), the city ground's (`ground-city`) on the flat map.
 //! `ground-flat` is never drawn today (the flat map takes the city ground).
 
+pub mod bridges;
 pub mod city;
 pub mod earth_picture;
 pub mod land;

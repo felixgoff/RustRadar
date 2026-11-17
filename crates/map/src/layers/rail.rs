@@ -193,6 +193,13 @@ pub fn line_style(zoom: f64) -> PathStyle {
     PathStyle { width_scale: rails::rail_width_scale(zoom), cap_rounded: true, dash: Dash::Segment, dash_justified: true, ..PathStyle::PIXELS }
 }
 
+/// How high the lines ride where the tracks stand in 3D: just over the sleepers, metres.
+pub const TRACK_BAND_M: f64 = rustradar_scene::track::SLEEPER_TOP_M + 0.08;
+/// ...and how wide they are there at most: within the rails, metres at the view's centre, but never
+/// thinner than this many pixels.
+pub const TRACK_BAND_WIDTH_M: f64 = 1.3;
+pub const TRACK_BAND_MIN_PX: f64 = 1.5;
+
 /// The overview's style: widths in pixels, PathLayer's defaults otherwise.
 pub const OVERVIEW_STYLE: PathStyle = PathStyle::PIXELS;
 
@@ -427,7 +434,17 @@ impl Rail {
         if !stations && !self.stations.is_empty() {
             self.stations.clear();
         }
-        let style = line_style(zoom);
+        // On the realistic map's flat ground the tracks stand in 3D close in (`scene::track`): the
+        // lines ride on them, on the sleepers between the rails (a band no wider than the track
+        // there), rather than lie hidden under the ballast. Far out they are a hand's width over
+        // the flat track, which no one can see.
+        let on_track = self.flat && cx.scene.draws_decks();
+        let lift = if on_track { TRACK_BAND_M } else { 0.0 };
+        let mut style = line_style(zoom);
+        if on_track {
+            let metres_per_pixel = f64::from(cx.view.globals.metres_per_pixel).max(1e-6);
+            style.width_max_pixels = (TRACK_BAND_WIDTH_M / metres_per_pixel).max(TRACK_BAND_MIN_PX);
+        }
         self.globe_lines.set(&cx.gpu.queue, &style);
         self.clipped_lines.set(&cx.gpu.queue, &style);
         if network || speed {
@@ -435,7 +452,7 @@ impl Rail {
             cx.update_tiles(set, |gpu, _tile, decoded| upload(&gpu.device, decoded));
             let tiles: Vec<TileIndex> = set.visible().map(|(tile, _)| tile).collect();
             for tile in tiles {
-                let slot = cx.tile_frame(tile, 0.0);
+                let slot = cx.tile_frame(tile, lift);
                 self.drawn.push((slot, tile));
             }
             self.speeds_drawn = speed;

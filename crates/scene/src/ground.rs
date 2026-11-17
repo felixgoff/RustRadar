@@ -96,7 +96,7 @@ const fn paved(texture: &'static str, metres: f64, rough: f64, snow: f64, flat: 
 
 /// The surfaces, by the id a feature's paint carries in its alpha (255 less the id); each
 /// texture's metres as Streets GL lays it.
-const SURFACES: [(usize, Surface); 28] = [
+const SURFACES: [(usize, Surface); 31] = [
     // where nothing is mapped: Streets GL's terrain (its detail repeats every 76 m)
     (0, ground("terrain", 76.0, 0.9, 1.0)),
     (1, ground("park", 20.0, 0.9, 1.0)),
@@ -119,6 +119,11 @@ const SURFACES: [(usize, Surface); 28] = [
     (16, ground("wood", 4.0, 0.8, 1.0)),
     // a field as mapped (Streets GL's tiles): its crop and the lie of its rows in its colour
     (17, ground("farmland0", 50.0, 0.95, 1.0)),
+    // the 3D track's (`crate::track`): its ballast, gravel fixed to the world; its rails, steel;
+    // its sleepers, concrete
+    (18, ground("gravel", 2.5, 0.95, 1.0)),
+    (19, Surface { flat: Some([0.11, 0.105, 0.1]), ..ground("gravel", 0.0, 0.3, 0.0) }),
+    (20, Surface { flat: Some([0.15, 0.145, 0.135]), ..ground("pavement", 0.0, 0.85, 1.0) }),
     // lines: laid along them
     // (roads and paths in plain colours, the railways' tracks and the piers' boards in their textures)
     (32, paved("road", 0.0, 0.8, 0.5, Some(ROAD))),
@@ -763,13 +768,14 @@ mod tests {
     #[test]
     fn the_surface_tables_are_the_shaders() {
         assert_eq!(SURFACE_COUNT, SURFACES.iter().map(|(i, _)| i + 1).max().unwrap_or(0));
-        // doc 04 §6.2's GS_LAYER: unused ids (18 to 31) take id 0's row
-        let mut layers = vec![22.0, 1.0, 2.0, 3.0, 0.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, -1.0, 14.0, 16.0, 7.0, 18.0, 20.0, 3.0];
-        layers.extend([22.0; 14]);
+        // doc 04 §6.2's GS_LAYER, and the 3D track's ballast, steel and concrete (18 to 20): unused
+        // ids (21 to 31) take id 0's row
+        let mut layers = vec![22.0, 1.0, 2.0, 3.0, 0.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, -1.0, 14.0, 16.0, 7.0, 18.0, 20.0, 3.0, 14.0, 14.0, 10.0];
+        layers.extend([22.0; 11]);
         layers.extend([12.0, 13.0, 17.0, 15.0, 10.0, 11.0, 14.0, 21.0, 20.0, 19.0]);
         assert_eq!(surface_table(Surface::layer).to_vec(), layers);
         let metres = surface_table(|s| s.metres);
-        assert_eq!((metres[0], metres[11], metres[20], metres[32], metres[36], metres[41]), (76.0, 0.0, 76.0, 0.0, 10.0, 8.0));
+        assert_eq!((metres[0], metres[11], metres[18], metres[21], metres[32], metres[36], metres[41]), (76.0, 0.0, 2.5, 76.0, 0.0, 10.0, 8.0));
         let paved = surface_table(|s| f64::from(u8::from(s.paved)));
         // pavement, asphalt, cobbles, the roads, footways, shoulders, tram rails, cycleways
         let paved_ids: Vec<usize> = (0..SURFACE_COUNT).filter(|&i| paved[i] == 1.0).collect();

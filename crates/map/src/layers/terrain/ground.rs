@@ -195,6 +195,8 @@ pub struct Standing {
     buffer: wgpu::Buffer,
     /// What the buffer was raised from (empty: at sea level).
     footing: Footing,
+    /// What each vertex stands on without the terrain (metres: a bridge's deck); empty: 0.
+    base: Vec<f32>,
 }
 
 impl Standing {
@@ -211,7 +213,23 @@ impl Standing {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Standing { places, buffer, footing: Footing::default() }
+        Standing { places, buffer, footing: Footing::default(), base: Vec::new() }
+    }
+
+    /// Vertices at `(u, v)` each standing on its `base` (metres up: a bridge's deck) without the
+    /// 3D terrain, and on the ground under it on the terrain (where no deck is drawn).
+    pub fn on_bases(device: &wgpu::Device, places: Vec<[f32; 2]>, base: Vec<f32>) -> Self {
+        let mut contents: Vec<u8> = bytemuck::cast_slice(&base).to_vec();
+        contents.resize(contents.len().max(16), 0);
+        let buffer = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("bases under the vertices"),
+                contents: &contents,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            },
+        );
+        Standing { places, buffer, footing: Footing::default(), base }
     }
 
     /// A mesh of `vertices` vertices that stays at sea level (a far tile drawn flat, which is
@@ -223,7 +241,7 @@ impl Standing {
             usage: wgpu::BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
-        Standing { places: Vec::new(), buffer, footing: Footing::default() }
+        Standing { places: Vec::new(), buffer, footing: Footing::default(), base: Vec::new() }
     }
 
     /// Whether the mesh of `tile` needs raising again for `ground`.
@@ -240,7 +258,7 @@ impl Standing {
         }
         if !self.places.is_empty() {
             let heights: Vec<f32> = if footing.is_empty() {
-                vec![0.0; self.places.len()]
+                if self.base.len() == self.places.len() { self.base.clone() } else { vec![0.0; self.places.len()] }
             } else {
                 self.places.iter().map(|&[u, v]| footing.at(tile, f64::from(u), f64::from(v)) as f32).collect()
             };
@@ -257,7 +275,7 @@ impl Standing {
 
     /// The bytes it keeps on the CPU.
     pub fn byte_size(&self) -> usize {
-        size_of_val(self.places.as_slice())
+        size_of_val(self.places.as_slice()) + size_of_val(self.base.as_slice())
     }
 }
 

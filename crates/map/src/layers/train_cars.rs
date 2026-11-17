@@ -101,11 +101,22 @@ pub fn mesh_of(shape: &CarShape) -> Option<&'static CarMesh> {
 /// One car's instance in `view`, every car `width` by `height` metres: the unit box at its
 /// middle, raised to its level's height, turned to its heading (`getOrientation: [0, −heading,
 /// 0]`) and stretched to `[width, length, height]` (`getScale`), in its colour, highlighted
-/// [`CAR_HIGHLIGHT`] when it is under the pointer.
-pub fn instance(view: &ViewFrame, car: &DrawnCar, width: f64, height: f64) -> Instance {
+/// [`CAR_HIGHLIGHT`] when it is under the pointer; `rails` metres higher still where it runs on
+/// rails that stand up from the ground (the realistic map's 3D track, [`rails_top`]), but not in
+/// a tunnel.
+pub fn instance(view: &ViewFrame, car: &DrawnCar, width: f64, height: f64, rails: f64) -> Instance {
     let model = orientation_matrix([0.0, -car.heading, car.pitch], [width, car.length, drawn_height(car, height)]);
     let highlight = if car.highlighted { CAR_HIGHLIGHT } else { Instance::NO_HIGHLIGHT };
-    Instance::at(view, [car.at[0], car.at[1], car.level.height], model, DVec3::ZERO, car.color, highlight)
+    let lift = if car.level.tunnel { 0.0 } else { rails };
+    Instance::at(view, [car.at[0], car.at[1], car.level.height + lift], model, DVec3::ZERO, car.color, highlight)
+}
+
+/// How high the rails' tops stand over the ground or a bridge's deck, metres: on the realistic
+/// map's flat ground its 3D track's ([`rustradar_scene::track::RAIL_TOP_M`]: far out, where the
+/// track lies flat, the half metre is lost in the distance); elsewhere the cars stand on the map.
+pub fn rails_top(scene: &crate::renderer::SceneInput, globe: bool) -> f64 {
+    let realistic = scene.ground.shown && scene.basemap == rustradar_core::geo::Basemap::Realistic;
+    if realistic && !globe { rustradar_scene::track::RAIL_TOP_M } else { 0.0 }
 }
 
 /// A car in a tunnel, unit sized as the meshes are: one flat rectangle on the ground under the
@@ -168,7 +179,8 @@ impl TrainCars {
                 let vertices = Vertex::from_arrays(&mesh.positions, &mesh.normals, Some(&mesh.colors));
                 self.shapes.insert(layer.key.clone(), Shape::new(device, &format!("train car {}", layer.key), &vertices, None));
             }
-            let instances: Vec<Instance> = layer.cars.iter().map(|&c| instance(cx.view, &cars.cars[c], cars.width, cars.height)).collect();
+            let rails = rails_top(cx.scene, cx.view.is_globe());
+            let instances: Vec<Instance> = layer.cars.iter().map(|&c| instance(cx.view, &cars.cars[c], cars.width, cars.height, rails)).collect();
             if self.draws.len() == self.active {
                 self.draws.push(Draw {
                     id: String::new(),
@@ -389,7 +401,7 @@ mod tests {
             color: [96, 212, 160, 240],
             highlighted: false,
         };
-        let i = instance(&view, &car, 3.1, 4.1);
+        let i = instance(&view, &car, 3.1, 4.1, 0.0);
         assert_eq!(i.offset, <[f32; 3]>::from(view.common_offset(car.at, 4.5)), "its middle, up on its bridge");
         assert_eq!((i.color, i.highlight), ([96, 212, 160, 240], Instance::NO_HIGHLIGHT));
         // the unit box's axes: y (along) to the heading's way, 25.4 m; x (across) to its right, 3.1
@@ -401,7 +413,12 @@ mod tests {
         for (a, b) in columns.to_cols_array().iter().zip(want.to_cols_array()) {
             assert!((a - b).abs() <= 1e-6 * want.x_axis.length(), "{columns:?} against {want:?}");
         }
-        assert_eq!(instance(&view, &DrawnCar { highlighted: true, ..car }, 3.1, 4.1).highlight, CAR_HIGHLIGHT);
+        assert_eq!(instance(&view, &DrawnCar { highlighted: true, ..car.clone() }, 3.1, 4.1, 0.0).highlight, CAR_HIGHLIGHT);
+        // on the realistic map's 3D track it stands on the rails' tops, but not in a tunnel
+        let on_rails = instance(&view, &car, 3.1, 4.1, rustradar_scene::track::RAIL_TOP_M);
+        assert_eq!(on_rails.offset, <[f32; 3]>::from(view.common_offset(car.at, 4.5 + rustradar_scene::track::RAIL_TOP_M)));
+        let tunnel = DrawnCar { level: Level { tunnel: true, height: 0.0 }, ..car };
+        assert_eq!(instance(&view, &tunnel, 3.1, 4.1, 0.52).offset, <[f32; 3]>::from(view.common_offset(car.at, 0.0)));
     }
 
     /// How long what is drawn along row `y` through pixel `x0` is, px: the run of pixels that

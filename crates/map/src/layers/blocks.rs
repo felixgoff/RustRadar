@@ -334,7 +334,9 @@ impl Layer for Blocks {
             }
             self.draped = Draped { runs: Some(scene.runs.clone()), styles: run_styles(scene), all: runs_area(&scene.runs) };
         }
-        self.slot = Some(cx.frames.push(&cx.view.local(self.local.anchor, self.local.scale, 0.0)));
+        // on the realistic map's flat ground the lines ride on the 3D tracks, as the rail map's do
+        let lift = if !cx.view.is_globe() && cx.scene.draws_decks() { super::rail::TRACK_BAND_M } else { 0.0 };
+        self.slot = Some(cx.frames.push(&cx.view.local(self.local.anchor, self.local.scale, lift)));
 
         // each block's signal at its start, lit as the blocks say (the signals and the texts on the
         // 3D terrain raised by the ground under them, Z3; the lines draped, G3)

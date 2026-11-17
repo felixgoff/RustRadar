@@ -79,6 +79,7 @@ pub use crate::ground::{NONE, PLATFORM_M, PLATFORM_MAX_DISTANCE_M, PLATFORM_ZOOM
 use crate::ground::{area_paint, line_of, on_rails};
 use crate::lod::Lod;
 use crate::tess::buildings::binary_polygons;
+use crate::track::{TrackBuilder, TrackMesh, gauge_of};
 pub use crate::tess::vector::Cancelled;
 use crate::tiles::{TileIndex, TilesetOptions};
 
@@ -121,6 +122,8 @@ pub struct GroundLines {
     pub bridge_lines: Vec<PathSegment>,
     /// The bridges' structures (flat map), lit, under their raised surfaces.
     pub structures: Structures,
+    /// The tracks in 3D (flat map), drawn close in over the flat ones ([`crate::track`]).
+    pub track: TrackMesh,
 }
 
 impl GroundLines {
@@ -131,12 +134,12 @@ impl GroundLines {
 
     /// Whether it draws nothing.
     pub fn is_empty(&self) -> bool {
-        self.structures.is_empty() && self.passes().iter().all(|(_, s)| s.is_empty())
+        self.structures.is_empty() && self.track.is_empty() && self.passes().iter().all(|(_, s)| s.is_empty())
     }
 
     /// The bytes it holds (for the tile cache's budget).
     pub fn byte_size(&self) -> usize {
-        self.structures.byte_size() + self.passes().iter().map(|(_, s)| size_of_val(*s)).sum::<usize>()
+        self.structures.byte_size() + self.track.byte_size() + self.passes().iter().map(|(_, s)| size_of_val(*s)).sum::<usize>()
     }
 }
 
@@ -270,12 +273,14 @@ struct Passes {
     bridge_edges: PathBuilder,
     bridge_lines: PathBuilder,
     structures: Structures,
+    track: TrackBuilder,
 }
 
 impl Passes {
     fn new(tile: TileIndex) -> Self {
         let b = || PathBuilder::new(LocalMercator::tile(tile));
-        Passes { edges: b(), lines: b(), bridge_edges: b(), bridge_lines: b(), structures: Structures::default() }
+        let m = bridges::metres_per_unit(bridges::TileIndex { x: tile.x, y: tile.y, z: tile.z });
+        Passes { edges: b(), lines: b(), bridge_edges: b(), bridge_lines: b(), structures: Structures::default(), track: TrackBuilder::new(m) }
     }
 
     fn finish(self) -> GroundLines {
@@ -285,6 +290,7 @@ impl Passes {
             bridge_edges: self.bridge_edges.finish(),
             bridge_lines: self.bridge_lines.finish(),
             structures: self.structures,
+            track: self.track.finish(),
         }
     }
 
@@ -329,11 +335,18 @@ impl Passes {
         }
         let index = bridges::TileIndex { x: tile.x, y: tile.y, z: tile.z };
         match bridge_parts(&lines, index, &deck_of) {
-            None => each_path(&lines, |p, path| self.ground(p, &path, PathType::Open)),
+            None => each_path(&lines, |p, path| {
+                self.ground(p, &path, PathType::Open);
+                self.track(p, &path);
+            }),
             Some(parts) => {
-                each_path(&parts.ground, |p, path| self.ground(p, &path, PathType::Open));
+                each_path(&parts.ground, |p, path| {
+                    self.ground(p, &path, PathType::Open);
+                    self.track(p, &path);
+                });
                 let m = bridges::metres_per_unit(index);
                 each_path(&parts.raised, |p, path| {
+                    self.track(p, &path);
                     let line = line_of(p);
                     push_painted(&mut self.bridge_edges, &path, line.edge_paint, line.edge_width(), PathType::Open);
                     push_painted(&mut self.bridge_lines, &path, line.paint, line.width, PathType::Open);
@@ -344,6 +357,13 @@ impl Passes {
             }
         }
         Ok(())
+    }
+
+    /// A railway's track in 3D (the flat map's), on its base: the ground or its bridge's deck.
+    fn track(&mut self, p: &Properties, path: &[[f64; 3]]) {
+        if p.get("layerName").and_then(Value::as_str) == Some(RAIL_LINES) && line_of(p).width > 0.0 {
+            self.track.push(path, gauge_of(p));
+        }
     }
 
     /// A line on the ground: its edging, then (in the next pass) itself.
@@ -636,7 +656,9 @@ mod tests {
             }
             // no bridges in this tile
             assert!(t.bridge_edges.is_empty() && t.bridge_lines.is_empty() && t.structures.is_empty());
-            assert!(!t.is_empty() && t.byte_size() == 10 * size_of::<PathSegment>());
+            assert!(!t.is_empty() && t.byte_size() == 10 * size_of::<PathSegment>() + t.track.byte_size());
+            // the flat map's tracks also stand in 3D (`crate::track`), the globe's do not
+            assert_eq!(t.track.outlines.len(), if flat { t.lines.len() } else { 0 }, "flat {flat}");
         }
         // the surfaces the ground's shader reads from the alpha: the railway's track and gravel
         assert_eq!((255 - TRACK[3], 255 - BALLAST[3]), (35, 38));

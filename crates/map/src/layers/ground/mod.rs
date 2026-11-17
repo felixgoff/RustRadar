@@ -341,6 +341,23 @@ impl GroundShader {
         self.pipeline(init, label, "vs_platform", "fs_area", &[Some(rails::PLATFORM_LAYOUT), Some(rails::PLATFORM_GROUND_LAYOUT)], state)
     }
 
+    /// The 3D track's beds and rails (`vs_track`, `fs_track`; item R13) with `state`.
+    pub fn track(&self, init: &Init<'_>, label: &str, state: DrawState) -> wgpu::RenderPipeline {
+        self.pipeline(init, label, "vs_track", "fs_track", &[Some(rails::TRACK_LAYOUT), Some(rails::BASE_LAYOUT)], state)
+    }
+
+    /// The 3D track's sleepers (`vs_sleeper`, `fs_track`): one box, an instance per sleeper.
+    pub fn sleepers(&self, init: &Init<'_>, label: &str, state: DrawState) -> wgpu::RenderPipeline {
+        self.pipeline(
+            init,
+            label,
+            "vs_sleeper",
+            "fs_track",
+            &[Some(rails::BOX_LAYOUT), Some(rails::SLEEPER_LAYOUT), Some(rails::SLEEPER_BASE_LAYOUT)],
+            state,
+        )
+    }
+
     fn pipeline(
         &self,
         init: &Init<'_>,

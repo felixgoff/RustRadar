@@ -161,6 +161,12 @@ impl<V: Pod> Mesh<V> {
         self.index_count
     }
 
+    /// Sets its buffers (vertex slot 0 and the indices), for draws of its own.
+    pub fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+    }
+
     /// Sets its buffers (vertex slot 0) and draws it once, with the pipeline and bind groups
     /// already set.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {

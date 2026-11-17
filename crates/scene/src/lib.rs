@@ -43,6 +43,7 @@ pub mod terrain;
 pub mod text;
 pub mod tiles;
 pub mod train_models;
+pub mod track;
 pub mod trains;
 pub mod trees;
 pub mod tess;

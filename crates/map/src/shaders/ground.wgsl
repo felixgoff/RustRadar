@@ -75,6 +75,9 @@ struct GroundOut {
     @location(7) uv: vec2<f32>,
     @location(8) corner_offset: vec2<f32>,
     @location(9) path_length: f32,
+    // the 3D track's (`vs_track`, `vs_sleeper`): how much of it is drawn here, 1 near the camera
+    // to 0 far from it; 0 elsewhere (unread)
+    @location(10) fade: f32,
 }
 
 // `rg_e` for a point `d` (world Mercator offset from the view centre): its longitude and latitude
@@ -136,6 +139,75 @@ fn vs_platform(@location(0) position: vec3<f32>, @location(1) paint: vec4<u32>, 
     out.corner_offset = vec2<f32>(0.0);
     out.path_length = 0.0;
     return out;
+}
+
+// ------------------------------------------------------------------ the track in 3D
+
+// The railway's track in 3D close in (item R13; `scene::track`, `layers::ground::rails`): its
+// ballast bed, rails and sleepers, in the ground's own surfaces, each vertex on its base (a
+// bridge's deck, or on the 3D terrain the ground under it). It is drawn in full to
+// TRACK_FULL_M from the camera and dissolves away by TRACK_GONE_M (a screen door: the flat track
+// under it shows through), so there is no edge where it starts.
+const TRACK_FULL_M: f32 = 700.0;
+const TRACK_GONE_M: f32 = 1050.0;
+
+fn track_vertex(local: vec3<f32>, paint: vec4<u32>, normal: vec3<f32>) -> GroundOut {
+    let p = project_local(local);
+    let d = local_offset(local.xy);
+    let rl = rl_vertex(p.rel, rl_mercator(d));
+    var out: GroundOut;
+    out.clip = p.clip;
+    out.eye = rl.eye;
+    out.sun = rl.sun;
+    out.t = rl.t;
+    out.c = rl.c;
+    out.e = earth_place(d);
+    out.paint = paint;
+    // a face that is not level lights by its own facing; a level one by its texture's
+    out.wall = select(vec3<f32>(0.0), normal, normal.z < 0.999);
+    let metres = length(p.rel - globals.camera_render) / globals.centre.z;
+    out.fade = 1.0 - smoothstep(TRACK_FULL_M, TRACK_GONE_M, metres);
+    return out;
+}
+
+// The bed and the rails: `position` metres over the vertex's `base`.
+@vertex
+fn vs_track(@location(0) position: vec3<f32>, @location(1) paint: vec4<u32>, @location(2) normal: vec3<f32>, @location(3) base: f32) -> GroundOut {
+    return track_vertex(position + vec3<f32>(0.0, 0.0, base), paint, normal);
+}
+
+// A sleeper: the box's corner (metres along the track, across it to the left, up) placed at the
+// instance's middle `at`, turned to its way `dir` (tile units per metre along the track).
+@vertex
+fn vs_sleeper(
+    @location(0) corner: vec3<f32>,
+    @location(1) paint: vec4<u32>,
+    @location(2) normal: vec3<f32>,
+    @location(3) base: f32,
+    @location(4) at: vec2<f32>,
+    @location(5) dir: vec2<f32>,
+) -> GroundOut {
+    // left of the way: a quarter turn in east and north (v runs south)
+    let left = vec2<f32>(dir.y, -dir.x);
+    let uv = at + dir * corner.x + left * corner.y;
+    let along = normalize(vec2<f32>(dir.x, -dir.y));
+    let across = vec2<f32>(-along.y, along.x);
+    let n = vec3<f32>(along * normal.x + across * normal.y, normal.z);
+    return track_vertex(vec3<f32>(uv, corner.z + base), paint, n);
+}
+
+// An interleaved gradient noise per pixel, 0 to 1: the screen door's threshold.
+fn track_door(p: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(floor(p), vec2<f32>(0.06711056, 0.00583715))));
+}
+
+@fragment
+fn fs_track(g: GroundOut) -> @location(0) vec4<f32> {
+    let colour = ground_colour(g, true);
+    if (g.fade <= track_door(g.clip.xy)) {
+        discard;
+    }
+    return colour;
 }
 
 // ------------------------------------------------------------------ lines
@@ -386,10 +458,11 @@ fn ground_colour(g: GroundOut, line: bool) -> vec4<f32> {
         // only speckle)
         let grain = 1.0 - smoothstep(0.25, 1.0, 32.0 * cells_t);
         albedo = c.rgb * tint * (1.0 + 0.28 * grain * (rl_noise(g.t, 32.0) - 0.5));
-        // a road or path: its plain colour, flat
+        // a road or path: its plain colour, flat (the 3D track's steel and concrete: facing their
+        // own way)
         if (more.y >= 0.0) {
             albedo = more.yzw * tint;
-            n = UP;
+            n = select(UP, normalize(g.wall), dot(g.wall, g.wall) > 0.0);
         }
         // Zoomed out the map's data hardly says what the land is: there its colour is the Earth's
         // own, from the picture of it, taking over as a pixel grows past 100 m or so. Closer in,

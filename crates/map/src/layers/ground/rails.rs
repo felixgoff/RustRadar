@@ -61,6 +61,7 @@ use bytemuck::{Pod, Zeroable};
 use rustradar_core::geo::Basemap;
 use rustradar_scene::ground_rails::{self as scene, GroundLines, PlatformsTile};
 use rustradar_scene::tess::ground::explicit;
+use rustradar_scene::track::{BoxVertex, Sleeper, TrackCell, TrackMesh, TrackVertex, sleeper_box};
 
 pub use rustradar_scene::ground_rails::{PLATFORM_TILES, PLATFORMS_MIN_PIXELS, RAIL_TILES as RAIL_TILESET, RAILS_MIN_PIXELS, platform_lod};
 
@@ -124,6 +125,42 @@ pub const PLATFORM_GROUND_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::Vert
     attributes: &wgpu::vertex_attr_array![3 => Float32],
 };
 
+/// The 3D track's vertices (`scene::track::TrackVertex`, its paint made explicit): position at
+/// location 0, normal at 2, paint at 1; its base is the [`Standing`] buffer ([`BASE_LAYOUT`]).
+pub const TRACK_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<TrackVertex>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 2 => Float32x3, 1 => Uint8x4],
+};
+
+/// What each of the track's vertices stands on, metres, at location 3.
+pub const BASE_LAYOUT: wgpu::VertexBufferLayout<'static> = PLATFORM_GROUND_LAYOUT;
+
+/// The sleeper box's vertices (`scene::track::BoxVertex`): corner at 0, normal at 2, paint at 1.
+pub const BOX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<BoxVertex>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 2 => Float32x3, 1 => Uint8x4],
+};
+
+/// The sleepers (`scene::track::Sleeper`), one an instance: middle at 4, way at 5.
+pub const SLEEPER_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<Sleeper>() as u64,
+    step_mode: wgpu::VertexStepMode::Instance,
+    attributes: &wgpu::vertex_attr_array![4 => Float32x2, 5 => Float32x2],
+};
+
+/// What each sleeper stands on, metres, at location 3.
+pub const SLEEPER_BASE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<f32>() as u64,
+    step_mode: wgpu::VertexStepMode::Instance,
+    attributes: &wgpu::vertex_attr_array![3 => Float32],
+};
+
+/// The 3D track is drawn only while the camera is this close to some of it, metres (the shader
+/// dissolves it away by then: `TRACK_GONE_M` in ground.wgsl).
+pub const TRACK_DRAWN_M: f64 = 1050.0;
+
 /// A platform tile, decoded: the standing platforms and the lines.
 pub struct Platforms {
     pub vertices: Vec<PlatformVertex>,
@@ -140,7 +177,12 @@ impl ByteSize for Platforms {
 /// The ground's passes of `lines` in the shader's explicit paints.
 pub fn explicit_lines(lines: GroundLines) -> GroundLines {
     let paint = |segments: Vec<PathSegment>| segments.into_iter().map(|s| PathSegment { color: explicit(s.color), ..s }).collect();
+    let mut track = lines.track;
+    for v in &mut track.vertices {
+        v.paint = explicit(v.paint);
+    }
     GroundLines {
+        track,
         edges: paint(lines.edges),
         lines: paint(lines.lines),
         bridge_edges: paint(lines.bridge_edges),
@@ -183,7 +225,109 @@ pub struct LineMeshes {
     pub bridge_edges: LineMesh,
     pub bridge_lines: LineMesh,
     pub structures: Option<TileBridges>,
+    pub track: Option<TrackMeshes>,
 }
+
+/// A tile's track in 3D on the GPU: the bed and rails, the sleepers, what each stands on, the
+/// cells to pick what is near, and the beds' shadow for the light it was cast from.
+pub struct TrackMeshes {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    bases: Standing,
+    sleepers: wgpu::Buffer,
+    sleeper_bases: Standing,
+    cells: Vec<TrackCell>,
+    outlines: Vec<Vec<([[f32; 3]; 2], f32)>>,
+    metres_per_unit: f64,
+    shadow: Option<([f32; 3], fill::Mesh<fill::Vertex>)>,
+    /// This frame's cells near the camera.
+    near: Vec<usize>,
+}
+
+impl TrackMeshes {
+    fn new(device: &wgpu::Device, t: &TrackMesh) -> Option<Self> {
+        if t.is_empty() {
+            return None;
+        }
+        let buffer = |label: &str, contents: &[u8], usage| {
+            let mut padded = contents.to_vec();
+            padded.resize(contents.len().max(16), 0);
+            wgpu::util::DeviceExt::create_buffer_init(device, &wgpu::util::BufferInitDescriptor { label: Some(label), contents: &padded, usage })
+        };
+        let places = t.vertices.iter().map(|v| [v.position[0], v.position[1]]).collect();
+        let bases = t.vertices.iter().map(|v| v.base).collect();
+        let sleeper_places = t.sleepers.iter().map(|s| s.at).collect();
+        let sleeper_bases = t.sleepers.iter().map(|s| s.base).collect();
+        Some(TrackMeshes {
+            vertices: buffer("track", bytemuck::cast_slice(&t.vertices), wgpu::BufferUsages::VERTEX),
+            indices: buffer("track", bytemuck::cast_slice(&t.indices), wgpu::BufferUsages::INDEX),
+            bases: Standing::on_bases(device, places, bases),
+            sleepers: buffer("sleepers", bytemuck::cast_slice(&t.sleepers), wgpu::BufferUsages::VERTEX),
+            sleeper_bases: Standing::on_bases(device, sleeper_places, sleeper_bases),
+            cells: t.cells.clone(),
+            outlines: t.outlines.clone(),
+            metres_per_unit: t.metres_per_unit,
+            shadow: None,
+            near: Vec::new(),
+        })
+    }
+
+    /// Picks the cells within [`TRACK_DRAWN_M`] of the camera (`camera` in common units, `scale`
+    /// common units per metre) for `tile`.
+    fn pick_near(&mut self, tile: TileIndex, camera: [f64; 3], scale: f64) {
+        let extent = 512.0 / f64::from(1u32 << tile.z);
+        self.near.clear();
+        for (i, c) in self.cells.iter().enumerate() {
+            let x = (f64::from(tile.x) + f64::from(c.centre[0])) * extent;
+            let y = 512.0 - (f64::from(tile.y) + f64::from(c.centre[1])) * extent;
+            let level = ((x - camera[0]).hypot(y - camera[1]) / scale - f64::from(c.radius_m)).max(0.0);
+            let metres = level.hypot(camera[2] / scale);
+            if metres < TRACK_DRAWN_M {
+                self.near.push(i);
+            }
+        }
+    }
+
+    /// The beds' shadows on what they stand on, cast toward `-light` (east, north, up), as the
+    /// bridges' decks cast theirs.
+    fn shade(&mut self, device: &wgpu::Device, light: [f64; 3]) {
+        let key = light.map(|c| c as f32);
+        if self.shadow.as_ref().is_some_and(|(was, _)| was.iter().zip(key).all(|(a, b)| (a - b).abs() <= 0.01)) {
+            return;
+        }
+        let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+        if -light[2] > 0.15 {
+            let m = self.metres_per_unit;
+            let (east, north) = (light[0] / -light[2], light[1] / -light[2]);
+            let k = (3.0 / east.hypot(north)).min(1.0);
+            let (du, dv) = (east * k / m, -north * k / m);
+            for outline in &self.outlines {
+                for (i, (pair, base)) in outline.iter().enumerate() {
+                    let start = vertices.len() as u32;
+                    vertices.extend(pair.map(|p| {
+                        let h = f64::from(p[2] - base).max(0.0);
+                        fill::Vertex { position: [(f64::from(p[0]) + du * h) as f32, (f64::from(p[1]) + dv * h) as f32, *base], color: TRACK_SHADOW }
+                    }));
+                    if i > 0 {
+                        indices.extend([start - 2, start - 1, start + 1, start - 2, start + 1, start]);
+                    }
+                }
+            }
+        }
+        self.shadow = Some((key, fill::Mesh::new(device, "track shadows", &vertices, &indices)));
+    }
+
+    /// The ground under each vertex and sleeper on the 3D terrain (or their bases off it).
+    fn stand(&mut self, queue: &wgpu::Queue, tile: TileIndex, ground: &crate::layers::terrain::ground::Ground) {
+        if self.bases.stale(tile, ground) {
+            self.bases.stand(queue, tile, ground);
+            self.sleeper_bases.stand(queue, tile, ground);
+        }
+    }
+}
+
+/// The track beds' shadow: the bridges' blue-black, lighter.
+const TRACK_SHADOW: [u8; 4] = [6, 12, 28, 70];
 
 impl LineMeshes {
     pub fn new(device: &wgpu::Device, label: &str, l: &GroundLines) -> Self {
@@ -193,6 +337,7 @@ impl LineMeshes {
             bridge_edges: LineMesh::new(device, label, &l.bridge_edges),
             bridge_lines: LineMesh::new(device, label, &l.bridge_lines),
             structures: bridges::upload(device, &l.structures),
+            track: TrackMeshes::new(device, &l.track),
         }
     }
 }
@@ -285,6 +430,15 @@ pub struct GroundRails {
     /// square lies at sea level.
     platform_areas_on_terrain: wgpu::RenderPipeline,
     platform_lines: wgpu::RenderPipeline,
+    /// The 3D track (item R13): its beds and rails, its sleepers (one box, instanced), the beds'
+    /// shadows.
+    track: wgpu::RenderPipeline,
+    sleepers: wgpu::RenderPipeline,
+    sleeper_box: fill::Mesh<BoxVertex>,
+    track_shadows: fill::Fill,
+    track_shadow_style: fill::Style,
+    /// This frame draws the 3D track (the flat map, close in).
+    track_drawn: bool,
     clip: Clip,
     flat: TileSet<Rails, LineMeshes>,
     globe: TileSet<Rails, LineMeshes>,
@@ -316,6 +470,7 @@ impl GroundRails {
             TileSetOptions { max_requests: MAX_REQUESTS, refinement: Refinement::KeepCoarserUntilIn, ..Default::default() },
             |tile, bytes, cancel| decode_platforms(tile, &bytes, cancel),
         );
+        let track_shadows = fill::Fill::new(init, "ground-rails track shadows", DrawState::SURFACE_NO_CULL);
         GroundRails {
             flat_lines: shader.lines(init, "ground-rails-flat", CLIPPED),
             globe_lines: shader.lines(init, "ground-rails-globe", DrawState::SURFACE_NO_CULL),
@@ -323,6 +478,16 @@ impl GroundRails {
             platform_areas: shader.platforms(init, "ground-platforms", SOLID),
             platform_areas_on_terrain: shader.platforms(init, "ground-platforms on the terrain", DrawState::NO_CULL),
             platform_lines: shader.lines(init, "ground-platforms lines", SOLID),
+            track: shader.track(init, "ground-rails track", DrawState::NO_CULL),
+            sleepers: shader.sleepers(init, "ground-rails sleepers", DrawState::NO_CULL),
+            sleeper_box: {
+                let (vertices, indices) = sleeper_box();
+                let vertices: Vec<BoxVertex> = vertices.into_iter().map(|v| BoxVertex { paint: explicit(v.paint), ..v }).collect();
+                fill::Mesh::new(&init.gpu.device, "sleeper", &vertices, &indices)
+            },
+            track_shadow_style: track_shadows.style(&init.gpu.device, fill::OPAQUE),
+            track_shadows,
+            track_drawn: false,
             shader,
             clip: Clip::new(init),
             flat: rails(true),
@@ -363,6 +528,47 @@ fn drop_tiles<D: ByteSize + Send + 'static, T>(set: &mut TileSet<D, T>) {
     }
 }
 
+impl GroundRails {
+    /// The 3D track of the cells near the camera (the map pass, flat map): the beds' shadows (off
+    /// the 3D terrain), then the beds and rails, then the sleepers.
+    fn draw_track(&self, pass: &mut wgpu::RenderPass<'_>, cx: &DrawCx<'_>) {
+        let tracks = || self.rails_drawn.iter().filter_map(|&(slot, tile)| Some((slot, self.flat.get(tile)?.track.as_ref()?))).filter(|(_, t)| !t.near.is_empty());
+        if !cx.scene.terrain.shown {
+            for (slot, t) in tracks() {
+                if let Some((_, shadow)) = &t.shadow {
+                    self.track_shadows.draw(pass, cx, slot, &self.track_shadow_style, shadow);
+                }
+            }
+        }
+        self.shader.begin(pass, &self.track, RAILS_WIDTH);
+        for (slot, t) in tracks() {
+            cx.bind_frame(pass, slot);
+            pass.set_vertex_buffer(0, t.vertices.slice(..));
+            t.bases.bind(pass, 1);
+            pass.set_index_buffer(t.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for &i in &t.near {
+                let r = &t.cells[i].indices;
+                if !r.is_empty() {
+                    pass.draw_indexed(r.clone(), 0, 0..1);
+                }
+            }
+        }
+        self.shader.begin(pass, &self.sleepers, RAILS_WIDTH);
+        for (slot, t) in tracks() {
+            cx.bind_frame(pass, slot);
+            self.sleeper_box.bind(pass);
+            pass.set_vertex_buffer(1, t.sleepers.slice(..));
+            t.sleeper_bases.bind(pass, 2);
+            for &i in &t.near {
+                let r = &t.cells[i].sleepers;
+                if !r.is_empty() {
+                    pass.draw_indexed(0..self.sleeper_box.index_count(), 0, r.clone());
+                }
+            }
+        }
+    }
+}
+
 impl Layer for GroundRails {
     fn name(&self) -> &'static str {
         "ground-rails"
@@ -398,6 +604,28 @@ impl Layer for GroundRails {
         }
         for &(_, tile) in &self.rails_drawn {
             self.structures.shade(&cx.gpu.device, rails.get_mut(tile).and_then(|m| m.structures.as_mut()));
+        }
+        // the 3D track close in on the flat map: the cells near the camera, standing on what is
+        // under them, their shadows for this light
+        self.track_drawn = false;
+        if flat {
+            let viewport = &cx.view.viewport;
+            let camera = viewport.camera_position.to_array();
+            let scale = viewport.distance_scales.units_per_meter[2];
+            let light = cx.scene.lights.key_direction;
+            let terrain = cx.scene.terrain.shown;
+            for &(_, tile) in &self.rails_drawn {
+                let Some(t) = rails.get_mut(tile).and_then(|m| m.track.as_mut()) else { continue };
+                t.pick_near(tile, camera, scale);
+                if t.near.is_empty() {
+                    continue;
+                }
+                self.track_drawn = true;
+                t.stand(&cx.gpu.queue, tile, &cx.scene.stands_on);
+                if !terrain {
+                    t.shade(&cx.gpu.device, light);
+                }
+            }
         }
         if flat {
             cx.update_tiles(&mut self.platforms, |gpu, _tile, decoded| PlatformMeshes {
@@ -452,6 +680,9 @@ impl Layer for GroundRails {
                     self.clip.mark(pass, cx, slot);
                     draw_passes(pass, cx, shader, slot, m, &p);
                     self.clip.reset(pass, cx, slot);
+                }
+                if standing && self.track_drawn {
+                    self.draw_track(pass, cx);
                 }
                 // `ground-platforms`: its areas standing, then its lines, all in `solid`'s parameters
                 let p = LinePipelines { lines: &self.platform_lines, structures: &self.structures, width: PLATFORMS_WIDTH };

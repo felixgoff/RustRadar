@@ -305,13 +305,49 @@ fn to_disk(z: u32, x: u32, y: u32, bytes: &[u8]) {
     }
 }
 
+/// The tiles being fetched, each behind its own lock: the map's layers that draw the rail map and
+/// the realistic map's ground track ask for the same tile at once, and a second asker waits for
+/// the first's answer instead of asking OpenRailwayMap again (two requests a tile doubled the
+/// load OpenRailwayMap asks to keep light; one could be refused while the other was served, so
+/// the rail map drew a track the ground had none under, item R13).
+type InFlight = HashMap<(u32, u32, u32), Arc<tokio::sync::Mutex<()>>>;
+
+fn in_flight() -> &'static Mutex<InFlight> {
+    static F: OnceLock<Mutex<InFlight>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remembered(z: u32, x: u32, y: u32) -> Option<Arc<Vec<u8>>> {
+    let mut s = store().lock().unwrap();
+    let (at, b) = s.bytes.get_mut(&(z, x, y))?;
+    *at = Instant::now();
+    Some(b.clone())
+}
+
 /// A tile's bytes: from memory, else disk, else OpenRailwayMap. Empty where
-/// there is no railway. At `PLATFORM_ZOOM`, the platforms' tile.
+/// there is no railway. At `PLATFORM_ZOOM`, the platforms' tile. One request
+/// a tile at a time: those asking meanwhile get its answer.
 pub async fn tile_bytes(z: u32, x: u32, y: u32) -> Result<Arc<Vec<u8>>, String> {
-    if let Some((at, b)) = store().lock().unwrap().bytes.get_mut(&(z, x, y)) {
-        *at = Instant::now();
-        return Ok(b.clone());
+    if let Some(b) = remembered(z, x, y) {
+        return Ok(b);
     }
+    let gate = in_flight().lock().unwrap().entry((z, x, y)).or_default().clone();
+    let result = {
+        let _turn = gate.lock().await;
+        // (answered while this one waited)
+        match remembered(z, x, y) {
+            Some(b) => Ok(b),
+            None => fetch_bytes(z, x, y).await,
+        }
+    };
+    let mut flying = in_flight().lock().unwrap();
+    if Arc::strong_count(&gate) <= 2 {
+        flying.remove(&(z, x, y));
+    }
+    result
+}
+
+async fn fetch_bytes(z: u32, x: u32, y: u32) -> Result<Arc<Vec<u8>>, String> {
     let stale = match from_disk(z, x, y) {
         Some((bytes, true)) => return Ok(remember(z, x, y, bytes)),
         Some((bytes, false)) => Some(bytes),

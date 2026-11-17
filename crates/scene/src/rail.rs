@@ -688,6 +688,24 @@ pub fn rail_layers(o: &RailOptions) -> Vec<RailLayer> {
 pub const NETWORK_TILES: TilesetOptions = TilesetOptions::new(512.0, RAIL_MIN_ZOOM, RAIL_MAX_TILE_ZOOM);
 /// The speed map's tiles (`railSpeedLayer`: 512 px, zooms [`SPEED_TILE_ZOOMS`]).
 pub const SPEED_TILES: TilesetOptions = TilesetOptions::new(512.0, SPEED_TILE_ZOOMS.0, SPEED_TILE_ZOOMS.1);
+/// The speed map's and the realistic ground's tracks by distance (item R13): the tiles' zooms
+/// picked by how far each is from the camera ([`crate::lod`]), not by deck's rule. deck's rule asks
+/// a tile to be as fine as the view's zoom less one level for every doubling of its distance; but
+/// it starts from the deepest zoom these tiles have (12), not the view's: at zoom 17 pitched past
+/// 60° a z12 tile was taken only within two view heights (some 400 m), and beyond it z11, z10, down
+/// to z8 a few kilometres off. OpenRailwayMap's coarse tiles are simplified for their zoom (at z10 a
+/// point lies on a 4.5 m grid in Sweden, the distance between two tracks), so parallel tracks there
+/// zigzagged across each other close to the camera. By distance, z12 serves everything within
+/// some 10 km, where a metre is under a pixel; coarser tiles only beyond.
+pub fn speed_lod() -> crate::lod::Lod {
+    crate::lod::Lod::new((SPEED_TILE_ZOOMS.0 as u32..=SPEED_TILE_ZOOMS.1 as u32).collect::<Vec<_>>())
+}
+
+/// The network's tiles by distance, as [`speed_lod`] (OpenFreeMap's zooms 8 to 14).
+pub fn network_lod() -> crate::lod::Lod {
+    crate::lod::Lod::new((RAIL_MIN_ZOOM as u32..=RAIL_MAX_TILE_ZOOM as u32).collect::<Vec<_>>())
+}
+
 /// The stations' tiles (`railStationLayer`: 512 px, `minZoom: 12`, `maxZoom: 14`).
 pub const STATION_TILES: TilesetOptions = TilesetOptions::new(512.0, STATION_MIN_ZOOM, STATION_MAX_TILE_ZOOM);
 

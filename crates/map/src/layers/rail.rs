@@ -60,7 +60,7 @@ use rustradar_scene::rail_overview::parse_rail_overview;
 use rustradar_scene::text::{Face, Family, FontSettings, GlyphAtlas, LaidText, TextLayout};
 
 use super::vector_map::{CLIP_MARK, CLIP_RESET, CLIPPED, MAX_REQUESTS};
-use super::{ByteSize, DeckSelect, DrawCx, Init, Layer, Pass, PrepareCx, Source, TileIndex, TileSet, TileSetOptions};
+use super::{ByteSize, DeckSelect, DrawCx, LodSelect, Init, Layer, Pass, PrepareCx, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::FrameSlot;
 use crate::io;
 use crate::jobs::{Job, JobPoll};
@@ -178,6 +178,14 @@ struct Clip {
     reset_style: fill::Style,
 }
 
+/// The tracks' tiles picked by their distance from the camera (`lod`), within `tiles`' size and
+/// zooms (`rustradar_scene::rail::speed_lod`: deck's rule took coarse, simplified tiles close in).
+pub fn lod_select(lod: rustradar_scene::lod::Lod, tiles: rustradar_scene::tiles::TilesetOptions) -> LodSelect {
+    let mut select = LodSelect::new(lod, tiles.tile_size);
+    select.min_zoom = tiles.min_zoom;
+    select
+}
+
 /// The line style of the network and the speed map at `zoom` (`lineWidthUnits: "pixels"`,
 /// `lineWidthScale: railWidthScale(zoom)`, `lineCapRounded: true`, PathStyleExtension
 /// `{ dash: true }` with `dashJustified: true`).
@@ -231,11 +239,12 @@ impl Rail {
     pub fn new(init: &Init<'_>) -> Self {
         let device = &init.gpu.device;
         let options = TileSetOptions { max_requests: MAX_REQUESTS, ..Default::default() };
-        let network = init.tile_set(vec![Source::new(io::OPENFREEMAP)], DeckSelect(rails::NETWORK_TILES), options, |tile, bytes, cancel| {
+        let network = init.tile_set(vec![Source::new(io::OPENFREEMAP)], lod_select(rails::network_lod(), rails::NETWORK_TILES), options, |tile, bytes, cancel| {
             decode_network(tile, &bytes, cancel)
         });
-        let speed =
-            init.tile_set(vec![Source::new(RAIL_TILES)], DeckSelect(rails::SPEED_TILES), options, |tile, bytes, cancel| decode_speeds(tile, &bytes, cancel));
+        let speed = init.tile_set(vec![Source::new(RAIL_TILES)], lod_select(rails::speed_lod(), rails::SPEED_TILES), options, |tile, bytes, cancel| {
+            decode_speeds(tile, &bytes, cancel)
+        });
         let stations = init.tile_set(vec![Source::new(io::OPENFREEMAP)], DeckSelect(rails::STATION_TILES), options, |tile, bytes, cancel| {
             decode_stations(tile, &bytes, cancel)
         });

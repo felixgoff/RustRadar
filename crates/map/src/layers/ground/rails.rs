@@ -71,7 +71,7 @@ use crate::frame::FrameSlot;
 use crate::jobs::Cancel;
 use crate::layers::vector_map::{CLIP_MARK, CLIP_RESET, CLIPPED, MAX_REQUESTS};
 use crate::layers::terrain::ground::{StandBudget, Standing};
-use crate::layers::{ByteSize, DeckSelect, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
+use crate::layers::{ByteSize, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::pipelines::fill;
 use crate::pipelines::path::Segment as PathSegment;
 use crate::state::DrawState;
@@ -303,7 +303,7 @@ impl GroundRails {
         let rails = |flat: bool| -> TileSet<Rails, LineMeshes> {
             init.tile_set(
                 vec![Source::new(RAIL_SOURCE)],
-                DeckSelect(RAIL_TILESET),
+                crate::layers::rail::lod_select(rustradar_scene::rail::speed_lod(), RAIL_TILESET),
                 TileSetOptions { max_requests: MAX_REQUESTS, ..Default::default() },
                 move |tile, bytes, cancel| decode_rails(tile, &bytes, flat, cancel),
             )

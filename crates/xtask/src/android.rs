@@ -260,11 +260,11 @@ pub fn check_badging(b: &Badging, version: &str, code: u32, abis: &[&str]) -> Re
 
 /// The signer's certificate digest from `apksigner verify --print-certs` (exactly one signer).
 ///
-/// apksigner names a signer `Signer #1`, or, when the APK's v3 signature covers SDK ranges,
-/// `Signer (minSdkVersion=24, maxSdkVersion=…)` once per range; the same certificate in several
-/// ranges is still one signer.
+/// apksigner names a signer `Signer #1`, `V2 Signer:` (newer build tools, per scheme), or, when the
+/// APK's v3 signature covers SDK ranges, `Signer (minSdkVersion=24, maxSdkVersion=…)` once per
+/// range; the same certificate under several names is still one signer.
 pub fn signer_digest(text: &str) -> Result<String, String> {
-    let line = Regex::new(r"(?m)^Signer (?:#\d+|\([^)]*\)) certificate SHA-256 digest: ([0-9a-fA-F]+)\s*$")
+    let line = Regex::new(r"(?m)^(?:Signer (?:#\d+|\([^)]*\))|V\d+(?:\.\d+)? Signer:) certificate SHA-256 digest: ([0-9a-fA-F]+)\s*$")
         .expect("a valid pattern");
     let mut digests: Vec<String> = line.captures_iter(text).map(|c| c[1].to_ascii_lowercase()).collect();
     digests.sort_unstable();
@@ -737,6 +737,11 @@ Signer #1 certificate SHA-1 digest: 0000000000000000000000000000000000000000
             d = RELEASE_CERT_SHA256.to_ascii_uppercase()
         );
         assert_eq!(signer_digest(&ranges).unwrap(), RELEASE_CERT_SHA256);
+        // build-tools 37 names the signer by scheme (the v1.0.1 release run's output)
+        let by_scheme = "V2 Signer: certificate DN: CN=Someone\n\
+             V2 Signer: certificate SHA-256 digest: a77966fb7f61d9465bf7c7d63918b13bf270cfb7d2d973b4b4f18b68b23c63a4\n\
+             V2 Signer: certificate SHA-1 digest: 0000000000000000000000000000000000000000\n";
+        assert_eq!(signer_digest(by_scheme).unwrap(), RELEASE_CERT_SHA256);
     }
 
     #[test]

@@ -59,13 +59,20 @@ pub const WINDOW_MIN_SIZE: [f64; 2] = [900.0, 600.0];
 /// at least 900 × 600, maximised, and hidden until its first frame is drawn (no flash of an empty
 /// window). `--size` sets the inner size instead of maximising.
 pub fn window_attributes(options: &Options) -> WindowAttributes {
-    let size = options.size.map_or(WINDOW_SIZE, |[w, h]| [f64::from(w), f64::from(h)]);
-    let attributes = Window::default_attributes()
-        .with_title("RustRadar")
-        .with_inner_size(LogicalSize::new(size[0], size[1]))
-        .with_min_inner_size(LogicalSize::new(WINDOW_MIN_SIZE[0], WINDOW_MIN_SIZE[1]))
-        .with_maximized(options.size.is_none())
-        .with_visible(false);
+    let attributes = Window::default_attributes().with_title("RustRadar").with_visible(false);
+    // A phone's window is its screen. iOS would make the UIWindow the size asked for (winit sets
+    // its frame from `inner_size`), so a 1440 × 900 point window would put the desktop layout on
+    // an iPhone; ask for no size there and on Android.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    let attributes = {
+        let size = options.size.map_or(WINDOW_SIZE, |[w, h]| [f64::from(w), f64::from(h)]);
+        attributes
+            .with_inner_size(LogicalSize::new(size[0], size[1]))
+            .with_min_inner_size(LogicalSize::new(WINDOW_MIN_SIZE[0], WINDOW_MIN_SIZE[1]))
+            .with_maximized(options.size.is_none())
+    };
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let _ = options;
     // The app id the Linux packages' .desktop file names in StartupWMClass (platform/linux,
     // item P7): X11's WM_CLASS and Wayland's app_id are `rustradar`, the binary's name, as the
     // Tauri window's were.

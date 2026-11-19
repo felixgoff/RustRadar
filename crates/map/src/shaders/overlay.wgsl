@@ -25,6 +25,13 @@
 
 // ------------------------------------------------------------------ shadows
 
+// How strong the tile's shadows and foot shade are in this view (`tess::shadow_presence`: gone
+// high above the clouds and far out), handed on as its frame's `pad.y` (`[0, 2]`, a whole frame,
+// reads 1).
+fn shadow_presence() -> f32 {
+    return clamp(frame.pad.y, 0.0, 1.0);
+}
+
 // `layers::building_shadows::ShadowUniform`: a tile's shadow colour, `[...shadowColor, alpha] / 255`.
 struct TileShadow {
     color: vec4<f32>,
@@ -56,7 +63,7 @@ fn fs_shadow(in: ShadowOut) -> @location(0) vec4<f32> {
     var color = tile_shadow.color;
     // `fs:DECKGL_FILTER_COLOR` (HAZE_FADE)
     let rl = RlVary(in.eye, vec3<f32>(0.0, 0.0, 1.0), vec2<f32>(0.0), vec2<f32>(0.0));
-    color.a = color.a * rl_clear(rl);
+    color.a = color.a * rl_clear(rl) * shadow_presence();
     return color;
 }
 
@@ -203,6 +210,6 @@ fn fs_foot(in: FootOut) -> @location(0) vec4<f32> {
     // the distance's air
     let across = 1.0 - min(abs(in.path_position.x), 1.0);
     let rl = RlVary(in.eye, vec3<f32>(0.0, 0.0, 1.0), vec2<f32>(0.0), vec2<f32>(0.0));
-    color.a = color.a * across * rl_clear(rl);
+    color.a = color.a * across * rl_clear(rl) * shadow_presence();
     return color;
 }

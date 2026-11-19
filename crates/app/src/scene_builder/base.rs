@@ -13,7 +13,7 @@
 //! builder then fills in the airports whose labels give way to markers (`labels.marked`).
 //!
 //! The plain buildings (item B7; G:2694) follow the *buildings* setting
-//! ([`buildings::Input::shown`]; the layer works out the flat map and the basemap), and with them
+//! ([`buildings::Input::shown`]; the layer works out the basemap and the camera's height), and with them
 //! the scene's key light is aimed at the sun (`scene.aim_lights`, G:2723-2724: from the real sun
 //! over buildings on the flat map, else from its usual direction), once the clocks are set.
 

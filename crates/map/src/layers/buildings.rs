@@ -5,13 +5,17 @@
 //! realistic map's buildings (façades, roofs, foot shade) are items R4–R6.
 //!
 //! What today's app does, and so this layer:
-//! - **When.** With the *buildings* setting on, on the flat map (zoom > 12), once the TileJSON has
-//!   given the tile URL (G:2694: `buildings && flat && tileUrl`), on the dark and satellite maps.
+//! - **When.** With the *buildings* setting on, on the dark and satellite maps, once the TileJSON
+//!   has given the tile URL, whenever the camera is under the clouds: on the globe too (the old app
+//!   drew them on the flat map only, zoom > 12, G:2694), dissolving away as the camera climbs above
+//!   the clouds (`tess::presence`, by its height above the ground, not the zoom).
 //!   The scene builder sets [`Input::shown`] from the setting (`app::scene_builder::base`); this
 //!   layer works out the projection and the basemap. When it stops drawing it drops its tiles and
 //!   their shadows, as deck finalizes a layer that leaves the list.
-//! - **Tiles** by their distance from the camera (`LodMVTLayer`): [`LodSelect`] over
-//!   `tess::plain_lod()` (levels 13 and 14, bias 0.5, 25 km: OpenFreeMap's zooms,
+//! - **Tiles** by their distance from the camera (`LodMVTLayer`): [`BuildingSelect`], a
+//!   [`LodSelect`] reaching as far as the view calls for (`tess::lod_for`: 25 km close in, up to
+//!   60 km from far up, the nearest `tess::MAX_TILES` tiles; far tiles' outlines simplified within
+//!   2 m, `tess::far_polygons`), over `tess::plain_lod()` (levels 13 and 14, bias 0.5: OpenFreeMap's zooms,
 //!   [`tess::SOURCE_ZOOMS`]; the old app also asked for a zoom 16 these maps have no source for,
 //!   and drew nothing close in) with the look-ahead while zooming, 8 requests at once, refined by `keepCoarserUntilIn`
 //!   ([`Refinement::KeepCoarserUntilIn`]: a coarser tile is drawn in place of finer ones until they
@@ -44,7 +48,11 @@
 //! - **Crossfade** ([`LodFade`]): as tiles refine, a tile coming in dissolves in over
 //!   [`LOD_FADE`] while the one it replaces dissolves out through the complementary screen-door
 //!   band (each frame's `pad`, the shader's `lod_dissolved`), so no pixel shows both and nothing
-//!   pops; the layer is pending meanwhile.
+//!   pops; the layer is pending meanwhile. The bands are narrowed to the share of a tile that
+//!   stands in the view (`tess::tile_presence`: the camera's height, and the tile thinning away
+//!   over the last part of the reach), so nothing pops above the clouds or at the reach's edge.
+//!   Shadows are cast out to `tess::SHADOW_REACH_M`, their alpha fading with
+//!   `tess::shadow_presence` (each tile's own fill style).
 //! - **On the 3D terrain** (item Z3, `terrain::ground`; deck's `TerrainExtension`): a near tile's
 //!   buildings stand on the ground vertex by vertex (an extruded layer is *offset*: each vertex is
 //!   raised by the ground under it), through a vertex buffer of the ground's heights under them
@@ -69,7 +77,10 @@ use rustradar_core::geo::Basemap;
 use rustradar_scene::lod::TILE_SIZE;
 use rustradar_scene::tess::buildings::{self as tess, BuildingTile, BuildingVertex, Footprints, ShadowSun, TileShadows};
 
-use super::{ByteSize, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
+use rustradar_scene::camera::Viewport;
+use rustradar_scene::lod::Selection;
+
+use super::{ByteSize, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Select, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::{FrameSlot, ViewFrame};
 use crate::io;
 use crate::layers::terrain::ground::{StandBudget, Standing};
@@ -226,6 +237,35 @@ pub fn shadow_vertices(shadows: &TileShadows) -> Vec<fill::Vertex> {
     shadows.positions.chunks_exact(2).map(|p| fill::Vertex { position: [p[0], p[1], 0.0], color }).collect()
 }
 
+/// The buildings' tile selection (both maps'): `LodSelect` over a LOD reaching as far as the view
+/// calls for (`tess::lod_for`: farther the farther the camera is), nothing once the camera is too
+/// far above the clouds, and only the nearest `tess::MAX_TILES` tiles.
+pub struct BuildingSelect(pub LodSelect);
+
+impl BuildingSelect {
+    pub fn new(lod: rustradar_scene::lod::Lod) -> Self {
+        BuildingSelect(LodSelect::new(lod, TILE_SIZE))
+    }
+}
+
+impl Select for BuildingSelect {
+    fn select(&mut self, viewport: &Viewport, cached: &dyn Fn(TileIndex) -> bool) -> Selection {
+        let Some(lod) = tess::lod_for(&self.0.lod, viewport) else { return Selection::default() };
+        self.0.lod = lod;
+        let mut selection = self.0.select(viewport, cached);
+        tess::keep_nearest(viewport, &mut selection.tiles, tess::MAX_TILES);
+        selection
+    }
+
+    fn is_ahead(&self, tile: TileIndex) -> bool {
+        self.0.is_ahead(tile)
+    }
+
+    fn min_zoom(&self) -> u32 {
+        self.0.min_zoom()
+    }
+}
+
 /// How long a tile takes to dissolve in, or out, when the level of detail changes.
 pub const LOD_FADE: Duration = Duration::from_millis(300);
 
@@ -298,9 +338,21 @@ impl LodFade {
 }
 
 /// `tile`'s frame with its dissolve `band`.
+/// It is narrowed to the share of the tile that stands in this view (`tess::tile_presence`: none
+/// high above the clouds, thinning away at the edge of the buildings' reach), so a tile dissolves
+/// away there instead of popping out; the shadows' alpha follows its top (`pad.y`, at most 1).
 pub fn faded_frame(cx: &mut PrepareCx<'_>, tile: TileIndex, band: Band) -> FrameSlot {
     let mut frame = cx.view.tile(tile, 0.0);
-    frame.pad = band;
+    let stands = tess::tile_presence(&cx.view.viewport, tile) as f32;
+    frame.pad = [band[0], band[1].min(stands)];
+    cx.frames.push(&frame)
+}
+
+/// `tile`'s frame for its shadows on the realistic map (`overlay.wgsl` reads their strength,
+/// `tess::shadow_presence`, from `pad.y`).
+pub fn shadow_frame(cx: &mut PrepareCx<'_>, tile: TileIndex) -> FrameSlot {
+    let mut frame = cx.view.tile(tile, 0.0);
+    frame.pad = [0.0, tess::shadow_presence(&cx.view.viewport, tile) as f32];
     cx.frames.push(&frame)
 }
 
@@ -311,6 +363,9 @@ struct Cast {
     sun: [f64; 3],
     /// `None` when they cast none (the sun too low, nothing tall).
     mesh: Option<fill::Mesh<fill::Vertex>>,
+    /// Their alpha this frame (`tess::shadow_presence`), as last written to `style`.
+    alpha: f32,
+    style: fill::Style,
 }
 
 /// The buildings' pipeline: [`SHADER`]'s entry with a draw state, and its lights buffer (group 2:
@@ -415,7 +470,6 @@ pub struct Buildings {
     /// Every tile: lit in `BUILDING_COLOR` with [`MATERIAL`].
     lit: Style,
     shadows: Fill,
-    shadow_style: fill::Style,
     /// The sun the shadows are cast with.
     sun: ShadowSun,
     /// Each tile's shadows, by tile (deck's `shadowCache`, by content).
@@ -439,20 +493,23 @@ impl Buildings {
         let device = &init.gpu.device;
         let tiles = init.tile_set(
             vec![Source::at(io::OPENFREEMAP, tess::SOURCE_ZOOMS.to_vec())],
-            LodSelect::new(tess::plain_lod(), TILE_SIZE),
-            TileSetOptions { max_requests: tess::MAX_REQUESTS, refinement: Refinement::KeepCoarserUntilIn, ..Default::default() },
+            BuildingSelect::new(tess::plain_lod()),
+            TileSetOptions {
+                max_requests: tess::MAX_REQUESTS,
+                max_cache_bytes: Some(tess::CACHE_BYTES),
+                refinement: Refinement::KeepCoarserUntilIn,
+                ..Default::default()
+            },
             |tile, bytes, cancel| decode(tile, &bytes, cancel),
         );
         let pipeline = BuildingPipeline::new(init, "buildings", DrawState::NO_CULL);
         let lit = pipeline.style(device, &MATERIAL, COLOR);
         let shadows = shadow::fill(init, "building shadows");
-        let shadow_style = shadows.style(device, fill::OPAQUE);
         Buildings {
             tiles,
             pipeline,
             lit,
             shadows,
-            shadow_style,
             sun: ShadowSun::default(),
             casts: HashMap::new(),
             serial: 0,
@@ -472,12 +529,18 @@ impl Buildings {
     /// Casts the shadows of the tiles on screen under `sun` (`renderLayers` and `shadowsOf`): a
     /// tile without shadows of its own gets them at once; one with an older sun's is recast while
     /// the frame's budget lasts (at least one a frame); the others wait for the next frame.
-    fn cast(&mut self, device: &wgpu::Device, sun: [f64; 3]) {
+    fn cast(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, viewport: &Viewport, sun: [f64; 3]) {
         let until = Instant::now() + Duration::from_secs_f64(tess::RECAST_BUDGET_MS / 1000.0);
         let mut recast_any = false;
         self.stale = 0;
         for (tile, meshes) in self.tiles.visible() {
-            if !meshes.extruded {
+            // (none far out, or high above the clouds)
+            let alpha = tess::shadow_presence(viewport, tile) as f32;
+            if let Some(cast) = self.casts.get_mut(&tile).filter(|c| c.alpha != alpha) {
+                cast.style.set(queue, [1.0, 1.0, 1.0, alpha]);
+                cast.alpha = alpha;
+            }
+            if !meshes.extruded || alpha <= 0.0 {
                 continue;
             }
             let cached = self.casts.get(&tile).filter(|c| c.serial == meshes.serial);
@@ -491,7 +554,8 @@ impl Buildings {
             recast_any = true;
             let mesh = tess::tile_shadows(tile, &meshes.footprints, sun)
                 .map(|s| fill::Mesh::new(device, "building shadows", &shadow_vertices(&s), &s.indices));
-            self.casts.insert(tile, Cast { serial: meshes.serial, sun, mesh });
+            let style = self.shadows.style(device, [1.0, 1.0, 1.0, alpha]);
+            self.casts.insert(tile, Cast { serial: meshes.serial, sun, mesh, alpha, style });
             // (draped over the 3D terrain, stage 9: the covers under it are drawn again)
             crate::layers::note_drawn_changes([tile]);
         }
@@ -508,7 +572,7 @@ impl Layer for Buildings {
 
     fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
         self.drawn.clear();
-        self.shown = cx.scene.buildings.shown && !cx.view.is_globe() && cx.scene.basemap != Basemap::Realistic;
+        self.shown = cx.scene.buildings.shown && cx.scene.basemap != Basemap::Realistic;
         if !self.shown {
             // deck drops a layer that leaves the list, its tiles and their shadows with it
             if !self.tiles.is_empty() {
@@ -525,7 +589,7 @@ impl Layer for Buildings {
             upload(&gpu.device, decoded, *serial)
         });
         let sun = self.sun.at(cx.scene.feed_now_ms);
-        self.cast(&cx.gpu.device, sun);
+        self.cast(&cx.gpu.device, &cx.gpu.queue, &cx.view.viewport, sun);
         // standing on the 3D terrain where it is drawn (Z3)
         let mut budget = StandBudget::default();
         let visible: Vec<TileIndex> = self.tiles.visible().map(|(t, _)| t).collect();
@@ -556,8 +620,11 @@ impl Layer for Buildings {
             let Some(meshes) = self.tiles.get(tile) else { continue };
             // under the tile's buildings, on the ground; not clipped to the tile (a tile
             // dissolving out keeps its shadows to the end: each pixel is darkened once anyway)
-            if draped && let Some(shadows) = self.casts.get(&tile).filter(|c| c.serial == meshes.serial).and_then(|c| c.mesh.as_ref()) {
-                self.shadows.draw(pass, cx, slot, &self.shadow_style, shadows);
+            if draped
+                && let Some(cast) = self.casts.get(&tile).filter(|c| c.serial == meshes.serial && c.alpha > 0.0)
+                && let Some(shadows) = &cast.mesh
+            {
+                self.shadows.draw(pass, cx, slot, &cast.style, shadows);
             }
             if standing {
                 self.pipeline.draw(pass, cx, slot, &self.lit, &meshes.mesh, &meshes.standing);
@@ -726,11 +793,11 @@ mod tests {
         noted.asked.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// The buildings draw on the dark and satellite maps, on the flat map only, with the setting
-    /// on (G:2694); the realistic map's are items R4–R6. Their tiles are OpenFreeMap's at zooms 13
-    /// and 14, picked by distance: at V4 both (far flat roofs, near standing buildings).
+    /// The buildings draw on the dark and satellite maps with the setting on (G:2694), whenever the
+    /// camera is under the clouds, on the globe too; the realistic map's are items R4–R6. Their
+    /// tiles are OpenFreeMap's at zooms 13 and 14, picked by distance: at V4 both.
     #[test]
-    fn they_load_on_the_flat_dark_and_satellite_maps_with_the_setting_on() {
+    fn they_load_on_the_dark_and_satellite_maps_under_the_clouds_with_the_setting_on() {
         let Some(gpu) = gpu() else { return };
         let size = [1440.0, 900.0];
         let only = |view: ViewState, basemap: Basemap, shown: bool| {
@@ -764,8 +831,15 @@ mod tests {
         on_realistic.sort_by_key(key);
         assert_eq!(on_realistic, on_dark);
         assert_eq!(openfreemap(&only(v4(), Basemap::Dark, false)), 0);
-        // on the globe, none
-        assert_eq!(openfreemap(&only(ViewState { zoom: 12.0, ..v4() }, Basemap::Dark, true)), 0);
+        // on the globe under the clouds (zoom 12 pitched 45°: the camera 6 km up) its zoom-13
+        // blocks; from far above the clouds (zoom 9 looking down: 66 km up) none
+        let globe = ViewState { zoom: 12.0, ..v4() };
+        assert!(viewport_for(&globe, size).is_globe());
+        let wanted = tess::view_tiles(&tess::plain_lod(), &viewport_for(&globe, size));
+        assert!(!wanted.is_empty() && wanted.iter().all(|t| t.z == 13), "{wanted:?}");
+        let asked_there: Vec<TileIndex> = asked(&gpu, &only(globe, Basemap::Dark, true)).into_iter().map(|(_, t)| t).collect();
+        assert!(wanted.iter().all(|t| asked_there.contains(t)), "{asked_there:?}");
+        assert_eq!(openfreemap(&only(ViewState { zoom: 9.0, pitch: 0.0, ..v4() }, Basemap::Dark, true)), 0);
     }
 
     /// Opened straight at V5 (zoom 15.5, pitched 60°), the selection wants OpenFreeMap's zoom-14

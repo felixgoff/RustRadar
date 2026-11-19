@@ -7,9 +7,11 @@
 //! `rustradar_map::layers::buildings_realistic`.
 //!
 //! What today's app does, and so this module:
-//! - **Which tiles.** Only on the flat map (zoom > 12) and with the *buildings* setting on
-//!   (G:2694). The tiles are picked by their distance from the camera, [`city_lod`] (`CITY_LOD`,
-//!   levels 13, 14 and 16, bias 0.5, nothing past 25 km), each zoom from its own source: on the
+//! - **Which tiles.** With the *buildings* setting on (G:2694), on the globe and the flat map alike
+//!   whenever the camera is under the clouds (the old app drew them only above zoom 12): see
+//!   [`presence`] and [`view_tiles`]. The tiles are picked by their distance from the camera,
+//!   [`city_lod`] (`CITY_LOD`, levels 13, 14 and 16, bias 0.5) out to the view's [`reach_m`] (25 km
+//!   close in, as the old app's, up to [`FAR_REACH_M`] from far up), each zoom from its own source: on the
 //!   dark and satellite maps OpenFreeMap's `building` layer at zooms 13 and 14 ([`SOURCE_ZOOMS`],
 //!   G:1047-1053); zoom 16 is Streets GL's, a source only the realistic map has, so on these maps
 //!   a tile of 16 comes back empty (`LodMVTLayer.getTileData` resolves `null`) and its coarser
@@ -64,6 +66,9 @@ use rustradar_core::num::{js_round, to_int32};
 use rustradar_core::sun::{SHADOW_MIN_ALPHA, local_sun, sun_direction, sunlight};
 
 use crate::building_shadow::{self, BUILDING_SHADOW_ALPHA, shadow_step};
+use crate::camera::{Viewport, ViewportBase};
+use crate::clouds::CLOUD_HEIGHT_M;
+use crate::lod::{distance_tile_indices, tile_distance_m};
 use crate::geom::earcut::earcut;
 use crate::lod::Lod;
 use crate::roofs::pitched;
@@ -111,7 +116,8 @@ pub const RECAST_BUDGET_MS: f64 = 4.0;
 /// Web Mercator's equator, metres (`EARTH_CIRCUMFERENCE`, `BL:24`).
 const EARTH_CIRCUMFERENCE: f64 = 2.0 * PI * 6_378_137.0;
 
-/// `CITY_LOD` (G:1039): the buildings' tiles by their distance from the camera.
+/// `CITY_LOD` (G:1039): the buildings' tiles by their distance from the camera. Its 25 km is the
+/// least reach; [`lod_for`] sets each view's.
 pub fn city_lod() -> Lod {
     Lod { levels: vec![13, 14, 16], bias: 0.5, max_distance: 25_000.0 }
 }
@@ -121,6 +127,103 @@ pub fn city_lod() -> Lod {
 /// zoom 16 there and drew nothing close in unless a coarser tile happened to be cached).
 pub fn plain_lod() -> Lod {
     Lod { levels: SOURCE_ZOOMS.to_vec(), ..city_lod() }
+}
+
+// --- how far out, and how high up, the buildings stand -----------------------------------------
+//
+// The old app drew buildings only on the flat map (zoom > 12) and within 25 km. Here they stand
+// whenever the camera is under the clouds ([`CLOUD_HEIGHT_M`], the height the cloud layer is drawn
+// at), on the globe too, by the camera's height above the ground rather than the zoom, so a view
+// pitched towards the horizon from zoom 10 keeps its city. Above the clouds they dissolve away
+// ([`presence`]) until [`BUILDINGS_GONE_M`]; far out they thin away towards the edge of their reach
+// ([`reach_m`], [`edge_presence`]), so no tile pops in or out at its edge. OpenFreeMap has no
+// building tiles under zoom 13 ([`SOURCE_ZOOMS`]): the far ones are its zoom-13 blocks, at most
+// [`MAX_TILES`] of them, the nearest kept.
+
+/// Up to this camera height above the ground the buildings stand in full, metres: the clouds'.
+pub const BUILDINGS_FULL_M: f64 = CLOUD_HEIGHT_M;
+/// From here up they are gone, metres (between, they dissolve away).
+pub const BUILDINGS_GONE_M: f64 = 2.0 * CLOUD_HEIGHT_M;
+/// The buildings reach at least this far from the camera, metres (the old `CITY_LOD`'s)...
+pub const NEAR_REACH_M: f64 = 25_000.0;
+/// ...this many times the camera's distance from the middle of the view...
+pub const REACH_DISTANCES: f64 = 1.6;
+/// ...and never farther than this, metres.
+pub const FAR_REACH_M: f64 = 60_000.0;
+/// Over this last part of their reach they thin away.
+pub const EDGE_FADE: f64 = 0.3;
+/// At most this many building tiles are asked for at once, the nearest ones.
+pub const MAX_TILES: usize = 320;
+/// The decoded tiles a building layer keeps, bytes: about twice the farthest view's (zoom 10
+/// pitched 75° over Stockholm holds some 80 MB of realistic tiles).
+pub const CACHE_BYTES: usize = 192 << 20;
+
+fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The camera's height above the ground (sea level), metres.
+pub fn camera_height_m(viewport: &ViewportBase) -> f64 {
+    viewport.focal_distance * viewport.height * viewport.meters_per_pixel() * viewport.pitch.to_radians().cos()
+}
+
+/// How much of the buildings stands at a camera `height_m` above the ground: 1 under the clouds,
+/// dissolving away to 0 at [`BUILDINGS_GONE_M`].
+pub fn presence(height_m: f64) -> f64 {
+    1.0 - smoothstep(BUILDINGS_FULL_M, BUILDINGS_GONE_M, height_m)
+}
+
+/// How far from the camera buildings stand in this view, metres.
+pub fn reach_m(viewport: &ViewportBase) -> f64 {
+    let distance = viewport.focal_distance * viewport.height * viewport.meters_per_pixel();
+    (REACH_DISTANCES * distance).clamp(NEAR_REACH_M, FAR_REACH_M)
+}
+
+/// How much of a tile `distance_m` from the camera stands, for a reach of `reach_m`: whole until
+/// the last [`EDGE_FADE`] of it, thinning to nothing at its end.
+pub fn edge_presence(distance_m: f64, reach_m: f64) -> f64 {
+    1.0 - smoothstep(reach_m * (1.0 - EDGE_FADE), reach_m, distance_m)
+}
+
+/// `lod` for this view: out to [`reach_m`]; `None` when the camera is too high for buildings.
+pub fn lod_for(lod: &Lod, viewport: &Viewport) -> Option<Lod> {
+    (presence(camera_height_m(viewport)) > 0.0).then(|| Lod { max_distance: reach_m(viewport), ..lod.clone() })
+}
+
+/// The buildings' tiles of a view by distance ([`lod_for`]), the nearest [`MAX_TILES`] of them.
+pub fn view_tiles(lod: &Lod, viewport: &Viewport) -> Vec<TileIndex> {
+    let Some(lod) = lod_for(lod, viewport) else { return Vec::new() };
+    let mut tiles = distance_tile_indices(viewport, &lod, None, 0.0);
+    keep_nearest(viewport, &mut tiles, MAX_TILES);
+    tiles
+}
+
+/// Keeps the `max` tiles nearest the camera, in their order.
+pub fn keep_nearest(viewport: &Viewport, tiles: &mut Vec<TileIndex>, max: usize) {
+    if tiles.len() <= max {
+        return;
+    }
+    let mut by_distance: Vec<(f64, TileIndex)> = tiles.iter().map(|&t| (tile_distance_m(viewport, t), t)).collect();
+    by_distance.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let keep: std::collections::HashSet<TileIndex> = by_distance[..max].iter().map(|&(_, t)| t).collect();
+    tiles.retain(|t| keep.contains(t));
+}
+
+/// Shadows are cast out to this far from the camera, metres, fading away over its last
+/// [`EDGE_FADE`]: farther out a building's shadow is under a pixel, and casting them costs.
+pub const SHADOW_REACH_M: f64 = 25_000.0;
+
+/// How strong `tile`'s shadows are in this view, 0–1: as the buildings with the camera's height,
+/// and fading out towards [`SHADOW_REACH_M`].
+pub fn shadow_presence(viewport: &Viewport, tile: TileIndex) -> f64 {
+    presence(camera_height_m(viewport)) * edge_presence(tile_distance_m(viewport, tile), SHADOW_REACH_M)
+}
+
+/// How much of `tile` stands in this view: the camera's height ([`presence`]) and the tile's
+/// distance against the reach ([`edge_presence`]), 0–1.
+pub fn tile_presence(viewport: &Viewport, tile: TileIndex) -> f64 {
+    presence(camera_height_m(viewport)) * edge_presence(tile_distance_m(viewport, tile), reach_m(viewport))
 }
 
 /// `SHADOW_SUN_STEP` (G:985): the cosine of a quarter of a degree; the shadows are recast once the
@@ -389,6 +492,80 @@ pub fn binary_polygons(feature: &Feature<'_>, extent: f64) -> Vec<Vec<Vec<[f32; 
     polygons
 }
 
+/// How far a far tile's outlines may stray from OpenFreeMap's, metres ([`far_polygons`]).
+pub const FAR_SIMPLIFY_M: f64 = 2.0;
+
+/// [`binary_polygons`] of a far tile (zoom < 14: OpenFreeMap's merged blocks, which the distance
+/// LOD only takes kilometres away, where a pixel is metres across), each ring simplified to within
+/// [`FAR_SIMPLIFY_M`] of its outline (Douglas–Peucker), so its walls and roofs take fewer vertices.
+/// A ring that would fall to less than a triangle keeps its points; a near tile's are as they are.
+pub fn far_polygons(tile: TileIndex, feature: &Feature<'_>, extent: f64) -> Vec<Vec<Vec<[f32; 2]>>> {
+    simplified(tile, binary_polygons(feature, extent))
+}
+
+/// `polygons` of `tile` simplified as [`far_polygons`] has them.
+fn simplified(tile: TileIndex, mut polygons: Vec<Vec<Vec<[f32; 2]>>>) -> Vec<Vec<Vec<[f32; 2]>>> {
+    if tile.z >= 14 {
+        return polygons;
+    }
+    let [_, lat] = tile_middle(tile);
+    let tile_m = EARTH_CIRCUMFERENCE * lat.to_radians().cos() / 2f64.powi(tile.z as i32);
+    let tolerance = (FAR_SIMPLIFY_M / tile_m) as f32;
+    for ring in polygons.iter_mut().flatten() {
+        let simpler = simplify_closed(ring, tolerance);
+        if simpler.len() >= 4 {
+            *ring = simpler;
+        }
+    }
+    polygons
+}
+
+/// A closed ring (its first point repeated at its end) simplified by Douglas–Peucker within
+/// `tolerance`, still closed.
+fn simplify_closed(ring: &[[f32; 2]], tolerance: f32) -> Vec<[f32; 2]> {
+    let n = ring.len();
+    if n <= 4 {
+        return ring.to_vec();
+    }
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[n - 1] = true;
+    // a closed ring's ends meet: split it at the point farthest from its start first
+    let far = (1..n - 1).max_by(|&a, &b| dist2(ring[a], ring[0]).total_cmp(&dist2(ring[b], ring[0]))).unwrap_or(1);
+    keep[far] = true;
+    let mut stack = vec![(0, far), (far, n - 1)];
+    while let Some((a, b)) = stack.pop() {
+        if b <= a + 1 {
+            continue;
+        }
+        let (mut worst, mut at) = (0.0f32, a);
+        for i in a + 1..b {
+            let d = segment_distance(ring[i], ring[a], ring[b]);
+            if d > worst {
+                (worst, at) = (d, i);
+            }
+        }
+        if worst > tolerance {
+            keep[at] = true;
+            stack.push((a, at));
+            stack.push((at, b));
+        }
+    }
+    ring.iter().zip(keep).filter_map(|(p, k)| k.then_some(*p)).collect()
+}
+
+fn dist2(a: [f32; 2], b: [f32; 2]) -> f32 {
+    (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)
+}
+
+/// How far `p` is from the segment `a`–`b`.
+fn segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 { (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    dist2(p, [a[0] + t * dx, a[1] + t * dy]).sqrt()
+}
+
 /// Builds one tile.
 struct Builder {
     extruded: bool,
@@ -468,7 +645,7 @@ pub fn tessellate(tile: TileIndex, bytes: &[u8], close_from_zoom: u32, cancelled
             }
             // deck's `elevations` attribute: f32
             let height = tile_building_height(tile, &feature, heights) as f32;
-            for polygon in binary_polygons(&feature, layer.extent) {
+            for polygon in far_polygons(tile, &feature, layer.extent) {
                 b.building(&polygon, height);
             }
         }
@@ -908,11 +1085,13 @@ pub struct RealisticBuilding<'a> {
     pub cast_height: f32,
     pub colour: Option<&'a str>,
     pub look: BuildingLook,
+    /// Its look's seed ([`style_seed`] of its outline as the tile gives it, before a far tile's
+    /// is simplified).
+    pub seed: i32,
 }
 
 /// Builds one realistic tile.
 struct RealisticBuilder {
-    tile: TileIndex,
     /// Metres per tile unit at the tile's middle (math.gl's circumference, as deck's shader).
     metres_per_unit: f64,
     out: RealisticTile,
@@ -922,11 +1101,11 @@ impl RealisticBuilder {
     fn new(tile: TileIndex, extruded: bool, sgl: bool) -> Self {
         let [_, lat] = tile_middle(tile);
         let metres_per_unit = crate::camera::MERCATOR_EARTH_CIRCUMFERENCE_M * (lat * PI / 180.0).cos() / 2f64.powi(tile.z as i32);
-        RealisticBuilder { tile, metres_per_unit, out: RealisticTile { extruded, sgl, ..Default::default() } }
+        RealisticBuilder { metres_per_unit, out: RealisticTile { extruded, sgl, ..Default::default() } }
     }
 
     fn building(&mut self, b: &RealisticBuilding<'_>) {
-        let tint = building_style(style_seed(self.tile, b.rings), b.style_height, b.colour, b.look);
+        let tint = building_style(b.seed, b.style_height, b.colour, b.look);
         let code = 255 - tint[3];
         let (facade, roof) = (code % FACADES, code / FACADES);
         let out = &mut self.out;
@@ -1029,13 +1208,15 @@ pub fn tessellate_realistic_with(
                 continue;
             }
             let polygons = binary_polygons(&feature, layer.extent);
+            let seeds: Vec<i32> = polygons.iter().map(|rings| style_seed(tile, rings)).collect();
+            let polygons = simplified(tile, polygons);
             if sgl {
                 let mut p = feature.json_properties();
                 p.insert("layerName".into(), serde_json::Value::from(SGL_SOURCE_LAYER));
                 adjust(index, &mut p);
                 let sgl = sgl_building(&p);
                 let height = realistic_height(&p, &sgl);
-                for rings in &polygons {
+                for (rings, &seed) in polygons.iter().zip(&seeds) {
                     b.building(&RealisticBuilding {
                         rings,
                         height: height as f32,
@@ -1043,6 +1224,7 @@ pub fn tessellate_realistic_with(
                         cast_height: cast_height(&p, &sgl) as f32,
                         colour: sgl.colour.as_deref(),
                         look: sgl_look(&sgl),
+                        seed,
                     });
                 }
             } else {
@@ -1051,13 +1233,14 @@ pub fn tessellate_realistic_with(
                     Some(Value::Str(s)) => Some(*s),
                     _ => None,
                 };
-                for rings in &polygons {
+                for (rings, &seed) in polygons.iter().zip(&seeds) {
                     b.building(&RealisticBuilding {
                         rings,
                         height: height as f32,
                         style_height: height,
                         cast_height: height as f32,
                         colour,
+                        seed,
                         look: BuildingLook::default(),
                     });
                 }
@@ -1077,6 +1260,102 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    fn stockholm(zoom: f64, pitch: f64) -> Viewport {
+        let view = crate::camera::ViewState { latitude: 59.3293, longitude: 18.0686, zoom, pitch, bearing: 20.0, position: None };
+        crate::camera::viewport_for(&view, [1000.0, 620.0])
+    }
+
+    /// Under the clouds the buildings stand in full, whatever the zoom; above them they dissolve
+    /// away smoothly, gone at twice their height.
+    #[test]
+    fn buildings_stand_under_the_clouds_and_dissolve_above_them() {
+        assert_eq!(presence(0.0), 1.0);
+        assert_eq!(presence(CLOUD_HEIGHT_M), 1.0);
+        assert_eq!(presence(BUILDINGS_GONE_M), 0.0);
+        let mut last = 1.0;
+        for step in 0..=100 {
+            let p = presence(CLOUD_HEIGHT_M + f64::from(step) * 100.0);
+            assert!(p <= last && last - p < 0.02, "{step}: {p} after {last}");
+            last = p;
+        }
+        // by the camera's height, not the zoom: zoom 10 pitched 75° is under the clouds, zoom 11
+        // looking straight down is not, nor is zoom 10 at all
+        let height = |zoom, pitch| camera_height_m(&stockholm(zoom, pitch));
+        assert!(height(10.0, 75.0) < CLOUD_HEIGHT_M, "{}", height(10.0, 75.0));
+        assert!(height(11.0, 0.0) > CLOUD_HEIGHT_M, "{}", height(11.0, 0.0));
+        assert_eq!(lod_for(&plain_lod(), &stockholm(10.0, 0.0)), None);
+        assert!(view_tiles(&plain_lod(), &stockholm(10.0, 0.0)).is_empty());
+    }
+
+    /// Far views on the globe (zoom ≤ 12) take OpenFreeMap's zoom-13 blocks out to their reach,
+    /// within the tile budget; the reach grows with the camera's distance, the old 25 km close in.
+    #[test]
+    fn far_views_take_zoom_13_tiles_out_to_their_reach_within_the_budget() {
+        for (zoom, pitch, at_least) in [(10.0, 75.0, 200), (11.0, 60.0, 60), (12.0, 0.0, 15), (12.0, 60.0, 50)] {
+            let viewport = stockholm(zoom, pitch);
+            assert!(viewport.is_globe());
+            let tiles = view_tiles(&plain_lod(), &viewport);
+            assert!(tiles.len() >= at_least && tiles.len() <= MAX_TILES, "zoom {zoom} pitch {pitch}: {}", tiles.len());
+            assert!(zoom >= 12.0 || tiles.iter().all(|t| t.z == 13), "{tiles:?}");
+            let reach = reach_m(&viewport);
+            assert!(tiles.iter().all(|&t| tile_distance_m(&viewport, t) <= reach));
+        }
+        assert_eq!(reach_m(&stockholm(14.0, 60.0)), NEAR_REACH_M);
+        assert_eq!(reach_m(&stockholm(9.0, 75.0)), FAR_REACH_M);
+        // close in, as before: zoom 14 near, 13 farther
+        let near = view_tiles(&plain_lod(), &stockholm(14.0, 60.0));
+        assert!(near.iter().any(|t| t.z == 14) && near.iter().any(|t| t.z == 13), "{near:?}");
+        // the budget keeps the nearest
+        let viewport = stockholm(10.0, 75.0);
+        let mut tiles = view_tiles(&plain_lod(), &viewport);
+        let farthest = tiles.iter().map(|&t| tile_distance_m(&viewport, t)).fold(0.0, f64::max);
+        keep_nearest(&viewport, &mut tiles, 50);
+        assert_eq!(tiles.len(), 50);
+        assert!(tiles.iter().all(|&t| tile_distance_m(&viewport, t) < farthest));
+    }
+
+    /// A tile thins away over the last part of the reach (no pop where it leaves), and its shadows
+    /// well before.
+    #[test]
+    fn tiles_thin_away_towards_the_edge_of_the_reach() {
+        assert_eq!(edge_presence(0.0, 30_000.0), 1.0);
+        assert_eq!(edge_presence(30_000.0 * (1.0 - EDGE_FADE), 30_000.0), 1.0);
+        assert!((edge_presence(30_000.0 * (1.0 - EDGE_FADE / 2.0), 30_000.0) - 0.5).abs() < 1e-9);
+        assert_eq!(edge_presence(30_000.0, 30_000.0), 0.0);
+        let viewport = stockholm(11.0, 60.0);
+        for tile in view_tiles(&plain_lod(), &viewport) {
+            let (stands, shadows) = (tile_presence(&viewport, tile), shadow_presence(&viewport, tile));
+            assert!((0.0..=1.0).contains(&stands) && shadows <= stands, "{tile:?}: {stands} {shadows}");
+        }
+    }
+
+    /// A far tile's outlines are simplified within `FAR_SIMPLIFY_M`: fewer points, closed, none
+    /// more than the tolerance off; a near tile's are as OpenFreeMap gives them.
+    #[test]
+    fn far_tiles_outlines_are_simplified_within_two_metres() {
+        let (far, near) = (TileIndex { z: 13, x: 4507, y: 2409 }, TileIndex { z: 14, x: 9014, y: 4818 });
+        let count = |tile: TileIndex, simplified: bool| {
+            let bytes = fixture(tile.z, tile.x, tile.y);
+            let mut points = 0;
+            for layer in mvt::layers_named(&bytes, &[SOURCE_LAYER]) {
+                for feature in layer.features().filter(|f| f.kind == GeomType::Polygon) {
+                    let polygons = if simplified { far_polygons(tile, &feature, layer.extent) } else { binary_polygons(&feature, layer.extent) };
+                    for ring in polygons.iter().flatten() {
+                        assert!(ring.len() >= 4 && ring.first() == ring.last());
+                        points += ring.len();
+                    }
+                }
+            }
+            points
+        };
+        assert!(count(far, true) * 10 < count(far, false) * 9, "{} of {}", count(far, true), count(far, false));
+        assert_eq!(count(near, true), count(near, false));
+        // a square with a kink of a metre in one side loses the kink, keeps its corners
+        let unit = 1.0 / 2500.0;
+        let ring = vec![[0.0, 0.0], [0.5, unit as f32], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]];
+        assert_eq!(simplify_closed(&ring, 2.0 * unit as f32), vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]);
+    }
 
     fn fixture(z: u32, x: u32, y: u32) -> Vec<u8> {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../map/tests/data/tiles/openfreemap/{z}/{x}/{y}.pbf"));

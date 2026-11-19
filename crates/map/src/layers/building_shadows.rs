@@ -7,8 +7,10 @@
 //! shader is `shaders/overlay.wgsl`.
 //!
 //! What today's app does, and so this module:
-//! - **Which tiles.** The near ones only (zoom ≥ 14, `CITY_CLOSE_ZOOM`, the extruded ones); a far
-//!   tile is flat and gets neither (`if (far) return buildings`).
+//! - **Which tiles.** The extruded ones (every tile: `CITY_CLOSE_ZOOM` is 13) within
+//!   `tess::SHADOW_REACH_M` of the camera, their alpha fading with `tess::shadow_presence` (gone far
+//!   out and high above the clouds), which the shadows' and foot shade's frame hands
+//!   `overlay.wgsl` as its `pad.y`.
 //! - **The foot shade** ([`foot_shade`]): every ring of the tile's footprints (outlines and holes,
 //!   `primitivePolygonIndices`) an open path (`_pathType: "open"`: capped at both ends where the ring
 //!   closes) 5 m wide ([`FOOT_SHADE_M`], `widthUnits: "meters"`), centred on the wall so half of it
@@ -292,7 +294,8 @@ impl BuildingShadows {
         let mut recast_any = false;
         self.stale = 0;
         for (tile, meshes) in tiles.visible() {
-            if !meshes.extruded {
+            // (none far out, or high above the clouds: `tess::shadow_presence`, the draw's frame)
+            if !meshes.extruded || tess::shadow_presence(&cx.view.viewport, tile) <= 0.0 {
                 continue;
             }
             let shade = self.tiles.entry(tile).or_insert_with(|| {

@@ -6,13 +6,15 @@
 //! half ([`tess::tessellate_realistic`]); the shader is `shaders/building.wgsl`.
 //!
 //! What today's app does, and so this layer:
-//! - **When.** With the *buildings* setting on, on the flat map (zoom > 12), on the realistic
-//!   basemap (G:2694; [`super::buildings::Buildings`] draws the other basemaps'). The scene builder
+//! - **When.** With the *buildings* setting on, on the realistic basemap, whenever the camera is
+//!   under the clouds, on the globe too (the old app: the flat map only, G:2694), as
+//!   [`super::buildings::Buildings`] draws the other basemaps' (its [`BuildingSelect`], reach and
+//!   dissolves; far out the realistic light's haze softens them into the distance). The scene builder
 //!   sets `SceneInput::buildings` from the setting (`app::scene_builder::base`); this layer works
 //!   out the projection and the basemap. When it stops drawing it drops its tiles, as deck
 //!   finalizes a layer that leaves the list.
-//! - **Tiles** by their distance from the camera (`LodMVTLayer`): [`LodSelect`] over
-//!   `tess::city_lod()` (`CITY_LOD`: levels 13, 14, 16, bias 0.5, 25 km) with the look-ahead while
+//! - **Tiles** by their distance from the camera (`LodMVTLayer`): [`BuildingSelect`] over
+//!   `tess::city_lod()` (`CITY_LOD`: levels 13, 14, 16, bias 0.5, out to the view's reach) with the look-ahead while
 //!   zooming, OpenFreeMap's `building` layer at zooms 13 and 14 and Streets GL's `buildings` at its
 //!   zoom 16 ([`sources`], `cityBuildingSources`; `io::STREETS_GL` asks for no other zoom, as
 //!   `sglFetch` does), 8 requests at once (`maxRequests: 8`), refined by `keepCoarserUntilIn`
@@ -56,16 +58,15 @@
 //! the gradients (`building.wgsl`'s header); the clip is per pixel, as deck's discard.
 
 use rustradar_core::geo::Basemap;
-use rustradar_scene::lod::TILE_SIZE;
 use rustradar_scene::streets_gl::SGL_ZOOM;
 use rustradar_scene::tess::buildings::{self as tess, Footprints, RealisticTile, RealisticVertex};
 
 use std::time::Instant;
 
 use super::building_shadows::BuildingShadows;
-use super::buildings::{LodFade, faded_frame};
+use super::buildings::{BuildingSelect, LodFade, faded_frame, shadow_frame};
 use super::roofs::{self, Overture, Roofs};
-use super::{ByteSize, DrawCx, Init, Layer, LodSelect, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
+use super::{ByteSize, DrawCx, Init, Layer, Pass, PrepareCx, Refinement, Source, TileIndex, TileSet, TileSetOptions};
 use crate::frame::FrameSlot;
 use crate::io;
 use crate::layers::terrain::ground::{StandBudget, Standing};
@@ -262,8 +263,8 @@ pub struct BuildingsRealistic {
     textures_loading: bool,
     /// This frame's light.
     look: Option<Look>,
-    /// This frame's tiles in draw order, each with its frame.
-    drawn: Vec<(FrameSlot, TileIndex)>,
+    /// This frame's tiles in draw order, each with its frame and its shadows' frame.
+    drawn: Vec<(FrameSlot, FrameSlot, TileIndex)>,
     /// The near tiles' foot shade and shadows (R5).
     shadows: BuildingShadows,
     /// Streets GL's tiles' pitched roofs (R6).
@@ -280,8 +281,13 @@ impl BuildingsRealistic {
         let overture = Overture::new(init.tiles);
         let tiles = init.tile_set(
             sources(),
-            LodSelect::new(tess::city_lod(), TILE_SIZE),
-            TileSetOptions { max_requests: tess::MAX_REQUESTS, refinement: Refinement::KeepCoarserUntilIn, ..Default::default() },
+            BuildingSelect::new(tess::city_lod()),
+            TileSetOptions {
+                max_requests: tess::MAX_REQUESTS,
+                max_cache_bytes: Some(tess::CACHE_BYTES),
+                refinement: Refinement::KeepCoarserUntilIn,
+                ..Default::default()
+            },
             move |tile, bytes, cancel| roofs::decode(tile, &bytes, cancel, Some(&overture)),
         );
         let shader = BuildingShader::new(init, "realistic buildings");
@@ -310,7 +316,7 @@ impl BuildingsRealistic {
 
     /// This frame's tiles in draw order (coarse to fine).
     pub fn drawn(&self) -> impl Iterator<Item = TileIndex> + '_ {
-        self.drawn.iter().map(|&(_, tile)| tile)
+        self.drawn.iter().map(|&(_, _, tile)| tile)
     }
 
     /// The light of the last frame drawn.
@@ -326,7 +332,7 @@ impl Layer for BuildingsRealistic {
 
     fn prepare(&mut self, cx: &mut PrepareCx<'_>) {
         self.drawn.clear();
-        self.shown = cx.scene.buildings.shown && !cx.view.is_globe() && cx.scene.basemap == Basemap::Realistic;
+        self.shown = cx.scene.buildings.shown && cx.scene.basemap == Basemap::Realistic;
         if !self.shown {
             // deck drops a layer that leaves the list, its tiles with it
             if !self.tiles.is_empty() {
@@ -360,7 +366,7 @@ impl Layer for BuildingsRealistic {
         self.unstood = budget.left;
         let tiles = &self.tiles;
         for (tile, band) in self.fade.update(Instant::now(), &visible, |t| tiles.get(t).is_some()) {
-            self.drawn.push((faded_frame(cx, tile, band), tile));
+            self.drawn.push((faded_frame(cx, tile, band), shadow_frame(cx, tile), tile));
         }
     }
 
@@ -370,7 +376,7 @@ impl Layer for BuildingsRealistic {
         }
         // stage 9: the foot shade and the shadows draped over the 3D terrain, the buildings standing
         let (draped, standing) = (cx.draws_draped(), cx.pass == Pass::Map);
-        for &(slot, tile) in &self.drawn {
+        for &(slot, shadow_slot, tile) in &self.drawn {
             let Some(meshes) = self.tiles.get(tile) else { continue };
             if meshes.mesh.index_count() == 0 {
                 continue;
@@ -378,7 +384,7 @@ impl Layer for BuildingsRealistic {
             // the tile's foot shade, then its shadows, on the ground under its buildings (kept by a
             // tile dissolving out to the end: each pixel is darkened once anyway)
             if draped {
-                self.shadows.draw_tile(pass, cx, slot, tile);
+                self.shadows.draw_tile(pass, cx, shadow_slot, tile);
             }
             if !standing {
                 continue;

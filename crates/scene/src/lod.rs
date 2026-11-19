@@ -29,6 +29,8 @@
 //!
 //! Differences from the TypeScript:
 //! - a [`Lod`] without levels selects nothing (the TypeScript would recurse without end);
+//! - on the globe `max_distance` leaves a tile out only from [`GLOBE_FARTHEST_FROM_ZOOM`] on: a
+//!   coarser tile's box misses the bulge of its surface, and with it the ground under the camera;
 //! - the tileset's cache is the caller's: [`LodTileset::tile_indices`] asks whether a tile is
 //!   cached (`cached`), and gives back the tiles to load ahead instead of creating them;
 //! - tile ids are [`TileIndex`] values, not deck.gl's `"x-y-z"` strings.
@@ -518,6 +520,10 @@ fn beyond_horizon<V: LodViewport>(x: u32, y: u32, z: u32, camera: [f64; 3], view
     p[0] * cx + p[1] * cy + p[2] * cz <= p[0] * p[0] + p[1] * p[1] + p[2] * p[2]
 }
 
+/// On the globe, tiles farther than [`Lod::max_distance`] are left out from this zoom on (a
+/// tile's surface bulges about 0.5 km out of its box at zoom 8, 30 km at zoom 5).
+pub const GLOBE_FARTHEST_FROM_ZOOM: u32 = 8;
+
 struct Traversal<'a, V> {
     globe: Option<&'a V>,
     planes: [Plane; 6],
@@ -556,7 +562,9 @@ impl<V: LodViewport> Traversal<'_, V> {
             return;
         }
         let distance = volume.distance_to(self.camera);
-        if distance > self.farthest {
+        // (on the globe a coarse tile's box, fitted to a few points of it, misses the bulge of
+        // its surface, where the camera may well be: its distance says nothing until it is small)
+        if distance > self.farthest && (self.globe.is_none() || z >= GLOBE_FARTHEST_FROM_ZOOM) {
             return;
         }
         if self.levels.contains(&z) {
@@ -605,6 +613,14 @@ pub fn distance_tile_indices<V: LodViewport>(viewport: &V, lod: &Lod, z_range: O
     let mut out = Vec::new();
     traversal.visit(0, 0, 0, &mut out);
     out
+}
+
+/// How far `tile`'s bounding volume (at sea level) is from the camera, metres: the distance the
+/// selection compares with [`Lod::max_distance`].
+pub fn tile_distance_m<V: LodViewport>(viewport: &V, tile: TileIndex) -> f64 {
+    let globe = viewport.is_globe().then_some(viewport);
+    let volume = bounding_volume(tile.x, tile.y, tile.z, [0.0, 0.0], globe);
+    volume.distance_to(viewport.camera_position()) / viewport.units_per_meter()
 }
 
 // --- the tileset ------------------------------------------------------------------

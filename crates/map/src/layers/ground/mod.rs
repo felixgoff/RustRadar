@@ -781,7 +781,7 @@ mod tests {
         assert_eq!(rows[2 * 32 + 1], [1.0, 0.075, 0.075, 0.08]);
         assert_eq!(rows[2 * 35], [15.0, 0.0, 0.8, 0.5]);
         assert_eq!(rows[2 * 35 + 1], [0.0, -1.0, -1.0, -1.0]);
-        assert_eq!((rows[2 * 20], rows[2 * 20 + 1]), (rows[0], rows[1]));
+        assert_eq!((rows[2 * 21], rows[2 * 21 + 1]), (rows[0], rows[1]));
         assert_eq!(GROUND_TEXTURES[22], "terrain");
         let (size, members) = wgsl_members(SHADER, "Ground");
         assert_eq!((size as usize, size_of::<GroundUniform>()), (1360, 1360));

@@ -142,8 +142,11 @@ pub fn plain_lod() -> Lod {
 
 /// Up to this camera height above the ground the buildings stand in full, metres: the clouds'.
 pub const BUILDINGS_FULL_M: f64 = CLOUD_HEIGHT_M;
-/// From here up they are gone, metres (between, they dissolve away).
-pub const BUILDINGS_GONE_M: f64 = 2.0 * CLOUD_HEIGHT_M;
+/// From here up they are gone, metres. Between, they dissolve away: a band kept narrow, as a
+/// partly dissolved city is a static screen-door stipple that also eats into the icons over it, so
+/// zooming crosses it but no view rests in it (zoom 12 looking straight down, some 13 km up, has
+/// none).
+pub const BUILDINGS_GONE_M: f64 = 1.1 * CLOUD_HEIGHT_M;
 /// The buildings reach at least this far from the camera, metres (the old `CITY_LOD`'s)...
 pub const NEAR_REACH_M: f64 = 25_000.0;
 /// ...this many times the camera's distance from the middle of the view...
@@ -1267,7 +1270,7 @@ mod tests {
     }
 
     /// Under the clouds the buildings stand in full, whatever the zoom; above them they dissolve
-    /// away smoothly, gone at twice their height.
+    /// away smoothly, gone a tenth higher.
     #[test]
     fn buildings_stand_under_the_clouds_and_dissolve_above_them() {
         assert_eq!(presence(0.0), 1.0);
@@ -1275,7 +1278,7 @@ mod tests {
         assert_eq!(presence(BUILDINGS_GONE_M), 0.0);
         let mut last = 1.0;
         for step in 0..=100 {
-            let p = presence(CLOUD_HEIGHT_M + f64::from(step) * 100.0);
+            let p = presence(CLOUD_HEIGHT_M + f64::from(step) * 10.0);
             assert!(p <= last && last - p < 0.02, "{step}: {p} after {last}");
             last = p;
         }
